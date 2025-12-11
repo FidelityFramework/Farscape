@@ -2,74 +2,73 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Farscape is a command-line tool that aims to automatically generate idiomatic F# bindings for C/C++ libraries, preserving F# intrinsics. It leverages LibClang through CppSHarp to parse C++ headers and produces F# code that can be directly used in both native and .NET based F# applications (and we have plans to eventually support C#/.NET as well through fluent API bindings).
+Farscape is a command-line tool that automatically generates idiomatic F# bindings for C/C++ libraries. It leverages LibClang through CppSharp to parse C/C++ headers and produces F# code that can be directly used in F# applications targeting native compilation (via Firefly/Fidelity) or .NET runtime.
 
 <table>
   <tr>
     <td align="center" width="100%">
-      <strong>⚠️ Caution: Experimental ⚠️</strong><br>
-      This project is in early development and not ready for production use.
+      <strong>Experimental</strong><br>
+      This project is in active development. The core parsing infrastructure is functional,
+      but code generation is being refined for Fidelity native compilation.
     </td>
   </tr>
 </table>
 
 ## Features
 
-- **C++ Header Parsing**: Uses CppSharp/LibClang to accurately parse C++ header files
+- **C/C++ Header Parsing**: Uses CppSharp/LibClang to accurately parse C and C++ header files
 - **Idiomatic F# Code Generation**:
-  - C++ namespaces to F# modules for harmony between APIs
-  - C++ unions/variants to F# discriminated unions for type-safe pattern matching
-  - C++ const-correctness principles translated to idiomatic F# immutability
-  - C++ templates to F# generics and SRTPs for type-safe polymorphism
-  - More Demanding C++ templates could be supported by F# type providers
-- **P/Invoke Support**: Automatically creates proper P/Invoke declarations for native functions
-- **Type Mapping**: Precise numeric types __*with matching bit widths and signedness*__
-- **Cross-Platform Bindings**: Generated code will work seamlessly with dependencies built for Windows, Linux, macOS, as well as mobile and IoT platforms
-- **Project Generation**: 🚧 Targets the creation of complete F# projects ready for building 🚧
-- **Documentation**: C++ documentation transferred as F# XML docs for consistent developer experience in all IDEs and code editor environments.
+  - C/C++ namespaces to F# modules
+  - C structs to F# record types with `[<Struct>]` attribute
+  - C enums to F# enums with proper underlying types
+  - C++ classes to F# types with method bindings
+- **P/Invoke Support**: Automatically creates proper `[<DllImport>]` declarations
+- **Type Mapping**: Precise numeric types with matching bit widths and signedness
+- **Cross-Platform Bindings**: Generated code works with native libraries on Windows, Linux, macOS, and embedded platforms
+- **Project Generation**: Creates complete F# projects ready for building
 
----
-![alt text](img/Farscape_social.png)
----
-### Current Implementation
+## Architecture
 
-We've successfully created a working implementation for cJSON.h that:
-- Automatically extracts function declarations, structs, and type definitions
-- Generates appropriate P/Invoke declarations with correct calling conventions
-- Maps C++ types to their F# equivalents (though with some conversion issues like char* → byte)
-- Produces usable bindings that can be incorporated into F# projects
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           Farscape Pipeline                             │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  C/C++ Header    ──►  CppParser.fs   ──►  TypeMapper.fs                │
+│  (e.g., gpio.h)       (CppSharp)          (C → F# types)               │
+│                            │                    │                       │
+│                            ▼                    ▼                       │
+│                    Declaration list      TypeMapping list               │
+│                            │                    │                       │
+│                            └──────┬─────────────┘                       │
+│                                   ▼                                     │
+│                          CodeGenerator.fs                               │
+│                          (F# binding generation)                        │
+│                                   │                                     │
+│                                   ▼                                     │
+│                          BindingGenerator.fs                            │
+│                          (Project orchestration)                        │
+│                                   │                                     │
+│                                   ▼                                     │
+│                           F# Project Output                             │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
 
-The current solution is intentionally focused on cJSON as a proof of concept. This simplified approach paves the way to a progressive implementation of more supported features. Eventually more complex C++ projects will be "placed on the bench" to determine how best to support more complicated APIs. The end result will eventually yield a mature tool that will cover a majority of support scenarios.
+### Core Modules
 
-### Generalization Requirements
-
-To fulfill Farscape's vision of supporting any C++ library, the implementation needs to be generalized:
-
-1. **Develop a more complex header parsing system**:
-    - Enhance CppSharp integration for more detailed and varied header parsing
-    - Support standard C/C++ constructs across various library styles
-    - Handle platform-specific details and preprocessor directives
-
-2. **Improve type mapping**:
-    - Refine string handling (currently mapping to byte instead of proper string marshaling)
-    - Broader support for complex types, structs, and templates
-    - Transform C++ function pointers into F# functional delegate definitions including built-in lifecycle management
-
-3. **Support diverse library patterns**:
-    - Handle C-style libraries like cJSON
-    - Support C++ classes and object-oriented patterns
-    - Accommodate different calling conventions and export styles
-
-The current hybrid approach for cJSON demonstrates the feasibility of this vision, and serves as a template for generalization to other libraries.
-
-___
-![alt text](<img/Screenshot 2025-03-18 113946.png>)
----
+| Module | Purpose |
+|--------|---------|
+| `CppParser.fs` | Parse C/C++ headers via CppSharp/LibClang |
+| `TypeMapper.fs` | Map C types to F# equivalents |
+| `CodeGenerator.fs` | Generate F# binding code |
+| `BindingGenerator.fs` | Orchestrate full pipeline |
+| `Project.fs` | Generate .fsproj and solution files |
 
 ## Prerequisites
 
 - [.NET 9.0 SDK](https://dotnet.microsoft.com/download/dotnet/9.0) or later
-- [LLVM/Clang](https://releases.llvm.org/download.html) with development components (for LibClang)
+- CppSharp NuGet package (automatically restored)
 
 ## Installation
 
@@ -81,7 +80,7 @@ git clone https://github.com/speakez-llc/farscape.git
 cd farscape
 
 # Build the project
-./build.ps1
+dotnet build
 
 # Install as a global tool
 dotnet tool install --global --add-source ./src/Farscape.Cli/nupkg farscape
@@ -93,24 +92,32 @@ dotnet tool install --global --add-source ./src/Farscape.Cli/nupkg farscape
 # Basic usage
 farscape generate --header path/to/header.h --library libname
 
-# With additional options
-Farscape.Cli generate [options]
+# With include paths and defines (for CMSIS, etc.)
+farscape generate --header stm32l5xx_hal_gpio.h \
+    --library cmsis \
+    --include-paths ./CMSIS/Core/Include,./STM32L5xx/Include \
+    --defines STM32L552xx,USE_HAL_DRIVER \
+    --verbose
+
+# Full options
+farscape generate [options]
 
 Options:
-  -h, --header <header> (REQUIRED)     Path to C++ header file
+  -h, --header <header> (REQUIRED)     Path to C/C++ header file
   -l, --library <library> (REQUIRED)   Name of native library to bind to
-  -o, --output <output>                Output directory for generated code [default: ./output]
+  -o, --output <output>                Output directory [default: ./output]
   -n, --namespace <namespace>          Namespace for generated code [default: NativeBindings]
-  -i, --include-paths <include-paths>  Additional include paths
+  -i, --include-paths <paths>          Additional include paths (comma-separated)
+  -d, --defines <defines>              Preprocessor definitions (comma-separated)
   -v, --verbose                        Verbose output [default: False]
-  -?, -h, --help                       Show help and usage information
+  -?, --help                           Show help and usage information
 ```
 
 ## Examples
 
-### Basic Example
+### Basic C Library
 
-Assume you have a simple C library with a header like this:
+Given a simple C header:
 
 ```c
 // math_lib.h
@@ -131,47 +138,63 @@ double multiply(double a, double b);
 #endif
 ```
 
-Generate F# bindings with:
+Generate F# bindings:
 
 ```bash
 farscape generate --header math_lib.h --library mathlib
 ```
 
-The generated F# code will look like:
+Generated F# code:
 
 ```fsharp
 namespace NativeBindings
 
-open System
 open System.Runtime.InteropServices
 
 module NativeBindings =
-    /// <summary>
     /// Adds two integers
-    /// </summary>
     [<DllImport("mathlib", CallingConvention = CallingConvention.Cdecl)>]
     extern int add(int a, int b)
-    
-    /// <summary>
+
     /// Multiplies two doubles
-    /// </summary>
     [<DllImport("mathlib", CallingConvention = CallingConvention.Cdecl)>]
     extern double multiply(double a, double b)
 ```
 
-## Advanced Topics
+### Embedded/CMSIS Headers
 
-### Self-Hosting as Working Proof
+For embedded development with CMSIS HAL:
 
-Farscape will eventually be used to generate F# bindings for LibClang itself, creating a self-hosting cycle.
+```bash
+farscape generate \
+    --header STM32L5xx_HAL_Driver/Inc/stm32l5xx_hal_gpio.h \
+    --library __cmsis \
+    --include-paths CMSIS/Core/Include,STM32L5xx/Include,STM32L5xx_HAL_Driver/Inc \
+    --defines STM32L552xx,USE_HAL_DRIVER \
+    --namespace CMSIS.STM32L5.GPIO \
+    --verbose
+```
 
-### MLIR/LLVM Integration
+## Fidelity/Firefly Integration
 
-The architecture is designed with potential pairing with F#-built executables in mind - [built with MLIR/LLVM lowering](https://github.com/speakez-llc/fsharp-mlir-hello), enabling compilation to native code as well as support the current standard .NET runtime.
+Farscape is designed to generate bindings compatible with the Fidelity native compilation toolchain:
 
-### Delegate Pointer Handling
+- **Library marker**: Use `__cmsis` or similar markers that Alex (Firefly's targeting layer) recognizes
+- **Typed pointers**: Generate `nativeptr<T>` instead of raw `nativeint` where appropriate
+- **Struct layout**: Use `[<Struct; StructLayout(LayoutKind.Sequential)>]` for C struct compatibility
 
-Special handling for C++ function pointers and delegates will be included, with support for marshaling between F# functions and C++ callbacks.
+See the Firefly documentation (`docs/Farscape_Assessment_January_Demo.md`) for detailed integration guidance.
+
+## Roadmap
+
+- [x] Core CppSharp parsing infrastructure
+- [x] Basic type mapping (primitives, pointers, arrays)
+- [x] P/Invoke declaration generation
+- [ ] Macro/constant extraction
+- [ ] Fidelity-specific output mode
+- [ ] Improved struct handling with volatile semantics
+- [ ] Function pointer to delegate mapping
+- [ ] C++ template to F# generic mapping
 
 ## Contributing
 
@@ -189,8 +212,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## Acknowledgments
 
-- [CppSharp](https://github.com/mono/CppSharp) for its deep coverage of LibClang
+- [CppSharp](https://github.com/mono/CppSharp) for LibClang bindings
 - [LLVM/Clang](https://llvm.org/) project for LibClang
-- [SpectreCoff](https://github.com/EluciusFTW/SpectreCoff) and Spectre.Console that it wraps
+- [Firefly](https://github.com/speakez-llc/firefly) F# native compiler
 - F# community for inspiration and support
-- .NET runtime for P/Invoke support

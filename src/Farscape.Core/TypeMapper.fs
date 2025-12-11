@@ -143,8 +143,11 @@ module TypeMapper =
                         
                 | CppParser.Declaration.Struct s ->
                     types <- mapType s.Name :: types
-                    for (_, fieldType) in s.Fields do
-                        types <- mapType fieldType :: types
+                    for field in s.Fields do
+                        types <- mapType field.Type :: types
+
+                | CppParser.Declaration.Macro _ ->
+                    () // Macros don't contribute to type mappings
                         
                 | CppParser.Declaration.Enum e ->
                     types <- mapType e.Name :: types
@@ -158,8 +161,8 @@ module TypeMapper =
                     
                 | CppParser.Declaration.Class c ->
                     types <- mapType c.Name :: types
-                    for (_, fieldType) in c.Fields do
-                        types <- mapType fieldType :: types
+                    for field in c.Fields do
+                        types <- mapType field.Type :: types
                     types <- collectTypes c.Methods @ types
             
             types

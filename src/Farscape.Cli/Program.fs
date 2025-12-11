@@ -48,37 +48,32 @@ let showConfiguration (options: GenerationOptions) =
     else
         options.IncludePaths
         |> List.iter (fun path -> printLine $"  {path}")
-    
+
+    printColorLine "Defines:" ConsoleColor.Yellow
+    if options.Defines = [] then
+        printLine "  None"
+    else
+        options.Defines
+        |> List.iter (fun d -> printLine $"  {d}")
+
     printLine ""
 
-let runGeneration (options: GenerationOptions) =
+let runGeneration (options: GenerationOptions) : Result<GenerationResult, string> =
     // Show generating message
     printHeader "Generating F# bindings..."
     printLine ""
 
-    // Process steps with appropriate messages
-    printLine "Starting C++ header parsing..."
-    let declarations = CppParser.parse options.HeaderFile.FullName options.IncludePaths options.Verbose
-
-    printLine "Mapping C++ types to F#..."
-    System.Threading.Thread.Sleep(500) // Simulating work
-
-    printLine "Generating F# code..."
-    System.Threading.Thread.Sleep(500) // Simulating work
-
-    printLine "Creating project files..."
-    BindingGenerator.generateBindings options |> ignore
-
-    printLine "Generation complete!"
-    printLine ""
-
-    // Show completion message
-    printColorLine "Generation Complete" ConsoleColor.Green
-    printLine ""
-
-    // Output info
-    printColorLine $"Output: F# bindings were successfully generated in {options.OutputDirectory}" ConsoleColor.Cyan
-    printLine ""
+    match BindingGenerator.generateBindings options with
+    | Error errorMsg ->
+        Error errorMsg
+    | Ok result ->
+        printLine ""
+        printColorLine "Generation Complete" ConsoleColor.Green
+        printLine ""
+        printColorLine $"Parsed {result.DeclarationCount} declarations from header" ConsoleColor.White
+        printColorLine $"Output: F# bindings generated in {options.OutputDirectory}" ConsoleColor.Cyan
+        printLine ""
+        Ok result
 
 let showNextSteps (options: GenerationOptions) =
     // Show next steps
@@ -119,25 +114,33 @@ let generateCommand =
     let output =    Input.Option<string>(["-o"; "--output"], description = "Output directory for generated code", defaultValue = "./output")
     let ns =        Input.Option<string>(["-n"; "--namespace"], description = "Namespace for generated code", defaultValue = "NativeBindings")
     let includes =  Input.Option<string[]>(["-i"; "--include-paths"], description = "Additional include paths")
+    let defines =   Input.Option<string[]>(["-d"; "--defines"], description = "Preprocessor definitions (e.g., STM32L552xx)")
     let verbose =   Input.Option<bool>(["-v"; "--verbose"], description = "Verbose output", defaultValue = false)
 
-    let handler (header, library, output, ns, includes, verbose) = 
+    let handler (header, library, output, ns, includes, defines, verbose) =
         let options = {
             HeaderFile = header
             LibraryName = library
             OutputDirectory = output
             Namespace = ns
             IncludePaths = includes |> Array.toList
+            Defines = defines |> Array.toList
             Verbose = verbose
         }
         showHeader()
         showConfiguration options
-        runGeneration options
-        showNextSteps options
+
+        match runGeneration options with
+        | Error errorMsg ->
+            showError errorMsg
+            1 // Exit with error code
+        | Ok _ ->
+            showNextSteps options
+            0 // Success exit code
 
     command "generate" {
         description "Generate F# bindings for a native library"
-        inputs (header, library, output, ns, includes, verbose)
+        inputs (header, library, output, ns, includes, defines, verbose)
         setHandler handler
     }
 

@@ -116,9 +116,9 @@ module CodeGenerator =
                 sb.AppendLine($"type {struct'.Name}Wrapper() =") |> ignore
 
                 // Add fields
-                for (fieldName, fieldType) in struct'.Fields do
-                    let fsharpType = TypeMapper.getFSharpType fieldType
-                    sb.AppendLine($"    member val {fieldName}: {fsharpType} = Unchecked.defaultof<{fsharpType}> with get, set") |> ignore
+                for field in struct'.Fields do
+                    let fsharpType = TypeMapper.getFSharpType field.Type
+                    sb.AppendLine($"    member val {field.Name}: {fsharpType} = Unchecked.defaultof<{fsharpType}> with get, set") |> ignore
 
                 sb.AppendLine() |> ignore
 

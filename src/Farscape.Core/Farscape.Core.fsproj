@@ -17,8 +17,4 @@
     <Compile Include="BindingGenerator.fs" />
   </ItemGroup>
 
-  <ItemGroup>
-    <PackageReference Include="CppSharp" Version="1.0.45.22293" />
-  </ItemGroup>
-
 </Project>
