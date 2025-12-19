@@ -28,11 +28,11 @@ Farscape is part of the **Fidelity** native F# compilation ecosystem:
 
 | Project | Role |
 |---------|------|
-| **[Firefly](https://github.com/speakez-llc/firefly)** | AOT compiler: F# → PSG → MLIR → Native binary |
-| **[Alloy](https://github.com/speakez-llc/alloy)** | Native standard library with platform bindings |
-| **[BAREWire](https://github.com/speakez-llc/barewire)** | Binary encoding, memory mapping, zero-copy IPC |
+| **[Firefly](https://github.com/speakeztech/firefly)** | AOT compiler: F# → PSG → MLIR → Native binary |
+| **[Alloy](https://github.com/speakeztech/alloy)** | Native standard library with platform bindings |
+| **[BAREWire](https://github.com/speakeztech/barewire)** | Binary encoding, memory mapping, zero-copy IPC |
 | **Farscape** | C/C++ header parsing for native library bindings |
-| **[XParsec](https://github.com/speakez-llc/xparsec)** | Parser combinators powering PSG traversal and header parsing |
+| **[XParsec](https://github.com/speakeztech/xparsec)** | Parser combinators powering PSG traversal and header parsing |
 
 The name "Fidelity" reflects the framework's core mission: **preserving type and memory safety** from source code through compilation to native execution.
 
@@ -74,7 +74,7 @@ The name "Fidelity" reflects the framework's core mission: **preserving type and
 
 ## XParsec: The Parsing Foundation
 
-Farscape uses [XParsec](https://github.com/speakez-llc/xparsec), the same parser combinator library that powers Firefly's PSG traversal. This provides:
+Farscape uses [XParsec](https://github.com/speakeztech/xparsec), the same parser combinator library that powers Firefly's PSG traversal. This provides:
 
 - **Type-safe parsing**: Errors caught at compile time
 - **Composable parsers**: Build complex parsers from simple primitives
@@ -275,7 +275,7 @@ firefly compile Blinky.fidproj --target thumbv7em-none-eabihf
 
 ```bash
 # Clone the repository
-git clone https://github.com/speakez-llc/farscape.git
+git clone https://github.com/speakeztech/farscape.git
 cd farscape
 
 # Build
@@ -321,11 +321,11 @@ A Commercial License is required for incorporating Farscape into commercial prod
 
 ### Patent Notice
 
-Farscape generates BAREWire peripheral descriptors, which utilize technology covered by U.S. Patent Application No. 63/786,247 "System and Method for Zero-Copy Inter-Process Communication Using BARE Protocol". See BAREWire's [PATENTS.md](https://github.com/speakez-llc/barewire/blob/main/PATENTS.md) for licensing details.
+Farscape generates BAREWire peripheral descriptors, which utilize technology covered by U.S. Patent Application No. 63/786,247 "System and Method for Zero-Copy Inter-Process Communication Using BARE Protocol". See BAREWire's [PATENTS.md](https://github.com/speakeztech/barewire/blob/main/PATENTS.md) for licensing details.
 
 ## Acknowledgments
 
-- **[XParsec](https://github.com/speakez-llc/xparsec)**: Parser combinators for F#
-- **[Firefly](https://github.com/speakez-llc/firefly)**: F# native compiler
-- **[BAREWire](https://github.com/speakez-llc/barewire)**: Memory descriptors and IPC
+- **[XParsec](https://github.com/speakeztech/xparsec)**: Parser combinators for F#
+- **[Firefly](https://github.com/speakeztech/firefly)**: F# native compiler
+- **[BAREWire](https://github.com/speakeztech/barewire)**: Memory descriptors and IPC
 - **ARM CMSIS**: Standard interface for Cortex-M microcontrollers
