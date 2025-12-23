@@ -81,19 +81,16 @@ let GPIO : PeripheralDescriptor = {
 }
 ```
 
-### 3. Platform Bindings - Library Function Bindings
-Platform.Bindings modules for pre-compiled C library functions (BCL-free pattern):
+### 3. Extern Declarations - Library Function Bindings
+F# externs for pre-compiled C library functions:
 
 ```fsharp
-// Fidelity.STM32L5/HAL.fs - Platform.Bindings pattern
-// Alex provides MLIR emission that links against HAL library
-module Platform.Bindings.HAL.GPIO =
-    let init (gpioX: nativeint) (gpioInit: nativeint) : HAL_StatusTypeDef =
-        Unchecked.defaultof<HAL_StatusTypeDef>
+// Fidelity.STM32L5/HAL.fs
+[<DllImport("stm32l5xx_hal", CallingConvention = CallingConvention.Cdecl)>]
+extern HAL_StatusTypeDef HAL_GPIO_Init(nativeint GPIOx, nativeint GPIO_Init)
 
-module Platform.Bindings.HAL.UART =
-    let transmit (huart: nativeint) (pData: nativeint) (size: uint16) (timeout: uint32) : HAL_StatusTypeDef =
-        Unchecked.defaultof<HAL_StatusTypeDef>
+[<DllImport("stm32l5xx_hal", CallingConvention = CallingConvention.Cdecl)>]
+extern HAL_StatusTypeDef HAL_UART_Transmit(nativeint huart, nativeint pData, uint16 Size, uint32 Timeout)
 ```
 
 ## What Farscape Parses
@@ -110,7 +107,7 @@ From C headers, Farscape extracts:
 | `#define XXX_Pos (n)` | BitField position |
 | `#define XXX_Msk (m)` | BitField width (computed from mask) |
 | `typedef enum {...}` | F# discriminated union |
-| `RetType FuncName(params)` | Platform.Bindings module function |
+| `RetType FuncName(params)` | DllImport extern declaration |
 
 ## Key CMSIS Patterns
 
