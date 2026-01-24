@@ -74,7 +74,7 @@ Farscape generates:
 ```fsharp
 namespace CMSIS.STM32L5.GPIO
 
-open Alloy
+open Fidelity.Platform
 open fsnative.Measures
 
 [<Struct; StructLayout(LayoutKind.Sequential)>]
@@ -170,7 +170,7 @@ CMSIS/
 ```fsharp
 namespace CMSIS.STM32L5.GPIO
 
-open Alloy
+open Fidelity.Platform
 open fsnative.Measures
 open System.Runtime.InteropServices
 
@@ -353,7 +353,7 @@ let GPIO_PIN_All: uint32 = 0xFFFFu
 ```fsharp
 namespace CMSIS.STM32L5.GPIO
 
-open Alloy
+open Fidelity.Platform
 open fsnative.Measures
 
 /// HAL GPIO function bindings

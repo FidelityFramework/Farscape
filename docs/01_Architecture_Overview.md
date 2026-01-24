@@ -235,7 +235,7 @@ Farscape uses special library names that Firefly's Alex recognizes:
 | Library Name | Target | Code Generation |
 |--------------|--------|-----------------|
 | `__cmsis` | ARM CMSIS HAL | Memory-mapped register access |
-| `__fidelity` | Alloy platform | Syscalls or platform APIs |
+| `__fidelity` | Fidelity.Platform | Syscalls or platform APIs |
 | `libname` | Standard library | Dynamic linking |
 
 ## Example: CMSIS GPIO
@@ -261,7 +261,7 @@ Generated Types.fs:
 ```fsharp
 namespace CMSIS.STM32L5.GPIO
 
-open Alloy
+open Fidelity.Platform
 
 [<Struct; StructLayout(LayoutKind.Sequential)>]
 type GPIO_TypeDef = {

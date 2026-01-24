@@ -162,8 +162,8 @@ Farscape doesn't produce this library - it's pre-compiled by the vendor (Renesas
 |---------|--------------|
 | **BAREWire** | Farscape uses BAREWire.Core types; generates BAREWire.[Target] |
 | **Firefly** | Firefly compiles Farscape's output; Alex handles externs |
-| **Alloy** | Generated Fidelity.[Target] may use Alloy types |
+| **Fidelity.Platform** | Generated Fidelity.[Target] may use Fidelity.Platform types |
 
 ## Canonical Document
 
-See Firefly `/docs/Native_Library_Binding_Architecture.md` for the complete binding architecture.
+See Firefly `/docs/Quotation_Based_Memory_Architecture.md` for the complete binding architecture.

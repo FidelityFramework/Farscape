@@ -29,7 +29,7 @@ Farscape is part of the **Fidelity** native F# compilation ecosystem:
 | Project | Role |
 |---------|------|
 | **[Firefly](https://github.com/speakeztech/firefly)** | AOT compiler: F# → PSG → MLIR → Native binary |
-| **[Alloy](https://github.com/speakeztech/alloy)** | Native standard library with platform bindings |
+| **[Fidelity.Platform](https://github.com/speakeztech/Fidelity.Platform)** | Native standard library with platform bindings |
 | **[BAREWire](https://github.com/speakeztech/barewire)** | Binary encoding, memory mapping, zero-copy IPC |
 | **Farscape** | C/C++ header parsing for native library bindings |
 | **[XParsec](https://github.com/speakeztech/xparsec)** | Parser combinators powering PSG traversal and header parsing |
@@ -134,7 +134,7 @@ Standard F# bindings for use with Firefly:
 ```fsharp
 namespace CMSIS.STM32L5.GPIO
 
-open Alloy
+open Fidelity.Platform
 
 [<Struct; StructLayout(LayoutKind.Sequential)>]
 type GPIO_InitTypeDef = {
@@ -208,7 +208,7 @@ Farscape maps C types to appropriate F# equivalents:
 Use special library names that Firefly's Alex component recognizes:
 
 - `__cmsis` - CMSIS HAL functions → memory-mapped register access
-- `__fidelity` - Alloy platform bindings → syscalls or platform APIs
+- `__fidelity` - Fidelity.Platform bindings → syscalls or platform APIs
 - `libname` - Standard library → dynamic linking
 
 ### Generated Platform Bindings
@@ -242,7 +242,7 @@ farscape generate \
 ### Using Generated Bindings
 
 ```fsharp
-open Alloy
+open Fidelity.Platform
 open CMSIS.STM32L5.GPIO
 
 let blink () =

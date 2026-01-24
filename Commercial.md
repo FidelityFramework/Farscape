@@ -82,4 +82,4 @@ A: Yes, you can upgrade your license tier at any time. The cost difference will 
 
 **Q: Does the Farscape Commercial License cover the entire Fidelity Framework?**
 
-A: The Farscape Commercial License covers Farscape itself. The Fidelity Framework includes other components (Firefly, Alloy, BAREWire) which are separately licensed but available under similar terms. Contact us for bundled licensing options.
+A: The Farscape Commercial License covers Farscape itself. The Fidelity Framework includes other components (Firefly, Fidelity.Platform, BAREWire) which are separately licensed but available under similar terms. Contact us for bundled licensing options.
