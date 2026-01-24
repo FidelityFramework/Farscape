@@ -1,5 +1,15 @@
 # Farscape-fsnative Integration Contract
 
+## Status: FNCS MATURE, READY FOR INTEGRATION (January 2026)
+
+**FNCS has reached production maturity.** Firefly samples 01-09 all pass with principled implementations including:
+- Full DU infrastructure (DULayout coeffect for heterogeneous unions)
+- Flat closure model (ClosureLayout coeffect)
+- Baker decomposition for all collection HOFs (List, Map, Set, Seq, Option)
+- Coeffect-driven MLIR emission
+
+The integration contract defined below can now be fulfilled.
+
 ## The Integration Surface
 
 Farscape generates output that fsnative's nanopass pipeline consumes. The integration point is the `MemoryModel` record type.

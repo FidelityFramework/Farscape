@@ -4,7 +4,7 @@
 
 Farscape generates F# bindings from C/C++ headers for the Fidelity native compilation ecosystem. Unlike traditional FFI tools that target runtime interop, Farscape generates code specifically for ahead-of-time native compilation via Firefly.
 
-> **Architecture Update (December 2024)**: Farscape now generates **quotation-based output** with active patterns.
+> **Architecture Update (December 2025)**: Farscape now generates **quotation-based output** with active patterns.
 > See `~/repos/Firefly/docs/Quotation_Based_Memory_Architecture.md` for the unified four-component architecture.
 
 ## Design Principles
@@ -152,7 +152,7 @@ let generateBinding (func: FunctionDef) =
 """ func.Name (generateParams func.Params) func.ReturnType func.ReturnType
 ```
 
-### QuotationGenerator.fs (NEW - December 2024)
+### QuotationGenerator.fs (NEW - December 2025)
 
 Generates F# quotations and active patterns for the nanopass pipeline:
 

@@ -1,7 +1,9 @@
 # Farscape's Role in Native Library Binding
 
-> **Architecture Update (December 2024)**: Farscape now generates **quotation-based output** with active patterns,
+> **Architecture Update (December 2025)**: Farscape now generates **quotation-based output** with active patterns,
 > not just raw P/Invoke declarations. See `~/repos/Firefly/docs/Quotation_Based_Memory_Architecture.md`.
+>
+> **Target Update (January 2025)**: Primary unikernel target changed from STM32L5 to **Renesas RA6M5** (ARM Cortex-M33).
 
 ## Position in the Architecture
 
@@ -21,7 +23,7 @@ Memory layout information as quotations for nanopass consumption:
 ```fsharp
 let gpioQuotation: Expr<PeripheralDescriptor> = <@
     { Name = "GPIO"
-      Instances = Map.ofList [("GPIOA", 0x48000000un)]
+      Instances = Map.ofList [("GPIOA", 0x40040000un)]
       Layout = { Size = 0x400; Alignment = 4; Fields = gpioFields }
       MemoryRegion = Peripheral }
 @>
@@ -39,9 +41,9 @@ let (|PeripheralAccess|_|) (node: PSGNode) : PeripheralAccessInfo option = ...
 Integration surface using pure F# record (not interface):
 
 ```fsharp
-let stm32l5MemoryModel: MemoryModel = {
-    TargetFamily = "STM32L5"
-    PeripheralDescriptors = [gpioQuotation; usartQuotation]
+let ra6m5MemoryModel: MemoryModel = {
+    TargetFamily = "RA6M5"
+    PeripheralDescriptors = [gpioQuotation; sciQuotation]
     RegisterConstraints = [accessConstraints]
     Regions = regionQuotation
     Recognize = recognizeMemoryOperation
@@ -54,10 +56,10 @@ let stm32l5MemoryModel: MemoryModel = {
 Developer-facing library with idiomatic F# types:
 
 ```fsharp
-// Fidelity.STM32L5/GPIO.fs
-module Fidelity.STM32L5.GPIO
+// Fidelity.RA6M5/GPIO.fs
+module Fidelity.RA6M5.GPIO
 
-type Port = GPIOA | GPIOB | GPIOC | ...
+type Port = Port0 | Port1 | Port2 | ...
 type Mode = Input | Output | Alternate | Analog
 
 let init (port: Port) (pin: int) (mode: Mode) : Result<unit, GpioError> = ...
@@ -68,33 +70,40 @@ let inline writePin (port: Port) (pin: int) (state: bool) : unit = ...
 Compile-time hardware memory map using BAREWire.Core types:
 
 ```fsharp
-// BAREWire.STM32L5/Descriptors.fs
+// BAREWire.RA6M5/Descriptors.fs
 let GPIO : PeripheralDescriptor = {
     Name = "GPIO"
     Region = MemoryRegionKind.Peripheral
-    Instances = Map.ofList [("GPIOA", 0x48000000un); ...]
+    Instances = Map.ofList [("PORT0", 0x40040000un); ...]
     Registers = [
-        { Name = "MODER"; Offset = 0x00; Width = 32; Access = ReadWrite; ... }
-        { Name = "IDR"; Offset = 0x10; Width = 32; Access = ReadOnly; ... }
-        { Name = "BSRR"; Offset = 0x18; Width = 32; Access = WriteOnly; ... }
+        { Name = "PODR"; Offset = 0x00; Width = 16; Access = ReadWrite; ... }
+        { Name = "PIDR"; Offset = 0x02; Width = 16; Access = ReadOnly; ... }
+        { Name = "POSR"; Offset = 0x06; Width = 16; Access = WriteOnly; ... }
     ]
 }
 ```
 
-### 3. Platform Bindings - Library Function Bindings
-Platform.Bindings modules for pre-compiled C library functions (BCL-free pattern):
+### 3. FFI Bindings (Layer 2)
+For external library bindings, Farscape generates quotation semantic carriers:
 
 ```fsharp
-// Fidelity.STM32L5/HAL.fs - Platform.Bindings pattern
-// Alex provides MLIR emission that links against HAL library
-module Platform.Bindings.HAL.GPIO =
-    let init (gpioX: nativeint) (gpioInit: nativeint) : HAL_StatusTypeDef =
-        Unchecked.defaultof<HAL_StatusTypeDef>
+// Fidelity.RA6M5/HAL.fs - Quotation-based FFI binding
+// Alex inspects quotations and generates platform-appropriate MLIR
 
-module Platform.Bindings.HAL.UART =
-    let transmit (huart: nativeint) (pData: nativeint) (size: uint16) (timeout: uint32) : HAL_StatusTypeDef =
-        Unchecked.defaultof<HAL_StatusTypeDef>
+/// Function descriptor - quotation carries calling convention
+let fspGpioOpenDescriptor: Expr<FunctionDescriptor> = <@
+    { CName = "R_IOPORT_Open"
+      Parameters = [
+          { Name = "ctrl"; Type = Ptr NativeInt; PassBy = Value }
+          { Name = "cfg"; Type = Ptr NativeInt; PassBy = Value }
+      ]
+      ReturnType = U32
+      CallingConvention = CDecl }
+@>
 ```
+
+> **DEPRECATED**: The old `Platform.Bindings` pattern with `Unchecked.defaultof` is no longer used.
+> Use quotation semantic carriers instead.
 
 ## What Farscape Parses
 
@@ -102,7 +111,7 @@ From C headers, Farscape extracts:
 
 | C Construct | F# Output |
 |-------------|-----------|
-| `typedef struct {...} XXX_TypeDef` | PeripheralDescriptor + F# record |
+| `typedef struct {...} xxx_ctrl_t` | PeripheralDescriptor + F# record |
 | `__IO uint32_t FIELD` | Register with Access = ReadWrite |
 | `__I uint32_t FIELD` | Register with Access = ReadOnly |
 | `__O uint32_t FIELD` | Register with Access = WriteOnly |
@@ -110,9 +119,9 @@ From C headers, Farscape extracts:
 | `#define XXX_Pos (n)` | BitField position |
 | `#define XXX_Msk (m)` | BitField width (computed from mask) |
 | `typedef enum {...}` | F# discriminated union |
-| `RetType FuncName(params)` | Platform.Bindings module function |
+| `RetType FuncName(params)` | Quotation semantic carrier (FFI descriptor) |
 
-## Key CMSIS Patterns
+## Key CMSIS/FSP Patterns
 
 ```c
 // Access qualifiers → AccessKind
@@ -121,31 +130,31 @@ From C headers, Farscape extracts:
 #define __O  volatile           // WriteOnly
 
 // Bit field macros → BitFieldDescriptor
-#define USART_CR1_UE_Pos  (0U)
-#define USART_CR1_UE_Msk  (0x1UL << USART_CR1_UE_Pos)
+#define R_SCI_SSR_RDRF_Pos  (6U)
+#define R_SCI_SSR_RDRF_Msk  (0x1UL << R_SCI_SSR_RDRF_Pos)
 
 // Peripheral instance → address in Instances map
-#define GPIOA_BASE  (0x48000000UL)
-#define GPIOA       ((GPIO_TypeDef *) GPIOA_BASE)
+#define R_PORT0_BASE  (0x40040000UL)
+#define R_PORT0       ((R_PORT0_Type *) R_PORT0_BASE)
 ```
 
 ## Link-Time Consideration
 
-The extern declarations reference a **library name** (e.g., `"stm32l5xx_hal"`).
+The extern declarations reference a **library name** (e.g., `"ra_fsp"`).
 
-At link time, the linker must find `libstm32l5xx_hal.a` containing:
-- `HAL_GPIO_Init`
-- `HAL_UART_Transmit`
+At link time, the linker must find `libra_fsp.a` containing:
+- `R_IOPORT_Open`
+- `R_SCI_UART_Write`
 - etc.
 
-Farscape doesn't produce this library - it's pre-compiled by the vendor (STMicroelectronics). Farscape only produces the F# bindings that reference it.
+Farscape doesn't produce this library - it's pre-compiled by the vendor (Renesas). Farscape only produces the F# bindings that reference it.
 
 ## What Farscape Does NOT Do
 
 - Generate MLIR or LLVM code
 - Know about Alex's internal patterns
 - Make platform-specific code generation decisions
-- Compile the HAL library itself
+- Compile the FSP library itself
 
 ## Relationship to Other Projects
 
