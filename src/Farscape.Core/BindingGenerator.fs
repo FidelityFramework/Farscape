@@ -4,6 +4,7 @@ open System.IO
 open ProjectOptions
 open CodeGenerator
 open Types
+open MoyaTypes
 
 
 module BindingGenerator =
@@ -98,5 +99,38 @@ module BindingGenerator =
 
                 Ok {
                     OutputFiles = [solutionPath; libraryPath; testPath]
+                    DeclarationCount = declarations.Length
+                }
+
+    /// Generate scoped Fidelity bindings from a .moya.toml project file.
+    /// Each [[namespace]] section produces a separate F# module.
+    let generateFromProject (projectPath: string) (verbose: bool) : Result<GenerationResult, string> =
+        match MoyaSerializer.loadFromFile projectPath with
+        | Error e -> Error $"Failed to load project: {e}"
+        | Ok project ->
+            let headerPath = project.Library.Header
+            logVerbose $"Parsing header: {headerPath}" verbose
+
+            match CppParser.parseWithDefines headerPath project.Library.IncludePaths project.Library.Defines verbose with
+            | Error e -> Error $"Failed to parse header: {e}"
+            | Ok declarations ->
+                logVerbose $"Parsed {declarations.Length} declarations" verbose
+
+                Directory.CreateDirectory(project.Output.Directory) |> ignore
+
+                let allFiles =
+                    project.Namespaces |> List.map (fun ns ->
+                        let filtered = MoyaAnalyzer.filterDeclarationsForNamespace ns declarations
+                        logVerbose $"Namespace {ns.Name}: {filtered.Length} declarations" verbose
+                        let code = FidelityCodeGenerator.generate filtered ns.Name ns.Library
+                        let fileName =
+                            let lastSegment = ns.Name.Split('.') |> Array.last
+                            $"{lastSegment}.fs"
+                        let outputPath = Path.Combine(project.Output.Directory, fileName)
+                        File.WriteAllText(outputPath, code)
+                        outputPath)
+
+                Ok {
+                    OutputFiles = allFiles
                     DeclarationCount = declarations.Length
                 }

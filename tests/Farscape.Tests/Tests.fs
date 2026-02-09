@@ -603,3 +603,264 @@ module FidelityCodeGeneratorTests =
         Assert.Contains("type Point = {", result)
         Assert.Contains("x: int32", result)
         Assert.Contains("y: int32", result)
+
+// =============================================================================
+// MoyaAnalyzer Tests — prefix analysis and declaration filtering
+// =============================================================================
+
+module MoyaAnalyzerTests =
+
+    let private mkFunc name retType parms : CppParser.FunctionDecl =
+        { Name = name; ReturnType = retType; Parameters = parms; Documentation = None
+          IsVirtual = false; IsStatic = false; IsInline = false }
+
+    let private mkStruct name : CppParser.StructDecl =
+        { Name = name; Fields = []; Documentation = None; IsUnion = false }
+
+    let private mkEnum name : CppParser.EnumDecl =
+        { Name = name; Values = []; Documentation = None; UnderlyingType = None }
+
+    // --- functionNameAlgebra tests ---
+
+    [<Fact>]
+    let ``functionNameAlgebra extracts function names`` () =
+        let decls = [
+            CppParser.Declaration.Function (mkFunc "strlen" "unsigned long" [])
+            CppParser.Declaration.Function (mkFunc "memcpy" "void *" [])
+        ]
+        let result = MoyaAnalyzer.extractFunctionNames decls
+        Assert.Equal(2, result.Length)
+        Assert.Contains("strlen", result)
+        Assert.Contains("memcpy", result)
+
+    [<Fact>]
+    let ``functionNameAlgebra ignores non-function declarations`` () =
+        let decls = [
+            CppParser.Declaration.Struct (mkStruct "Point")
+            CppParser.Declaration.Function (mkFunc "read" "int" [])
+            CppParser.Declaration.Enum (mkEnum "Flags")
+        ]
+        let result = MoyaAnalyzer.extractFunctionNames decls
+        Assert.Equal(1, result.Length)
+        Assert.Equal("read", result[0])
+
+    // --- extractPrefix tests ---
+
+    [<Theory>]
+    [<InlineData("io_read", "io")>]
+    [<InlineData("gpio_init", "gpio")>]
+    [<InlineData("uart_send", "uart")>]
+    let ``extractPrefix detects underscore-separated prefixes`` (name: string) (expected: string) =
+        match MoyaAnalyzer.extractPrefix name with
+        | Some prefix -> Assert.Equal(expected, prefix)
+        | None -> Assert.Fail $"Expected prefix '{expected}' for '{name}'"
+
+    [<Theory>]
+    [<InlineData("strlen", "str")>]
+    [<InlineData("strcmp", "str")>]
+    [<InlineData("strcpy", "str")>]
+    [<InlineData("memcpy", "mem")>]
+    [<InlineData("memset", "mem")>]
+    let ``extractPrefix detects known C library prefixes`` (name: string) (expected: string) =
+        match MoyaAnalyzer.extractPrefix name with
+        | Some prefix -> Assert.Equal(expected, prefix)
+        | None -> Assert.Fail $"Expected prefix '{expected}' for '{name}'"
+
+    [<Theory>]
+    [<InlineData("HAL_GPIO_Init", "HAL_GPIO")>]
+    [<InlineData("HAL_UART_Transmit", "HAL_UART")>]
+    let ``extractPrefix detects HAL-style prefixes`` (name: string) (expected: string) =
+        match MoyaAnalyzer.extractPrefix name with
+        | Some prefix -> Assert.Equal(expected, prefix)
+        | None -> Assert.Fail $"Expected prefix '{expected}' for '{name}'"
+
+    // --- clusterByPrefix tests ---
+
+    [<Fact>]
+    let ``clusterByPrefix groups functions by shared prefix`` () =
+        let names = ["strlen"; "strcmp"; "strcpy"; "memcpy"; "memset"; "abort"]
+        let groups, ungrouped = MoyaAnalyzer.clusterByPrefix names
+        Assert.True(groups |> List.exists (fun g -> g.Prefix = "str"))
+        Assert.True(groups |> List.exists (fun g -> g.Prefix = "mem"))
+        Assert.Contains("abort", ungrouped)
+
+    [<Fact>]
+    let ``clusterByPrefix respects minimum group size`` () =
+        let names = ["strlen"; "abort"; "exit"]
+        let groups, ungrouped = MoyaAnalyzer.clusterByPrefix names
+        // "strlen" alone is only 1 function with "str" prefix — below minGroupSize, so it goes to ungrouped
+        Assert.Contains("strlen", ungrouped)
+        // But abort and exit are also singles
+        Assert.Contains("abort", ungrouped)
+
+    // --- analyze integration test ---
+
+    [<Fact>]
+    let ``analyze produces correct AnalysisResult`` () =
+        let decls = [
+            CppParser.Declaration.Function (mkFunc "strlen" "unsigned long" [])
+            CppParser.Declaration.Function (mkFunc "strcmp" "int" [])
+            CppParser.Declaration.Function (mkFunc "memcpy" "void *" [])
+            CppParser.Declaration.Function (mkFunc "memset" "void *" [])
+            CppParser.Declaration.Struct (mkStruct "Point")
+            CppParser.Declaration.Function (mkFunc "abort" "void" [])
+        ]
+        let result = MoyaAnalyzer.analyze decls
+        Assert.Equal(5, result.TotalFunctions)
+        Assert.True(result.Groups.Length >= 2) // str + mem groups
+        Assert.Contains("abort", result.Ungrouped)
+
+    // --- filterDeclarationsForNamespace tests ---
+
+    [<Fact>]
+    let ``filterDeclarationsForNamespace keeps functions matching prefix`` () =
+        let spec : MoyaTypes.NamespaceSpec =
+            { Name = "Test.String"; Description = ""; Library = "libc"
+              Prefixes = ["str"]; Functions = [] }
+        let decls = [
+            CppParser.Declaration.Function (mkFunc "strlen" "unsigned long" [])
+            CppParser.Declaration.Function (mkFunc "memcpy" "void *" [])
+        ]
+        let filtered = MoyaAnalyzer.filterDeclarationsForNamespace spec decls
+        let funcNames = MoyaAnalyzer.extractFunctionNames filtered
+        Assert.Contains("strlen", funcNames)
+        Assert.DoesNotContain("memcpy", funcNames)
+
+    [<Fact>]
+    let ``filterDeclarationsForNamespace keeps explicitly listed functions`` () =
+        let spec : MoyaTypes.NamespaceSpec =
+            { Name = "Test.Misc"; Description = ""; Library = "libc"
+              Prefixes = []; Functions = ["abort"; "exit"] }
+        let decls = [
+            CppParser.Declaration.Function (mkFunc "abort" "void" [])
+            CppParser.Declaration.Function (mkFunc "exit" "void" [])
+            CppParser.Declaration.Function (mkFunc "strlen" "unsigned long" [])
+        ]
+        let filtered = MoyaAnalyzer.filterDeclarationsForNamespace spec decls
+        let funcNames = MoyaAnalyzer.extractFunctionNames filtered
+        Assert.Contains("abort", funcNames)
+        Assert.Contains("exit", funcNames)
+        Assert.DoesNotContain("strlen", funcNames)
+
+    [<Fact>]
+    let ``filterDeclarationsForNamespace passes through non-function declarations`` () =
+        let spec : MoyaTypes.NamespaceSpec =
+            { Name = "Test.String"; Description = ""; Library = "libc"
+              Prefixes = ["str"]; Functions = [] }
+        let decls = [
+            CppParser.Declaration.Struct (mkStruct "size_t")
+            CppParser.Declaration.Enum (mkEnum "Flags")
+            CppParser.Declaration.Function (mkFunc "memcpy" "void *" [])
+        ]
+        let filtered = MoyaAnalyzer.filterDeclarationsForNamespace spec decls
+        // Structs and enums pass through, memcpy gets filtered out
+        Assert.Equal(2, filtered.Length)
+
+// =============================================================================
+// MoyaSerializer Tests — TOML round-trip and deserialization
+// =============================================================================
+
+module MoyaSerializerTests =
+
+    let private sampleProject : MoyaTypes.MoyaProject = {
+        Library = {
+            Name = "libc"
+            Header = "/usr/include/string.h"
+            IncludePaths = ["/usr/include"]
+            Defines = ["_GNU_SOURCE"]
+        }
+        Output = { Mode = "fidelity"; Directory = "./bindings" }
+        Namespaces = [
+            { Name = "Fidelity.libc.Memory"
+              Description = "Memory operations"
+              Library = "libc"
+              Prefixes = ["mem"; "str"]
+              Functions = [] }
+            { Name = "Fidelity.libc.IO"
+              Description = "I/O operations"
+              Library = "libc"
+              Prefixes = ["read"; "write"]
+              Functions = ["pipe"] }
+        ]
+    }
+
+    [<Fact>]
+    let ``serialize produces valid TOML with all sections`` () =
+        let toml = MoyaSerializer.toTomlString sampleProject
+        Assert.Contains("name = \"libc\"", toml)
+        Assert.Contains("header = \"/usr/include/string.h\"", toml)
+        Assert.Contains("mode = \"fidelity\"", toml)
+        Assert.Contains("directory = \"./bindings\"", toml)
+        Assert.Contains("[[namespace]]", toml)
+        Assert.Contains("Fidelity.libc.Memory", toml)
+        Assert.Contains("Fidelity.libc.IO", toml)
+
+    [<Fact>]
+    let ``round-trip serialize then deserialize produces identical project`` () =
+        let toml = MoyaSerializer.toTomlString sampleProject
+        match Fidelity.Toml.Toml.parse toml with
+        | Ok doc ->
+            match MoyaSerializer.deserialize doc with
+            | Ok roundTripped ->
+                Assert.Equal(sampleProject.Library.Name, roundTripped.Library.Name)
+                Assert.Equal(sampleProject.Library.Header, roundTripped.Library.Header)
+                Assert.Equal<string list>(sampleProject.Library.IncludePaths, roundTripped.Library.IncludePaths)
+                Assert.Equal<string list>(sampleProject.Library.Defines, roundTripped.Library.Defines)
+                Assert.Equal(sampleProject.Output.Mode, roundTripped.Output.Mode)
+                Assert.Equal(sampleProject.Output.Directory, roundTripped.Output.Directory)
+                Assert.Equal(sampleProject.Namespaces.Length, roundTripped.Namespaces.Length)
+                Assert.Equal(sampleProject.Namespaces[0].Name, roundTripped.Namespaces[0].Name)
+                Assert.Equal<string list>(sampleProject.Namespaces[0].Prefixes, roundTripped.Namespaces[0].Prefixes)
+                Assert.Equal<string list>(sampleProject.Namespaces[1].Functions, roundTripped.Namespaces[1].Functions)
+            | Error e -> Assert.Fail $"Deserialize failed: {e}"
+        | Error e -> Assert.Fail $"Parse failed: {e}"
+
+    [<Fact>]
+    let ``deserialize returns Error for missing library section`` () =
+        let doc = Fidelity.Toml.Toml.parseOrFail "[output]\nmode = \"fidelity\"\ndirectory = \"./out\""
+        match MoyaSerializer.deserialize doc with
+        | Error _ -> ()
+        | Ok _ -> Assert.Fail "Should return Error for missing [library]"
+
+    [<Fact>]
+    let ``deserialize returns Error for missing output section`` () =
+        let doc = Fidelity.Toml.Toml.parseOrFail "[library]\nname = \"test\"\nheader = \"test.h\""
+        match MoyaSerializer.deserialize doc with
+        | Error _ -> ()
+        | Ok _ -> Assert.Fail "Should return Error for missing [output]"
+
+    [<Fact>]
+    let ``deserialize handles empty namespace array`` () =
+        let toml = "[library]\nname = \"test\"\nheader = \"test.h\"\n[output]\nmode = \"fidelity\"\ndirectory = \"./out\""
+        let doc = Fidelity.Toml.Toml.parseOrFail toml
+        match MoyaSerializer.deserialize doc with
+        | Ok project -> Assert.Empty(project.Namespaces)
+        | Error e -> Assert.Fail $"Should succeed with no namespaces: {e}"
+
+    [<Fact>]
+    let ``deserialize handles optional functions field`` () =
+        let toml = """
+[library]
+name = "test"
+header = "test.h"
+[output]
+mode = "fidelity"
+directory = "./out"
+[[namespace]]
+name = "Test.Str"
+description = "String ops"
+library = "test"
+prefixes = ["str"]
+"""
+        let doc = Fidelity.Toml.Toml.parseOrFail toml
+        match MoyaSerializer.deserialize doc with
+        | Ok project ->
+            Assert.Equal(1, project.Namespaces.Length)
+            Assert.Empty(project.Namespaces[0].Functions)
+        | Error e -> Assert.Fail $"Should succeed: {e}"
+
+    [<Fact>]
+    let ``loadFromFile returns Error for nonexistent file`` () =
+        match MoyaSerializer.loadFromFile "/nonexistent/path.moya.toml" with
+        | Error _ -> ()
+        | Ok _ -> Assert.Fail "Should return Error for missing file"

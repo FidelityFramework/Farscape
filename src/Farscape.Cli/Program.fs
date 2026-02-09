@@ -6,6 +6,7 @@ open Farscape.Core
 open FSharp.SystemCommandLine
 open System.CommandLine.Invocation
 open Farscape.Core.BindingGenerator
+open Farscape.Core.MoyaTypes
 
 let printLine (text: string) =
     Console.WriteLine(text)
@@ -151,10 +152,167 @@ let generateCommand =
         setHandler handler
     }
 
+let moyaAnalyzeCommand =
+    let header =
+        Input.Option<FileInfo>(["-h"; "--header"],
+            fun o ->
+                o.Description <- "Path to C/C++ header file"
+                o.IsRequired <- true
+                o.AddValidator(fun result ->
+                    let file = result.GetValueForOption<FileInfo> o
+                    if not file.Exists then
+                        result.ErrorMessage <- $"Header file not found: {file.FullName}"
+                )
+        )
+    let library =   Input.OptionRequired<string>(["-l"; "--library"], description = "Library name (e.g., libc)")
+    let includes =  Input.Option<string[]>(["-i"; "--include-paths"], description = "Additional include paths")
+    let defines =   Input.Option<string[]>(["-d"; "--defines"], description = "Preprocessor definitions")
+    let output =    Input.Option<string>(["-o"; "--output"], description = "Output .moya.toml path (default: <library>.moya.toml)")
+    let outputMode = Input.Option<string>(["-m"; "--output-mode"], description = "Output mode", defaultValue = "fidelity")
+    let outputDir = Input.Option<string>(["--output-dir"], description = "Output directory for generated bindings", defaultValue = "./bindings")
+    let verbose =   Input.Option<bool>(["-v"; "--verbose"], description = "Verbose output", defaultValue = false)
+
+    let handler (header: FileInfo, library, includes: string[], defines: string[], output, outputMode, outputDir, verbose) =
+        showHeader ()
+        printHeader "Moya: Analyzing header for namespace subdivisions"
+        printLine ""
+
+        let includePaths = includes |> Array.toList
+        let definesList = defines |> Array.toList
+
+        match CppParser.parseWithDefines header.FullName includePaths definesList verbose with
+        | Error e ->
+            showError $"Failed to parse header: {e}"
+            1
+        | Ok declarations ->
+            let result = MoyaAnalyzer.analyze declarations
+
+            printColorLine $"Parsed {declarations.Length} declarations, {result.TotalFunctions} functions" ConsoleColor.White
+            printLine ""
+
+            printColorLine "Prefix Groups:" ConsoleColor.Yellow
+            for g in result.Groups do
+                printLine $"  {g.SuggestedName} ({g.Prefix}*): {g.FunctionNames.Length} functions"
+                if verbose then
+                    for fn in g.FunctionNames do
+                        printLine $"    - {fn}"
+
+            printLine ""
+            printColorLine $"Ungrouped: {result.Ungrouped.Length} functions" ConsoleColor.Yellow
+            if verbose then
+                for fn in result.Ungrouped do
+                    printLine $"    - {fn}"
+
+            let project =
+                MoyaAnalyzer.toMoyaProject library header.FullName includePaths definesList outputMode outputDir result
+
+            let tomlPath =
+                if String.IsNullOrEmpty output then $"{library}.moya.toml"
+                else output
+
+            match MoyaSerializer.saveToFile tomlPath project with
+            | Error e ->
+                showError $"Failed to write project file: {e}"
+                1
+            | Ok () ->
+                printLine ""
+                printColorLine $"Project file written: {tomlPath}" ConsoleColor.Green
+                printLine ""
+                printLine "Next steps:"
+                printLine $"  farscape generate --project {tomlPath}"
+                0
+
+    command "analyze" {
+        description "Analyze a header file and generate a .moya.toml project file"
+        inputs (header, library, includes, defines, output, outputMode, outputDir, verbose)
+        setHandler handler
+    }
+
+let moyaInitCommand =
+    let library =   Input.OptionRequired<string>(["-l"; "--library"], description = "Library name")
+    let header =    Input.Option<string>(["-h"; "--header"], description = "Path to header file", defaultValue = "")
+    let output =    Input.Option<string>(["-o"; "--output"], description = "Output .moya.toml path")
+
+    let handler (library, header, output) =
+        let project : MoyaProject = {
+            Library = {
+                Name = library
+                Header = if String.IsNullOrEmpty header then $"/usr/include/{library}.h" else header
+                IncludePaths = []
+                Defines = []
+            }
+            Output = { Mode = "fidelity"; Directory = "./bindings" }
+            Namespaces = [
+                { Name = $"Fidelity.{library}.Core"
+                  Description = "Core functions"
+                  Library = library
+                  Prefixes = []
+                  Functions = [] }
+            ]
+        }
+
+        let tomlPath =
+            if String.IsNullOrEmpty output then $"{library}.moya.toml"
+            else output
+
+        match MoyaSerializer.saveToFile tomlPath project with
+        | Error e ->
+            showError $"Failed to write: {e}"
+            1
+        | Ok () ->
+            printColorLine $"Skeleton project written: {tomlPath}" ConsoleColor.Green
+            printLine "Edit the file to add namespace definitions, then run:"
+            printLine $"  farscape generate --project {tomlPath}"
+            0
+
+    command "init" {
+        description "Create a skeleton .moya.toml project file"
+        inputs (library, header, output)
+        setHandler handler
+    }
+
+let moyaCommand =
+    command "moya" {
+        description "Namespace analysis and project file management"
+        setHandler id
+        addCommand moyaAnalyzeCommand
+        addCommand moyaInitCommand
+    }
+
+let projectGenerateCommand =
+    let project =   Input.OptionRequired<FileInfo>(["--project"], description = "Path to .moya.toml project file")
+    let verbose =   Input.Option<bool>(["-v"; "--verbose"], description = "Verbose output", defaultValue = false)
+
+    let handler (project: FileInfo, verbose) =
+        showHeader ()
+        printHeader "Generating Fidelity bindings from project..."
+        printLine ""
+
+        match BindingGenerator.generateFromProject project.FullName verbose with
+        | Error e ->
+            showError e
+            1
+        | Ok result ->
+            printColorLine "Generation Complete" ConsoleColor.Green
+            printLine ""
+            printColorLine $"Parsed {result.DeclarationCount} declarations" ConsoleColor.White
+            for file in result.OutputFiles do
+                printColorLine $"  {file}" ConsoleColor.Cyan
+            printLine ""
+            0
+
+    command "project" {
+        description "Generate Fidelity bindings from a .moya.toml project file"
+        inputs (project, verbose)
+        setHandler handler
+    }
+
 [<EntryPoint>]
 let main argv =
     rootCommand argv {
         description "Farscape: F# Native Library Binding Generator"
         setHandler id
         addCommand generateCommand
+        addCommand moyaCommand
+        addCommand projectGenerateCommand
     }

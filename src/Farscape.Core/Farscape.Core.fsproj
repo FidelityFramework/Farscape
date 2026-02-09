@@ -15,7 +15,10 @@
     <Compile Include="TypeMapper.fs" />
     <Compile Include="CTypeParser.fs" />
     <Compile Include="ActivePatterns.fs" />
+    <Compile Include="MoyaTypes.fs" />
     <Compile Include="DeclarationAlgebra.fs" />
+    <Compile Include="MoyaAnalyzer.fs" />
+    <Compile Include="MoyaSerializer.fs" />
     <Compile Include="CodeAST.fs" />
     <Compile Include="CodeRenderer.fs" />
     <Compile Include="FidelityCodeGenerator.fs" />
@@ -24,6 +27,10 @@
     <Compile Include="CodeGenerator.fs" />
     <Compile Include="Project.fs" />
     <Compile Include="BindingGenerator.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Fidelity.Toml" Version="0.1.1" />
   </ItemGroup>
 
   <!-- XParsec: NuGet for packaging, local project ref for dev override -->
