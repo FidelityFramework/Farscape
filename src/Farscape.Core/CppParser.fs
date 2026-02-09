@@ -33,6 +33,18 @@ module CppParser =
         ArraySize: int option // Size if IsArray
     }
 
+    /// Raw attribute data extracted from clang AST nodes.
+    /// Stored as-is from clang JSON — semantic interpretation happens downstream
+    /// in WrapperPatternAnalyzer.
+    type AttributeData = {
+        /// Clang AST node kind, e.g., "AllocSizeAttr", "NonNullAttr", "FormatAttr"
+        Kind: string
+        /// Integer arguments (parameter indices for NonNull, AllocSize, etc.)
+        Args: int list
+        /// String argument (archetype for FormatAttr, label for AsmLabelAttr)
+        StringArg: string option
+    }
+
     /// Represents a C/C++ function declaration
     type FunctionDecl = {
         Name: string
@@ -42,6 +54,8 @@ module CppParser =
         IsVirtual: bool
         IsStatic: bool
         IsInline: bool
+        /// Raw clang AST attributes (AllocSizeAttr, NonNullAttr, etc.)
+        Attributes: AttributeData list
     }
 
     /// Represents a C/C++ struct declaration
@@ -263,6 +277,33 @@ module CppParser =
     // AST Node Processing
     // =========================================================================
 
+    /// Extract raw attribute data from a FunctionDecl's inner nodes.
+    /// Filters for child nodes with kind ending in "Attr" (excluding BuiltinAttr).
+    let private extractAttributes (node: JsonElement) : AttributeData list =
+        getArray node "inner"
+        |> Seq.filter (fun inner ->
+            let kind = getStringOr inner "kind" ""
+            kind.EndsWith("Attr") && kind <> "BuiltinAttr")
+        |> Seq.choose (fun attr ->
+            let kind = getStringOr attr "kind" ""
+            // Extract integer args from inner ConstantExpr/IntegerLiteral nodes
+            let args =
+                getArray attr "inner"
+                |> Seq.choose (fun arg ->
+                    // Try direct value, then look for nested integer literals
+                    match getInt64 arg "value" with
+                    | Some v -> Some (int v)
+                    | None ->
+                        getArray arg "inner"
+                        |> Seq.tryPick (fun nested -> getInt64 nested "value" |> Option.map int))
+                |> List.ofSeq
+            // Extract string argument (archetype for FormatAttr, label for AsmLabelAttr)
+            let stringArg =
+                getString attr "archetype"
+                |> Option.orElseWith (fun () -> getString attr "label")
+            Some { Kind = kind; Args = args; StringArg = stringArg })
+        |> List.ofSeq
+
     /// Process FunctionDecl AST node
     let private processFunctionDecl (node: JsonElement) : FunctionDecl option =
         match getString node "name" with
@@ -281,6 +322,7 @@ module CppParser =
             let returnType = extractReturnType (getQualType node)
             let isStatic = getStringOr node "storageClass" "" = "static"
             let isInline = getBool node "inline"
+            let attributes = extractAttributes node
 
             Some {
                 Name = name
@@ -290,6 +332,7 @@ module CppParser =
                 IsVirtual = false
                 IsStatic = isStatic
                 IsInline = isInline
+                Attributes = attributes
             }
 
     /// Process FieldDecl AST node

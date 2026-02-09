@@ -19,9 +19,12 @@
     <Compile Include="DeclarationAlgebra.fs" />
     <Compile Include="MoyaAnalyzer.fs" />
     <Compile Include="MoyaSerializer.fs" />
+    <Compile Include="WrapperTypes.fs" />
+    <Compile Include="WrapperPatternAnalyzer.fs" />
     <Compile Include="CodeAST.fs" />
     <Compile Include="CodeRenderer.fs" />
     <Compile Include="FidelityCodeGenerator.fs" />
+    <Compile Include="WrapperCodeGenerator.fs" />
     <Compile Include="MemoryManager.fs" />
     <Compile Include="DelegatePointer.fs" />
     <Compile Include="CodeGenerator.fs" />

@@ -278,7 +278,7 @@ module DeclarationAlgebraTests =
 
     let private mkFunc name retType parms : CppParser.FunctionDecl =
         { Name = name; ReturnType = retType; Parameters = parms; Documentation = None
-          IsVirtual = false; IsStatic = false; IsInline = false }
+          IsVirtual = false; IsStatic = false; IsInline = false; Attributes = [] }
 
     let private mkTypedef name underlying : CppParser.TypedefInfo =
         { Name = name; UnderlyingType = underlying; Documentation = None }
@@ -453,7 +453,7 @@ module FidelityCodeGeneratorTests =
 
     let private mkFunc name retType parms : CppParser.FunctionDecl =
         { Name = name; ReturnType = retType; Parameters = parms; Documentation = None
-          IsVirtual = false; IsStatic = false; IsInline = false }
+          IsVirtual = false; IsStatic = false; IsInline = false; Attributes = [] }
 
     let private mkTypedef name underlying : CppParser.TypedefInfo =
         { Name = name; UnderlyingType = underlying; Documentation = None }
@@ -612,7 +612,7 @@ module MoyaAnalyzerTests =
 
     let private mkFunc name retType parms : CppParser.FunctionDecl =
         { Name = name; ReturnType = retType; Parameters = parms; Documentation = None
-          IsVirtual = false; IsStatic = false; IsInline = false }
+          IsVirtual = false; IsStatic = false; IsInline = false; Attributes = [] }
 
     let private mkStruct name : CppParser.StructDecl =
         { Name = name; Fields = []; Documentation = None; IsUnion = false }
@@ -864,3 +864,301 @@ prefixes = ["str"]
         match MoyaSerializer.loadFromFile "/nonexistent/path.moya.toml" with
         | Error _ -> ()
         | Ok _ -> Assert.Fail "Should return Error for missing file"
+
+// =============================================================================
+// WrapperPatternAnalyzer Tests — Attribute mapping and inference
+// =============================================================================
+
+module WrapperPatternAnalyzerTests =
+
+    open WrapperTypes
+
+    let private mkFunc name retType parms attrs : CppParser.FunctionDecl =
+        { Name = name; ReturnType = retType; Parameters = parms; Documentation = None
+          IsVirtual = false; IsStatic = false; IsInline = false
+          Attributes = attrs }
+
+    let private mkAttr kind args strArg : CppParser.AttributeData =
+        { Kind = kind; Args = args; StringArg = strArg }
+
+    // ── Attribute Mapping Tests ──
+
+    [<Theory>]
+    [<InlineData("AllocSizeAttr")>]
+    [<InlineData("NonNullAttr")>]
+    [<InlineData("NoReturnAttr")>]
+    [<InlineData("NoThrowAttr")>]
+    [<InlineData("ColdAttr")>]
+    [<InlineData("RestrictAttr")>]
+    [<InlineData("PureAttr")>]
+    [<InlineData("WarnUnusedResultAttr")>]
+    let ``mapAttribute recognizes known attribute kinds`` (kind: string) =
+        let raw = mkAttr kind [] None
+        let result = WrapperPatternAnalyzer.mapAttribute raw
+        Assert.True(result.IsSome, $"Should recognize {kind}")
+
+    [<Fact>]
+    let ``mapAttribute returns None for unknown attribute kinds`` () =
+        let raw = mkAttr "SomeUnknownAttr" [] None
+        Assert.True((WrapperPatternAnalyzer.mapAttribute raw).IsNone)
+
+    [<Fact>]
+    let ``mapAttribute extracts FormatAttr archetype and indices`` () =
+        let raw = mkAttr "FormatAttr" [1; 2] (Some "printf")
+        match WrapperPatternAnalyzer.mapAttribute raw with
+        | Some (Format ("printf", 1, 2)) -> ()
+        | other -> Assert.Fail $"Expected Format(\"printf\", 1, 2) but got {other}"
+
+    [<Fact>]
+    let ``mapAttribute extracts AllocSize param indices`` () =
+        let raw = mkAttr "AllocSizeAttr" [0] None
+        match WrapperPatternAnalyzer.mapAttribute raw with
+        | Some (AllocSize [0]) -> ()
+        | other -> Assert.Fail $"Expected AllocSize [0] but got {other}"
+
+    [<Fact>]
+    let ``mapAttribute extracts NonNull param indices`` () =
+        let raw = mkAttr "NonNullAttr" [1; 2] None
+        match WrapperPatternAnalyzer.mapAttribute raw with
+        | Some (NonNull [1; 2]) -> ()
+        | other -> Assert.Fail $"Expected NonNull [1; 2] but got {other}"
+
+    // ── Return Semantic Tests ──
+
+    [<Fact>]
+    let ``analyzeReturn NoReturn attribute produces NeverReturns`` () =
+        let result = WrapperPatternAnalyzer.analyzeReturn "void" [NoReturn] Map.empty
+        Assert.Equal(NeverReturns, result)
+
+    [<Fact>]
+    let ``analyzeReturn AllocSize attribute produces AllocatedPointer`` () =
+        let result = WrapperPatternAnalyzer.analyzeReturn "void *" [AllocSize [0]] Map.empty
+        Assert.Equal(AllocatedPointer, result)
+
+    [<Fact>]
+    let ``analyzeReturn Pure attribute produces PureValue`` () =
+        let result = WrapperPatternAnalyzer.analyzeReturn "int" [Pure] Map.empty
+        Assert.Equal(PureValue, result)
+
+    [<Fact>]
+    let ``analyzeReturn ssize_t return produces CountOrError`` () =
+        let result = WrapperPatternAnalyzer.analyzeReturn "ssize_t" [] Map.empty
+        Assert.Equal(CountOrError, result)
+
+    [<Fact>]
+    let ``analyzeReturn void return produces VoidReturn`` () =
+        let result = WrapperPatternAnalyzer.analyzeReturn "void" [] Map.empty
+        Assert.Equal(VoidReturn, result)
+
+    [<Fact>]
+    let ``analyzeReturn void pointer produces AllocatedPointer`` () =
+        let result = WrapperPatternAnalyzer.analyzeReturn "void *" [] Map.empty
+        Assert.Equal(AllocatedPointer, result)
+
+    [<Fact>]
+    let ``analyzeReturn FILE pointer produces OpaqueHandleReturn`` () =
+        let result = WrapperPatternAnalyzer.analyzeReturn "FILE *" [] Map.empty
+        Assert.Equal(OpaqueHandleReturn, result)
+
+    [<Fact>]
+    let ``analyzeReturn int produces ZeroSuccessOrError`` () =
+        let result = WrapperPatternAnalyzer.analyzeReturn "int" [] Map.empty
+        Assert.Equal(ZeroSuccessOrError, result)
+
+    [<Fact>]
+    let ``analyzeReturn resolves typedef to underlying type`` () =
+        let tdMap = Map.ofList [("__ssize_t", "long")]
+        let result = WrapperPatternAnalyzer.analyzeReturn "__ssize_t" [] tdMap
+        Assert.Equal(CountOrError, result)
+
+    // ── Parameter Role Tests ──
+
+    [<Fact>]
+    let ``analyzeParameters identifies file descriptor by name`` () =
+        let parms = [("fd", "int"); ("buf", "void *"); ("count", "size_t")]
+        let roles = WrapperPatternAnalyzer.analyzeParameters parms [] Map.empty
+        match roles with
+        | (_, FileDescriptor) :: _ -> ()
+        | other -> Assert.Fail $"Expected FileDescriptor for fd but got {other}"
+
+    [<Fact>]
+    let ``analyzeParameters identifies const pointer as InputBuffer`` () =
+        let parms = [("buf", "const void *"); ("count", "size_t")]
+        let roles = WrapperPatternAnalyzer.analyzeParameters parms [] Map.empty
+        match roles with
+        | ("buf", InputBuffer (Some "count")) :: _ -> ()
+        | other -> Assert.Fail $"Expected InputBuffer with length param but got {other}"
+
+    [<Fact>]
+    let ``analyzeParameters identifies mutable pointer as OutputBuffer`` () =
+        let parms = [("buf", "void *"); ("count", "size_t")]
+        let roles = WrapperPatternAnalyzer.analyzeParameters parms [] Map.empty
+        match roles with
+        | ("buf", OutputBuffer (Some "count")) :: _ -> ()
+        | other -> Assert.Fail $"Expected OutputBuffer with length param but got {other}"
+
+    [<Fact>]
+    let ``analyzeParameters identifies FILE pointer as OpaqueHandle`` () =
+        let parms = [("stream", "FILE *")]
+        let roles = WrapperPatternAnalyzer.analyzeParameters parms [] Map.empty
+        match roles with
+        | [("stream", OpaqueHandle)] -> ()
+        | other -> Assert.Fail $"Expected OpaqueHandle but got {other}"
+
+    [<Fact>]
+    let ``analyzeParameters identifies size_t named count as BufferLength`` () =
+        let parms = [("buf", "void *"); ("count", "size_t")]
+        let roles = WrapperPatternAnalyzer.analyzeParameters parms [] Map.empty
+        match roles with
+        | [_; ("count", BufferLength "buf")] -> ()
+        | other -> Assert.Fail $"Expected BufferLength but got {other}"
+
+    // ── End-to-End Pattern Analysis Tests ──
+
+    [<Fact>]
+    let ``analyze read function produces CountOrError pattern`` () =
+        let func = mkFunc "read" "ssize_t"
+                    [("fd", "int"); ("buf", "void *"); ("count", "size_t")]
+                    []
+        let pattern = WrapperPatternAnalyzer.analyze func Map.empty
+        Assert.Equal(CountOrError, pattern.ReturnSemantic)
+        Assert.True(pattern.NeedsResultWrap)
+        Assert.False(pattern.IsPure)
+
+    [<Fact>]
+    let ``analyze malloc with AllocSizeAttr produces AllocatedPointer pattern`` () =
+        let func = mkFunc "malloc" "void *"
+                    [("size", "size_t")]
+                    [mkAttr "AllocSizeAttr" [0] None; mkAttr "NoThrowAttr" [] None]
+        let pattern = WrapperPatternAnalyzer.analyze func Map.empty
+        Assert.Equal(AllocatedPointer, pattern.ReturnSemantic)
+        Assert.True(pattern.NeedsResultWrap)
+        Assert.True(pattern.NeedsResourceCleanup)
+
+    [<Fact>]
+    let ``analyze abort with NoReturnAttr produces NeverReturns pattern`` () =
+        let func = mkFunc "abort" "void" []
+                    [mkAttr "NoReturnAttr" [] None]
+        let pattern = WrapperPatternAnalyzer.analyze func Map.empty
+        Assert.Equal(NeverReturns, pattern.ReturnSemantic)
+        Assert.False(pattern.NeedsResultWrap)
+
+    [<Fact>]
+    let ``analyze abs with PureAttr produces PureValue pattern`` () =
+        let func = mkFunc "abs" "int"
+                    [("x", "int")]
+                    [mkAttr "PureAttr" [] None; mkAttr "NoThrowAttr" [] None]
+        let pattern = WrapperPatternAnalyzer.analyze func Map.empty
+        Assert.Equal(PureValue, pattern.ReturnSemantic)
+        Assert.False(pattern.NeedsResultWrap)
+        Assert.True(pattern.IsPure)
+
+// =============================================================================
+// WrapperCodeGenerator Tests — End-to-end wrapper generation
+// =============================================================================
+
+module WrapperCodeGeneratorTests =
+
+    let private mkDecl name retType parms attrs =
+        CppParser.Declaration.Function
+            { Name = name; ReturnType = retType; Parameters = parms; Documentation = None
+              IsVirtual = false; IsStatic = false; IsInline = false; Attributes = attrs }
+
+    let private mkAttr kind args strArg : CppParser.AttributeData =
+        { Kind = kind; Args = args; StringArg = strArg }
+
+    let private generateSingle name retType parms attrs =
+        let decls = [ mkDecl name retType parms attrs ]
+        WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test"
+
+    [<Fact>]
+    let ``CountOrError wrapper generates Result return and comparison`` () =
+        let output = generateSingle "read" "ssize_t"
+                        [("fd", "int"); ("buf", "void *"); ("count", "size_t")]
+                        []
+        Assert.Contains("let read", output)
+        Assert.Contains("Result<", output)
+        Assert.Contains("let result = Platform.Bindings.Test.read", output)
+        Assert.Contains("if result >= 0n then Ok", output)
+        Assert.Contains("else Error", output)
+
+    [<Fact>]
+    let ``AllocatedPointer wrapper generates null check`` () =
+        let output = generateSingle "malloc" "void *"
+                        [("size", "size_t")]
+                        [mkAttr "AllocSizeAttr" [0] None]
+        Assert.Contains("let malloc", output)
+        Assert.Contains("Result<", output)
+        Assert.Contains("let result = Platform.Bindings.Test.malloc", output)
+        Assert.Contains("if result <> 0n then Ok", output)
+        Assert.Contains("else Error ()", output)
+
+    [<Fact>]
+    let ``PureValue wrapper generates direct delegation`` () =
+        let output = generateSingle "abs" "int"
+                        [("x", "int")]
+                        [mkAttr "PureAttr" [] None]
+        Assert.Contains("let abs", output)
+        Assert.Contains("Platform.Bindings.Test.abs", output)
+        // Should NOT have Result wrapping
+        Assert.DoesNotContain("Result<", output)
+        Assert.DoesNotContain("if result", output)
+
+    [<Fact>]
+    let ``ZeroSuccessOrError wrapper generates zero check`` () =
+        let output = generateSingle "fclose" "int"
+                        [("stream", "FILE *")]
+                        []
+        Assert.Contains("let fclose", output)
+        Assert.Contains("Result<", output)
+        Assert.Contains("let result = Platform.Bindings.Test.fclose", output)
+        Assert.Contains("if result = 0l then Ok ()", output)
+
+    [<Fact>]
+    let ``NeverReturns wrapper generates direct delegation with unit return`` () =
+        let output = generateSingle "abort" "void" []
+                        [mkAttr "NoReturnAttr" [] None]
+        Assert.Contains("let abort", output)
+        Assert.Contains(": unit =", output)
+        Assert.Contains("Platform.Bindings.Test.abort", output)
+        Assert.DoesNotContain("Result<", output)
+
+    [<Fact>]
+    let ``VoidReturn wrapper generates direct delegation`` () =
+        let output = generateSingle "free" "void"
+                        [("ptr", "void *")]
+                        []
+        Assert.Contains("let free", output)
+        Assert.Contains(": unit =", output)
+        Assert.Contains("Platform.Bindings.Test.free", output)
+        Assert.DoesNotContain("Result<", output)
+
+    [<Fact>]
+    let ``wrapper module includes open declaration for bindings`` () =
+        let output = generateSingle "abs" "int" [("x", "int")] [mkAttr "PureAttr" [] None]
+        Assert.Contains("open Platform.Bindings.Test", output)
+
+    [<Fact>]
+    let ``wrapper module has correct namespace`` () =
+        let output = generateSingle "abs" "int" [("x", "int")] [mkAttr "PureAttr" [] None]
+        Assert.Contains("module Wrappers.Test", output)
+
+    [<Fact>]
+    let ``wrapper generates XML doc with original C signature`` () =
+        let output = generateSingle "read" "ssize_t"
+                        [("fd", "int"); ("buf", "void *"); ("count", "size_t")]
+                        []
+        Assert.Contains("/// ssize_t read(int fd, void * buf, size_t count)", output)
+
+    [<Fact>]
+    let ``multiple functions are deduplicated by name`` () =
+        let decls = [
+            mkDecl "read" "ssize_t" [("fd", "int"); ("buf", "void *"); ("count", "size_t")] []
+            mkDecl "read" "ssize_t" [("fd", "int"); ("buf", "void *"); ("count", "size_t")] []
+            mkDecl "write" "ssize_t" [("fd", "int"); ("buf", "const void *"); ("count", "size_t")] []
+        ]
+        let output = WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test"
+        // Count occurrences of "let read" — should be exactly 1
+        let readCount = output.Split("let read") |> Array.length
+        Assert.Equal(2, readCount) // split produces N+1 parts for N occurrences
+        Assert.Contains("let write", output)

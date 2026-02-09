@@ -25,7 +25,8 @@ Every module in Farscape is built from one of four patterns:
 
 Output is designed for Firefly native compilation, not .NET runtime interop:
 
-- Generates `Unchecked.defaultof<T>` stubs that Alex recognizes
+- **Layer 1**: Generates `Unchecked.defaultof<T>` stubs that Alex recognizes
+- **Layer 2**: Generates idiomatic F# wrappers with Result types, null checking, error handling
 - Alex provides platform-specific MLIR implementations for these bindings
 - No BCL dependencies in generated code
 - Also supports P/Invoke mode for traditional .NET interop
@@ -59,8 +60,12 @@ Generated F# source is byte-identical across runs. No hash-dependent ordering, n
  │              Single fold over Declaration DU                      │
  │                           │                                       │
  │                           ▼                                       │
- │              FidelityCodeGenerator.fs                              │
+ │              FidelityCodeGenerator.fs (Layer 1)                    │
  │              Declaration list → FsDecl AST                        │
+ │                           │                                       │
+ │              WrapperPatternAnalyzer.fs (Layer 2, optional)        │
+ │              Clang attrs → WrapperPattern → FsDecl AST            │
+ │              (WrapperCodeGenerator.fs)                             │
  │                           │                                       │
  │                           ▼                                       │
  │              CodeRenderer.fs                                      │
@@ -174,7 +179,10 @@ Typed representation of generated F# code:
 
 ```fsharp
 type FsType = Named of string | Generic of string * FsType | Unit
-type FsExpr = DefaultOf of FsType
+type FsExpr =
+    | DefaultOf of FsType                    // Layer 1: Unchecked.defaultof<T>
+    | FunctionCall | IfThenElse | ResultOk   // Layer 2: wrapper constructs
+    | ResultError | LetIn | Comparison | ... // (see CodeAST.fs for full list)
 type FsDecl =
     | Module of name: string * comment: string * decls: FsDecl list
     | XmlDoc of text: string
@@ -252,9 +260,14 @@ Traditional .NET P/Invoke bindings with DllImport attributes (via `CodeGenerator
 <Compile Include="CTypeParser.fs" />
 <Compile Include="ActivePatterns.fs" />
 <Compile Include="DeclarationAlgebra.fs" />
+<Compile Include="MoyaAnalyzer.fs" />
+<Compile Include="MoyaSerializer.fs" />
+<Compile Include="WrapperTypes.fs" />
+<Compile Include="WrapperPatternAnalyzer.fs" />
 <Compile Include="CodeAST.fs" />
 <Compile Include="CodeRenderer.fs" />
 <Compile Include="FidelityCodeGenerator.fs" />
+<Compile Include="WrapperCodeGenerator.fs" />
 <Compile Include="MemoryManager.fs" />
 <Compile Include="DelegatePointer.fs" />
 <Compile Include="CodeGenerator.fs" />
@@ -277,3 +290,4 @@ Key constraint: `CppParser.fs` compiles before `CTypeParser.fs` — the XParsec 
 - [BAREWire Integration](./02_BAREWire_Integration.md) — Hardware descriptor generation design
 - [fsnative Integration](./03_fsnative_Integration.md) — Native type system coordination
 - [XParsec Architecture](./04_XParsec_Architecture.md) — How Farscape uses XParsec throughout
+- [Wrapper Generation](./05_Wrapper_Generation.md) — Layer 2 idiomatic F# wrapper generation

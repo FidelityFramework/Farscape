@@ -18,6 +18,7 @@ module BindingGenerator =
         Defines: string list
         Verbose: bool
         OutputMode: OutputMode
+        GenerateWrappers: bool
     }
 
     /// Extract struct/class type names from declarations using catamorphism.
@@ -60,16 +61,27 @@ module BindingGenerator =
                 logVerbose "Generating Fidelity F# source..." options.Verbose
                 let generatedCode = FidelityCodeGenerator.generate declarations options.Namespace options.LibraryName
 
-                let outputFileName =
-                    let lastSegment = options.Namespace.Split('.') |> Array.last
-                    $"{lastSegment}.fs"
+                let lastSegment = options.Namespace.Split('.') |> Array.last
+                let outputFileName = $"{lastSegment}.fs"
                 let outputPath = Path.Combine(options.OutputDirectory, outputFileName)
                 File.WriteAllText(outputPath, generatedCode)
 
                 logVerbose $"Fidelity binding written to: {outputPath}" options.Verbose
 
+                let wrapperFiles =
+                    if options.GenerateWrappers then
+                        logVerbose "Generating idiomatic F# wrappers..." options.Verbose
+                        let wrapperNamespace = $"{options.Namespace}.Wrappers"
+                        let wrapperCode =
+                            WrapperCodeGenerator.generate declarations wrapperNamespace options.LibraryName options.Namespace
+                        let wrapperPath = Path.Combine(options.OutputDirectory, $"{lastSegment}Wrappers.fs")
+                        File.WriteAllText(wrapperPath, wrapperCode)
+                        logVerbose $"Wrapper module written to: {wrapperPath}" options.Verbose
+                        [wrapperPath]
+                    else []
+
                 Ok {
-                    OutputFiles = [outputPath]
+                    OutputFiles = outputPath :: wrapperFiles
                     DeclarationCount = declarations.Length
                 }
 
@@ -104,7 +116,8 @@ module BindingGenerator =
 
     /// Generate scoped Fidelity bindings from a .moya.toml project file.
     /// Each [[namespace]] section produces a separate F# module.
-    let generateFromProject (projectPath: string) (verbose: bool) : Result<GenerationResult, string> =
+    /// When generateWrappers is true, also generates Layer 2 idiomatic wrappers.
+    let generateFromProject (projectPath: string) (verbose: bool) (generateWrappers: bool) : Result<GenerationResult, string> =
         match MoyaSerializer.loadFromFile projectPath with
         | Error e -> Error $"Failed to load project: {e}"
         | Ok project ->
@@ -119,16 +132,25 @@ module BindingGenerator =
                 Directory.CreateDirectory(project.Output.Directory) |> ignore
 
                 let allFiles =
-                    project.Namespaces |> List.map (fun ns ->
+                    project.Namespaces |> List.collect (fun ns ->
                         let filtered = MoyaAnalyzer.filterDeclarationsForNamespace ns declarations
                         logVerbose $"Namespace {ns.Name}: {filtered.Length} declarations" verbose
                         let code = FidelityCodeGenerator.generate filtered ns.Name ns.Library
-                        let fileName =
-                            let lastSegment = ns.Name.Split('.') |> Array.last
-                            $"{lastSegment}.fs"
+                        let lastSegment = ns.Name.Split('.') |> Array.last
+                        let fileName = $"{lastSegment}.fs"
                         let outputPath = Path.Combine(project.Output.Directory, fileName)
                         File.WriteAllText(outputPath, code)
-                        outputPath)
+
+                        if generateWrappers then
+                            let wrapperNamespace = $"{ns.Name}.Wrappers"
+                            let wrapperCode =
+                                WrapperCodeGenerator.generate filtered wrapperNamespace ns.Library ns.Name
+                            let wrapperPath = Path.Combine(project.Output.Directory, $"{lastSegment}Wrappers.fs")
+                            File.WriteAllText(wrapperPath, wrapperCode)
+                            logVerbose $"Wrapper module: {wrapperPath}" verbose
+                            [outputPath; wrapperPath]
+                        else
+                            [outputPath])
 
                 Ok {
                     OutputFiles = allFiles

@@ -20,6 +20,26 @@ module CodeAST =
     type FsExpr =
         /// Unchecked.defaultof<T> — the standard Platform.Bindings body
         | DefaultOf of FsType
+        /// Function call: Module.func arg1 arg2 (module' = "" for unqualified)
+        | FunctionCall of module': string * name: string * args: FsExpr list
+        /// Variable reference
+        | Identifier of string
+        /// Type conversion: int32 x, nativeint x
+        | TypeConversion of targetType: string * expr: FsExpr
+        /// Static method call: NativePtr.toNativeInt buffer
+        | MethodCall of receiver: FsExpr * method': string
+        /// Conditional: if cond then thenExpr else elseExpr
+        | IfThenElse of cond: FsExpr * thenExpr: FsExpr * elseExpr: FsExpr
+        /// Binary comparison: result >= 0L
+        | Comparison of left: FsExpr * op: string * right: FsExpr
+        /// Literal value: 0L, 0n, ()
+        | Literal of string
+        /// Ok wrapper: Ok x
+        | ResultOk of FsExpr
+        /// Error wrapper: Error x
+        | ResultError of FsExpr
+        /// Let binding in expression: let result = binding in body
+        | LetIn of name: string * binding: FsExpr * body: FsExpr
 
     /// A function parameter
     type FsParam = {

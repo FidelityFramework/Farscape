@@ -46,7 +46,7 @@ module FidelityCodeGenerator =
         |> resolveTypedefChains 10
 
     /// Resolve a C type through the typedef map.
-    let private resolveType (typedefMap: Map<string, string>) (baseType: string) : string =
+    let resolveType (typedefMap: Map<string, string>) (baseType: string) : string =
         match Map.tryFind baseType typedefMap with
         | Some resolved -> resolved
         | None -> baseType
@@ -56,7 +56,7 @@ module FidelityCodeGenerator =
     // =========================================================================
 
     /// Map pointer/value type info to FsType using active pattern decomposition.
-    let private mapTypeInfo (baseTypeFn: string -> FsType) = function
+    let mapTypeInfo (baseTypeFn: string -> FsType) = function
         | CharPointer -> Generic("nativeptr", Named "byte")
         | VoidPointer -> Named "nativeint"
         | TypedPointer _ -> Named "nativeint"
@@ -64,7 +64,8 @@ module FidelityCodeGenerator =
 
     /// Map a C type string to an FsType suitable for Fidelity native compilation.
     /// Uses ParsedCType active pattern (XParsec-backed) instead of Regex/string munging.
-    let private mapCTypeToFidelityType (typedefMap: Map<string, string>) (cType: string) : FsType =
+    /// Used by both FidelityCodeGenerator (Layer 1) and WrapperCodeGenerator (Layer 2).
+    let mapCTypeToFidelityType (typedefMap: Map<string, string>) (cType: string) : FsType =
         // Function pointer types like "void (*)(void)" contain (*) — always nativeint
         if cType.Contains("(*)") then Named "nativeint"
         else

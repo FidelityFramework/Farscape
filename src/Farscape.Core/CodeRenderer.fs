@@ -18,9 +18,31 @@ module CodeRenderer =
     /// Render an FsParam to "(name: type)" form
     let renderParam (p: FsParam) = $"({p.Name}: {renderType p.Type})"
 
-    /// Render an FsExpr to its F# string representation
-    let renderExpr = function
+    /// Render an FsExpr to its F# string representation.
+    /// The indent parameter is the continuation indent for multi-line expressions.
+    let rec renderExpr (indent: string) = function
         | DefaultOf ty -> $"Unchecked.defaultof<{renderType ty}>"
+        | FunctionCall (mod', name, args) ->
+            let argStr = args |> List.map (renderExpr indent) |> String.concat " "
+            if mod' = "" then $"{name} {argStr}"
+            else $"{mod'}.{name} {argStr}"
+        | Identifier name -> name
+        | TypeConversion (target, expr) -> $"{target} ({renderExpr indent expr})"
+        | MethodCall (expr, method') -> $"{method'} ({renderExpr indent expr})"
+        | IfThenElse (cond, thenE, elseE) ->
+            $"if {renderExpr indent cond} then {renderExpr indent thenE}\n{indent}else {renderExpr indent elseE}"
+        | Comparison (left, op, right) -> $"{renderExpr indent left} {op} {renderExpr indent right}"
+        | Literal s -> s
+        | ResultOk expr ->
+            match expr with
+            | Identifier _ | Literal _ -> $"Ok {renderExpr indent expr}"
+            | _ -> $"Ok ({renderExpr indent expr})"
+        | ResultError expr ->
+            match expr with
+            | Identifier _ | Literal _ -> $"Error {renderExpr indent expr}"
+            | _ -> $"Error ({renderExpr indent expr})"
+        | LetIn (name, binding, body) ->
+            $"let {name} = {renderExpr indent binding}\n{indent}{renderExpr indent body}"
 
     /// Render a single FsDecl node to the StringBuilder at the given indentation level
     let rec private renderDecl (sb: StringBuilder) (indent: int) (decl: FsDecl) =
@@ -49,7 +71,8 @@ module CodeRenderer =
                 if params'.IsEmpty then "()"
                 else params' |> List.map renderParam |> String.concat " "
             sb.AppendLine($"{prefix}    let {name} {paramStr} : {renderType retType} =") |> ignore
-            sb.Append($"{prefix}        {renderExpr body}") |> ignore
+            let bodyIndent = $"{prefix}        "
+            sb.Append($"{bodyIndent}{renderExpr bodyIndent body}") |> ignore
             sb.AppendLine() |> ignore
             sb.AppendLine() |> ignore
 

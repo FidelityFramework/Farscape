@@ -107,13 +107,14 @@ let generateCommand =
     let includes =   Input.option<string[]> "--include-paths" |> alias "-i" |> desc "Additional include paths" |> def [||]
     let defines =    Input.option<string[]> "--defines"       |> alias "-d" |> desc "Preprocessor definitions (e.g., STM32L552xx)" |> def [||]
     let verbose =    Input.option<bool> "--verbose"           |> alias "-v" |> desc "Verbose output" |> def false
-    let outputMode = Input.option<string> "--output-mode"     |> alias "-m" |> desc "Output mode: pinvoke or fidelity" |> def "pinvoke"
+    let outputMode = Input.option<string> "--output-mode"     |> alias "-m" |> desc "Output mode: pinvoke, fidelity, or fidelity-wrappers" |> def "pinvoke"
 
     let action (header, library, output, ns, includes, defines, verbose, outputMode) =
-        let mode =
+        let mode, wrappers =
             match outputMode with
-            | "fidelity" | "Fidelity" -> Farscape.Core.Types.Fidelity
-            | _ -> Farscape.Core.Types.PInvoke
+            | "fidelity-wrappers" | "Fidelity-Wrappers" -> Farscape.Core.Types.Fidelity, true
+            | "fidelity" | "Fidelity" -> Farscape.Core.Types.Fidelity, false
+            | _ -> Farscape.Core.Types.PInvoke, false
         let options = {
             HeaderFile = header
             LibraryName = library
@@ -123,6 +124,7 @@ let generateCommand =
             Defines = defines |> Array.toList
             Verbose = verbose
             OutputMode = mode
+            GenerateWrappers = wrappers
         }
         showHeader()
         showConfiguration options
@@ -267,13 +269,14 @@ let moyaCommand =
 let projectGenerateCommand =
     let project = Input.option<FileInfo> "--project" |> desc "Path to .moya.toml project file" |> required |> validateFileExists
     let verbose = Input.option<bool> "--verbose"     |> alias "-v" |> desc "Verbose output" |> def false
+    let wrappers = Input.option<bool> "--wrappers"   |> alias "-w" |> desc "Also generate idiomatic F# wrappers (Layer 2)" |> def false
 
-    let action (project: FileInfo, verbose) =
+    let action (project: FileInfo, verbose, wrappers) =
         showHeader ()
         printHeader "Generating Fidelity bindings from project..."
         printLine ""
 
-        match BindingGenerator.generateFromProject project.FullName verbose with
+        match BindingGenerator.generateFromProject project.FullName verbose wrappers with
         | Error e ->
             showError e
             1
@@ -288,7 +291,7 @@ let projectGenerateCommand =
 
     command "project" {
         description "Generate Fidelity bindings from a .moya.toml project file"
-        inputs (project, verbose)
+        inputs (project, verbose, wrappers)
         setAction action
     }
 
