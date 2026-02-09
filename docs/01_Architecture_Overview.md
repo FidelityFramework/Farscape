@@ -2,15 +2,27 @@
 
 ## Purpose
 
-Farscape generates F# bindings from C/C++ headers for the Fidelity native compilation ecosystem. Unlike traditional FFI tools that target runtime interop, Farscape generates code specifically for ahead-of-time native compilation via Firefly.
+Farscape generates F# bindings from C headers for the Fidelity native compilation ecosystem. Unlike traditional FFI tools that target runtime interop, Farscape generates code specifically for ahead-of-time native compilation via Firefly.
+
+There is no P/Invoke in the Fidelity framework. Farscape generates `[<FidelityExtern>]` attributed stubs that carry library name and symbol metadata through the entire pipeline: FNCS type-checking, Baker saturation, Alex MLIR emission, LLVM compilation. A separate P/Invoke mode exists for traditional .NET F# interop only.
 
 ## Design Principles
 
-### 1. Clang-Powered Parsing with XParsec Post-Processing
+### 1. Closed-Loop Fidelity Pipeline
 
-Farscape uses **clang** for robust C/C++ header parsing via a two-pass strategy (JSON AST + macro extraction). XParsec parser combinators handle **post-processing**: decomposing C type strings, classifying macro values, and parsing numeric literals from clang's output.
+Farscape is not a standalone binding generator. It is one component of a closed-loop system:
 
-### 2. Four Architectural Patterns
+```
+C Headers → Farscape → [<FidelityExtern>] stubs → FNCS → Baker → Alex → MLIR → LLVM → native binary
+```
+
+`[<FidelityExtern>]` carries library name + symbol through the PSG so Alex can emit MLIR with `fidelity.binding_strategy` and `fidelity.library_name` attributes, and the linker auto-collects flags (`-lc`, `-lwayland-client`, etc.).
+
+### 2. Clang-Powered Parsing with XParsec Post-Processing
+
+Farscape uses **clang** for robust C header parsing via a two-pass strategy (JSON AST + macro extraction). XParsec parser combinators handle **post-processing**: decomposing C type strings, classifying macro values, and parsing numeric literals from clang's output.
+
+### 3. Four Architectural Patterns
 
 Every module in Farscape is built from one of four patterns:
 
@@ -21,17 +33,14 @@ Every module in Farscape is built from one of four patterns:
 | **Catamorphism** | `DeclarationAlgebra.fs` | Single fold over Declaration DU; the ONLY traversal |
 | **Typed Code AST** | `CodeAST.fs` + `CodeRenderer.fs` | FsDecl tree → F# source (the ONLY StringBuilder) |
 
-### 3. Fidelity-First Output
+### 4. Two-Layer Binding Model
 
-Output is designed for Firefly native compilation, not .NET runtime interop:
+- **Layer 1**: `[<FidelityExtern>]` stubs with `Unchecked.defaultof<T>` bodies. Alex provides platform-specific MLIR implementations.
+- **Layer 2** (implemented): Idiomatic F# wrappers with Result types, null checking, error handling. Driven by 12 clang attribute types and 7 return semantic patterns. CLI: `--output-mode fidelity-wrappers`
 
-- **Layer 1**: Generates `Unchecked.defaultof<T>` stubs that Alex recognizes
-- **Layer 2**: Generates idiomatic F# wrappers with Result types, null checking, error handling
-- Alex provides platform-specific MLIR implementations for these bindings
-- No BCL dependencies in generated code
-- Also supports P/Invoke mode for traditional .NET interop
+Both layers compile to zero-overhead native code via type erasure. No BCL dependencies in generated code.
 
-### 4. Deterministic Output
+### 5. Deterministic Output
 
 Generated F# source is byte-identical across runs. No hash-dependent ordering, no mutable state in the generation pipeline.
 
@@ -39,7 +48,7 @@ Generated F# source is byte-identical across runs. No hash-dependent ordering, n
 
 ```mermaid
 flowchart TD
-    A["C/C++ Header<br/>(stdlib.h)"] --> B["Clang Two-Pass<br/>(CppParser.fs)"]
+    A["C Header<br/>(stdlib.h)"] --> B["Clang Two-Pass<br/>(CppParser.fs)"]
     B --> C["Declaration AST<br/>(functions, structs, enums,<br/>typedefs, macros)"]
     C --> D["XParsec Post-Processing<br/>(CTypeParser.fs)"]
     C --> E["TypeMapper.fs<br/>(type dictionary)"]
@@ -47,7 +56,7 @@ flowchart TD
     F --> G["Catamorphism<br/>(DeclarationAlgebra.fs)<br/>Single fold over Declaration DU"]
     E --> G
     G --> H["FidelityCodeGenerator.fs<br/>(Layer 1)<br/>Declaration list → FsDecl AST"]
-    G --> I["WrapperPatternAnalyzer.fs<br/>(Layer 2, optional)<br/>Clang attrs → WrapperPattern → FsDecl AST<br/>(WrapperCodeGenerator.fs)"]
+    G --> I["WrapperPatternAnalyzer.fs<br/>(Layer 2)<br/>Clang attrs → WrapperPattern → FsDecl AST<br/>(WrapperCodeGenerator.fs)"]
     H --> J["CodeRenderer.fs<br/>FsDecl → F# source string<br/>(the ONLY StringBuilder)"]
     I --> J
 ```
@@ -56,7 +65,7 @@ flowchart TD
 
 ### CppParser.fs: Clang Two-Pass Parsing
 
-Parses C/C++ headers using clang in two passes:
+Parses C headers using clang in two passes:
 
 1. **Pass 1 (JSON AST)**: `clang -Xclang -ast-dump=json` extracts functions, structs, enums, typedefs, classes, namespaces
 2. **Pass 2 (Macro extraction)**: `clang -dM -E` extracts `#define` macros
@@ -210,7 +219,7 @@ let getFSharpType (cType: string) : string =
 
 ### Fidelity Mode
 
-Generates `Unchecked.defaultof` stubs for Firefly/Alex consumption:
+Generates `[<FidelityExtern>]` stubs for the FNCS/Baker/Alex pipeline:
 
 ```fsharp
 module Fidelity.libc.Memory
@@ -223,9 +232,9 @@ module Fidelity.libc.Memory
         Unchecked.defaultof<nativeint>
 ```
 
-### P/Invoke Mode
+### P/Invoke Mode (Traditional .NET Only)
 
-Traditional .NET P/Invoke bindings with DllImport attributes (via `CodeGenerator.fs`).
+Traditional .NET P/Invoke bindings with DllImport attributes (via `CodeGenerator.fs`). This is NOT part of the Fidelity framework.
 
 ## File Compile Order
 
@@ -254,17 +263,23 @@ Traditional .NET P/Invoke bindings with DllImport attributes (via `CodeGenerator
 
 Key constraint: `CppParser.fs` compiles before `CTypeParser.fs`; the XParsec parsers are in a separate module downstream of the parser types.
 
-## Current Limitations
+## Core Infrastructure Under Development
 
-1. **No BAREWire descriptors**: awaiting BAREWire hardware descriptor types
-2. **No `[<FidelityExtern>]` attributes**: binding metadata not yet carried through pipeline
-3. **No quotation output**: planned for PSG recognition patterns (quotation semantic carriers)
-4. **No C++ class/template support**: class declarations parsed but not generated
-5. **No CMSIS qualifier extraction**: `__I`/`__O`/`__IO` not yet mapped to `AccessKind`
+These are not optional future features. They are what closes the Fidelity system loop:
+
+1. **`[<FidelityExtern>]` attributes**: Binding metadata carried through the PSG pipeline. Currently Alex infers from naming conventions; the attribute makes it explicit.
+2. **BAREWire memory/type layout capture**: Reading header AST for precise struct layout, access constraints, memory regions. Core to memory safety guarantees.
+3. **CMSIS qualifier extraction**: `__I`/`__O`/`__IO` → `AccessKind` for hardware-enforced access constraints.
+
+## Roadmap
+
+- Static binding: LLVM LTO cross-language inlining (current focus: libc dynamic binding)
+- C++ support: Plugify ABI intelligence for virtual tables, templates, RAII
+- fsnx interactive mode: Dynamic FFI for development, static binding for release builds
 
 ## Related Documents
 
 - [BAREWire Integration](./02_BAREWire_Integration.md): Hardware descriptor generation design
-- [fsnative Integration](./03_fsnative_Integration.md): Native type system coordination
+- [FNCS Integration](./03_fsnative_Integration.md): Native type system coordination
 - [XParsec Architecture](./04_XParsec_Architecture.md): How Farscape uses XParsec throughout
 - [Wrapper Generation](./05_Wrapper_Generation.md): Layer 2 idiomatic F# wrapper generation

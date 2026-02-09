@@ -1,118 +1,35 @@
-# Farscape's Role in Native Library Binding
-
-> **Architecture Update (December 2025)**: Farscape now generates **quotation-based output** with active patterns,
-> not just raw P/Invoke declarations. See `~/repos/Firefly/docs/Quotation_Based_Memory_Architecture.md`.
->
-> **Target Update (January 2025)**: Primary unikernel target changed from STM32L5 to **Renesas RA6M5** (ARM Cortex-M33).
+# Farscape's Role in the Fidelity Ecosystem
 
 ## Position in the Architecture
 
-Farscape is the **binding generator** - it transforms C/C++ headers into F# source code with quotations:
+Farscape is the **binding generator** for the Fidelity native compilation pipeline. It transforms C headers into F# source with `[<FidelityExtern>]` attributes and BAREWire memory descriptors:
 
 ```
-C Headers → Farscape → F# Source (Fidelity.[Target] + BAREWire.[Target] + Externs)
+C Headers → Farscape → F# Source (FidelityExtern stubs + Wrappers + Descriptors)
 ```
 
-Farscape runs at **generation time**, before Firefly compilation.
+Farscape runs at **generation time**, before Firefly compilation. It is a .NET tool (`dotnet tool install -g farscape`).
 
-## Farscape's Current Output: Fidelity Bindings
+## Two-Layer Output (Both Implemented)
 
-> **STATUS (February 2026)**: Farscape currently generates `Platform.Bindings` pattern files with `Unchecked.defaultof`.
-> Alex provides platform-specific MLIR implementations. Quotation-based output is PLANNED but not yet implemented.
-> The generation pipeline uses XParsec, catamorphisms, active patterns, and a typed code AST (CodeRenderer).
-
-## Aspirational: Quotation-Based Outputs (NOT YET IMPLEMENTED)
-
-### 1. Expr<PeripheralDescriptor> Quotations
-Memory layout information as quotations for nanopass consumption:
-
+### Layer 1: Platform.Bindings
 ```fsharp
-let gpioQuotation: Expr<PeripheralDescriptor> = <@
-    { Name = "GPIO"
-      Instances = Map.ofList [("GPIOA", 0x40040000un)]
-      Layout = { Size = 0x400; Alignment = 4; Fields = gpioFields }
-      MemoryRegion = Peripheral }
-@>
+[<FidelityExtern("libc", "write")>]
+let write (fd: int32) (buf: nativeint) (count: nativeint) : int64 =
+    Unchecked.defaultof<int64>
 ```
 
-### 2. Active Patterns for Recognition
-PSG pattern matching for Alex consumption:
-
+### Layer 2: Idiomatic F# Wrappers
 ```fsharp
-let (|GpioWritePin|_|) (node: PSGNode) : (string * int * uint32) option = ...
-let (|PeripheralAccess|_|) (node: PSGNode) : PeripheralAccessInfo option = ...
+let write (fd: int32) (buf: nativeint) (count: nativeint) : Result<int64, int64> =
+    let result = Platform.Bindings.Libc.IO.write fd buf count
+    if result >= 0L then Ok result
+    else Error result
 ```
 
-### 3. MemoryModel Record
-Integration surface using pure F# record (not interface):
+Both layers flow through: FNCS → Baker → Alex → MLIR → LLVM → native binary. Wrappers compile to zero overhead via type erasure.
 
-```fsharp
-let ra6m5MemoryModel: MemoryModel = {
-    TargetFamily = "RA6M5"
-    PeripheralDescriptors = [gpioQuotation; sciQuotation]
-    RegisterConstraints = [accessConstraints]
-    Regions = regionQuotation
-    Recognize = recognizeMemoryOperation
-    CacheTopology = None
-    CoherencyModel = None
-}
-```
-
-### 4. Fidelity.[Target] - High-Level F# API
-Developer-facing library with idiomatic F# types:
-
-```fsharp
-// Fidelity.RA6M5/GPIO.fs
-module Fidelity.RA6M5.GPIO
-
-type Port = Port0 | Port1 | Port2 | ...
-type Mode = Input | Output | Alternate | Analog
-
-let init (port: Port) (pin: int) (mode: Mode) : Result<unit, GpioError> = ...
-let inline writePin (port: Port) (pin: int) (state: bool) : unit = ...
-```
-
-### 2. BAREWire.[Target] - Memory Descriptors
-Compile-time hardware memory map using BAREWire.Core types:
-
-```fsharp
-// BAREWire.RA6M5/Descriptors.fs
-let GPIO : PeripheralDescriptor = {
-    Name = "GPIO"
-    Region = MemoryRegionKind.Peripheral
-    Instances = Map.ofList [("PORT0", 0x40040000un); ...]
-    Registers = [
-        { Name = "PODR"; Offset = 0x00; Width = 16; Access = ReadWrite; ... }
-        { Name = "PIDR"; Offset = 0x02; Width = 16; Access = ReadOnly; ... }
-        { Name = "POSR"; Offset = 0x06; Width = 16; Access = WriteOnly; ... }
-    ]
-}
-```
-
-### 3. FFI Bindings (Layer 2)
-For external library bindings, Farscape generates quotation semantic carriers:
-
-```fsharp
-// Fidelity.RA6M5/HAL.fs - Quotation-based FFI binding
-// Alex inspects quotations and generates platform-appropriate MLIR
-
-/// Function descriptor - quotation carries calling convention
-let fspGpioOpenDescriptor: Expr<FunctionDescriptor> = <@
-    { CName = "R_IOPORT_Open"
-      Parameters = [
-          { Name = "ctrl"; Type = Ptr NativeInt; PassBy = Value }
-          { Name = "cfg"; Type = Ptr NativeInt; PassBy = Value }
-      ]
-      ReturnType = U32
-      CallingConvention = CDecl }
-@>
-```
-
-> **Note**: The quotation semantic carriers below are PLANNED, not yet implemented.
-
-## What Farscape Parses
-
-From C headers, Farscape extracts:
+## What Farscape Parses from C Headers
 
 | C Construct | F# Output |
 |-------------|-----------|
@@ -124,51 +41,48 @@ From C headers, Farscape extracts:
 | `#define XXX_Pos (n)` | BitField position |
 | `#define XXX_Msk (m)` | BitField width (computed from mask) |
 | `typedef enum {...}` | F# discriminated union |
-| `RetType FuncName(params)` | Quotation semantic carrier (FFI descriptor) |
+| `RetType FuncName(params)` | FidelityExtern stub + optional wrapper |
 
-## Key CMSIS/FSP Patterns
+## Sliced Package Architecture
 
-```c
-// Access qualifiers → AccessKind
-#define __IO volatile           // ReadWrite
-#define __I  volatile const     // ReadOnly  
-#define __O  volatile           // WriteOnly
+Farscape generates categorized, source-based packages from C headers:
 
-// Bit field macros → BitFieldDescriptor
-#define R_SCI_SSR_RDRF_Pos  (6U)
-#define R_SCI_SSR_RDRF_Msk  (0x1UL << R_SCI_SSR_RDRF_Pos)
+| Package | C Headers | Key Functions |
+|---------|-----------|---------------|
+| `Fidelity.libc.IO` | `<unistd.h>` | read, write, open, close, lseek, pipe |
+| `Fidelity.libc.Memory` | `<string.h>` | memcpy, memset, strlen, strcpy |
+| `Fidelity.libc.Alloc` | `<stdlib.h>` | malloc, free, calloc, realloc, abort, exit |
 
-// Peripheral instance → address in Instances map
-#define R_PORT0_BASE  (0x40040000UL)
-#define R_PORT0       ((R_PORT0_Type *) R_PORT0_BASE)
-```
+Reachability analysis means only functions actually called get MLIR emissions. Unused bindings cost zero in the final binary.
 
-## Link-Time Consideration
+## TOML Artifacts (Distinct Roles)
 
-The extern declarations reference a **library name** (e.g., `"ra_fsp"`).
+- **Moya TOML** (`.moya.toml`): Namespace analysis and grouping by C function prefix patterns
+- **fidproj TOML**: Generated library project file for the Fidelity build system
 
-At link time, the linker must find `libra_fsp.a` containing:
-- `R_IOPORT_Open`
-- `R_SCI_UART_Write`
-- etc.
-
-Farscape doesn't produce this library - it's pre-compiled by the vendor (Renesas). Farscape only produces the F# bindings that reference it.
+These are separate artifacts with completely different purposes.
 
 ## What Farscape Does NOT Do
 
-- Generate MLIR or LLVM code
-- Know about Alex's internal patterns
-- Make platform-specific code generation decisions
-- Compile the FSP library itself
+- Generate MLIR or LLVM code (Alex does this)
+- Make platform-specific code generation decisions (Alex does this)
+- Compile the vendor library itself (pre-compiled by vendor)
+- Use P/Invoke within the Fidelity framework (FidelityExtern only)
+
+## Current Focus
+
+Libc dynamic binding: generating FidelityExtern stubs for standard library headers (unistd.h, string.h, stdlib.h).
+
+## Roadmap
+
+- **Static binding**: LLVM LTO for statically bound libraries
+- **C++ support**: Plugify ABI intelligence
+- **fsnx interactive mode**: Dynamic FFI for dev, static for release
 
 ## Relationship to Other Projects
 
 | Project | Relationship |
-|---------|--------------|
-| **BAREWire** | Farscape uses BAREWire.Core types; generates BAREWire.[Target] |
-| **Firefly** | Firefly compiles Farscape's output; Alex handles externs |
-| **Fidelity.Platform** | Generated Fidelity.[Target] may use Fidelity.Platform types |
-
-## Canonical Document
-
-See Firefly `/docs/Quotation_Based_Memory_Architecture.md` for the complete binding architecture.
+|---------|-------------|
+| **BAREWire** | Farscape uses BAREWire types; generates memory descriptors |
+| **Firefly** | Firefly compiles Farscape's output; Alex handles FidelityExtern |
+| **FNCS** | Type-checks Farscape's output in NTU |

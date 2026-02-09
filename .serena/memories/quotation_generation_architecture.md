@@ -1,8 +1,14 @@
-# Farscape Output Architecture (February 2026)
+# Farscape Output Architecture
 
-## Current Implementation: Fidelity Bindings
+## The Fidelity Pipeline (No P/Invoke)
 
-Farscape currently generates **Platform.Bindings pattern** files:
+There is NO P/Invoke in the Fidelity framework. Only `[<FidelityExtern>]`.
+
+P/Invoke mode exists as a separate output target for traditional .NET F# interop. It is not part of the Fidelity pipeline.
+
+## Current Implementation: Platform.Bindings
+
+Farscape generates Platform.Bindings pattern files with `Unchecked.defaultof<T>` stubs:
 
 ```fsharp
 module Fidelity.libc.Memory
@@ -15,11 +21,11 @@ module Fidelity.libc.Memory
         Unchecked.defaultof<nativeint>
 ```
 
-Alex recognizes this pattern and provides platform-specific MLIR implementations. This is the CURRENT, WORKING output mode.
+Alex recognizes this pattern and provides platform-specific MLIR implementations.
 
-### Four Architectural Patterns (XParsec Restructuring, February 2026)
+### Four Architectural Patterns
 
-The generation pipeline now uses:
+The generation pipeline uses:
 
 1. **XParsec Parser Combinators** (`CTypeParser.fs`): Parse C type strings, macro values, integer literals
 2. **Catamorphisms** (`DeclarationAlgebra.fs`): Single fold algebra over Declaration DU
@@ -28,22 +34,51 @@ The generation pipeline now uses:
 
 Pipeline: `Declarations → catamorphism → FsDecl list → Module wrapper → CodeRenderer.render → string`
 
-## Aspirational: Quotation-Based Output (NOT YET IMPLEMENTED)
+## Core Infrastructure: `[<FidelityExtern>]`
 
-Future output modes are designed but NOT implemented:
+The target output adds binding metadata that travels through the entire pipeline:
 
-1. **Expr<PeripheralDescriptor> quotations**: Memory layout for nanopass consumption
-2. **Active patterns for PSG recognition**: `(|GpioWritePin|_|)` etc.
-3. **MemoryModel records**: Integration surface for fsnative
-4. **High-level F# API**: Developer-facing typed wrappers
+```fsharp
+[<FidelityExtern("libc", "memcpy")>]
+let memcpy (dest: nativeint) (src: nativeint) (n: nativeint) : nativeint =
+    Unchecked.defaultof<nativeint>
+```
 
-These require BAREWire descriptor types and `[<FidelityExtern>]` attribute recognition in FNCS.
+FNCS recognizes the attribute and carries library name + symbol through the PSG. Alex emits MLIR with `fidelity.binding_strategy` and `fidelity.library_name` attributes. The linker auto-collects library flags.
+
+**Current state**: Stubs generate without the attribute. Adding it is core infrastructure work.
+
+## Core Infrastructure: Quotation-Based Output
+
+For embedded targets (CMSIS peripherals), Farscape generates quotation semantic carriers:
+
+1. **Expr<PeripheralDescriptor>** - Quotations encoding hardware memory layout
+2. **Active Patterns** - PSG recognition patterns like `(|GpioWritePin|_|)`
+3. **MemoryModel Record** - Integration surface for FNCS nanopass pipeline
+
+These require BAREWire descriptor types. This is core infrastructure, not optional.
+
+## Core Infrastructure: BAREWire Memory Layout
+
+Reading header AST to capture precise memory/type layout:
+- Struct field offsets and alignment
+- CMSIS qualifiers (`__I`/`__O`/`__IO`) → AccessKind
+- Base addresses from macros
+- Bit fields from `_Pos`/`_Msk` macros
+
+This is what makes Farscape part of Fidelity's memory safety story.
+
+## Layer 2: Idiomatic Wrappers (Implemented)
+
+Layer 2 wrappers are implemented and working:
+- WrapperPatternAnalyzer: 12 clang attribute types, 7 return semantic patterns
+- WrapperCodeGenerator: Catamorphism-based FsDecl tree generation
+- CLI: `--output-mode fidelity-wrappers`
 
 ## Output Modes
 
-| Mode | CLI Flag | Status |
+| Mode | CLI Flag | Target |
 |------|----------|--------|
-| `fidelity` | `--output-mode fidelity` | WORKING: Platform.Bindings with Unchecked.defaultof |
-| `pinvoke` | `--output-mode pinvoke` | WORKING: Traditional P/Invoke with DllImport |
-| `descriptors` | - | PLANNED: BAREWire peripheral descriptors |
-| `quotations` | - | PLANNED: Quotation semantic carriers |
+| `fidelity` | `--output-mode fidelity` | F# Native / Fidelity pipeline (FidelityExtern) |
+| `fidelity-wrappers` | `--output-mode fidelity-wrappers` | F# Native with Layer 2 wrappers |
+| `pinvoke` | `--output-mode pinvoke` | Traditional .NET F# (DllImport, NOT Fidelity) |

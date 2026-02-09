@@ -2,92 +2,92 @@
 
 ## Overview
 
-Farscape is the C/C++ binding generator for the Fidelity native F# compilation ecosystem. It parses C/C++ headers using clang and generates type-safe F# bindings, with XParsec parser combinators handling C type decomposition and macro classification.
+Farscape is the C header binding generator for the Fidelity native F# compilation ecosystem. It parses C headers using clang and generates type-safe F# bindings with `[<FidelityExtern>]` attributes, with XParsec parser combinators handling C type decomposition and macro classification.
+
+There is no P/Invoke in the Fidelity framework. Farscape generates `[<FidelityExtern>]` stubs for the native pipeline (FNCS, Baker, Alex, MLIR, LLVM). A separate P/Invoke mode exists for traditional .NET F# interop only.
 
 ## Table of Contents
 
 ### Architecture
 
 1. [Architecture Overview](./01_Architecture_Overview.md): Pipeline structure, four architectural patterns, module roles
-2. [BAREWire Integration](./02_BAREWire_Integration.md): Hardware descriptor generation design (PLANNED)
+2. [BAREWire Integration](./02_BAREWire_Integration.md): Hardware memory/type layout capture from headers
 3. [FNCS Integration](./03_fsnative_Integration.md): How Farscape output feeds the FNCS compilation pipeline
 4. [XParsec Architecture](./04_XParsec_Architecture.md): Parser combinators, active patterns, catamorphisms, typed code AST
+5. [Wrapper Generation](./05_Wrapper_Generation.md): Layer 2 idiomatic F# wrapper generation
 
-## Position in Fidelity Ecosystem
+## Position in the Fidelity Closed-Loop Pipeline
 
 ```mermaid
 flowchart TD
-    A["C/C++ Headers<br/>libc, CMSIS HAL, vendor SDKs"] --> B
+    A["C Headers<br/>libc, CMSIS HAL, vendor SDKs"] --> B
 
     subgraph B["Farscape"]
         B1["Clang Parser"] --> B2["XParsec +<br/>Active Patterns"] --> B3["Catamorphism + AST<br/>→ CodeRenderer"]
     end
 
-    B --> C["Fidelity Mode<br/>Unchecked.defaultof stubs"]
-    B --> D["P/Invoke Mode<br/>DllImport attrs"]
+    B --> C["Fidelity Mode<br/>[⟨FidelityExtern⟩] stubs"]
+    B --> D["P/Invoke Mode<br/>DllImport attrs<br/>(traditional .NET only)"]
 
-    C --> E["Firefly Pipeline<br/>FNCS → PSG → Baker → Alex → MLIR"]
-    D --> F[".NET Runtime Interop"]
-
-    E --> G["Native Binary"]
+    C --> E["FNCS → PSG → Baker → Alex → MLIR"]
+    E --> G["LLVM → Native Binary"]
 ```
+
+Farscape is one component of a closed-loop native compilation system. `[<FidelityExtern>]` carries library name + symbol through the PSG so Alex can emit MLIR with binding metadata, and the linker auto-collects library flags.
+
+## Two-Layer Binding Model
+
+**Layer 1: Platform.Bindings** - `[<FidelityExtern>]` attributed stubs with `Unchecked.defaultof<T>` bodies. Core infrastructure.
+
+**Layer 2: Idiomatic F# Wrappers** (implemented) - Safe functional APIs with Result types, null checking, error handling. Driven by 12 clang attribute types and 7 return semantic patterns.
+
+## Core Infrastructure Under Development
+
+These are not optional features. They are what makes Farscape part of Fidelity:
+
+1. **`[<FidelityExtern>]` attributes**: Library name + symbol metadata that closes the pipeline loop
+2. **BAREWire memory/type layout capture**: Precise struct layout, access constraints, memory regions from header AST
+3. **CMSIS qualifier mapping**: `__I` → ReadOnly, `__O` → WriteOnly, `__IO` → ReadWrite
 
 ## Dependencies
 
 ### FNCS (F# Native Compiler Services)
 
-FNCS is the native type checker that processes the F# source Farscape generates. It operates in the Native Type Universe (NTU), a BCL-free, freestanding type system with NTUKind types, SRTP resolution, and union-find constraint solving.
+FNCS is the native type checker that processes Farscape's F# source. It operates in the Native Type Universe (NTU), a BCL-free, freestanding type system with NTUKind types, SRTP resolution, and union-find constraint solving.
 
-Farscape generates `Unchecked.defaultof<T>` stubs. FNCS type-checks them. Baker saturates intrinsic operations. Alex emits platform-specific MLIR.
+### BAREWire (Memory Descriptor Types)
 
-### BAREWire (Descriptor Types)
-
-BAREWire will provide hardware descriptor types (`PeripheralDescriptor`, `FieldDescriptor`, `AccessKind`) that Farscape populates from CMSIS headers. This is PLANNED; not yet implemented.
+BAREWire provides hardware descriptor types (`PeripheralDescriptor`, `FieldDescriptor`, `AccessKind`) that Farscape populates from C headers. BAREWire development advances in parallel.
 
 ## Output Modes
 
-### Fidelity Mode (`--output-mode fidelity`)
+| Mode | CLI Flag | Target |
+|------|----------|--------|
+| `fidelity` | `--output-mode fidelity` | F# Native / Fidelity pipeline (FidelityExtern) |
+| `fidelity-wrappers` | `--output-mode fidelity-wrappers` | F# Native with Layer 2 wrappers |
+| `pinvoke` | `--output-mode pinvoke` | Traditional .NET F# (DllImport, NOT Fidelity) |
 
-Generates `Unchecked.defaultof` stubs for the FNCS → Baker → Alex pipeline:
+## What's Implemented
 
-```fsharp
-module Fidelity.libc.Memory
+- Clang two-pass C header parsing (JSON AST + macro extraction)
+- XParsec post-processing for C type strings and macro values
+- Active pattern decomposition (type classification, macro filtering)
+- Catamorphism-based declaration traversal
+- Typed code AST (FsDecl/FsType) with single CodeRenderer
+- Fidelity binding generation (`Unchecked.defaultof` pattern)
+- Layer 2 wrapper generation (WrapperPatternAnalyzer + WrapperCodeGenerator)
+- P/Invoke binding generation (DllImport) for traditional .NET
+- Typedef chain resolution, macro constant extraction
+- Moya namespace analysis and TOML project files
+- 89 unit tests covering all architectural patterns
 
-    /// void * memcpy(void *restrict __dest, const void *restrict __src, size_t __n)
-    let memcpy (dest: nativeint) (src: nativeint) (n: nativeint) : nativeint =
-        Unchecked.defaultof<nativeint>
-```
+## Roadmap
 
-### P/Invoke Mode (`--output-mode pinvoke`)
-
-Traditional .NET P/Invoke bindings with DllImport attributes.
-
-## Development Status
-
-### Implemented
-
-- [x] Clang two-pass C header parsing (JSON AST + macro extraction)
-- [x] XParsec post-processing for C type strings and macro values
-- [x] Active pattern decomposition (type classification, macro filtering)
-- [x] Catamorphism-based declaration traversal
-- [x] Typed code AST (FsDecl/FsType) with single CodeRenderer
-- [x] Fidelity binding generation (`Unchecked.defaultof` pattern)
-- [x] P/Invoke binding generation (DllImport)
-- [x] Typedef chain resolution
-- [x] Macro constant extraction and numeric literal parsing
-- [x] Function pointer type detection (direct and typedef-resolved)
-- [x] F# keyword backtick quoting
-- [x] Struct/record generation
-- [x] Enum generation
-- [x] 89 unit tests covering all architectural patterns
-
-### Planned
-
-- [ ] `[<FidelityExtern>]` attribute generation for FNCS recognition
-- [ ] BAREWire peripheral descriptor generation
-- [ ] Quotation-based output for PSG recognition patterns
-- [ ] C++ class/template support
-- [ ] CMSIS qualifier extraction (`__I`, `__O`, `__IO` → `AccessKind`)
+- `[<FidelityExtern>]` attribute generation
+- BAREWire peripheral descriptor generation from header AST
+- CMSIS qualifier extraction (`__I`, `__O`, `__IO` → `AccessKind`)
+- Static binding support (LLVM LTO cross-language inlining)
+- C++ support via Plugify ABI intelligence
 
 ## Related Documentation
 

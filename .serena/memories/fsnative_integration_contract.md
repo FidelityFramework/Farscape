@@ -1,109 +1,80 @@
 # Farscape-FNCS Integration Contract
 
-## Status (February 2026)
+## The Closed-Loop Pipeline
 
-**FNCS is a complete, standalone native type checker** operating in the Native Type Universe (NTU).
-It has NTUKind types, SRTP resolution,
-union-find constraint solving, and full expression checking.
+Farscape generates F# source → FNCS type-checks in NTU → Baker saturates intrinsics → Alex emits MLIR → LLVM → native binary.
 
-**Current integration**: Farscape generates `Unchecked.defaultof` stubs → FNCS type-checks them →
-Baker saturates → Alex emits platform-specific MLIR. This works end-to-end for libc bindings.
+This is a closed system. Every component carries binding intent forward.
 
-**Planned integration** (below): `[<FidelityExtern>]` attributes, quotation semantic carriers,
-MemoryModel records for embedded targets.
+## What Farscape Generates
 
-## Planned Integration Surface
+### 1. `[<FidelityExtern>]` Attributed Stubs (core infrastructure)
 
-Farscape will generate output that FNCS's nanopass pipeline consumes. The planned integration point
-is the `MemoryModel` record type (for embedded/CMSIS targets).
+```fsharp
+[<FidelityExtern("libc", "memcpy")>]
+let memcpy (dest: nativeint) (src: nativeint) (n: nativeint) : nativeint =
+    Unchecked.defaultof<nativeint>
+```
 
-## What Farscape Provides
+FNCS recognizes `[<FidelityExtern>]` and carries library name + symbol through the PSG. Alex emits MLIR with `fidelity.binding_strategy` and `fidelity.library_name` attributes. The linker auto-collects all referenced libraries and generates appropriate flags (`-lc`, etc.).
 
-### 1. MemoryModel Record
+**Current state**: Stubs generate without the attribute; Alex infers from naming conventions. Adding `[<FidelityExtern>]` is core infrastructure that closes the pipeline loop.
+
+**There is NO P/Invoke in the Fidelity framework. Only FidelityExtern.**
+
+### 2. MemoryModel Record (for embedded/CMSIS targets)
 
 ```fsharp
 type MemoryModel = {
-    /// Target family identifier (e.g., "STM32L5", "NRF52")
     TargetFamily: string
-    
-    /// Quotations encoding peripheral memory layout
     PeripheralDescriptors: Expr<PeripheralDescriptor> list
-    
-    /// Quotations encoding access constraints
     RegisterConstraints: Expr<RegisterConstraint> list
-    
-    /// Quotation encoding memory regions
     Regions: Expr<RegionDescriptor list>
-    
-    /// Active pattern function for PSG recognition
     Recognize: PSGNode -> MemoryOperation option
-    
-    /// Optional cache topology (for optimization)
     CacheTopology: Expr<CacheLevel list> option
-    
-    /// Optional coherency model (for multi-core)
     CoherencyModel: Expr<CoherencyPolicy> option
 }
 ```
 
-### 2. Quotations for Nanopass Consumption
+### 3. Quotations for Nanopass Consumption
 
-Quotations carry information that fsnative nanopasses can inspect:
+Quotations carry hardware memory layout that FNCS nanopasses can inspect:
 
 ```fsharp
-// Farscape generates
 let gpioQuotation: Expr<PeripheralDescriptor> = <@
     { Name = "GPIO"
       Instances = Map.ofList [("GPIOA", 0x48000000un)]
       Layout = { Size = 0x400; Alignment = 4; Fields = [...] }
       MemoryRegion = Peripheral }
 @>
-
-// fsnative nanopass can decompose
-match gpioQuotation with
-| <@ { Name = name; MemoryRegion = Peripheral; _ } @> ->
-    // Mark all access as volatile
-| <@ { MemoryRegion = Flash; _ } @> ->
-    // Emit read-only constraints
 ```
 
-### 3. Active Patterns for Recognition
+Quotations must be decomposable (record literals, not function calls).
 
-fsnative uses the `Recognize` function during PSG traversal:
+### 4. Active Patterns for PSG Recognition
+
+FNCS uses the `Recognize` function during PSG traversal:
 
 ```fsharp
-// In fsnative nanopass
 let enrichMemorySemantics (model: MemoryModel) (node: PSGNode) =
     match model.Recognize node with
-    | Some (PeripheralOp op) ->
-        // Attach volatile semantics
-        node |> withVolatile |> withAccessKind op.Access
-    | Some (DmaOp op) ->
-        // Attach DMA semantics
-        node |> withDmaMarker op.Channel
-    | None ->
-        // Normal memory operation
-        node
+    | Some (PeripheralOp op) -> node |> withVolatile |> withAccessKind op.Access
+    | Some (DmaOp op) -> node |> withDmaMarker op.Channel
+    | None -> node
 ```
 
-## What fsnative Expects
+## What FNCS Expects
 
-### Type Definitions in Scope
-
-fsnative expects these types to be defined (by BAREWire):
+### Type Definitions (provided by BAREWire)
 
 ```fsharp
 type PeripheralDescriptor = { ... }
 type FieldDescriptor = { ... }
 type AccessKind = ReadOnly | WriteOnly | ReadWrite
 type MemoryRegionKind = Flash | SRAM | Peripheral | SystemControl | DMA | CCM
-type RegisterConstraint = { ... }
-type RegionDescriptor = { ... }
 ```
 
-### PSGNode Pattern Matching
-
-The `Recognize` function receives `PSGNode` and must handle:
+### PSG Memory Operations
 
 ```fsharp
 type MemoryOperation =
@@ -113,67 +84,52 @@ type MemoryOperation =
     | FlashRead of FlashReadInfo
 ```
 
-### Quotation Structure
-
-Quotations must be decomposable. Use record literals, not function calls:
-
-```fsharp
-// ✅ Decomposable
-<@ { Name = "GPIO"; MemoryRegion = Peripheral } @>
-
-// ❌ Not decomposable
-<@ createPeripheral "GPIO" Peripheral @>
-```
-
 ## The Dependency Chain
 
 ```
-BAREWire (types) ← Farscape (quotations) ← fsnative (consumption)
+BAREWire (types) ← Farscape (quotations + FidelityExtern stubs) ← FNCS (consumption + type checking)
 ```
 
-1. **BAREWire** provides type definitions
-2. **Farscape** generates quotations using those types
-3. **fsnative** pattern-matches on quotations in nanopasses
+1. **BAREWire** provides type definitions (PeripheralDescriptor, etc.)
+2. **Farscape** generates quotations using those types + FidelityExtern stubs
+3. **FNCS** type-checks stubs, pattern-matches quotations in nanopasses
 
 ## Registration Flow
 
 ```fsharp
-// Farscape generates a registration module
 module STM32L5.Registration =
     let memoryModel: MemoryModel = {
         TargetFamily = "STM32L5"
-        PeripheralDescriptors = [gpioQuotation; usartQuotation; ...]
+        PeripheralDescriptors = [gpioQuotation; usartQuotation]
         RegisterConstraints = [accessConstraints]
         Regions = regionQuotation
         Recognize = recognizeSTM32L5Operation
         CacheTopology = None
         CoherencyModel = None
     }
-
-// fsnative loads at compile time
-let models = [
-    STM32L5.Registration.memoryModel
-    NRF52.Registration.memoryModel
-    // ...
-]
 ```
 
 ## Error Reporting
 
-Farscape-generated patterns should provide good error context:
+Farscape-generated patterns provide hardware-aware error context:
 
 ```fsharp
 let (|WriteToReadOnly|_|) node =
     match node with
     | RegisterWrite { Register = reg } when reg.Access = ReadOnly ->
-        Some {
-            Register = reg.Name
-            Peripheral = reg.Peripheral
-            Message = $"Cannot write to read-only register {reg.Name}"
-            Suggestion = "Use a read-write register or check hardware documentation"
-        }
+        Some { Register = reg.Name; Peripheral = reg.Peripheral
+               Message = $"Cannot write to read-only register {reg.Name}"
+               Suggestion = "Use a read-write register or check hardware documentation" }
     | _ -> None
 ```
+
+## Alex's Role
+
+Alex works ONLY with MLIR. It receives binding metadata via MLIR attributes emitted from the PSG:
+- `fidelity.binding_strategy` (static or dynamic)
+- `fidelity.library_name` (library identifier)
+
+Alex does NOT work with F# source or P/Invoke. It transforms MLIR based on binding strategy configuration.
 
 ## Canonical Reference
 

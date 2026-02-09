@@ -1,49 +1,16 @@
 # Farscape + BAREWire Integration Architecture
 
-> **Current State (February 2026)**: Farscape generates `Unchecked.defaultof` stubs with XParsec-powered
-> type decomposition. Output is validated against three real libc headers (unistd.h, string.h, stdlib.h).
-> Quotation-based output and BAREWire descriptor generation are PLANNED, not yet implemented.
->
-> **Target**: Primary unikernel target is **Renesas RA6M5** (ARM Cortex-M33).
+## Core Infrastructure, Not Optional
 
-## Planned: Quotation-Based Output
+BAREWire integration is what makes Farscape part of the Fidelity framework rather than a standalone binding script. Reading header AST to capture precise memory/type layout is core to the memory safety guarantees that earn Fidelity its name.
 
-When implemented, Farscape will generate three artifact types using F# quotations and active patterns:
+Without BAREWire descriptors carrying mapped layout into the codebase, there is no memory safety story. There is no closed system.
 
-1. **Expr<PeripheralDescriptor>** - Quotations encoding hardware memory layout
-2. **Active Patterns** - PSG recognition patterns like `(|GpioWritePin|_|)`
-3. **MemoryModel Record** - Integration surface for fsnative nanopass pipeline
+**Primary unikernel target**: Renesas RA6M5 (ARM Cortex-M33).
 
-```fsharp
-// Generated quotation for GPIO peripheral
-let gpioPeripheralQuotation: Expr<PeripheralDescriptor> = <@
-    { Name = "GPIO"
-      Instances = Map.ofList [("PORT0", 0x40040000un); ("PORT1", 0x40040020un)]
-      Layout = { Size = 0x20; Alignment = 4; Fields = gpioFields }
-      MemoryRegion = Peripheral }
-@>
+## Design Principle: Invisible Memory Management
 
-// Active pattern for PSG recognition
-let (|GpioWritePin|_|) (node: PSGNode) : (string * int * uint32) option = ...
-
-// MemoryModel for fsnative integration
-let ra6m5MemoryModel: MemoryModel = {
-    TargetFamily = "RA6M5"
-    PeripheralDescriptors = [gpioPeripheralQuotation; sciPeripheralQuotation]
-    RegisterConstraints = [gpioConstraints]
-    Regions = regionQuotation
-    Recognize = recognizeMemoryOperation
-    CacheTopology = None
-    CoherencyModel = None
-}
-```
-
-## Core Design Principle: Invisible Memory Management
-
-Farscape is NOT just a C/C++ binding generator. For hardware targets like CMSIS/FSP, it builds a **complete model of the hardware memory system** that enables the Fidelity compiler to manage memory on behalf of the developer.
-
-From "Memory Management By Choice":
-> "BAREWire takes a fundamentally different approach. Rather than demanding constant attention to memory, it provides an opt-in model where developers can accept compiler-generated memory layouts for most code"
+From "Memory Management By Choice": BAREWire provides an opt-in model where developers accept compiler-generated memory layouts for most code while taking explicit control only where it merits hand-curated optimization.
 
 The developer writes clean F#:
 ```fsharp
@@ -59,17 +26,17 @@ The compiler (via tree-shaking/reachability) determines:
 
 **The developer never sees BARELayout or offset calculations.**
 
-## Farscape Output: Three Artifacts
+## Three Artifact Types
 
 For CMSIS/FSP and similar hardware targets, Farscape generates:
 
 1. **F# Types** - Struct definitions (`ioport_ctrl_t`, etc.)
-2. **Extern Declarations** - Function bindings (`R_IOPORT_Open`, etc.)
+2. **FidelityExtern Declarations** - Function bindings with `[<FidelityExtern>]` attributes
 3. **Memory Descriptors** - BAREWire-compatible hardware memory catalog
 
 ## The Memory Descriptor Model
 
-Farscape must didactically catalog the entire hardware memory architecture:
+Farscape catalogs the entire hardware memory architecture:
 
 ```fsharp
 type PeripheralDescriptor = {
@@ -81,7 +48,7 @@ type PeripheralDescriptor = {
 
 and PeripheralLayout = {
     Size: int
-    Alignment: int  
+    Alignment: int
     Fields: FieldDescriptor list
 }
 
@@ -90,11 +57,11 @@ and FieldDescriptor = {
     Offset: int
     Type: RegisterType
     Access: AccessKind      // ReadOnly | WriteOnly | ReadWrite
-    BitFields: BitFieldDescriptor list option  // For _Pos/_Msk macros
+    BitFields: BitFieldDescriptor list option
     Documentation: string option
 }
 
-and AccessKind = 
+and AccessKind =
     | ReadOnly   // __I - reads hardware state
     | WriteOnly  // __O - writes trigger hardware action, reads undefined
     | ReadWrite  // __IO - normal read/write
@@ -108,15 +75,13 @@ and MemoryRegionKind =
 
 ## CMSIS/FSP Qualifier Semantics
 
-The `__I`, `__O`, `__IO` qualifiers encode hardware constraints:
-
 | Qualifier | Meaning | Code Gen Implication |
 |-----------|---------|---------------------|
 | `__I` (volatile const) | Read-only register | Writes are UB, emit read-only access |
 | `__O` (volatile) | Write-only register | Reads return undefined, emit write-only |
 | `__IO` (volatile) | Read-write register | Normal volatile access |
 
-Writing to `PIDR` (port input data register) or reading from `POSR` (port output set register) is a hardware error.
+Writing to `PIDR` (port input data register) or reading from `POSR` (port output set register) is a hardware error. These constraints must be captured from headers and enforced at compile time.
 
 ## Renesas RA6M5 Memory Map
 
@@ -129,9 +94,9 @@ Writing to `PIDR` (port input data register) or reading from `POSR` (port output
 
 ## Dependency: Farscape → BAREWire
 
-Farscape should take BAREWire as a dependency. The memory descriptor types live in BAREWire; Farscape populates them from parsed headers.
+Farscape takes BAREWire as a dependency. The memory descriptor types live in BAREWire; Farscape populates them from parsed headers.
 
-This means BAREWire development may need to advance in parallel with Farscape to provide:
+BAREWire development must advance in parallel to provide:
 - `PeripheralDescriptor` and related types
 - Memory region abstractions
 - Hardware address mapping primitives
@@ -144,10 +109,10 @@ FSP/CMSIS Header (.h)
     ↓
 Farscape Output:
     ├── Types.fs (F# structs)
-    ├── Bindings.fs (extern declarations)  
+    ├── Bindings.fs (FidelityExtern declarations)
     └── Descriptors (BAREWire memory catalog)
     ↓
-PSG (contains type defs + extern markers + layout refs)
+PSG (contains type defs + FidelityExtern markers + layout refs)
     ↓
 Alex/Zipper traversal:
     ├── Peripheral access → MLIR volatile load/store
@@ -172,3 +137,13 @@ The FSP headers get tree-shaken to only what's used:
 3. Compile - Firefly handles all memory management
 
 The infrastructure is invisible unless the developer explicitly opts into manual control.
+
+## Current State
+
+Reading headers to capture precise memory/type layout data is the foundational work. This includes:
+- Struct field offsets and alignment
+- CMSIS qualifier recognition (`__I`, `__O`, `__IO`)
+- Base address extraction from macros
+- Bit field extraction from `_Pos`/`_Msk` macros
+
+This is core infrastructure under development, not an optional enhancement.

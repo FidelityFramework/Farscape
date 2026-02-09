@@ -1,35 +1,33 @@
 # BAREWire Integration
 
-Farscape generates BAREWire hardware descriptors from parsed C/C++ headers. This document describes how Farscape populates BAREWire types and how the generated descriptors are consumed by Firefly/Alex.
+Farscape generates BAREWire hardware descriptors from parsed C headers. This document describes how Farscape populates BAREWire types and how the generated descriptors are consumed by Firefly/Alex.
 
-## Status
+## Core Infrastructure
 
-> **Implementation Status: PLANNED**
->
-> BAREWire hardware descriptor types are not yet implemented. This document describes the design specification for Farscape's integration with BAREWire once those types exist.
+Reading header AST to capture precise memory/type layout is foundational to Fidelity's memory safety guarantees. Without BAREWire descriptors carrying mapped layout into the codebase, there is no closed-loop memory safety story. This is core infrastructure, not an optional enhancement.
 
 ## Dependency Chain
 
 ```mermaid
 flowchart TD
     A["CMSIS/HAL Headers"] --> B["Farscape (parse)"]
-    B --> C["Types.fs<br/>(F# structs using fsnative types)"]
-    B --> D["Bindings.fs<br/>(Platform.Bindings declarations)"]
+    B --> C["Types.fs<br/>(F# structs using NTU types)"]
+    B --> D["Bindings.fs<br/>(FidelityExtern declarations)"]
     B --> E["Descriptors.fs<br/>(BAREWire types)"]
-    E -. "REQUIRES BAREWire types" .-> F["BAREWire"]
+    E --> F["BAREWire"]
 ```
 
-Farscape cannot generate complete hardware descriptors until BAREWire provides these types:
+Farscape takes BAREWire as a dependency. The memory descriptor types live in BAREWire; Farscape populates them from parsed headers. BAREWire development advances in parallel to provide:
 
-| BAREWire Type | Purpose | Status |
-|---------------|---------|--------|
-| `PeripheralDescriptor` | Complete peripheral definition | PLANNED |
-| `PeripheralLayout` | Register set structure | PLANNED |
-| `FieldDescriptor` | Individual register definition | PLANNED |
-| `AccessKind` | Read/Write constraints | PLANNED |
-| `MemoryRegionKind` | Memory classification | PLANNED |
-| `BitFieldDescriptor` | Sub-register fields | PLANNED |
-| `RegisterType` | Register data types | PLANNED |
+| BAREWire Type | Purpose |
+|---------------|---------|
+| `PeripheralDescriptor` | Complete peripheral definition |
+| `PeripheralLayout` | Register set structure |
+| `FieldDescriptor` | Individual register definition |
+| `AccessKind` | Read/Write constraints |
+| `MemoryRegionKind` | Memory classification |
+| `BitFieldDescriptor` | Sub-register fields |
+| `RegisterType` | Register data types |
 
 See [BAREWire Hardware Descriptors](~/repos/BAREWire/docs/08%20Hardware%20Descriptors.md) for type definitions.
 
@@ -107,7 +105,6 @@ let calculateLayout (fields: CFieldDef list) : PeripheralLayout =
     let fieldDescriptors = [
         for field in fields do
             let (size, align) = getTypeMetrics field.Type
-            // Align offset
             offset <- alignUp offset align
             maxAlign <- max maxAlign align
 
@@ -116,7 +113,7 @@ let calculateLayout (fields: CFieldDef list) : PeripheralLayout =
                 Offset = offset
                 Type = mapCTypeToRegisterType field.Type
                 Access = mapQualifiersToAccess field.Qualifiers
-                BitFields = None  // Extracted separately
+                BitFields = None
                 Documentation = None
             }
 
@@ -124,7 +121,7 @@ let calculateLayout (fields: CFieldDef list) : PeripheralLayout =
     ]
 
     {
-        Size = alignUp offset maxAlign  // Total struct size
+        Size = alignUp offset maxAlign
         Alignment = maxAlign
         Fields = fieldDescriptors
     }
@@ -179,7 +176,7 @@ let mapQualifiersToAccess (qualifiers: CQualifier list) : AccessKind =
 Access constraints are **hardware-enforced**. The generated `AccessKind` informs:
 
 1. **FNCS type checking**: Fields carry access constraints through the type system
-2. **Alex code generation**: Prevents invalid read-modify-write on write-only registers
+2. **Alex MLIR emission**: Prevents invalid read-modify-write on write-only registers
 3. **Compile-time safety**: Attempts to read a write-only register produce compile errors
 
 Example error:
@@ -236,41 +233,9 @@ let gpioDescriptor: PeripheralDescriptor = {
     MemoryRegion = Peripheral
 }
 
-/// USART peripheral family descriptor
-let usartDescriptor: PeripheralDescriptor = {
-    Name = "USART"
-    Instances = Map.ofList [
-        "USART1", 0x40013800un
-        "USART2", 0x40004400un
-        "USART3", 0x40004800un
-        "UART4",  0x40004C00un
-        "UART5",  0x40005000un
-        "LPUART1", 0x40008000un
-    ]
-    Layout = {
-        Size = 0x400
-        Alignment = 4
-        Fields = [
-            { Name = "CR1";   Offset = 0x00; Type = U32; Access = ReadWrite; BitFields = None; Documentation = Some "Control register 1" }
-            { Name = "CR2";   Offset = 0x04; Type = U32; Access = ReadWrite; BitFields = None; Documentation = None }
-            { Name = "CR3";   Offset = 0x08; Type = U32; Access = ReadWrite; BitFields = None; Documentation = None }
-            { Name = "BRR";   Offset = 0x0C; Type = U32; Access = ReadWrite; BitFields = None; Documentation = Some "Baud rate register" }
-            { Name = "GTPR";  Offset = 0x10; Type = U32; Access = ReadWrite; BitFields = None; Documentation = None }
-            { Name = "RTOR";  Offset = 0x14; Type = U32; Access = ReadWrite; BitFields = None; Documentation = None }
-            { Name = "RQR";   Offset = 0x18; Type = U32; Access = WriteOnly; BitFields = None; Documentation = Some "Request register" }
-            { Name = "ISR";   Offset = 0x1C; Type = U32; Access = ReadOnly;  BitFields = None; Documentation = Some "Interrupt and status register" }
-            { Name = "ICR";   Offset = 0x20; Type = U32; Access = WriteOnly; BitFields = None; Documentation = Some "Interrupt flag clear register" }
-            { Name = "RDR";   Offset = 0x24; Type = U32; Access = ReadOnly;  BitFields = None; Documentation = Some "Receive data register" }
-            { Name = "TDR";   Offset = 0x28; Type = U32; Access = WriteOnly; BitFields = None; Documentation = Some "Transmit data register" }
-        ]
-    }
-    MemoryRegion = Peripheral
-}
-
 /// All descriptors for STM32L5 family
 let allDescriptors = [
     gpioDescriptor
-    usartDescriptor
     // ... more peripherals
 ]
 ```
@@ -282,10 +247,9 @@ let allDescriptors = [
 Alex uses the descriptors to build a memory catalog:
 
 ```fsharp
-// In Alex/Bindings/MemoryCatalog.fs
 type MemoryCatalog = {
     Peripherals: Map<string, PeripheralDescriptor>
-    AddressToPeripheral: Map<unativeint, string * string>  // address → (family, instance)
+    AddressToPeripheral: Map<unativeint, string * string>
 }
 
 let buildCatalog (descriptors: PeripheralDescriptor list) : MemoryCatalog =
@@ -314,7 +278,7 @@ match field.Access with
 | WriteOnly | ReadWrite -> ()  // OK
 
 // 3. Generate volatile store with correct offset
-let baseAddr = Map.find "GPIOA" gpioDescriptor.Instances  // 0x48000000un
+let baseAddr = Map.find "GPIOA" gpioDescriptor.Instances
 let ptr = builder.BuildIntToPtr baseAddr
 let fieldPtr = builder.BuildGEP ptr [| int64 field.Offset |]
 builder.BuildVolatileStore value fieldPtr
@@ -328,7 +292,7 @@ Only referenced descriptors are included in final binary:
 2. Unused peripheral descriptors are eliminated
 3. Final binary contains minimal metadata
 
-## Bit Field Extraction (Future)
+## Bit Field Extraction
 
 CMSIS headers define bit fields via macros:
 
@@ -342,16 +306,16 @@ CMSIS headers define bit fields via macros:
 #define USART_CR1_RE        USART_CR1_RE_Msk
 ```
 
-Future Farscape versions will extract these into `BitFieldDescriptor`:
+Farscape extracts these into `BitFieldDescriptor`:
 
 ```fsharp
 { Name = "UE"; Position = 0; Width = 1; Access = ReadWrite }
 { Name = "RE"; Position = 2; Width = 1; Access = ReadWrite }
 ```
 
-## Implementation Roadmap
+## Development Sequence
 
-### Immediate (Required for BAREWire types)
+### Immediate (requires BAREWire types)
 
 1. BAREWire adds types to `src/Core/Hardware/`
 2. Farscape references BAREWire
@@ -363,7 +327,7 @@ Future Farscape versions will extract these into `BitFieldDescriptor`:
 2. CMSIS qualifier recognition (`__I`, `__O`, `__IO`)
 3. Struct layout calculation
 
-### Future
+### Subsequent
 
 1. Bit field extraction from `_Pos`/`_Msk` macros
 2. Documentation extraction from comments
@@ -374,5 +338,5 @@ Future Farscape versions will extract these into `BitFieldDescriptor`:
 | Document | Location |
 |----------|----------|
 | BAREWire Hardware Descriptors | `~/repos/BAREWire/docs/08 Hardware Descriptors.md` |
-| fsnative Integration | `./03_fsnative_Integration.md` |
+| FNCS Integration | `./03_fsnative_Integration.md` |
 | Memory Interlock Requirements | `~/repos/Firefly/docs/Memory_Interlock_Requirements.md` |
