@@ -102,39 +102,47 @@ LetBinding("memcpy",
 
 ```bash
 # Generate Fidelity bindings from a standard library header
-dotnet run --project src/Farscape.Cli -- generate \
+farscape generate \
     --header /usr/include/string.h \
-    --library libc \
-    --output-mode fidelity \
-    --namespace Fidelity.libc.Memory \
-    --output ./output/
+    -l libc \
+    -m fidelity \
+    -n Fidelity.libc.Memory \
+    -o ./output/
+
+# Generate Fidelity bindings with idiomatic F# wrappers (Layer 2)
+farscape generate \
+    --header /usr/include/unistd.h \
+    -l libc \
+    -m fidelity-wrappers \
+    -n Fidelity.libc.IO \
+    -o ./output/
 
 # Generate P/Invoke bindings (traditional .NET interop)
-dotnet run --project src/Farscape.Cli -- generate \
+farscape generate \
     --header /usr/include/unistd.h \
-    --library libc \
-    --output-mode pinvoke \
-    --namespace LibC.IO \
-    --output ./output/
+    -l libc \
+    -m pinvoke \
+    -n LibC.IO \
+    -o ./output/
 
 # With include paths and defines (for CMSIS headers)
-dotnet run --project src/Farscape.Cli -- generate \
+farscape generate \
     --header stm32l5xx_hal_gpio.h \
-    --library __cmsis \
-    --output-mode fidelity \
-    --include-paths ./CMSIS/Core/Include,./STM32L5xx/Include \
-    --defines STM32L552xx,USE_HAL_DRIVER \
-    --namespace Fidelity.CMSIS.GPIO \
-    --verbose
+    -l __cmsis \
+    -m fidelity \
+    -i ./CMSIS/Core/Include,./STM32L5xx/Include \
+    -d STM32L552xx,USE_HAL_DRIVER \
+    -n Fidelity.CMSIS.GPIO \
+    -v
 
 Options:
-  -h, --header <header>         Path to C/C++ header file (required)
+      --header <header>         Path to C/C++ header file (required)
   -l, --library <library>       Name of native library (required)
   -o, --output <output>         Output directory [default: ./output]
   -n, --namespace <namespace>   Namespace for generated code [default: NativeBindings]
   -i, --include-paths <paths>   Additional include paths
   -d, --defines <defines>       Preprocessor definitions
-  -m, --output-mode <mode>      Output mode: fidelity | pinvoke [default: pinvoke]
+  -m, --output-mode <mode>      Output mode: pinvoke | fidelity | fidelity-wrappers [default: pinvoke]
   -v, --verbose                 Verbose output
 ```
 
