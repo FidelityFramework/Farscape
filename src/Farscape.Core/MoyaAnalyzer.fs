@@ -16,7 +16,7 @@ module MoyaAnalyzer =
     // Prefix and Suffix Classification
     // =========================================================================
 
-    /// Known suffix families — cross-cutting C naming patterns where
+    /// Known suffix families: cross-cutting C naming patterns where
     /// the base function name appears as a suffix (fprintf = f + printf).
     let private knownSuffixFamilies =
         [ "printf"; "scanf" ]
@@ -50,7 +50,7 @@ module MoyaAnalyzer =
             // Simple underscore-separated: io_read → "io"
             Some parts[0]
         else
-            // Try suffix families first — catches fprintf→"printf", vsnprintf→"printf", etc.
+            // Try suffix families first; catches fprintf->"printf", vsnprintf->"printf", etc.
             match knownSuffixFamilies |> List.tryFind (fun suffix -> name.EndsWith suffix) with
             | Some suffix -> Some suffix
             | None ->

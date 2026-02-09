@@ -4,7 +4,7 @@ namespace Farscape.Core
 ///
 /// Instead of repeated `List.choose (function | Function f -> ... | _ -> None)` patterns,
 /// define an algebra with one function per variant and fold it over a declaration list.
-/// This is the ONLY traversal function — everything uses it.
+/// This is the ONLY traversal function; everything uses it.
 module DeclarationAlgebra =
 
     /// Fold algebra: one function per Declaration variant.

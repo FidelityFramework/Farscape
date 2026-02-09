@@ -9,7 +9,7 @@ open WrapperTypes
 /// The output `WrapperPattern` drives code generation in `WrapperCodeGenerator`.
 ///
 /// Architecture: Active patterns for classification, pure functions for inference.
-/// Same pattern as `ActivePatterns.fs` — independent, testable classifiers.
+/// Same pattern as `ActivePatterns.fs`: independent, testable classifiers.
 module WrapperPatternAnalyzer =
 
     // =========================================================================
@@ -145,7 +145,7 @@ module WrapperPatternAnalyzer =
         (paramIdx: int)
         (allParams: (string * string) list)
         : string option =
-        // Look at the previous parameter — commonly the buffer
+        // Look at the previous parameter, commonly the buffer
         if paramIdx > 0 then
             let (prevName, prevType) = allParams.[paramIdx - 1]
             if prevType.Contains("*") then Some prevName
@@ -158,7 +158,7 @@ module WrapperPatternAnalyzer =
         (allParams: (string * string) list)
         (typedefMap: Map<string, string>)
         : string option =
-        // Look at the next parameter — commonly the length
+        // Look at the next parameter, commonly the length
         if paramIdx < allParams.Length - 1 then
             let (nextName, nextType) = allParams.[paramIdx + 1]
             if isSizeType nextType typedefMap then Some nextName

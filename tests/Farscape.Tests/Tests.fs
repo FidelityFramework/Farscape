@@ -4,7 +4,7 @@ open Xunit
 open Farscape.Core
 
 // =============================================================================
-// CTypeParser Tests — XParsec monadic parsers for C type strings
+// CTypeParser Tests: XParsec monadic parsers for C type strings
 // =============================================================================
 
 module CTypeParserTests =
@@ -138,7 +138,7 @@ module CTypeParserTests =
         Assert.True(CTypeParser.parseMacroLine("#include <stdio.h>").IsNone)
 
 // =============================================================================
-// ActivePatterns Tests — structured decomposition backed by XParsec
+// ActivePatterns Tests: structured decomposition backed by XParsec
 // =============================================================================
 
 module ActivePatternsTests =
@@ -163,7 +163,7 @@ module ActivePatternsTests =
         | ParsedCType info ->
             match info with
             | CharPointer -> Assert.Fail "wchar_t * should NOT match CharPointer"
-            | TypedPointer _ -> () // correct — wchar_t is a typed pointer
+            | TypedPointer _ -> () // correct; wchar_t is a typed pointer
             | other -> Assert.Fail $"Unexpected: {other}"
         | _ -> Assert.Fail "Failed to parse wchar_t *"
 
@@ -271,7 +271,7 @@ module ActivePatternsTests =
         | _ -> Assert.Fail "Failed to match ArrayType"
 
 // =============================================================================
-// DeclarationAlgebra Tests — catamorphism over Declaration DU
+// DeclarationAlgebra Tests: catamorphism over Declaration DU
 // =============================================================================
 
 module DeclarationAlgebraTests =
@@ -347,7 +347,7 @@ module DeclarationAlgebraTests =
         Assert.Equal<string list>(["A"; "B"; "C"], results)
 
 // =============================================================================
-// CodeAST + CodeRenderer Tests — typed AST to F# source
+// CodeAST + CodeRenderer Tests: typed AST to F# source
 // =============================================================================
 
 module CodeRendererTests =
@@ -446,7 +446,7 @@ module CodeRendererTests =
         Assert.Contains("let abort () : unit =", result)
 
 // =============================================================================
-// FidelityCodeGenerator Integration Tests — end-to-end declaration → source
+// FidelityCodeGenerator Integration Tests: end-to-end declaration → source
 // =============================================================================
 
 module FidelityCodeGeneratorTests =
@@ -605,7 +605,7 @@ module FidelityCodeGeneratorTests =
         Assert.Contains("y: int32", result)
 
 // =============================================================================
-// MoyaAnalyzer Tests — prefix analysis and declaration filtering
+// MoyaAnalyzer Tests: prefix analysis and declaration filtering
 // =============================================================================
 
 module MoyaAnalyzerTests =
@@ -688,7 +688,7 @@ module MoyaAnalyzerTests =
     let ``clusterByPrefix respects minimum group size`` () =
         let names = ["strlen"; "abort"; "exit"]
         let groups, ungrouped = MoyaAnalyzer.clusterByPrefix names
-        // "strlen" alone is only 1 function with "str" prefix — below minGroupSize, so it goes to ungrouped
+        // "strlen" alone is only 1 function with "str" prefix, below minGroupSize, so it goes to ungrouped
         Assert.Contains("strlen", ungrouped)
         // But abort and exit are also singles
         Assert.Contains("abort", ungrouped)
@@ -757,7 +757,7 @@ module MoyaAnalyzerTests =
         Assert.Equal(2, filtered.Length)
 
 // =============================================================================
-// MoyaSerializer Tests — TOML round-trip and deserialization
+// MoyaSerializer Tests: TOML round-trip and deserialization
 // =============================================================================
 
 module MoyaSerializerTests =
@@ -866,7 +866,7 @@ prefixes = ["str"]
         | Ok _ -> Assert.Fail "Should return Error for missing file"
 
 // =============================================================================
-// WrapperPatternAnalyzer Tests — Attribute mapping and inference
+// WrapperPatternAnalyzer Tests: Attribute mapping and inference
 // =============================================================================
 
 module WrapperPatternAnalyzerTests =
@@ -1054,7 +1054,7 @@ module WrapperPatternAnalyzerTests =
         Assert.True(pattern.IsPure)
 
 // =============================================================================
-// WrapperCodeGenerator Tests — End-to-end wrapper generation
+// WrapperCodeGenerator Tests: End-to-end wrapper generation
 // =============================================================================
 
 module WrapperCodeGeneratorTests =
@@ -1158,7 +1158,7 @@ module WrapperCodeGeneratorTests =
             mkDecl "write" "ssize_t" [("fd", "int"); ("buf", "const void *"); ("count", "size_t")] []
         ]
         let output = WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test"
-        // Count occurrences of "let read" — should be exactly 1
+        // Count occurrences of "let read"; should be exactly 1
         let readCount = output.Split("let read") |> Array.length
         Assert.Equal(2, readCount) // split produces N+1 parts for N occurrences
         Assert.Contains("let write", output)

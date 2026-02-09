@@ -16,7 +16,7 @@ flowchart LR
 
 ### The Generic Class Pattern
 
-Farscape follows the same XParsec pattern as `XParsec.Json.JsonParsers` — a generic class with `static let` bindings and `static member` accessors:
+Farscape follows the same XParsec pattern as `XParsec.Json.JsonParsers`, a generic class with `static let` bindings and `static member` accessors:
 
 ```fsharp
 type Parsers<'Input, 'InputSlice
@@ -56,8 +56,8 @@ Concrete instantiation: `type private P = Parsers<ReadableString, ReadableString
 
 ### XParsec API Notes
 
-- `many` returns `ImmutableArray`, not `list` — use `Seq.toList` or `.Length`
-- `sepBy` returns `struct (ImmutableArray * ImmutableArray)` — first is items, second is separators
+- `many` returns `ImmutableArray`, not `list`; use `Seq.toList` or `.Length`
+- `sepBy` returns `struct (ImmutableArray * ImmutableArray)`; first is items, second is separators
 - `manyChars`/`many1Chars` return `string` directly
 - ParseResult is matched as `Ok result -> result.Parsed`
 - Invocation: `P.CType reader` where `reader = Reader.ofString input ()`
@@ -105,9 +105,9 @@ let (|CompilerBuiltin|InternalMacro|PredefinedMacro|UserMacro|) (name: string) =
 
 ### Other Active Patterns
 
-- `(|IntegerLiteral|_|)` — decimal/hex integer parsing via XParsec
-- `(|FSharpKeyword|CleanName|)` — F# keyword detection + backtick quoting
-- `(|ArrayType|_|)` — array size extraction from C type strings
+- `(|IntegerLiteral|_|)`: decimal/hex integer parsing via XParsec
+- `(|FSharpKeyword|CleanName|)`: F# keyword detection + backtick quoting
+- `(|ArrayType|_|)`: array size extraction from C type strings
 
 ## Pattern 3: Catamorphism (`DeclarationAlgebra.fs`)
 
@@ -133,8 +133,8 @@ let cataDeclarations (algebra: DeclarationAlgebra<'R>) (decls: Declaration list)
 
 ### Pre-Built Algebras
 
-- **`typedefAlgebra`** — extracts `(name, underlyingType)` pairs, produces `None` for non-typedefs
-- **`structNameAlgebra`** — extracts struct/class names
+- **`typedefAlgebra`**: extracts `(name, underlyingType)` pairs, produces `None` for non-typedefs
+- **`structNameAlgebra`**: extracts struct/class names
 
 ### Custom Algebras
 
@@ -154,7 +154,7 @@ let private generationAlgebra typedefMap : DeclarationAlgebra<DeclGroup> = {
 
 ## Pattern 4: Typed Code AST (`CodeAST.fs` + `CodeRenderer.fs`)
 
-Instead of building strings with `StringBuilder`, generation produces `FsDecl` values — typed, inspectable, testable AST nodes.
+Instead of building strings with `StringBuilder`, generation produces `FsDecl` values: typed, inspectable, testable AST nodes.
 
 ### The AST Types
 

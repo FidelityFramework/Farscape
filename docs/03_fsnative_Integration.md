@@ -1,13 +1,13 @@
 # FNCS Integration
 
-Farscape generates F# binding source files that feed into the Firefly compilation pipeline. The first consumer of this output is **FNCS (F# Native Compiler Services)** — a complete, standalone native type checker operating in the Native Type Universe (NTU).
+Farscape generates F# binding source files that feed into the Firefly compilation pipeline. The first consumer of this output is **FNCS (F# Native Compiler Services)**, a complete, standalone native type checker operating in the Native Type Universe (NTU).
 
 ## The Pipeline
 
 ```mermaid
 flowchart TD
     A["C/C++ Headers"] --> B["Farscape<br/>(generates F# source with<br/>Unchecked.defaultof stubs)"]
-    B --> C["FNCS<br/>(type-checks in NTU —<br/>BCL-free, freestanding)"]
+    B --> C["FNCS<br/>(type-checks in NTU;<br/>BCL-free, freestanding)"]
     C --> D["PSG<br/>(Program Semantic Graph<br/>with native types attached)"]
     D --> E["Baker<br/>(saturates intrinsic operations,<br/>SRTP resolution)"]
     E --> F["Alex<br/>(XParsec pattern matching →<br/>platform-specific MLIR)"]
@@ -16,7 +16,7 @@ flowchart TD
 
 ## What FNCS Is
 
-FNCS is the native type checker for Firefly — a **complete compiler service** with:
+FNCS is the native type checker for Firefly, a **complete compiler service** with:
 
 - **Native Type Universe (NTU)**: NTUKind types (`NTUint`, `NTUuint`, `NTUptr<'T>`, `NTUsize`), BCL-free
 - **SRTP resolution**: Statically resolved type parameters via native WitnessResolution
@@ -28,7 +28,7 @@ FNCS lives at `~/repos/fsnative/` and is registered as the `FNCS` Serena project
 
 ## What Farscape Generates
 
-Farscape currently generates **Fidelity binding stubs** — F# source files with `Unchecked.defaultof<T>` bodies:
+Farscape currently generates **Fidelity binding stubs**: F# source files with `Unchecked.defaultof<T>` bodies:
 
 ```fsharp
 module Fidelity.libc.Memory
@@ -98,7 +98,7 @@ These constraints are enforced at compile time through NTU's type system, FNCS's
 | Aspect | Current | Target |
 |--------|---------|--------|
 | Output format | `Unchecked.defaultof` stubs | `[<FidelityExtern>]` attributed stubs |
-| Library metadata | None — Alex infers from symbol names | Library name + symbol carried through PSG |
+| Library metadata | None: Alex infers from symbol names | Library name + symbol carried through PSG |
 | CMSIS support | Structs/enums parsed, qualifiers not extracted | Full qualifier → access constraint mapping |
 | Linker flags | Hard-coded in Codegen.fs | Auto-collected from `fidelity.library_name` attributes |
 | Distribution | Manual file generation | Source-based packages via frgo.dev |

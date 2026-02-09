@@ -79,11 +79,11 @@ module WrapperTypes =
         | AllocatedPointer
         /// FILE*/handle pattern: non-null = handle, null = error.
         | OpaqueHandleReturn
-        /// Pure value return — no error checking needed (abs, strlen).
+        /// Pure value return; no error checking needed (abs, strlen).
         | PureValue
         /// Function never returns (abort, _exit).
         | NeverReturns
-        /// void return — no return value to wrap.
+        /// void return; no return value to wrap.
         | VoidReturn
 
     // =========================================================================

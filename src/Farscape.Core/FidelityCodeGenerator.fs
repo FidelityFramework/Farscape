@@ -66,7 +66,7 @@ module FidelityCodeGenerator =
     /// Uses ParsedCType active pattern (XParsec-backed) instead of Regex/string munging.
     /// Used by both FidelityCodeGenerator (Layer 1) and WrapperCodeGenerator (Layer 2).
     let mapCTypeToFidelityType (typedefMap: Map<string, string>) (cType: string) : FsType =
-        // Function pointer types like "void (*)(void)" contain (*) — always nativeint
+        // Function pointer types like "void (*)(void)" contain (*); always nativeint
         if cType.Contains("(*)") then Named "nativeint"
         else
         match cType with
@@ -143,7 +143,7 @@ module FidelityCodeGenerator =
     // Catamorphism-Based Generation
     // =========================================================================
 
-    /// Declaration group — produced by catamorphism, consumed by assembler.
+    /// Declaration group: produced by catamorphism, consumed by assembler.
     type private DeclGroup =
         | GEnum of FsDecl list
         | GStruct of FsDecl list

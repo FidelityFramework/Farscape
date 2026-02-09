@@ -34,7 +34,7 @@ module CppParser =
     }
 
     /// Raw attribute data extracted from clang AST nodes.
-    /// Stored as-is from clang JSON — semantic interpretation happens downstream
+    /// Stored as-is from clang JSON; semantic interpretation happens downstream
     /// in WrapperPatternAnalyzer.
     type AttributeData = {
         /// Clang AST node kind, e.g., "AllocSizeAttr", "NonNullAttr", "FormatAttr"

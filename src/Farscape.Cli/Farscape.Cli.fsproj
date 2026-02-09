@@ -6,7 +6,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>farscape</ToolCommandName>
     <PackageId>Farscape</PackageId>
-    <Description>F# native binding generator CLI — generates F# bindings from C/C++ headers for the Fidelity ecosystem</Description>
+    <Description>F# native binding generator CLI: generates F# bindings from C/C++ headers for the Fidelity ecosystem</Description>
     <PackageTags>fsharp;f#;bindings;codegen;native;cli;dotnet-tool</PackageTags>
   </PropertyGroup>
 

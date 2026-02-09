@@ -1,12 +1,12 @@
-# XParsec in Farscape — Actual Implementation (February 2026)
+# XParsec in Farscape: Actual Implementation (February 2026)
 
 ## Architecture
 
 Farscape uses a **two-stage parsing strategy**:
 
-1. **Stage 1: Clang two-pass parsing** (`CppParser.fs`) — Clang produces JSON AST + macro extraction. Clang does the heavy lifting for C/C++ syntax. XParsec is NOT used at this layer.
+1. **Stage 1: Clang two-pass parsing** (`CppParser.fs`): Clang produces JSON AST + macro extraction. Clang does the heavy lifting for C/C++ syntax. XParsec is NOT used at this layer.
 
-2. **Stage 2: XParsec post-processing** (`CTypeParser.fs`, `ActivePatterns.fs`) — XParsec parsers decompose C type strings, macro values, and numeric literals extracted from Stage 1.
+2. **Stage 2: XParsec post-processing** (`CTypeParser.fs`, `ActivePatterns.fs`): XParsec parsers decompose C type strings, macro values, and numeric literals extracted from Stage 1.
 
 ## XParsec Generic Class Pattern
 
@@ -69,8 +69,8 @@ type CTypeInfo = { BaseType: string; PointerDepth: int }
 
 ## Key Decisions
 
-- `CharPointer` active pattern uses `EndsWith("char")` NOT `Contains("char")` — excludes `wchar_t`
-- Function pointer types (containing `(*)`) detected by string check before XParsec parsing — always map to `nativeint`
+- `CharPointer` active pattern uses `EndsWith("char")` NOT `Contains("char")`; excludes `wchar_t`
+- Function pointer types (containing `(*)`) detected by string check before XParsec parsing; always map to `nativeint`
 - Typedef-resolved types also checked for `(*)` to handle `__compar_fn_t` → `int (*)(const void *, const void *)`
 
 ## Tests

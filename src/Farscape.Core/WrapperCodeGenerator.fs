@@ -93,7 +93,7 @@ module WrapperCodeGenerator =
                 ResultError(Literal "()")))
 
     /// Generate wrapper body for OpaqueHandleReturn pattern (e.g., fopen).
-    /// Same structure as AllocatedPointer — null check.
+    /// Same structure as AllocatedPointer; null check.
     let private opaqueHandleBody (bindingsModule: string) (funcName: string) (paramNames: string list) : FsExpr =
         allocatedPointerBody bindingsModule funcName paramNames
 
@@ -171,7 +171,7 @@ module WrapperCodeGenerator =
     // Catamorphism-Based Generation
     // =========================================================================
 
-    /// Wrapper declaration group — only functions produce wrappers.
+    /// Wrapper declaration group: only functions produce wrappers.
     type private WrapperGroup =
         | WFunc of CppParser.FunctionDecl
         | WNone
@@ -210,7 +210,7 @@ module WrapperCodeGenerator =
             |> List.distinctBy (fun f -> f.Name)
             |> List.collect (generateWrapperDecls typedefMap bindingsModule)
 
-        // Phase 4: Build typed FsDecl tree — wrapper module opens the bindings module
+        // Phase 4: Build typed FsDecl tree; wrapper module opens the bindings module
         let openDecl = Comment $"open {bindingsModule}"
         let allDecls = openDecl :: BlankLine :: functions
         let moduleDecl = Module(wrapperNamespace, libraryName, allDecls)

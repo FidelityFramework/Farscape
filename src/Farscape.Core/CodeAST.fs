@@ -18,7 +18,7 @@ module CodeAST =
 
     /// F# expression representation
     type FsExpr =
-        /// Unchecked.defaultof<T> — the standard Platform.Bindings body
+        /// Unchecked.defaultof<T>, the standard Platform.Bindings body
         | DefaultOf of FsType
         /// Function call: Module.func arg1 arg2 (module' = "" for unqualified)
         | FunctionCall of module': string * name: string * args: FsExpr list
@@ -47,7 +47,7 @@ module CodeAST =
         Type: FsType
     }
 
-    /// F# declaration representation — the core of the typed code AST
+    /// F# declaration representation: the core of the typed code AST
     type FsDecl =
         /// Module declaration with namespace, header comment, and child declarations
         | Module of name: string * comment: string * decls: FsDecl list

@@ -11,7 +11,7 @@ module MoyaTypes =
     // TOML Project Model
     // =========================================================================
 
-    /// A single namespace subdivision — either discovered by analysis or hand-configured.
+    /// A single namespace subdivision, either discovered by analysis or hand-configured.
     type NamespaceSpec = {
         /// Fully qualified F# module name, e.g. "Fidelity.libc.Memory"
         Name: string

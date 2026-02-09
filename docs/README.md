@@ -8,10 +8,10 @@ Farscape is the C/C++ binding generator for the Fidelity native F# compilation e
 
 ### Architecture
 
-1. [Architecture Overview](./01_Architecture_Overview.md) — Pipeline structure, four architectural patterns, module roles
-2. [BAREWire Integration](./02_BAREWire_Integration.md) — Hardware descriptor generation design (PLANNED)
-3. [FNCS Integration](./03_fsnative_Integration.md) — How Farscape output feeds the FNCS compilation pipeline
-4. [XParsec Architecture](./04_XParsec_Architecture.md) — Parser combinators, active patterns, catamorphisms, typed code AST
+1. [Architecture Overview](./01_Architecture_Overview.md): Pipeline structure, four architectural patterns, module roles
+2. [BAREWire Integration](./02_BAREWire_Integration.md): Hardware descriptor generation design (PLANNED)
+3. [FNCS Integration](./03_fsnative_Integration.md): How Farscape output feeds the FNCS compilation pipeline
+4. [XParsec Architecture](./04_XParsec_Architecture.md): Parser combinators, active patterns, catamorphisms, typed code AST
 
 ## Position in Fidelity Ecosystem
 
@@ -36,13 +36,13 @@ flowchart TD
 
 ### FNCS (F# Native Compiler Services)
 
-FNCS is the native type checker that processes the F# source Farscape generates. It operates in the Native Type Universe (NTU) — a BCL-free, freestanding type system with NTUKind types, SRTP resolution, and union-find constraint solving.
+FNCS is the native type checker that processes the F# source Farscape generates. It operates in the Native Type Universe (NTU), a BCL-free, freestanding type system with NTUKind types, SRTP resolution, and union-find constraint solving.
 
 Farscape generates `Unchecked.defaultof<T>` stubs. FNCS type-checks them. Baker saturates intrinsic operations. Alex emits platform-specific MLIR.
 
 ### BAREWire (Descriptor Types)
 
-BAREWire will provide hardware descriptor types (`PeripheralDescriptor`, `FieldDescriptor`, `AccessKind`) that Farscape populates from CMSIS headers. This is PLANNED — not yet implemented.
+BAREWire will provide hardware descriptor types (`PeripheralDescriptor`, `FieldDescriptor`, `AccessKind`) that Farscape populates from CMSIS headers. This is PLANNED; not yet implemented.
 
 ## Output Modes
 

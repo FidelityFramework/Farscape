@@ -40,7 +40,7 @@ module ActivePatterns =
     /// CompilerBuiltin: __STDC__, __GNUC__, etc. (double underscore bookends)
     /// InternalMacro: _POSIX_SOURCE, _GNU_SOURCE, etc. (leading underscore + uppercase)
     /// PredefinedMacro: linux, unix, etc. (compiler-predefined names)
-    /// UserMacro: everything else — these get emitted
+    /// UserMacro: everything else; these get emitted
     let (|CompilerBuiltin|InternalMacro|PredefinedMacro|UserMacro|) (name: string) =
         if name.StartsWith("__") && name.EndsWith("__") then CompilerBuiltin
         elif name.StartsWith("_") && name.Length > 1 && Char.IsUpper(name.[1]) then InternalMacro
