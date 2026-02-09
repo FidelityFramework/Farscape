@@ -4,7 +4,7 @@ open System
 open System.IO
 open Farscape.Core
 open FSharp.SystemCommandLine
-open System.CommandLine.Invocation
+open Input
 open Farscape.Core.BindingGenerator
 open Farscape.Core.MoyaTypes
 
@@ -316,7 +316,7 @@ let projectGenerateCommand =
 let main argv =
     rootCommand argv {
         description "Farscape: F# Native Library Binding Generator"
-        setHandler id
+        noAction
         addCommand generateCommand
         addCommand moyaCommand
         addCommand projectGenerateCommand
