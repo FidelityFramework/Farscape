@@ -24,14 +24,16 @@ Wrapper patterns are **not heuristic guesses**. They are driven by clang's AST a
 
 ### Attribute Extraction Pipeline
 
-```
-clang -Xclang -ast-dump=json  →  CppParser.extractAttributes  →  AttributeData list
-                                         ↓
-                               WrapperPatternAnalyzer.mapAttributes  →  FunctionAttribute list
-                                         ↓
-                               WrapperPatternAnalyzer.analyze  →  WrapperPattern
-                                         ↓
-                               WrapperCodeGenerator.generate  →  FsDecl tree  →  F# source
+```mermaid
+flowchart TD
+    A["clang -Xclang -ast-dump=json"] --> B["CppParser.extractAttributes"]
+    B --> C["AttributeData list"]
+    C --> D["WrapperPatternAnalyzer.mapAttributes"]
+    D --> E["FunctionAttribute list"]
+    E --> F["WrapperPatternAnalyzer.analyze"]
+    F --> G["WrapperPattern"]
+    G --> H["WrapperCodeGenerator.generate"]
+    H --> I["FsDecl tree → F# source"]
 ```
 
 ### Supported Attributes (12 types)

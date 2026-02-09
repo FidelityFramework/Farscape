@@ -4,20 +4,14 @@ Farscape generates F# binding source files that feed into the Firefly compilatio
 
 ## The Pipeline
 
-```
-C/C++ Headers
-    ↓
-Farscape (generates F# source with Unchecked.defaultof stubs)
-    ↓
-FNCS (type-checks in NTU — BCL-free, freestanding)
-    ↓
-PSG (Program Semantic Graph with native types attached)
-    ↓
-Baker (saturates intrinsic operations, SRTP resolution)
-    ↓
-Alex (XParsec pattern matching → platform-specific MLIR)
-    ↓
-MLIR → LLVM → Native Binary
+```mermaid
+flowchart TD
+    A["C/C++ Headers"] --> B["Farscape<br/>(generates F# source with<br/>Unchecked.defaultof stubs)"]
+    B --> C["FNCS<br/>(type-checks in NTU —<br/>BCL-free, freestanding)"]
+    C --> D["PSG<br/>(Program Semantic Graph<br/>with native types attached)"]
+    D --> E["Baker<br/>(saturates intrinsic operations,<br/>SRTP resolution)"]
+    E --> F["Alex<br/>(XParsec pattern matching →<br/>platform-specific MLIR)"]
+    F --> G["MLIR → LLVM → Native Binary"]
 ```
 
 ## What FNCS Is

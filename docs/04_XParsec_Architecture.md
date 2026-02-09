@@ -4,11 +4,12 @@ Farscape uses XParsec parser combinators throughout its pipeline for **post-proc
 
 ## The Four Patterns
 
-```
-CTypeParser.fs     →  XParsec parsers (decompose C types, parse macros)
-ActivePatterns.fs  →  Active patterns (classify types, filter macros, quote keywords)
-DeclarationAlgebra.fs → Catamorphism (single fold over Declaration DU)
-CodeAST.fs + CodeRenderer.fs → Typed code AST (FsDecl tree → F# source)
+```mermaid
+flowchart LR
+    A["CTypeParser.fs"] --> B["XParsec parsers<br/>(decompose C types, parse macros)"]
+    C["ActivePatterns.fs"] --> D["Active patterns<br/>(classify types, filter macros, quote keywords)"]
+    E["DeclarationAlgebra.fs"] --> F["Catamorphism<br/>(single fold over Declaration DU)"]
+    G["CodeAST.fs + CodeRenderer.fs"] --> H["Typed code AST<br/>(FsDecl tree → F# source)"]
 ```
 
 ## Pattern 1: XParsec Parser Combinators (`CTypeParser.fs`)
@@ -195,18 +196,13 @@ Every other module produces `FsDecl` values. The separation means:
 
 ## How It All Flows Together
 
-```
-CppParser.fs                    Clang two-pass → Declaration list
-    ↓
-CTypeParser.fs                  XParsec parsers available (pCType, pMacroLine, etc.)
-    ↓
-ActivePatterns.fs               Active patterns wrap XParsec parsers
-    ↓
-DeclarationAlgebra.fs           Catamorphism: fold algebra over Declaration DU
-    ↓
-FidelityCodeGenerator.fs        generationAlgebra → FsDecl list → Module wrapper
-    ↓
-CodeRenderer.fs                 FsDecl → F# source string (the ONLY StringBuilder)
+```mermaid
+flowchart TD
+    A["CppParser.fs<br/>Clang two-pass → Declaration list"] --> B["CTypeParser.fs<br/>XParsec parsers available<br/>(pCType, pMacroLine, etc.)"]
+    B --> C["ActivePatterns.fs<br/>Active patterns wrap XParsec parsers"]
+    C --> D["DeclarationAlgebra.fs<br/>Catamorphism: fold algebra<br/>over Declaration DU"]
+    D --> E["FidelityCodeGenerator.fs<br/>generationAlgebra → FsDecl list<br/>→ Module wrapper"]
+    E --> F["CodeRenderer.fs<br/>FsDecl → F# source string<br/>(the ONLY StringBuilder)"]
 ```
 
 One traversal. One algebra. One render.

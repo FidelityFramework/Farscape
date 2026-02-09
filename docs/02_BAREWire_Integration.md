@@ -10,17 +10,13 @@ Farscape generates BAREWire hardware descriptors from parsed C/C++ headers. This
 
 ## Dependency Chain
 
-```
-CMSIS/HAL Headers
-       │
-       ▼
-   Farscape (parse)
-       │
-       ├──▶ Types.fs (F# structs using fsnative types)
-       │
-       ├──▶ Bindings.fs (Platform.Bindings declarations)
-       │
-       └──▶ Descriptors.fs (BAREWire types) ← REQUIRES BAREWire types
+```mermaid
+flowchart TD
+    A["CMSIS/HAL Headers"] --> B["Farscape (parse)"]
+    B --> C["Types.fs<br/>(F# structs using fsnative types)"]
+    B --> D["Bindings.fs<br/>(Platform.Bindings declarations)"]
+    B --> E["Descriptors.fs<br/>(BAREWire types)"]
+    E -. "REQUIRES BAREWire types" .-> F["BAREWire"]
 ```
 
 Farscape cannot generate complete hardware descriptors until BAREWire provides these types:

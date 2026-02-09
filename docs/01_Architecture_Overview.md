@@ -37,42 +37,19 @@ Generated F# source is byte-identical across runs. No hash-dependent ordering, n
 
 ## Pipeline Architecture
 
-```
-                         Farscape Pipeline
- ┌────────────────────────────────────────────────────────────────────┐
- │                                                                    │
- │  C/C++ Header ──► Clang Two-Pass ──► Declaration AST              │
- │  (stdlib.h)       (CppParser.fs)     (functions, structs,         │
- │                                       enums, typedefs, macros)    │
- │                                           │                       │
- │              ┌────────────────────────────┤                       │
- │              ▼                            ▼                       │
- │   XParsec Post-Processing          TypeMapper.fs                  │
- │   (CTypeParser.fs)                 (type dictionary)              │
- │              │                            │                       │
- │              ▼                            │                       │
- │   Active Patterns                        │                       │
- │   (ActivePatterns.fs)                    │                       │
- │              │                            │                       │
- │              └────────────┬───────────────┘                       │
- │                           ▼                                       │
- │              Catamorphism (DeclarationAlgebra.fs)                  │
- │              Single fold over Declaration DU                      │
- │                           │                                       │
- │                           ▼                                       │
- │              FidelityCodeGenerator.fs (Layer 1)                    │
- │              Declaration list → FsDecl AST                        │
- │                           │                                       │
- │              WrapperPatternAnalyzer.fs (Layer 2, optional)        │
- │              Clang attrs → WrapperPattern → FsDecl AST            │
- │              (WrapperCodeGenerator.fs)                             │
- │                           │                                       │
- │                           ▼                                       │
- │              CodeRenderer.fs                                      │
- │              FsDecl → F# source string                            │
- │              (the ONLY StringBuilder)                              │
- │                                                                    │
- └────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    A["C/C++ Header<br/>(stdlib.h)"] --> B["Clang Two-Pass<br/>(CppParser.fs)"]
+    B --> C["Declaration AST<br/>(functions, structs, enums,<br/>typedefs, macros)"]
+    C --> D["XParsec Post-Processing<br/>(CTypeParser.fs)"]
+    C --> E["TypeMapper.fs<br/>(type dictionary)"]
+    D --> F["Active Patterns<br/>(ActivePatterns.fs)"]
+    F --> G["Catamorphism<br/>(DeclarationAlgebra.fs)<br/>Single fold over Declaration DU"]
+    E --> G
+    G --> H["FidelityCodeGenerator.fs<br/>(Layer 1)<br/>Declaration list → FsDecl AST"]
+    G --> I["WrapperPatternAnalyzer.fs<br/>(Layer 2, optional)<br/>Clang attrs → WrapperPattern → FsDecl AST<br/>(WrapperCodeGenerator.fs)"]
+    H --> J["CodeRenderer.fs<br/>FsDecl → F# source string<br/>(the ONLY StringBuilder)"]
+    I --> J
 ```
 
 ## Core Modules
