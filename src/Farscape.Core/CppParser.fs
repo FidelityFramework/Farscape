@@ -4,7 +4,10 @@ open System
 open System.Diagnostics
 open System.IO
 open System.Text.Json
-open System.Text.RegularExpressions
+open XParsec
+open XParsec.Parsers
+open XParsec.Combinators
+open XParsec.CharParsers
 
 /// C/C++ header parsing using native clang tooling.
 ///
@@ -218,25 +221,34 @@ module CppParser =
         | -1 -> typeStr.Trim()
         | idx -> typeStr.Substring(0, idx).Trim()
 
-    /// Parse a field type string into structured info
+    /// Parse a field type string into structured info.
+    /// Uses XParsec for array size extraction (no Regex).
     let private parseFieldType (typeStr: string) : FieldDecl =
-        let mutable isVolatile = typeStr.Contains("volatile") || typeStr.Contains("__IO")
-        let mutable isConst = typeStr.Contains("const") || typeStr.Contains("__I")
-        let mutable isArray = false
-        let mutable arraySize = None
-        let mutable cleanType = typeStr
+        let isVolatile = typeStr.Contains("volatile") || typeStr.Contains("__IO")
+        let isConst = typeStr.Contains("const") || typeStr.Contains("__I")
 
-        // Check for array syntax: type[N]
-        let arrayMatch = Regex.Match(typeStr, @"\[(\d+)\]")
-        if arrayMatch.Success then
-            isArray <- true
-            arraySize <- Some (int arrayMatch.Groups.[1].Value)
-            cleanType <- Regex.Replace(typeStr, @"\[\d+\]", "").Trim()
+        // Check for array syntax using XParsec parser
+        let pArraySize =
+            skipMany (satisfyL (fun c -> c <> '[') "non-bracket")
+            >>. (skipChar '[' >>. pint32 .>> skipChar ']')
+
+        let isArray, arraySize, cleanType =
+            let reader = Reader.ofString typeStr ()
+            match pArraySize reader with
+            | Ok result ->
+                let baseType =
+                    match typeStr.IndexOf('[') with
+                    | -1 -> typeStr
+                    | idx -> typeStr.Substring(0, idx)
+                true, Some result.Parsed, baseType.Trim()
+            | Error _ ->
+                false, None, typeStr
 
         // Clean up qualifiers for the base type
-        cleanType <- cleanType.Replace("volatile ", "").Replace("const ", "")
-                              .Replace("__IO ", "").Replace("__I ", "").Replace("__O ", "")
-                              .Trim()
+        let cleanType =
+            cleanType.Replace("volatile ", "").Replace("const ", "")
+                     .Replace("__IO ", "").Replace("__I ", "").Replace("__O ", "")
+                     .Trim()
 
         {
             Name = ""
@@ -502,64 +514,101 @@ module CppParser =
     // Macro Parsing
     // =========================================================================
 
-    /// Parse a single macro definition line
+    // =========================================================================
+    // XParsec Macro Parsers (private, defined inline for compile-order independence)
+    // =========================================================================
+
+    /// Classify an object macro's value into MacroKind
+    let private classifyObjectMacroValue (value: string) : MacroKind =
+        if value.StartsWith("((") && value.Contains("*)") && value.EndsWith(")") then
+            let inner = value.Substring(2, value.Length - 3)
+            match inner.IndexOf("*)") with
+            | -1 -> SimpleValue value
+            | idx ->
+                let typeName = inner.Substring(0, idx).Trim()
+                let castValue = inner.Substring(idx + 2).Trim()
+                TypeCast (typeName, castValue)
+        elif value.Contains("+") || value.Contains("-") || value.Contains("<<") ||
+             value.Contains(">>") || value.Contains("|") || value.Contains("&") then
+            Expression value
+        else
+            SimpleValue value
+
+    /// XParsec parsers for macro line parsing (same pattern as XParsec.Json.JsonParsers)
+    type private MacroParsers<'Input, 'InputSlice
+        when 'Input :> IReadable<char, 'InputSlice> and 'InputSlice :> IReadable<char, 'InputSlice>>() =
+
+        static let pIdentifier =
+            many1Chars (satisfyL (fun c -> Char.IsLetterOrDigit c || c = '_') "identifier char")
+
+        static let pFunctionLikeMacro =
+            parser {
+                let! name = pIdentifier
+                do! skipChar '('
+                let! args, _ = sepBy (spaces >>. pIdentifier .>> spaces) (skipChar ',')
+                do! skipChar ')'
+                do! spaces1
+                let! body = manyChars (satisfyL (fun _ -> true) "body char")
+                let macro : MacroDecl = {
+                    Name = name
+                    Kind = FunctionLike (Seq.toList args, body)
+                    RawValue = body
+                }
+                return macro
+            }
+
+        static let pObjectMacro =
+            parser {
+                let! name = pIdentifier
+                do! spaces1
+                let! value = manyChars (satisfyL (fun _ -> true) "value char")
+                let trimmed = value.Trim()
+                let macro : MacroDecl = {
+                    Name = name
+                    Kind = classifyObjectMacroValue trimmed
+                    RawValue = trimmed
+                }
+                return macro
+            }
+
+        static let pEmptyMacro =
+            parser {
+                let! name = pIdentifier
+                do! eof
+                let macro : MacroDecl = {
+                    Name = name
+                    Kind = SimpleValue ""
+                    RawValue = ""
+                }
+                return macro
+            }
+
+        static let pMacroLine =
+            parser {
+                do! pstring "#define " >>% ()
+                do! spaces
+                return! choice [ pFunctionLikeMacro; pObjectMacro; pEmptyMacro ]
+            }
+
+        static member MacroLine = pMacroLine
+
+    type private MP = MacroParsers<ReadableString, ReadableStringSlice>
+
+    /// Parse a single macro definition line using XParsec.
     let private parseMacroLine (line: string) : MacroDecl option =
         if not (line.StartsWith("#define ")) then None
         else
-            let rest = line.Substring(8).TrimStart()
+            let reader = Reader.ofString line ()
+            match MP.MacroLine reader with
+            | Ok result -> Some result.Parsed
+            | Error _ -> None
 
-            // Check for function-like macro: NAME(args) body
-            let funcMatch = Regex.Match(rest, @"^(\w+)\(([^)]*)\)\s+(.+)$")
-            if funcMatch.Success then
-                let name = funcMatch.Groups.[1].Value
-                let args = funcMatch.Groups.[2].Value.Split(',') |> Array.map (fun s -> s.Trim()) |> List.ofArray
-                let body = funcMatch.Groups.[3].Value
-                Some {
-                    Name = name
-                    Kind = FunctionLike (args, body)
-                    RawValue = body
-                }
-            else
-                // Object-like macro: NAME value or NAME (expression)
-                let objMatch = Regex.Match(rest, @"^(\w+)\s+(.+)$")
-                if objMatch.Success then
-                    let name = objMatch.Groups.[1].Value
-                    let value = objMatch.Groups.[2].Value.Trim()
-
-                    // Classify the macro kind
-                    let kind =
-                        // Type cast pattern: ((Type*)value)
-                        let castMatch = Regex.Match(value, @"^\(\((\w+)\s*\*\)\s*(.+)\)$")
-                        if castMatch.Success then
-                            TypeCast (castMatch.Groups.[1].Value, castMatch.Groups.[2].Value)
-                        // Expression with operators
-                        elif value.Contains("+") || value.Contains("-") || value.Contains("<<") ||
-                             value.Contains(">>") || value.Contains("|") || value.Contains("&") then
-                            Expression value
-                        else
-                            SimpleValue value
-
-                    Some {
-                        Name = name
-                        Kind = kind
-                        RawValue = value
-                    }
-                else
-                    // Empty macro: NAME (no value)
-                    let emptyMatch = Regex.Match(rest, @"^(\w+)$")
-                    if emptyMatch.Success then
-                        Some {
-                            Name = emptyMatch.Groups.[1].Value
-                            Kind = SimpleValue ""
-                            RawValue = ""
-                        }
-                    else None
-
-    /// Filter macros to exclude compiler built-ins
+    /// Filter macros to exclude compiler built-ins.
     let private isUserMacro (name: string) (prefixes: string list) : bool =
-        // Exclude compiler built-ins
+        // Exclude compiler built-ins (__STDC__, __GNUC__ etc.)
         if name.StartsWith("__") && name.EndsWith("__") then false
-        elif name.StartsWith("_") && Char.IsUpper(name.[1]) then false  // Reserved identifiers
+        // Exclude reserved identifiers (_POSIX_SOURCE, _GNU_SOURCE etc.)
+        elif name.StartsWith("_") && name.Length > 1 && Char.IsUpper(name.[1]) then false
         elif prefixes.IsEmpty then true
         else prefixes |> List.exists (fun p -> name.StartsWith(p))
 

@@ -41,7 +41,7 @@ See [BAREWire Hardware Descriptors](~/repos/BAREWire/docs/08%20Hardware%20Descri
 
 ### Stage 1: Header Parsing
 
-Farscape's XParsec-based parser extracts C struct definitions:
+Farscape's clang two-pass parser (with XParsec post-processing) extracts C struct definitions:
 
 ```c
 // Input: CMSIS header
@@ -182,9 +182,9 @@ let mapQualifiersToAccess (qualifiers: CQualifier list) : AccessKind =
 
 Access constraints are **hardware-enforced**. The generated `AccessKind` informs:
 
-1. **fsnative type generation**: Fields get `readOnly`, `writeOnly`, or `readWrite` measures
+1. **FNCS type checking**: Fields carry access constraints through the type system
 2. **Alex code generation**: Prevents invalid read-modify-write on write-only registers
-3. **Compile-time safety**: Attempts to read a write-only register fail with FS8001
+3. **Compile-time safety**: Attempts to read a write-only register produce compile errors
 
 Example error:
 
@@ -359,7 +359,7 @@ Future Farscape versions will extract these into `BitFieldDescriptor`:
 
 1. BAREWire adds types to `src/Core/Hardware/`
 2. Farscape references BAREWire
-3. DescriptorGenerator.fs outputs `PeripheralDescriptor` instances
+3. Farscape outputs `PeripheralDescriptor` instances via the generation pipeline
 
 ### Near-term
 

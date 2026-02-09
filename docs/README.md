@@ -2,205 +2,97 @@
 
 ## Overview
 
-Farscape is the C/C++ binding generator for the Fidelity native F# compilation ecosystem. It parses C/C++ headers and generates type-safe F# bindings along with BAREWire memory descriptors for hardware targets.
+Farscape is the C/C++ binding generator for the Fidelity native F# compilation ecosystem. It parses C/C++ headers using clang and generates type-safe F# bindings, with XParsec parser combinators handling C type decomposition and macro classification.
 
 ## Table of Contents
 
 ### Architecture
 
-1. [Architecture Overview](./01_Architecture_Overview.md) - Pipeline structure and design principles
-2. [BAREWire Integration](./02_BAREWire_Integration.md) - Hardware descriptor generation
-3. [fsnative Integration](./03_fsnative_Integration.md) - Native type system coordination
-
-### Reference
-
-- [Type Mapping Reference](./Type_Mapping_Reference.md) - C to F# type mappings
-- [CMSIS HAL Guide](./CMSIS_HAL_Guide.md) - STM32 and ARM peripheral bindings
+1. [Architecture Overview](./01_Architecture_Overview.md) — Pipeline structure, four architectural patterns, module roles
+2. [BAREWire Integration](./02_BAREWire_Integration.md) — Hardware descriptor generation design (PLANNED)
+3. [FNCS Integration](./03_fsnative_Integration.md) — How Farscape output feeds the FNCS compilation pipeline
+4. [XParsec Architecture](./04_XParsec_Architecture.md) — Parser combinators, active patterns, catamorphisms, typed code AST
 
 ## Position in Fidelity Ecosystem
 
-Farscape sits at a critical junction in the Fidelity compilation pipeline:
+```mermaid
+flowchart TD
+    A["C/C++ Headers<br/>libc, CMSIS HAL, vendor SDKs"] --> B
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    Farscape in Fidelity Ecosystem                       │
-│                                                                         │
-│  ┌─────────────┐                                                        │
-│  │  C/C++      │  CMSIS headers, HAL libraries, vendor SDKs            │
-│  │  Headers    │                                                        │
-│  └──────┬──────┘                                                        │
-│         │                                                               │
-│         ▼                                                               │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │                         Farscape                                 │   │
-│  │  ┌───────────┐   ┌───────────┐   ┌───────────┐                  │   │
-│  │  │ XParsec   │──▶│ TypeMapper│──▶│ CodeGen   │                  │   │
-│  │  │ Parser    │   │           │   │           │                  │   │
-│  │  └───────────┘   └───────────┘   └───────────┘                  │   │
-│  │        │               │               │                         │   │
-│  │        │         Uses fsnative   Uses BAREWire                   │   │
-│  │        │         types           descriptors                     │   │
-│  └────────┼───────────────┼───────────────┼─────────────────────────┘   │
-│           │               │               │                             │
-│           ▼               ▼               ▼                             │
-│  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐                   │
-│  │  Types.fs   │   │ Bindings.fs │   │ Descriptors │                   │
-│  │ (F# structs)│   │  (externs)  │   │ (BAREWire)  │                   │
-│  └─────────────┘   └─────────────┘   └─────────────┘                   │
-│         │                 │                 │                           │
-│         └─────────────────┴─────────────────┘                           │
-│                           │                                             │
-│                           ▼                                             │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │                      Firefly/Alex                                │   │
-│  │  Consumes F# bindings and descriptors to generate native code   │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-│                           │                                             │
-│                           ▼                                             │
-│                    Native Binary                                        │
-└─────────────────────────────────────────────────────────────────────────┘
+    subgraph B["Farscape"]
+        B1["Clang Parser"] --> B2["XParsec +<br/>Active Patterns"] --> B3["Catamorphism + AST<br/>→ CodeRenderer"]
+    end
+
+    B --> C["Fidelity Mode<br/>Unchecked.defaultof stubs"]
+    B --> D["P/Invoke Mode<br/>DllImport attrs"]
+
+    C --> E["Firefly Pipeline<br/>FNCS → PSG → Baker → Alex → MLIR"]
+    D --> F[".NET Runtime Interop"]
+
+    E --> G["Native Binary"]
 ```
 
 ## Dependencies
 
-Farscape has two critical dependencies that must advance in lockstep:
+### FNCS (F# Native Compiler Services)
 
-### 1. fsnative (Type Provider)
+FNCS is the native type checker that processes the F# source Farscape generates. It operates in the Native Type Universe (NTU) — a BCL-free, freestanding type system with NTUKind types, SRTP resolution, and union-find constraint solving.
 
-fsnative provides the phantom type measures that make Farscape's output type-safe:
+Farscape generates `Unchecked.defaultof<T>` stubs. FNCS type-checks them. Baker saturates intrinsic operations. Alex emits platform-specific MLIR.
 
-```fsharp
-// fsnative provides
-[<Measure>] type peripheral
-[<Measure>] type readOnly
-[<Measure>] type writeOnly
-[<Measure>] type readWrite
+### BAREWire (Descriptor Types)
 
-type NativePtr<'T, [<Measure>] 'region, [<Measure>] 'access>
-
-// Farscape generates using these types
-type GPIO_TypeDef = {
-    IDR: NativePtr<uint32, peripheral, readOnly>
-    ODR: NativePtr<uint32, peripheral, readWrite>
-    BSRR: NativePtr<uint32, peripheral, writeOnly>
-}
-```
-
-**Without fsnative types**, Farscape can only generate untyped `nativeint` pointers.
-
-### 2. BAREWire (Descriptor Types)
-
-BAREWire provides the hardware descriptor types that Farscape populates:
-
-```fsharp
-// BAREWire provides
-type PeripheralDescriptor = { ... }
-type FieldDescriptor = { ... }
-type AccessKind = ReadOnly | WriteOnly | ReadWrite
-type MemoryRegionKind = Peripheral | SRAM | Flash | ...
-
-// Farscape populates these from parsed headers
-let gpioDescriptor = {
-    Name = "GPIO"
-    Instances = Map.ofList ["GPIOA", 0x48000000un; ...]
-    Layout = { Fields = [...] }
-    MemoryRegion = Peripheral
-}
-```
-
-**Without BAREWire types**, Farscape cannot generate the memory catalog that Alex needs.
-
-## The Interlock Requirement
-
-The dependency chain must be maintained:
-
-```
-FSharp.UMX ──absorption──▶ fsnative ──types──▶ Farscape ──uses──▶ BAREWire
-```
-
-See [Memory Interlock Requirements](https://github.com/speakeztech/firefly/docs/Memory_Interlock_Requirements.md) for full details.
+BAREWire will provide hardware descriptor types (`PeripheralDescriptor`, `FieldDescriptor`, `AccessKind`) that Farscape populates from CMSIS headers. This is PLANNED — not yet implemented.
 
 ## Output Modes
 
-Farscape supports three output modes:
+### Fidelity Mode (`--output-mode fidelity`)
 
-### 1. F# Bindings (`--output-mode bindings`)
-
-Standard F# type definitions and extern declarations:
+Generates `Unchecked.defaultof` stubs for the FNCS → Baker → Alex pipeline:
 
 ```fsharp
-[<Struct; StructLayout(LayoutKind.Sequential)>]
-type GPIO_InitTypeDef = {
-    Pin: uint32
-    Mode: uint32
-    Pull: uint32
-    Speed: uint32
-}
+module Fidelity.libc.Memory
 
-module Platform.Bindings =
-    let halGpioInit gpio init : unit = Unchecked.defaultof<unit>
+    /// void * memcpy(void *restrict __dest, const void *restrict __src, size_t __n)
+    let memcpy (dest: nativeint) (src: nativeint) (n: nativeint) : nativeint =
+        Unchecked.defaultof<nativeint>
 ```
 
-### 2. BAREWire Descriptors (`--output-mode descriptors`)
+### P/Invoke Mode (`--output-mode pinvoke`)
 
-Hardware memory catalog for Alex:
+Traditional .NET P/Invoke bindings with DllImport attributes.
 
-```fsharp
-let gpioDescriptor: PeripheralDescriptor = {
-    Name = "GPIO"
-    Instances = Map.ofList [
-        "GPIOA", 0x48000000un
-        "GPIOB", 0x48000400un
-    ]
-    Layout = {
-        Fields = [
-            { Name = "MODER"; Offset = 0x00; Type = U32; Access = ReadWrite }
-            { Name = "IDR"; Offset = 0x10; Type = U32; Access = ReadOnly }
-            { Name = "BSRR"; Offset = 0x18; Type = U32; Access = WriteOnly }
-        ]
-    }
-    MemoryRegion = Peripheral
-}
-```
+## Development Status
 
-### 3. Both (`--output-mode both`)
+### Implemented
 
-Complete output for Fidelity integration.
+- [x] Clang two-pass C header parsing (JSON AST + macro extraction)
+- [x] XParsec post-processing for C type strings and macro values
+- [x] Active pattern decomposition (type classification, macro filtering)
+- [x] Catamorphism-based declaration traversal
+- [x] Typed code AST (FsDecl/FsType) with single CodeRenderer
+- [x] Fidelity binding generation (`Unchecked.defaultof` pattern)
+- [x] P/Invoke binding generation (DllImport)
+- [x] Typedef chain resolution
+- [x] Macro constant extraction and numeric literal parsing
+- [x] Function pointer type detection (direct and typedef-resolved)
+- [x] F# keyword backtick quoting
+- [x] Struct/record generation
+- [x] Enum generation
+- [x] 89 unit tests covering all architectural patterns
 
-## CMSIS Qualifier Handling
+### Planned
 
-Farscape extracts access constraints from CMSIS `__I`, `__O`, `__IO` qualifiers:
-
-| CMSIS | C Definition | Generated AccessKind |
-|-------|--------------|---------------------|
-| `__I` | `volatile const` | `ReadOnly` |
-| `__O` | `volatile` | `WriteOnly` |
-| `__IO` | `volatile` | `ReadWrite` |
-
-These map to fsnative measures:
-- `__I` → `readOnly` measure
-- `__O` → `writeOnly` measure
-- `__IO` → `readWrite` measure
+- [ ] `[<FidelityExtern>]` attribute generation for FNCS recognition
+- [ ] BAREWire peripheral descriptor generation
+- [ ] Quotation-based output for PSG recognition patterns
+- [ ] C++ class/template support
+- [ ] CMSIS qualifier extraction (`__I`, `__O`, `__IO` → `AccessKind`)
 
 ## Related Documentation
 
 | Document | Location |
 |----------|----------|
 | BAREWire Hardware Descriptors | `~/repos/BAREWire/docs/08 Hardware Descriptors.md` |
-| fsnative Specification | `~/repos/fsnative-spec/docs/fidelity/FNCS_Specification.md` |
-| UMX Integration Plan | `~/repos/FSharp.UMX/docs/fidelity/UMX_Integration_Plan.md` |
+| FNCS Architecture | `~/repos/fsnative/` (Serena project: FNCS) |
 | Memory Interlock Requirements | `~/repos/Firefly/docs/Memory_Interlock_Requirements.md` |
-| Staged Memory Model | `~/repos/Firefly/docs/Staged_Memory_Model.md` |
-
-## Development Status
-
-Current implementation status:
-
-- [x] XParsec-based C header parsing (basic)
-- [x] Basic type mapping (primitives, pointers, structs)
-- [x] F# binding generation
-- [ ] CppParser wired to XParsec (currently hardcoded to cJSON.h)
-- [ ] Macro/constant extraction (#define values)
-- [ ] CMSIS qualifier extraction (__I, __O, __IO)
-- [ ] BAREWire descriptor generation (awaiting BAREWire types)
-- [ ] fsnative type integration (awaiting fsnative maturation)

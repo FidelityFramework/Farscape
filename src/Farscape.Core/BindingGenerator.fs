@@ -19,17 +19,10 @@ module BindingGenerator =
         OutputMode: OutputMode
     }
 
+    /// Extract struct/class type names from declarations using catamorphism.
     let extractStructTypes (declarations: CppParser.Declaration list) : string list =
-        let rec collect (decls: CppParser.Declaration list) =
-            [
-                for decl in decls do
-                    match decl with
-                    | CppParser.Declaration.Struct s -> yield s.Name
-                    | CppParser.Declaration.Namespace ns -> yield! collect ns.Declarations
-                    | CppParser.Declaration.Class c when c.Methods.IsEmpty -> yield c.Name
-                    | _ -> ()
-            ]
-        collect declarations
+        DeclarationAlgebra.cataDeclarations DeclarationAlgebra.structNameAlgebra declarations
+        |> List.choose id
         |> List.distinct
 
     let logVerbose (message: string) (verbose: bool) =

@@ -15,7 +15,13 @@ C Headers → Farscape → F# Source (Fidelity.[Target] + BAREWire.[Target] + Ex
 
 Farscape runs at **generation time**, before Firefly compilation.
 
-## Farscape's Quotation-Based Outputs
+## Farscape's Current Output: Fidelity Bindings
+
+> **STATUS (February 2026)**: Farscape currently generates `Platform.Bindings` pattern files with `Unchecked.defaultof`.
+> Alex provides platform-specific MLIR implementations. Quotation-based output is PLANNED but not yet implemented.
+> The generation pipeline uses XParsec, catamorphisms, active patterns, and a typed code AST (CodeRenderer).
+
+## Aspirational: Quotation-Based Outputs (NOT YET IMPLEMENTED)
 
 ### 1. Expr<PeripheralDescriptor> Quotations
 Memory layout information as quotations for nanopass consumption:
@@ -102,8 +108,7 @@ let fspGpioOpenDescriptor: Expr<FunctionDescriptor> = <@
 @>
 ```
 
-> **DEPRECATED**: The old `Platform.Bindings` pattern with `Unchecked.defaultof` is no longer used.
-> Use quotation semantic carriers instead.
+> **Note**: The quotation semantic carriers below are PLANNED, not yet implemented.
 
 ## What Farscape Parses
 

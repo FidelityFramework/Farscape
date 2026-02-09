@@ -1,18 +1,21 @@
-# Farscape-fsnative Integration Contract
+# Farscape-FNCS Integration Contract
 
-## Status: FNCS MATURE, READY FOR INTEGRATION (January 2026)
+## Status (February 2026)
 
-**FNCS has reached production maturity.** Firefly samples 01-09 all pass with principled implementations including:
-- Full DU infrastructure (DULayout coeffect for heterogeneous unions)
-- Flat closure model (ClosureLayout coeffect)
-- Baker decomposition for all collection HOFs (List, Map, Set, Seq, Option)
-- Coeffect-driven MLIR emission
+**FNCS is a complete, standalone native type checker** operating in the Native Type Universe (NTU).
+It has NTUKind types, SRTP resolution,
+union-find constraint solving, and full expression checking.
 
-The integration contract defined below can now be fulfilled.
+**Current integration**: Farscape generates `Unchecked.defaultof` stubs → FNCS type-checks them →
+Baker saturates → Alex emits platform-specific MLIR. This works end-to-end for libc bindings.
 
-## The Integration Surface
+**Planned integration** (below): `[<FidelityExtern>]` attributes, quotation semantic carriers,
+MemoryModel records for embedded targets.
 
-Farscape generates output that fsnative's nanopass pipeline consumes. The integration point is the `MemoryModel` record type.
+## Planned Integration Surface
+
+Farscape will generate output that FNCS's nanopass pipeline consumes. The planned integration point
+is the `MemoryModel` record type (for embedded/CMSIS targets).
 
 ## What Farscape Provides
 

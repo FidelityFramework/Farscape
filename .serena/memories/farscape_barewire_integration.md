@@ -1,15 +1,14 @@
 # Farscape + BAREWire Integration Architecture
 
-> **Status Update (January 2026)**: **FNCS is production mature.** Firefly samples 01-09 pass with full DU infrastructure, closures, and Baker decomposition. The integration architecture below can now be implemented.
+> **Current State (February 2026)**: Farscape generates `Unchecked.defaultof` stubs with XParsec-powered
+> type decomposition. Output is validated against three real libc headers (unistd.h, string.h, stdlib.h).
+> Quotation-based output and BAREWire descriptor generation are PLANNED, not yet implemented.
 >
-> **Architecture Update (December 2025)**: Farscape now generates **quotation-based output** with active patterns.
-> See `~/repos/Firefly/docs/Quotation_Based_Memory_Architecture.md` for the unified architecture.
->
-> **Target Update (January 2026)**: Primary unikernel target changed from STM32L5 to **Renesas RA6M5** (ARM Cortex-M33).
+> **Target**: Primary unikernel target is **Renesas RA6M5** (ARM Cortex-M33).
 
-## Quotation-Based Output
+## Planned: Quotation-Based Output
 
-Farscape generates three artifact types using F# quotations and active patterns:
+When implemented, Farscape will generate three artifact types using F# quotations and active patterns:
 
 1. **Expr<PeripheralDescriptor>** - Quotations encoding hardware memory layout
 2. **Active Patterns** - PSG recognition patterns like `(|GpioWritePin|_|)`

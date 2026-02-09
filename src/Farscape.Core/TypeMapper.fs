@@ -3,7 +3,10 @@ namespace Farscape.Core
 open System
 open System.Collections.Generic
 open System.Runtime.InteropServices
-open System.Text.RegularExpressions
+open XParsec
+open XParsec.Parsers
+open XParsec.Combinators
+open XParsec.CharParsers
 
 module TypeMapper =
     type TypeMapping = {
@@ -124,11 +127,13 @@ module TypeMapper =
         typeName.Contains("[") && typeName.Contains("]")
 
     let getArrayLength (typeName: string) =
-        let match' = Regex.Match(typeName, @"\[(\d+)\]")
-        if match'.Success then
-            Some(Int32.Parse(match'.Groups.[1].Value))
-        else
-            None
+        let pArrayLen =
+            skipMany (satisfyL (fun c -> c <> '[') "non-bracket")
+            >>. (skipChar '[' >>. pint32 .>> skipChar ']')
+        let reader = Reader.ofString typeName ()
+        match pArrayLen reader with
+        | Ok result -> Some result.Parsed
+        | Error _ -> None
 
     let cleanTypeName (typeName: string) =
         typeName
@@ -188,41 +193,20 @@ module TypeMapper =
         }
 
     let mapTypes (declarations: CppParser.Declaration list) : TypeMapping list =
-        let rec collectTypes (decls: CppParser.Declaration list) =
-            let mutable types = []
-            
-            for decl in decls do
+        let rec collectTypes (decls: CppParser.Declaration list) : TypeMapping list =
+            decls |> List.collect (fun decl ->
                 match decl with
                 | CppParser.Declaration.Function f ->
-                    types <- mapType f.ReturnType :: types
-                    for (_, paramType) in f.Parameters do
-                        types <- mapType paramType :: types
-                        
+                    mapType f.ReturnType :: (f.Parameters |> List.map (fun (_, pt) -> mapType pt))
                 | CppParser.Declaration.Struct s ->
-                    types <- mapType s.Name :: types
-                    for field in s.Fields do
-                        types <- mapType field.Type :: types
-
-                | CppParser.Declaration.Macro _ ->
-                    () // Macros don't contribute to type mappings
-                        
-                | CppParser.Declaration.Enum e ->
-                    types <- mapType e.Name :: types
-                    
-                | CppParser.Declaration.Typedef t ->
-                    types <- mapType t.Name :: types
-                    types <- mapType t.UnderlyingType :: types
-                    
-                | CppParser.Declaration.Namespace ns ->
-                    types <- collectTypes ns.Declarations @ types
-                    
+                    mapType s.Name :: (s.Fields |> List.map (fun f -> mapType f.Type))
+                | CppParser.Declaration.Macro _ -> []
+                | CppParser.Declaration.Enum e -> [mapType e.Name]
+                | CppParser.Declaration.Typedef t -> [mapType t.Name; mapType t.UnderlyingType]
+                | CppParser.Declaration.Namespace ns -> collectTypes ns.Declarations
                 | CppParser.Declaration.Class c ->
-                    types <- mapType c.Name :: types
-                    for field in c.Fields do
-                        types <- mapType field.Type :: types
-                    types <- collectTypes c.Methods @ types
-            
-            types
-            
+                    mapType c.Name
+                    :: (c.Fields |> List.map (fun f -> mapType f.Type))
+                    @ collectTypes c.Methods)
         collectTypes declarations
         |> List.distinctBy (fun t -> t.OriginalName)

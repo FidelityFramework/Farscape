@@ -19,7 +19,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Folder Include="obj\Debug\net9.0\" />
+    <ProjectReference Include="../../src/Farscape.Core/Farscape.Core.fsproj" />
   </ItemGroup>
 
 </Project>

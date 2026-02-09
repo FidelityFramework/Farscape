@@ -10,12 +10,21 @@
     <Compile Include="Types.fs" />
     <Compile Include="CppParser.fs" />
     <Compile Include="TypeMapper.fs" />
+    <Compile Include="CTypeParser.fs" />
+    <Compile Include="ActivePatterns.fs" />
+    <Compile Include="DeclarationAlgebra.fs" />
+    <Compile Include="CodeAST.fs" />
+    <Compile Include="CodeRenderer.fs" />
     <Compile Include="FidelityCodeGenerator.fs" />
     <Compile Include="MemoryManager.fs" />
     <Compile Include="DelegatePointer.fs" />
     <Compile Include="CodeGenerator.fs" />
     <Compile Include="Project.fs" />
     <Compile Include="BindingGenerator.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../../XParsec/src/XParsec/XParsec.fsproj" />
   </ItemGroup>
 
 </Project>

@@ -4,313 +4,276 @@
 
 Farscape generates F# bindings from C/C++ headers for the Fidelity native compilation ecosystem. Unlike traditional FFI tools that target runtime interop, Farscape generates code specifically for ahead-of-time native compilation via Firefly.
 
-> **Architecture Update (December 2025)**: Farscape now generates **quotation-based output** with active patterns.
-> See `~/repos/Firefly/docs/Quotation_Based_Memory_Architecture.md` for the unified four-component architecture.
-
 ## Design Principles
 
-### 1. XParsec-Powered Parsing
+### 1. Clang-Powered Parsing with XParsec Post-Processing
 
-Farscape uses XParsec, the same parser combinator library that powers Firefly's PSG traversal. This provides:
+Farscape uses **clang** for robust C/C++ header parsing via a two-pass strategy (JSON AST + macro extraction). XParsec parser combinators handle **post-processing** — decomposing C type strings, classifying macro values, and parsing numeric literals from clang's output.
 
-- Type-safe parsing with compile-time guarantees
-- Composable parsers for complex C/C++ constructs
-- Excellent error messages with precise locations
-- Pure F# implementation with no external dependencies
+### 2. Four Architectural Patterns
 
-### 2. Fidelity-First Output
+Every module in Farscape is built from one of four patterns:
+
+| Pattern | Module | Purpose |
+|---------|--------|---------|
+| **XParsec Parsers** | `CTypeParser.fs` | Decompose C type strings, parse macros and numeric literals |
+| **Active Patterns** | `ActivePatterns.fs` | Classify types, filter macros, quote F# keywords |
+| **Catamorphism** | `DeclarationAlgebra.fs` | Single fold over Declaration DU — the ONLY traversal |
+| **Typed Code AST** | `CodeAST.fs` + `CodeRenderer.fs` | FsDecl tree → F# source (the ONLY StringBuilder) |
+
+### 3. Fidelity-First Output
 
 Output is designed for Firefly native compilation, not .NET runtime interop:
 
-- Uses fsnative phantom types for memory safety
-- Generates BAREWire descriptors for hardware targets
-- Produces `Platform.Bindings` declarations that Alex recognizes
+- Generates `Unchecked.defaultof<T>` stubs that Alex recognizes
+- Alex provides platform-specific MLIR implementations for these bindings
 - No BCL dependencies in generated code
+- Also supports P/Invoke mode for traditional .NET interop
 
-### 3. Embedded Focus
+### 4. Deterministic Output
 
-First-class support for embedded targets:
-
-- CMSIS HAL header parsing
-- Peripheral register extraction
-- Volatile qualifier preservation
-- Memory-mapped I/O patterns
+Generated F# source is byte-identical across runs. No hash-dependent ordering, no mutable state in the generation pipeline.
 
 ## Pipeline Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         Farscape Pipeline                               │
-│                                                                         │
-│  Stage 1: Parsing                                                       │
-│  ┌───────────────────────────────────────────────────────────────────┐ │
-│  │  HeaderParser.fs (XParsec)                                        │ │
-│  │  - C/C++ lexical analysis                                         │ │
-│  │  - Declaration extraction                                          │ │
-│  │  - Macro preprocessing (future)                                   │ │
-│  └───────────────────────────────────────────────────────────────────┘ │
-│                                │                                        │
-│                                ▼                                        │
-│  Stage 2: Type Mapping                                                  │
-│  ┌───────────────────────────────────────────────────────────────────┐ │
-│  │  TypeMapper.fs                                                    │ │
-│  │  - C type → F# type conversion                                    │ │
-│  │  - Pointer handling (const, volatile)                             │ │
-│  │  - Struct field layout                                            │ │
-│  └───────────────────────────────────────────────────────────────────┘ │
-│                                │                                        │
-│                                ▼                                        │
-│  Stage 3: Code Generation                                               │
-│  ┌───────────────────────────────────────────────────────────────────┐ │
-│  │  CodeGenerator.fs                                                 │ │
-│  │  - F# type definitions                                            │ │
-│  │  - Platform.Bindings declarations                                 │ │
-│  │  - Module structure                                               │ │
-│  └───────────────────────────────────────────────────────────────────┘ │
-│                                │                                        │
-│                                ▼                                        │
-│  Stage 4: Quotation & Pattern Generation                               │
-│  ┌───────────────────────────────────────────────────────────────────┐ │
-│  │  QuotationGenerator.fs                                            │ │
-│  │  - Expr<PeripheralDescriptor> quotations                          │ │
-│  │  - Active patterns for PSG recognition                            │ │
-│  │  - MemoryModel record generation                                  │ │
-│  └───────────────────────────────────────────────────────────────────┘ │
-│                                │                                        │
-│                                ▼                                        │
-│  Output                                                                 │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐   │
-│  │  Types.fs   │  │ Bindings.fs │  │Quotations.fs│  │ Patterns.fs │   │
-│  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘   │
-└─────────────────────────────────────────────────────────────────────────┘
+                         Farscape Pipeline
+ ┌────────────────────────────────────────────────────────────────────┐
+ │                                                                    │
+ │  C/C++ Header ──► Clang Two-Pass ──► Declaration AST              │
+ │  (stdlib.h)       (CppParser.fs)     (functions, structs,         │
+ │                                       enums, typedefs, macros)    │
+ │                                           │                       │
+ │              ┌────────────────────────────┤                       │
+ │              ▼                            ▼                       │
+ │   XParsec Post-Processing          TypeMapper.fs                  │
+ │   (CTypeParser.fs)                 (type dictionary)              │
+ │              │                            │                       │
+ │              ▼                            │                       │
+ │   Active Patterns                        │                       │
+ │   (ActivePatterns.fs)                    │                       │
+ │              │                            │                       │
+ │              └────────────┬───────────────┘                       │
+ │                           ▼                                       │
+ │              Catamorphism (DeclarationAlgebra.fs)                  │
+ │              Single fold over Declaration DU                      │
+ │                           │                                       │
+ │                           ▼                                       │
+ │              FidelityCodeGenerator.fs                              │
+ │              Declaration list → FsDecl AST                        │
+ │                           │                                       │
+ │                           ▼                                       │
+ │              CodeRenderer.fs                                      │
+ │              FsDecl → F# source string                            │
+ │              (the ONLY StringBuilder)                              │
+ │                                                                    │
+ └────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Core Modules
 
-### HeaderParser.fs
+### CppParser.fs — Clang Two-Pass Parsing
 
-XParsec-based parser for C/C++ headers:
+Parses C/C++ headers using clang in two passes:
+
+1. **Pass 1 (JSON AST)**: `clang -Xclang -ast-dump=json` extracts functions, structs, enums, typedefs, classes, namespaces
+2. **Pass 2 (Macro extraction)**: `clang -dM -E` extracts `#define` macros
+
+Produces a `Declaration` discriminated union:
 
 ```fsharp
-// Parse a C struct definition
-let structParser =
-    parse {
-        do! keyword "struct"
-        let! name = optional identifier
-        do! symbol "{"
-        let! fields = many fieldParser
-        do! symbol "}"
-        return StructDef { Name = name; Fields = fields }
-    }
-
-// Parse a field with qualifiers
-let fieldParser =
-    parse {
-        let! qualifiers = many qualifier  // volatile, const, __I, __O, __IO
-        let! baseType = typeSpecifier
-        let! name = identifier
-        let! arraySize = optional arrayDeclarator
-        do! symbol ";"
-        return { Qualifiers = qualifiers; Type = baseType; Name = name; ArraySize = arraySize }
-    }
+type Declaration =
+    | Function of FunctionDecl
+    | Struct of StructDecl
+    | Enum of EnumDecl
+    | Typedef of TypedefInfo
+    | Macro of MacroDecl
+    | Namespace of NamespaceDecl
+    | Class of ClassDecl
 ```
 
-### TypeMapper.fs
+### CTypeParser.fs — XParsec Post-Processing
 
-Maps C types to F# equivalents:
+XParsec parsers for C type strings and macro values, using the generic class pattern:
 
 ```fsharp
-let mapCType (cType: CType) : FSharpType =
+type Parsers<'Input, 'InputSlice ...>() =
+    static let pQualifier = choice [ stringReturn "const " (); ... ]
+    static let pCType =
+        parser {
+            do! skipMany pQualifier
+            let! firstWord = pTypeWord
+            let! restWords = many (spaces1 >>. pTypeWord)
+            let! stars = many (skipChar '*')
+            return { BaseType = ...; PointerDepth = stars.Length }
+        }
+    static member CType = pCType
+
+type private P = Parsers<ReadableString, ReadableStringSlice>
+```
+
+Provides four public API functions:
+- `tryParseCType` — C type string → `CTypeInfo` (base type + pointer depth)
+- `parseMacroLine` — `#define` line → `MacroDecl`
+- `tryParseInteger` — decimal/hex string → `int64`
+- `tryParseArraySize` — `"uint32_t[4]"` → `4`
+
+### ActivePatterns.fs — Type Classification
+
+Active patterns backed by XParsec parsers:
+
+```fsharp
+// C type decomposition
+let (|ParsedCType|_|) (s: string) : CTypeInfo option = CTypeParser.tryParseCType s
+
+let (|CharPointer|VoidPointer|TypedPointer|ValueType|) (info: CTypeInfo) =
+    if info.PointerDepth > 0 then
+        if info.BaseType.EndsWith("char") then CharPointer
+        elif info.BaseType = "void" then VoidPointer
+        else TypedPointer info.BaseType
+    else ValueType info.BaseType
+
+// Macro classification
+let (|CompilerBuiltin|InternalMacro|PredefinedMacro|UserMacro|) (name: string) = ...
+
+// Numeric parsing
+let (|IntegerLiteral|_|) (s: string) : int64 option = CTypeParser.tryParseInteger s
+
+// F# keyword quoting
+let (|FSharpKeyword|CleanName|) (name: string) = ...
+```
+
+### DeclarationAlgebra.fs — Catamorphism
+
+A fold algebra over the Declaration DU — the single, canonical traversal:
+
+```fsharp
+type DeclarationAlgebra<'R> = {
+    OnFunction:  FunctionDecl  -> 'R
+    OnStruct:    StructDecl    -> 'R
+    OnEnum:      EnumDecl      -> 'R
+    OnTypedef:   TypedefInfo   -> 'R
+    OnMacro:     MacroDecl     -> 'R
+    OnNamespace: NamespaceDecl -> 'R
+    OnClass:     ClassDecl     -> 'R
+}
+
+let cataDeclarations (algebra: DeclarationAlgebra<'R>) (decls: Declaration list) : 'R list =
+    decls |> List.map (fun decl ->
+        match decl with
+        | Declaration.Function f -> algebra.OnFunction f
+        | Declaration.Struct s   -> algebra.OnStruct s
+        | ...)
+```
+
+Pre-built algebras: `typedefAlgebra` (extract typedef pairs), `structNameAlgebra` (extract struct names).
+
+### CodeAST.fs — Typed Code AST
+
+Typed representation of generated F# code:
+
+```fsharp
+type FsType = Named of string | Generic of string * FsType | Unit
+type FsExpr = DefaultOf of FsType
+type FsDecl =
+    | Module of name: string * comment: string * decls: FsDecl list
+    | XmlDoc of text: string
+    | LetBinding of name: string * params': FsParam list * returnType: FsType * body: FsExpr
+    | LiteralBinding of name: string * value: string
+    | RecordType of name: string * fields: (string * FsType) list * doc: string option
+    | EnumType of name: string * values: (string * int64) list * doc: string option
+    | Comment of text: string
+    | BlankLine
+```
+
+### CodeRenderer.fs — Single Renderer
+
+The ONLY `StringBuilder` in Farscape. Converts `FsDecl` tree to F# source string:
+
+```fsharp
+let render (decl: FsDecl) : string =
+    let sb = StringBuilder()
+    renderDecl sb 0 decl
+    sb.ToString().TrimEnd() + "\n"
+```
+
+### FidelityCodeGenerator.fs — Orchestration
+
+Wires everything together using one catamorphism pass:
+
+1. Build typedef resolution map (catamorphism + pure recursive chain resolution)
+2. Categorize declarations via `generationAlgebra` (one pass)
+3. Assemble categories into `FsDecl` list
+4. Wrap in `FsDecl.Module`
+5. Render via `CodeRenderer.render`
+
+### TypeMapper.fs — Type Dictionary
+
+Pure data mapping from C type names to F# type names. No parsing logic — just a dictionary lookup:
+
+```fsharp
+let getFSharpType (cType: string) : string =
     match cType with
-    | CPrimitive "uint32_t" -> FSharpType.UInt32
-    | CPrimitive "int32_t" -> FSharpType.Int32
-    | CPointer (inner, qualifiers) ->
-        let region = if hasVolatile qualifiers then "peripheral" else "sram"
-        let access = extractAccess qualifiers  // from __I, __O, __IO
-        FSharpType.NativePtr (mapCType inner, region, access)
-    | CStruct fields ->
-        FSharpType.Record (fields |> List.map mapField)
-    | _ -> ...
+    | "int" | "int32_t" -> "int32"
+    | "unsigned int" | "uint32_t" -> "uint32"
+    | "char" | "signed char" -> "byte"
+    | "void" -> "unit"
+    | ...
 ```
 
-### CodeGenerator.fs
+## Output Modes
 
-Generates F# source code:
+### Fidelity Mode
+
+Generates `Unchecked.defaultof` stubs for Firefly/Alex consumption:
 
 ```fsharp
-let generateStruct (name: string) (fields: FieldDef list) =
-    sprintf """
-[<Struct; StructLayout(LayoutKind.Sequential)>]
-type %s = {
-%s
-}
-""" name (fields |> List.map generateField |> String.concat "\n")
+module Fidelity.libc.Memory
 
-let generateBinding (func: FunctionDef) =
-    sprintf """
-    let %s %s : %s = Unchecked.defaultof<%s>
-""" func.Name (generateParams func.Params) func.ReturnType func.ReturnType
+// Generated by Farscape — Fidelity binding for libc
+// Alex provides platform-specific MLIR implementations for these bindings.
+
+    /// void * memcpy(void *restrict __dest, const void *restrict __src, size_t __n)
+    let memcpy (dest: nativeint) (src: nativeint) (n: nativeint) : nativeint =
+        Unchecked.defaultof<nativeint>
 ```
 
-### QuotationGenerator.fs (NEW - December 2025)
+### P/Invoke Mode
 
-Generates F# quotations and active patterns for the nanopass pipeline:
+Traditional .NET P/Invoke bindings with DllImport attributes (via `CodeGenerator.fs`).
 
-```fsharp
-// Generate quotation for peripheral descriptor
-let generatePeripheralQuotation (peripheral: PeripheralDef) =
-    sprintf """
-let %sQuotation: Expr<PeripheralDescriptor> = <@
-    { Name = "%s"
-      Instances = Map.ofList [%s]
-      Layout = { Size = %d; Alignment = %d; Fields = %sFields }
-      MemoryRegion = Peripheral }
-@>
-""" peripheral.Name peripheral.Name
-    (generateInstanceList peripheral.Instances)
-    peripheral.Size
-    peripheral.Alignment
-    peripheral.Name
+## File Compile Order
 
-// Generate active pattern for PSG recognition
-let generateActivePattern (func: FunctionDef) =
-    sprintf """
-let (|%s|_|) (node: PSGNode) : %s option =
-    match node with
-    | CallToExtern "%s" args -> Some (extractArgs args)
-    | _ -> None
-""" func.PatternName func.ExtractedType func.ExternName
-
-// Generate MemoryModel record
-let generateMemoryModel (target: TargetDef) =
-    sprintf """
-let %sMemoryModel: MemoryModel = {
-    TargetFamily = "%s"
-    PeripheralDescriptors = [%s]
-    RegisterConstraints = [%s]
-    Regions = %sRegions
-    Recognize = recognize%sMemoryOperation
-    CacheTopology = None
-    CoherencyModel = None
-}
-""" target.Name target.Family
-    (target.Peripherals |> List.map (fun p -> p.Name + "Quotation") |> String.concat "; ")
-    (generateConstraintList target)
-    target.Name
-    target.Name
+```xml
+<Compile Include="ProjectOptions.fs" />
+<Compile Include="Types.fs" />
+<Compile Include="CppParser.fs" />
+<Compile Include="TypeMapper.fs" />
+<Compile Include="CTypeParser.fs" />
+<Compile Include="ActivePatterns.fs" />
+<Compile Include="DeclarationAlgebra.fs" />
+<Compile Include="CodeAST.fs" />
+<Compile Include="CodeRenderer.fs" />
+<Compile Include="FidelityCodeGenerator.fs" />
+<Compile Include="MemoryManager.fs" />
+<Compile Include="DelegatePointer.fs" />
+<Compile Include="CodeGenerator.fs" />
+<Compile Include="Project.fs" />
+<Compile Include="BindingGenerator.fs" />
 ```
 
-### DescriptorGenerator.fs (Legacy)
-
-Generates BAREWire hardware descriptors:
-
-```fsharp
-let generatePeripheralDescriptor (peripheral: PeripheralDef) =
-    sprintf """
-let %sDescriptor: PeripheralDescriptor = {
-    Name = "%s"
-    Instances = Map.ofList [
-%s
-    ]
-    Layout = {
-        Size = %d
-        Alignment = %d
-        Fields = [
-%s
-        ]
-    }
-    MemoryRegion = Peripheral
-}
-""" peripheral.Name peripheral.Name
-    (generateInstances peripheral.Instances)
-    peripheral.Size
-    peripheral.Alignment
-    (generateFields peripheral.Fields)
-```
-
-## Library Markers
-
-Farscape uses special library names that Firefly's Alex recognizes:
-
-| Library Name | Target | Code Generation |
-|--------------|--------|-----------------|
-| `__cmsis` | ARM CMSIS HAL | Memory-mapped register access |
-| `__fidelity` | Fidelity.Platform | Syscalls or platform APIs |
-| `libname` | Standard library | Dynamic linking |
-
-## Example: CMSIS GPIO
-
-Input header:
-```c
-typedef struct {
-    __IO uint32_t MODER;
-    __IO uint32_t OTYPER;
-    __I  uint32_t IDR;
-    __IO uint32_t ODR;
-    __O  uint32_t BSRR;
-} GPIO_TypeDef;
-
-#define GPIOA_BASE 0x48000000UL
-#define GPIOA ((GPIO_TypeDef *) GPIOA_BASE)
-
-void HAL_GPIO_Init(GPIO_TypeDef *GPIOx, GPIO_InitTypeDef *GPIO_Init);
-void HAL_GPIO_WritePin(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin, GPIO_PinState PinState);
-```
-
-Generated Types.fs:
-```fsharp
-namespace CMSIS.STM32L5.GPIO
-
-open Fidelity.Platform
-
-[<Struct; StructLayout(LayoutKind.Sequential)>]
-type GPIO_TypeDef = {
-    MODER: NativePtr<uint32, peripheral, readWrite>
-    OTYPER: NativePtr<uint32, peripheral, readWrite>
-    IDR: NativePtr<uint32, peripheral, readOnly>
-    ODR: NativePtr<uint32, peripheral, readWrite>
-    BSRR: NativePtr<uint32, peripheral, writeOnly>
-}
-
-let GPIOA_BASE = 0x48000000un
-```
-
-Generated Bindings.fs:
-```fsharp
-module Platform.Bindings =
-    let halGpioInit gpio init : unit = Unchecked.defaultof<unit>
-    let halGpioWritePin gpio pin state : unit = Unchecked.defaultof<unit>
-```
-
-Generated Descriptors.fs:
-```fsharp
-let gpioDescriptor: PeripheralDescriptor = {
-    Name = "GPIO"
-    Instances = Map.ofList ["GPIOA", 0x48000000un]
-    Layout = {
-        Size = 0x400
-        Alignment = 4
-        Fields = [
-            { Name = "MODER"; Offset = 0x00; Type = U32; Access = ReadWrite; ... }
-            { Name = "OTYPER"; Offset = 0x04; Type = U32; Access = ReadWrite; ... }
-            { Name = "IDR"; Offset = 0x10; Type = U32; Access = ReadOnly; ... }
-            { Name = "ODR"; Offset = 0x14; Type = U32; Access = ReadWrite; ... }
-            { Name = "BSRR"; Offset = 0x18; Type = U32; Access = WriteOnly; ... }
-        ]
-    }
-    MemoryRegion = Peripheral
-}
-```
+Key constraint: `CppParser.fs` compiles before `CTypeParser.fs` — the XParsec parsers are in a separate module downstream of the parser types.
 
 ## Current Limitations
 
-1. **CppParser Hardcoded**: Currently only parses cJSON.h; needs XParsec wiring
-2. **No Macro Extraction**: #define constants not yet extracted
-3. **Missing CMSIS Qualifiers**: __I, __O, __IO not yet recognized
-4. **Awaiting Dependencies**: Full output requires fsnative types and BAREWire descriptors
+1. **No BAREWire descriptors** — awaiting BAREWire hardware descriptor types
+2. **No `[<FidelityExtern>]` attributes** — binding metadata not yet carried through pipeline
+3. **No quotation output** — planned for PSG recognition patterns (quotation semantic carriers)
+4. **No C++ class/template support** — class declarations parsed but not generated
+5. **No CMSIS qualifier extraction** — `__I`/`__O`/`__IO` not yet mapped to `AccessKind`
 
 ## Related Documents
 
-- [BAREWire Integration](./02_BAREWire_Integration.md)
-- [fsnative Integration](./03_fsnative_Integration.md)
-- [Type Mapping Reference](./Type_Mapping_Reference.md)
+- [BAREWire Integration](./02_BAREWire_Integration.md) — Hardware descriptor generation design
+- [fsnative Integration](./03_fsnative_Integration.md) — Native type system coordination
+- [XParsec Architecture](./04_XParsec_Architecture.md) — How Farscape uses XParsec throughout
