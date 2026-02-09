@@ -1,6 +1,6 @@
 # Farscape
 
-F# bindings generator for C/C++ libraries, part of the Fidelity native compilation ecosystem.
+F# bindings generator for C libraries, part of the Fidelity native compilation ecosystem.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![License: Commercial](https://img.shields.io/badge/License-Commercial-orange.svg)](Commercial.md)
@@ -12,7 +12,7 @@ Under Active Development<br>
 
 ## Overview
 
-Farscape automatically generates F# bindings from C/C++ header files. It uses **clang** for robust header parsing and **XParsec** parser combinators for post-processing C type strings and macro values, producing type-safe F# code that integrates with the Fidelity native compilation toolchain.
+Farscape automatically generates F# bindings from C header files. It uses **clang** for robust header parsing and **XParsec** parser combinators for post-processing C type strings and macro values, producing type-safe F# code that integrates with the Fidelity native compilation toolchain.
 
 The codebase is structured around four functional programming patterns that compose cleanly:
 
@@ -27,7 +27,7 @@ Farscape is part of the [Fidelity](https://github.com/FidelityFramework) native 
 
 ```mermaid
 flowchart TD
-    A["C/C++ Header<br/>(stdlib.h, unistd.h)"] --> B["Clang Two-Pass<br/>(CppParser.fs)"]
+    A["C Header<br/>(stdlib.h, unistd.h)"] --> B["Clang Two-Pass<br/>(CppParser.fs)"]
     B --> C["Declaration AST<br/>(functions, structs, enums,<br/>typedefs, macros)"]
     C --> D["XParsec Post-Processing<br/>(CTypeParser.fs)"]
     C --> E["TypeMapper.fs<br/>(type dictionary)"]
@@ -136,7 +136,7 @@ farscape generate \
     -v
 
 Options:
-      --header <header>         Path to C/C++ header file (required)
+      --header <header>         Path to C header file (required)
   -l, --library <library>       Name of native library (required)
   -o, --output <output>         Output directory [default: ./output]
   -n, --namespace <namespace>   Namespace for generated code [default: NativeBindings]
