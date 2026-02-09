@@ -21,18 +21,7 @@ The codebase is structured around four functional programming patterns that comp
 - **Catamorphism** (`DeclarationAlgebra.fs`): A fold algebra over the Declaration DU; one traversal function serves typedef extraction, function collection, and full code generation through composable algebras
 - **Typed Code AST** (`CodeAST.fs` → `CodeRenderer.fs`): Generation produces `FsDecl` values (typed, inspectable, testable AST nodes), not strings. The ONLY `StringBuilder` in the codebase is the final `CodeRenderer.render`
 
-## The Fidelity Framework
-
-Farscape is part of the **Fidelity** native F# compilation ecosystem:
-
-| Project | Role |
-|---------|------|
-| **Firefly** | AOT compiler: F# → PSG → MLIR → Native binary |
-| **Fidelity.Platform** | Native standard library with platform bindings |
-| **fsnative** | F# Native Compiler Services, compiler-level type system for native targets |
-| **BAREWire** | Binary encoding, memory mapping, zero-copy IPC |
-| **Farscape** | C/C++ header → F# binding generation |
-| **XParsec** | Parser combinators powering PSG traversal and type parsing |
+Farscape is part of the [Fidelity](https://github.com/FidelityFramework) native F# compilation ecosystem.
 
 ## Architecture
 
@@ -222,39 +211,6 @@ cd tests/Farscape.Tests && dotnet test
 #   - CodeRenderer: FsDecl → F# source for all declaration types
 #   - FidelityCodeGenerator: End-to-end declaration → source generation
 ```
-
-## Prerequisites
-
-- [.NET 9.0 SDK](https://dotnet.microsoft.com/download/dotnet/9.0) or later
-- Clang (for header parsing)
-- XParsec (project reference, automatically built)
-
-## Development Status
-
-### Implemented
-
-- [x] Clang two-pass C header parsing (JSON AST + macro extraction)
-- [x] XParsec post-processing for C type strings and macro values
-- [x] Active pattern decomposition (type classification, macro filtering)
-- [x] Catamorphism-based declaration traversal
-- [x] Typed code AST (FsDecl/FsType) with single CodeRenderer
-- [x] Fidelity binding generation (`Unchecked.defaultof` pattern)
-- [x] P/Invoke binding generation (DllImport)
-- [x] Typedef chain resolution
-- [x] Macro constant extraction and numeric literal parsing
-- [x] Function pointer type detection (direct and typedef-resolved)
-- [x] F# keyword backtick quoting
-- [x] Struct/record generation
-- [x] Enum generation
-- [x] 89 unit tests covering all architectural patterns
-
-### Planned
-
-- [ ] BAREWire peripheral descriptor generation
-- [ ] `[<FidelityExtern>]` attribute generation for FNCS recognition
-- [ ] Quotation-based output for PSG recognition patterns
-- [ ] C++ class/template support
-- [ ] CMSIS qualifier extraction (`__I`, `__O`, `__IO` → `AccessKind`)
 
 ## License
 
