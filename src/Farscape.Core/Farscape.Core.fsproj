@@ -3,6 +3,9 @@
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <PackageId>Fidelity.Farscape</PackageId>
+    <Description>F# bindings generator for C/C++ headers, part of the Fidelity native compilation ecosystem. Uses XParsec parser combinators, active patterns, catamorphisms, and a typed code AST.</Description>
+    <PackageTags>fsharp;f#;bindings;codegen;native;fidelity;xparsec</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>
@@ -23,7 +26,11 @@
     <Compile Include="BindingGenerator.fs" />
   </ItemGroup>
 
-  <ItemGroup>
+  <!-- XParsec: NuGet for packaging, local project ref for dev override -->
+  <ItemGroup Condition="'$(UseFarscapeLocalDeps)' != 'true'">
+    <PackageReference Include="XParsec" Version="0.3.1" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseFarscapeLocalDeps)' == 'true'">
     <ProjectReference Include="../../../XParsec/src/XParsec/XParsec.fsproj" />
   </ItemGroup>
 
