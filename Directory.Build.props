@@ -5,8 +5,8 @@
     <Copyright>Copyright © SpeakEZ Technologies, Inc. 2025</Copyright>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <PackageProjectUrl>https://github.com/speakeztech/Farscape</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/speakeztech/Farscape</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/FidelityFramework/Farscape</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/FidelityFramework/Farscape</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
 
     <!-- Build quality -->

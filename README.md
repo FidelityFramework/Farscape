@@ -7,7 +7,7 @@ F# bindings generator for C/C++ libraries, part of the Fidelity native compilati
 
 <p align="center">
 Under Active Development<br>
-<em>This project is in early development and not intended for production use.</em>
+<em>This project is in early development and the API may undergo breaking changes.</em>
 </p>
 
 ## Overview

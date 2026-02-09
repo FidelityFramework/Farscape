@@ -1,7 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <PackageId>Fidelity.Farscape</PackageId>
     <Description>F# bindings generator for C/C++ headers, part of the Fidelity native compilation ecosystem. Uses XParsec parser combinators, active patterns, catamorphisms, and a typed code AST.</Description>
