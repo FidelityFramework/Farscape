@@ -167,15 +167,18 @@ let moyaAnalyzeCommand =
     let library =   Input.OptionRequired<string>(["-l"; "--library"], description = "Library name (e.g., libc)")
     let includes =  Input.Option<string[]>(["-i"; "--include-paths"], description = "Additional include paths")
     let defines =   Input.Option<string[]>(["-d"; "--defines"], description = "Preprocessor definitions")
-    let output =    Input.Option<string>(["-o"; "--output"], description = "Output .moya.toml path (default: <library>.moya.toml)")
-    let outputMode = Input.Option<string>(["-m"; "--output-mode"], description = "Output mode", defaultValue = "fidelity")
-    let outputDir = Input.Option<string>(["--output-dir"], description = "Output directory for generated bindings", defaultValue = "./bindings")
+    let output =    Input.Option<string>(["-o"; "--output"], description = "Output directory (default: ./<library>)")
     let verbose =   Input.Option<bool>(["-v"; "--verbose"], description = "Verbose output", defaultValue = false)
 
-    let handler (header: FileInfo, library, includes: string[], defines: string[], output, outputMode, outputDir, verbose) =
+    let handler (header: FileInfo, library, includes: string[], defines: string[], output, verbose) =
         showHeader ()
         printHeader "Moya: Analyzing header for namespace subdivisions"
         printLine ""
+
+        let outputDir =
+            if String.IsNullOrEmpty output then $"./{library}"
+            else output
+        Directory.CreateDirectory(outputDir) |> ignore
 
         let includePaths = includes |> Array.toList
         let definesList = defines |> Array.toList
@@ -204,11 +207,9 @@ let moyaAnalyzeCommand =
                     printLine $"    - {fn}"
 
             let project =
-                MoyaAnalyzer.toMoyaProject library header.FullName includePaths definesList outputMode outputDir result
+                MoyaAnalyzer.toMoyaProject library header.FullName includePaths definesList "fidelity" outputDir result
 
-            let tomlPath =
-                if String.IsNullOrEmpty output then $"{library}.moya.toml"
-                else output
+            let tomlPath = Path.Combine(outputDir, $"{library}.moya.toml")
 
             match MoyaSerializer.saveToFile tomlPath project with
             | Error e ->
@@ -216,24 +217,30 @@ let moyaAnalyzeCommand =
                 1
             | Ok () ->
                 printLine ""
-                printColorLine $"Project file written: {tomlPath}" ConsoleColor.Green
+                printColorLine $"Output directory: {Path.GetFullPath(outputDir)}" ConsoleColor.Green
+                printColorLine $"  Project file: {tomlPath}" ConsoleColor.Cyan
                 printLine ""
                 printLine "Next steps:"
-                printLine $"  farscape generate --project {tomlPath}"
+                printLine $"  farscape project --project {tomlPath}"
                 0
 
     command "analyze" {
         description "Analyze a header file and generate a .moya.toml project file"
-        inputs (header, library, includes, defines, output, outputMode, outputDir, verbose)
+        inputs (header, library, includes, defines, output, verbose)
         setHandler handler
     }
 
 let moyaInitCommand =
     let library =   Input.OptionRequired<string>(["-l"; "--library"], description = "Library name")
     let header =    Input.Option<string>(["-h"; "--header"], description = "Path to header file", defaultValue = "")
-    let output =    Input.Option<string>(["-o"; "--output"], description = "Output .moya.toml path")
+    let output =    Input.Option<string>(["-o"; "--output"], description = "Output directory (default: ./<library>)")
 
     let handler (library, header, output) =
+        let outputDir =
+            if String.IsNullOrEmpty output then $"./{library}"
+            else output
+        Directory.CreateDirectory(outputDir) |> ignore
+
         let project : MoyaProject = {
             Library = {
                 Name = library
@@ -241,7 +248,7 @@ let moyaInitCommand =
                 IncludePaths = []
                 Defines = []
             }
-            Output = { Mode = "fidelity"; Directory = "./bindings" }
+            Output = { Mode = "fidelity"; Directory = outputDir }
             Namespaces = [
                 { Name = $"Fidelity.{library}.Core"
                   Description = "Core functions"
@@ -251,9 +258,7 @@ let moyaInitCommand =
             ]
         }
 
-        let tomlPath =
-            if String.IsNullOrEmpty output then $"{library}.moya.toml"
-            else output
+        let tomlPath = Path.Combine(outputDir, $"{library}.moya.toml")
 
         match MoyaSerializer.saveToFile tomlPath project with
         | Error e ->
@@ -262,7 +267,7 @@ let moyaInitCommand =
         | Ok () ->
             printColorLine $"Skeleton project written: {tomlPath}" ConsoleColor.Green
             printLine "Edit the file to add namespace definitions, then run:"
-            printLine $"  farscape generate --project {tomlPath}"
+            printLine $"  farscape project --project {tomlPath}"
             0
 
     command "init" {
