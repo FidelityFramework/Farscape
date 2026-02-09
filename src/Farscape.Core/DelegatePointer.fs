@@ -100,20 +100,20 @@ module DelegatePointer =
                     | None -> ()
     
                 | CppParser.Declaration.Struct s ->
-                    for (fieldName, fieldType) in s.Fields do
-                        match extractFunctionPointerSignature fieldType with
+                    for field in s.Fields do
+                        match extractFunctionPointerSignature field.Type with
                         | Some signature ->
-                            let delegateName = $"{s.Name}_{fieldName}Delegate"
+                            let delegateName = $"{s.Name}_{field.Name}Delegate"
                             delegates <- { Name = delegateName; Signature = signature; Documentation = None } :: delegates
                         | None -> ()
     
                 | CppParser.Declaration.Class c ->
                     processDeclarations c.Methods |> ignore
-    
-                    for (fieldName, fieldType) in c.Fields do
-                        match extractFunctionPointerSignature fieldType with
+
+                    for field in c.Fields do
+                        match extractFunctionPointerSignature field.Type with
                         | Some signature ->
-                            let delegateName = $"{c.Name}_{fieldName}Delegate"
+                            let delegateName = $"{c.Name}_{field.Name}Delegate"
                             delegates <- { Name = delegateName; Signature = signature; Documentation = None } :: delegates
                         | None -> ()
     

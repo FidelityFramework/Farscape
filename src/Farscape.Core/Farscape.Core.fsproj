@@ -1,8 +1,11 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <PackageId>Fidelity.Farscape</PackageId>
+    <Description>F# bindings generator for C/C++ headers, part of the Fidelity native compilation ecosystem. Uses XParsec parser combinators, active patterns, catamorphisms, and a typed code AST.</Description>
+    <PackageTags>fsharp;f#;bindings;codegen;native;fidelity;xparsec</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>
@@ -10,6 +13,15 @@
     <Compile Include="Types.fs" />
     <Compile Include="CppParser.fs" />
     <Compile Include="TypeMapper.fs" />
+    <Compile Include="CTypeParser.fs" />
+    <Compile Include="ActivePatterns.fs" />
+    <Compile Include="MoyaTypes.fs" />
+    <Compile Include="DeclarationAlgebra.fs" />
+    <Compile Include="MoyaAnalyzer.fs" />
+    <Compile Include="MoyaSerializer.fs" />
+    <Compile Include="CodeAST.fs" />
+    <Compile Include="CodeRenderer.fs" />
+    <Compile Include="FidelityCodeGenerator.fs" />
     <Compile Include="MemoryManager.fs" />
     <Compile Include="DelegatePointer.fs" />
     <Compile Include="CodeGenerator.fs" />
@@ -18,7 +30,15 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="CppSharp" Version="1.0.45.22293" />
+    <PackageReference Include="Fidelity.Toml" Version="0.1.1" />
+  </ItemGroup>
+
+  <!-- XParsec: NuGet for packaging, local project ref for dev override -->
+  <ItemGroup Condition="'$(UseFarscapeLocalDeps)' != 'true'">
+    <PackageReference Include="XParsec" Version="0.3.1" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseFarscapeLocalDeps)' == 'true'">
+    <ProjectReference Include="../../../XParsec/src/XParsec/XParsec.fsproj" />
   </ItemGroup>
 
 </Project>

@@ -1,0 +1,164 @@
+namespace Farscape.Core
+
+open Fidelity.Toml
+open MoyaTypes
+
+/// Serialization and deserialization of MoyaProject to/from TOML format.
+///
+/// Uses Fidelity.Toml 0.1.1 for type-safe TOML handling.
+/// All functions are pure: TomlDocument → Result<MoyaProject, string>
+/// and MoyaProject → TomlDocument.
+module MoyaSerializer =
+
+    // =========================================================================
+    // Serialization: MoyaProject → TomlDocument
+    // =========================================================================
+
+    /// Convert a LibrarySpec to a TomlTable.
+    let private serializeLibrary (lib: LibrarySpec) : TomlValue =
+        let table =
+            TomlTable.empty
+            |> TomlTable.add "name" (TomlValue.String lib.Name)
+            |> TomlTable.add "header" (TomlValue.String lib.Header)
+        let table =
+            if lib.IncludePaths.IsEmpty then table
+            else TomlTable.add "include_paths" (TomlValue.Array (lib.IncludePaths |> List.map TomlValue.String)) table
+        let table =
+            if lib.Defines.IsEmpty then table
+            else TomlTable.add "defines" (TomlValue.Array (lib.Defines |> List.map TomlValue.String)) table
+        TomlValue.Table table
+
+    /// Convert an OutputSpec to a TomlTable.
+    let private serializeOutput (output: OutputSpec) : TomlValue =
+        TomlTable.empty
+        |> TomlTable.add "mode" (TomlValue.String output.Mode)
+        |> TomlTable.add "directory" (TomlValue.String output.Directory)
+        |> TomlValue.Table
+
+    /// Convert a NamespaceSpec to a TomlTable (for [[namespace]] array entries).
+    let private serializeNamespace (ns: NamespaceSpec) : TomlValue =
+        let table =
+            TomlTable.empty
+            |> TomlTable.add "name" (TomlValue.String ns.Name)
+            |> TomlTable.add "description" (TomlValue.String ns.Description)
+            |> TomlTable.add "library" (TomlValue.String ns.Library)
+            |> TomlTable.add "prefixes" (TomlValue.Array (ns.Prefixes |> List.map TomlValue.String))
+        let table =
+            if ns.Functions.IsEmpty then table
+            else TomlTable.add "functions" (TomlValue.Array (ns.Functions |> List.map TomlValue.String)) table
+        TomlValue.Table table
+
+    /// Serialize a complete MoyaProject to a TomlDocument.
+    let serialize (project: MoyaProject) : TomlDocument =
+        TomlTable.empty
+        |> TomlTable.add "library" (serializeLibrary project.Library)
+        |> TomlTable.add "output" (serializeOutput project.Output)
+        |> TomlTable.add "namespace" (TomlValue.Array (project.Namespaces |> List.map serializeNamespace))
+
+    /// Render a MoyaProject to a TOML string.
+    let toTomlString (project: MoyaProject) : string =
+        project |> serialize |> Toml.serialize
+
+    // =========================================================================
+    // Deserialization: TomlDocument → Result<MoyaProject, string>
+    // =========================================================================
+
+    /// Helper: require a string field from a TomlTable.
+    let private requireString (fieldName: string) (sectionName: string) (table: TomlTable) : Result<string, string> =
+        match TomlTable.tryFind fieldName table with
+        | Some (TomlValue.String s) -> Ok s
+        | Some _ -> Error $"[{sectionName}].{fieldName} must be a string"
+        | None -> Error $"[{sectionName}].{fieldName} is required"
+
+    /// Helper: get an optional string list from a TomlTable.
+    let private optionalStringArray (fieldName: string) (table: TomlTable) : string list =
+        match TomlTable.tryFind fieldName table with
+        | Some (TomlValue.Array arr) ->
+            arr |> List.choose (function TomlValue.String s -> Some s | _ -> None)
+        | _ -> []
+
+    /// Parse a LibrarySpec from the [library] table.
+    let private deserializeLibrary (doc: TomlDocument) : Result<LibrarySpec, string> =
+        match Toml.getTable "library" doc with
+        | None -> Error "Missing [library] section"
+        | Some table ->
+            match requireString "name" "library" table, requireString "header" "library" table with
+            | Ok name, Ok header ->
+                Ok { Name = name
+                     Header = header
+                     IncludePaths = optionalStringArray "include_paths" table
+                     Defines = optionalStringArray "defines" table }
+            | Error e, _ | _, Error e -> Error e
+
+    /// Parse an OutputSpec from the [output] table.
+    let private deserializeOutput (doc: TomlDocument) : Result<OutputSpec, string> =
+        match Toml.getTable "output" doc with
+        | None -> Error "Missing [output] section"
+        | Some table ->
+            match requireString "mode" "output" table, requireString "directory" "output" table with
+            | Ok mode, Ok directory ->
+                Ok { Mode = mode; Directory = directory }
+            | Error e, _ | _, Error e -> Error e
+
+    /// Parse a NamespaceSpec from a TomlTable (one entry in [[namespace]] array).
+    let private deserializeNamespace (table: TomlTable) : Result<NamespaceSpec, string> =
+        match requireString "name" "namespace" table,
+              requireString "description" "namespace" table,
+              requireString "library" "namespace" table with
+        | Ok name, Ok description, Ok library ->
+            Ok { Name = name
+                 Description = description
+                 Library = library
+                 Prefixes = optionalStringArray "prefixes" table
+                 Functions = optionalStringArray "functions" table }
+        | Error e, _, _ | _, Error e, _ | _, _, Error e -> Error e
+
+    /// Parse the [[namespace]] array from a document.
+    let private deserializeNamespaces (doc: TomlDocument) : Result<NamespaceSpec list, string> =
+        match Toml.getValue "namespace" doc with
+        | None -> Ok []
+        | Some (TomlValue.Array items) ->
+            let results =
+                items |> List.map (fun item ->
+                    match item with
+                    | TomlValue.Table t -> deserializeNamespace t
+                    | _ -> Error "Each [[namespace]] entry must be a table")
+            // Collect all errors or all successes
+            let errors = results |> List.choose (function Error e -> Some e | _ -> None)
+            if errors.IsEmpty then
+                Ok (results |> List.choose (function Ok ns -> Some ns | _ -> None))
+            else
+                Error (String.concat "; " errors)
+        | _ -> Error "'namespace' must be an array of tables"
+
+    /// Deserialize a TomlDocument to a MoyaProject.
+    let deserialize (doc: TomlDocument) : Result<MoyaProject, string> =
+        match deserializeLibrary doc, deserializeOutput doc, deserializeNamespaces doc with
+        | Ok lib, Ok output, Ok namespaces ->
+            Ok { Library = lib
+                 Output = output
+                 Namespaces = namespaces }
+        | Error e, _, _ | _, Error e, _ | _, _, Error e -> Error e
+
+    // =========================================================================
+    // File I/O
+    // =========================================================================
+
+    /// Load a MoyaProject from a TOML file path.
+    let loadFromFile (path: string) : Result<MoyaProject, string> =
+        try
+            let content = System.IO.File.ReadAllText(path)
+            match Toml.parse content with
+            | Ok doc -> deserialize doc
+            | Error err -> Error $"TOML parse error: {err}"
+        with ex ->
+            Error $"Failed to read file: {ex.Message}"
+
+    /// Save a MoyaProject to a TOML file.
+    let saveToFile (path: string) (project: MoyaProject) : Result<unit, string> =
+        try
+            let content = toTomlString project
+            System.IO.File.WriteAllText(path, content)
+            Ok ()
+        with ex ->
+            Error $"Failed to write file: {ex.Message}"

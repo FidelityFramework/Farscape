@@ -71,7 +71,7 @@ module Project =
         sb.AppendLine("<Project Sdk=\"Microsoft.NET.Sdk\">") |> ignore
         sb.AppendLine() |> ignore
         sb.AppendLine("  <PropertyGroup>") |> ignore
-        sb.AppendLine("    <TargetFramework>net9.0</TargetFramework>") |> ignore
+        sb.AppendLine("    <TargetFramework>net10.0</TargetFramework>") |> ignore
         sb.AppendLine("    <GenerateDocumentationFile>true</GenerateDocumentationFile>") |> ignore
         sb.AppendLine($"    <RootNamespace>{options.Namespace}</RootNamespace>") |> ignore
         sb.AppendLine($"    <AssemblyName>{options.LibraryName}</AssemblyName>") |> ignore
@@ -118,7 +118,7 @@ module Project =
         sb.AppendLine("<Project Sdk=\"Microsoft.NET.Sdk\">") |> ignore
         sb.AppendLine() |> ignore
         sb.AppendLine("  <PropertyGroup>") |> ignore
-        sb.AppendLine("    <TargetFramework>net9.0</TargetFramework>") |> ignore
+        sb.AppendLine("    <TargetFramework>net10.0</TargetFramework>") |> ignore
         sb.AppendLine("    <GenerateDocumentationFile>true</GenerateDocumentationFile>") |> ignore
         sb.AppendLine("    <IsPackable>false</IsPackable>") |> ignore
         sb.AppendLine("  </PropertyGroup>") |> ignore

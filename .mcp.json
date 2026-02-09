@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "serena-local": {
+      "type": "sse",
+      "url": "http://localhost:8000/sse"
+    }
+  }
+}
