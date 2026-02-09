@@ -4,7 +4,7 @@ open System
 open System.IO
 open Farscape.Core
 open FSharp.SystemCommandLine
-open System.CommandLine.Invocation
+open Input
 open Farscape.Core.BindingGenerator
 
 let printLine (text: string) =
@@ -102,26 +102,15 @@ let showError (message: string) =
     printColorLine $"Error: {message}" ConsoleColor.Red
     printLine ""
 
-let generateCommand = 
-    let header = 
-        Input.Option<FileInfo>(["-h"; "--header"], 
-            // Manually edit underlying S.CL option to add validator logic.
-            fun o -> 
-                o.Description <- "Path to C++ header file"
-                o.IsRequired <- true
-                o.AddValidator(fun result -> 
-                    let file = result.GetValueForOption<FileInfo> o
-                    if not file.Exists then
-                        result.ErrorMessage <- $"Header file not found: {file.FullName}"
-                )
-        )
-    let library =   Input.OptionRequired<string>(["-l"; "--library"], description = "Name of native library to bind to")
-    let output =    Input.Option<string>(["-o"; "--output"], description = "Output directory for generated code", defaultValue = "./output")
-    let ns =        Input.Option<string>(["-n"; "--namespace"], description = "Namespace for generated code", defaultValue = "NativeBindings")
-    let includes =  Input.Option<string[]>(["-i"; "--include-paths"], description = "Additional include paths")
-    let verbose =   Input.Option<bool>(["-v"; "--verbose"], description = "Verbose output", defaultValue = false)
+let generateCommand =
+    let header =    Input.option<FileInfo> "--header"         |> desc "Path to C++ header file" |> required |> validateFileExists
+    let library =   Input.option<string> "--library"          |> alias "-l" |> desc "Name of native library to bind to" |> required
+    let output =    Input.option<string> "--output"           |> alias "-o" |> desc "Output directory for generated code" |> def "./output"
+    let ns =        Input.option<string> "--namespace"        |> alias "-n" |> desc "Namespace for generated code" |> def "NativeBindings"
+    let includes =  Input.option<string[]> "--include-paths"  |> alias "-i" |> desc "Additional include paths" |> def [||]
+    let verbose =   Input.option<bool> "--verbose"            |> alias "-v" |> desc "Verbose output" |> def false
 
-    let handler (header, library, output, ns, includes, verbose) = 
+    let action (header, library, output, ns, includes, verbose) =
         let options = {
             HeaderFile = header
             LibraryName = library
@@ -138,13 +127,13 @@ let generateCommand =
     command "generate" {
         description "Generate F# bindings for a native library"
         inputs (header, library, output, ns, includes, verbose)
-        setHandler handler
+        setAction action
     }
 
 [<EntryPoint>]
 let main argv =
     rootCommand argv {
         description "Farscape: F# Native Library Binding Generator"
-        setHandler id
+        noAction
         addCommand generateCommand
     }

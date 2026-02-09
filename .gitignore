@@ -496,3 +496,5 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
+/.claude/*
+/tests/Farscape.Tests/obj/Debug/net9.0/Farscape.Tests.AssemblyInfo.fs
