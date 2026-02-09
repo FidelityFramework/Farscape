@@ -71,7 +71,8 @@ let runGeneration (options: GenerationOptions) : Result<GenerationResult, string
         printColorLine "Generation Complete" ConsoleColor.Green
         printLine ""
         printColorLine $"Parsed {result.DeclarationCount} declarations from header" ConsoleColor.White
-        printColorLine $"Output: F# bindings generated in {options.OutputDirectory}" ConsoleColor.Cyan
+        for file in result.OutputFiles do
+            printColorLine $"  {file}" ConsoleColor.Cyan
         printLine ""
         Ok result
 
@@ -116,8 +117,13 @@ let generateCommand =
     let includes =  Input.Option<string[]>(["-i"; "--include-paths"], description = "Additional include paths")
     let defines =   Input.Option<string[]>(["-d"; "--defines"], description = "Preprocessor definitions (e.g., STM32L552xx)")
     let verbose =   Input.Option<bool>(["-v"; "--verbose"], description = "Verbose output", defaultValue = false)
+    let outputMode = Input.Option<string>(["-m"; "--output-mode"], description = "Output mode: pinvoke or fidelity", defaultValue = "pinvoke")
 
-    let handler (header, library, output, ns, includes, defines, verbose) =
+    let handler (header, library, output, ns, includes, defines, verbose, outputMode) =
+        let mode =
+            match outputMode with
+            | "fidelity" | "Fidelity" -> Farscape.Core.Types.Fidelity
+            | _ -> Farscape.Core.Types.PInvoke
         let options = {
             HeaderFile = header
             LibraryName = library
@@ -126,6 +132,7 @@ let generateCommand =
             IncludePaths = includes |> Array.toList
             Defines = defines |> Array.toList
             Verbose = verbose
+            OutputMode = mode
         }
         showHeader()
         showConfiguration options
@@ -140,7 +147,7 @@ let generateCommand =
 
     command "generate" {
         description "Generate F# bindings for a native library"
-        inputs (header, library, output, ns, includes, defines, verbose)
+        inputs (header, library, output, ns, includes, defines, verbose, outputMode)
         setHandler handler
     }
 

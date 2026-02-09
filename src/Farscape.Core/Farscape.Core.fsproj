@@ -10,6 +10,7 @@
     <Compile Include="Types.fs" />
     <Compile Include="CppParser.fs" />
     <Compile Include="TypeMapper.fs" />
+    <Compile Include="FidelityCodeGenerator.fs" />
     <Compile Include="MemoryManager.fs" />
     <Compile Include="DelegatePointer.fs" />
     <Compile Include="CodeGenerator.fs" />

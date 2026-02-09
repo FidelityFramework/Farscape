@@ -3,6 +3,7 @@ namespace Farscape.Core
 open System.IO
 open ProjectOptions
 open CodeGenerator
+open Types
 
 
 module BindingGenerator =
@@ -15,6 +16,7 @@ module BindingGenerator =
         IncludePaths: string list
         Defines: string list
         Verbose: bool
+        OutputMode: OutputMode
     }
 
     let extractStructTypes (declarations: CppParser.Declaration list) : string list =
@@ -36,9 +38,7 @@ module BindingGenerator =
 
     /// Result type for binding generation
     type GenerationResult = {
-        SolutionPath: string
-        LibraryPath: string
-        TestPath: string
+        OutputFiles: string list
         DeclarationCount: int
     }
 
@@ -49,6 +49,7 @@ module BindingGenerator =
         logVerbose $"Target library: {options.LibraryName}" options.Verbose
         logVerbose $"Output directory: {options.OutputDirectory}" options.Verbose
         logVerbose $"Namespace: {options.Namespace}" options.Verbose
+        logVerbose $"Output mode: {options.OutputMode}" options.Verbose
 
         logVerbose "Parsing header file..." options.Verbose
 
@@ -60,35 +61,49 @@ module BindingGenerator =
 
             Directory.CreateDirectory(options.OutputDirectory) |> ignore
 
-            logVerbose "Generating F# code..." options.Verbose
-            let generatedCode = generateCode declarations options.Namespace options.LibraryName
+            match options.OutputMode with
+            | Fidelity ->
+                logVerbose "Generating Fidelity F# source..." options.Verbose
+                let generatedCode = FidelityCodeGenerator.generate declarations options.Namespace options.LibraryName
 
-            logVerbose "Creating project files..." options.Verbose
-            let projectOptions : ProjectOptions = {
-                ProjectName = options.LibraryName
-                Namespace = options.Namespace
-                OutputDirectory = options.OutputDirectory
-                References = []
-                NuGetPackages = [
-                    ("System.Memory", "4.5.5")
-                    ("System.Runtime.CompilerServices.Unsafe", "6.0.0")
-                ]
-                HeaderFile = options.HeaderFile.FullName
-                LibraryName = options.LibraryName
-                IncludePaths = options.IncludePaths
-                Verbose = options.Verbose
-            }
+                let outputFileName =
+                    let lastSegment = options.Namespace.Split('.') |> Array.last
+                    $"{lastSegment}.fs"
+                let outputPath = Path.Combine(options.OutputDirectory, outputFileName)
+                File.WriteAllText(outputPath, generatedCode)
 
-            let (solutionPath, libraryPath, testPath) = Project.generateProject projectOptions generatedCode
+                logVerbose $"Fidelity binding written to: {outputPath}" options.Verbose
 
-            logVerbose "Binding generation completed successfully." options.Verbose
-            logVerbose $"Solution generated at: {solutionPath}" options.Verbose
-            logVerbose $"Library project generated at: {libraryPath}" options.Verbose
-            logVerbose $"Test project generated at: {testPath}" options.Verbose
+                Ok {
+                    OutputFiles = [outputPath]
+                    DeclarationCount = declarations.Length
+                }
 
-            Ok {
-                SolutionPath = solutionPath
-                LibraryPath = libraryPath
-                TestPath = testPath
-                DeclarationCount = declarations.Length
-            }
+            | PInvoke ->
+                logVerbose "Generating P/Invoke F# code..." options.Verbose
+                let generatedCode = generateCode declarations options.Namespace options.LibraryName
+
+                logVerbose "Creating project files..." options.Verbose
+                let projectOptions : ProjectOptions = {
+                    ProjectName = options.LibraryName
+                    Namespace = options.Namespace
+                    OutputDirectory = options.OutputDirectory
+                    References = []
+                    NuGetPackages = [
+                        ("System.Memory", "4.5.5")
+                        ("System.Runtime.CompilerServices.Unsafe", "6.0.0")
+                    ]
+                    HeaderFile = options.HeaderFile.FullName
+                    LibraryName = options.LibraryName
+                    IncludePaths = options.IncludePaths
+                    Verbose = options.Verbose
+                }
+
+                let (solutionPath, libraryPath, testPath) = Project.generateProject projectOptions generatedCode
+
+                logVerbose "Binding generation completed successfully." options.Verbose
+
+                Ok {
+                    OutputFiles = [solutionPath; libraryPath; testPath]
+                    DeclarationCount = declarations.Length
+                }
