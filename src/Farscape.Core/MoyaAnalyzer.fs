@@ -1,31 +1,36 @@
 namespace Farscape.Core
 
 /// Analyzes C declarations to discover rational namespace subdivisions
-/// based on function name prefix patterns.
+/// based on function name prefix and suffix patterns.
 ///
 /// Architecture:
-///   Catamorphism (DeclarationAlgebra) → function name list → prefix clustering → PrefixGroup list
-///   Active patterns for prefix classification.
+///   Catamorphism (DeclarationAlgebra) → function name list → clustering → PrefixGroup list
+///   Suffix families handle cross-cutting patterns (printf/scanf).
+///   Groups sharing a suggested name are merged, then minGroupSize applied.
 ///   Pure functions, no mutable state.
 module MoyaAnalyzer =
 
     open MoyaTypes
 
     // =========================================================================
-    // Active Patterns for Prefix Classification
+    // Prefix and Suffix Classification
     // =========================================================================
+
+    /// Known suffix families — cross-cutting C naming patterns where
+    /// the base function name appears as a suffix (fprintf = f + printf).
+    let private knownSuffixFamilies =
+        [ "printf"; "scanf" ]
 
     /// Known short prefixes for standard C library functions
     /// that don't use underscore separation.
     /// Sorted longest-first so "strftime" doesn't incorrectly match "str".
     let private knownCPrefixes =
         [ "realloc"; "calloc"; "malloc"
-          "snprintf"; "sprintf"; "fprintf"; "printf"
-          "sscanf"; "fscanf"; "scanf"
           "fwrite"; "fread"; "fopen"; "fclose"; "fseek"; "ftell"; "fflush"; "fgets"; "fputs"
           "strftime"; "str"
           "mem"
           "write"; "read"; "open"; "close"; "lseek"
+          "tmp"; "set"
           "wcs"; "sem"; "sig"; "ato"; "div"
           "put"; "get" ]
 
@@ -33,7 +38,8 @@ module MoyaAnalyzer =
     /// Strategies in priority order:
     ///   1. HAL-style: "HAL_GPIO_Init" → "HAL_GPIO"
     ///   2. Underscore-separated: "io_read" → "io"
-    ///   3. Known C library prefix: "strlen" → "str"
+    ///   3. Suffix family: "fprintf" → "printf", "sscanf" → "scanf"
+    ///   4. Known C library prefix: "strlen" → "str", "fclose" → "fclose"
     let extractPrefix (name: string) : string option =
         // HAL-style: at least two underscore-separated segments before the "verb"
         let parts = name.Split('_')
@@ -44,9 +50,13 @@ module MoyaAnalyzer =
             // Simple underscore-separated: io_read → "io"
             Some parts[0]
         else
-            // Try known C library prefixes (longest match first)
-            knownCPrefixes
-            |> List.tryFind (fun prefix -> name.StartsWith(prefix) && name.Length > prefix.Length)
+            // Try suffix families first — catches fprintf→"printf", vsnprintf→"printf", etc.
+            match knownSuffixFamilies |> List.tryFind (fun suffix -> name.EndsWith suffix) with
+            | Some suffix -> Some suffix
+            | None ->
+                // Try known C library prefixes (longest match first, exact match allowed)
+                knownCPrefixes
+                |> List.tryFind (fun prefix -> name.StartsWith(prefix) && name.Length >= prefix.Length)
 
     // =========================================================================
     // Catamorphism-based Function Name Extraction
@@ -81,14 +91,16 @@ module MoyaAnalyzer =
         | "wcs" -> "WideString"
         | "io" | "read" | "write" | "open" | "close" | "lseek" -> "IO"
         | "malloc" | "calloc" | "realloc" | "free" -> "Alloc"
-        | "printf" | "sprintf" | "fprintf" | "snprintf" -> "Format"
-        | "scanf" | "sscanf" | "fscanf" -> "Scan"
+        | "printf" -> "Format"
+        | "scanf" -> "Scan"
         | "fwrite" | "fread" | "fopen" | "fclose" | "fseek" | "ftell" | "fflush" | "fgets" | "fputs" -> "FileIO"
         | "sig" -> "Signal"
         | "sem" -> "Semaphore"
         | "ato" -> "Conversion"
         | "put" | "get" -> "IO"
         | "div" -> "Math"
+        | "tmp" -> "Temp"
+        | "set" -> "Buffering"
         | p ->
             // For underscore-separated and HAL-style: capitalize each segment
             p.Split('_')
@@ -99,37 +111,46 @@ module MoyaAnalyzer =
             |> String.concat ""
 
     // =========================================================================
-    // Prefix Clustering
+    // Clustering with Merge
     // =========================================================================
 
-    /// Minimum number of functions sharing a prefix to form a group.
+    /// Minimum number of functions sharing a pattern to form a group.
     let private minGroupSize = 2
 
-    /// Cluster function names by their extracted prefix.
-    /// Returns groups with >= minGroupSize members and the list of ungrouped names.
+    /// Cluster function names by extracted prefix, merge groups that map
+    /// to the same suggested namespace name, then apply minGroupSize.
     let clusterByPrefix (names: string list) : PrefixGroup list * string list =
         let withPrefixes =
             names |> List.map (fun name -> name, extractPrefix name)
 
-        let grouped =
+        // Group by raw prefix
+        let rawGroups =
             withPrefixes
             |> List.choose (fun (name, prefix) -> prefix |> Option.map (fun p -> p, name))
             |> List.groupBy fst
-            |> List.map (fun (prefix, pairs) ->
-                prefix, pairs |> List.map snd)
-            |> List.filter (fun (_, fns) -> fns.Length >= minGroupSize)
+            |> List.map (fun (prefix, pairs) -> prefix, pairs |> List.map snd)
+
+        // Merge groups that share the same suggestedNamespaceName, then apply minGroupSize
+        let merged =
+            rawGroups
+            |> List.groupBy (fun (prefix, _) -> suggestNamespaceName prefix)
+            |> List.map (fun (suggestedName, groups) ->
+                let allPrefixes = groups |> List.map fst
+                let allFunctions = groups |> List.collect snd
+                allPrefixes, allFunctions, suggestedName)
+            |> List.filter (fun (_, fns, _) -> fns.Length >= minGroupSize)
 
         let groupedNames =
-            grouped |> List.collect snd |> Set.ofList
+            merged |> List.collect (fun (_, fns, _) -> fns) |> Set.ofList
 
         let ungrouped =
             names |> List.filter (fun n -> not (Set.contains n groupedNames))
 
         let groups =
-            grouped |> List.map (fun (prefix, fns) ->
-                { Prefix = prefix
+            merged |> List.map (fun (prefixes, fns, suggestedName) ->
+                { Prefixes = prefixes
                   FunctionNames = fns
-                  SuggestedName = suggestNamespaceName prefix })
+                  SuggestedName = suggestedName })
 
         groups, ungrouped
 
@@ -147,6 +168,7 @@ module MoyaAnalyzer =
           TotalFunctions = names.Length }
 
     /// Convert an AnalysisResult to a MoyaProject with default settings.
+    /// Ungrouped functions are collected into a catch-all "Core" namespace.
     let toMoyaProject
         (libraryName: string)
         (headerFile: string)
@@ -157,11 +179,36 @@ module MoyaAnalyzer =
         (result: AnalysisResult) : MoyaProject =
         let namespaces =
             result.Groups |> List.map (fun g ->
+                // Functions not covered by any prefix go into explicit functions list
+                let coveredByPrefix (fn: string) =
+                    g.Prefixes |> List.exists (fun p -> fn.StartsWith p && fn <> p)
+                let explicitFunctions =
+                    g.FunctionNames |> List.filter (fun fn -> not (coveredByPrefix fn))
+                // Prefixes that actually extend to longer function names
+                let effectivePrefixes =
+                    g.Prefixes |> List.filter (fun p ->
+                        g.FunctionNames |> List.exists (fun fn -> fn.StartsWith p && fn <> p))
+                let description =
+                    match effectivePrefixes with
+                    | [p] -> sprintf "Functions with prefix '%s'" p
+                    | ps when ps.Length > 0 ->
+                        let matching = ps |> List.map (fun p -> p + "*") |> String.concat ", "
+                        sprintf "Functions matching: %s" matching
+                    | _ -> sprintf "%s functions" g.SuggestedName
                 { Name = $"Fidelity.{libraryName}.{g.SuggestedName}"
-                  Description = $"Functions with prefix '{g.Prefix}'"
+                  Description = description
                   Library = libraryName
-                  Prefixes = [ g.Prefix ]
-                  Functions = [] })
+                  Prefixes = effectivePrefixes
+                  Functions = explicitFunctions })
+        // Add catch-all namespace for ungrouped functions
+        let catchAll =
+            if result.Ungrouped.IsEmpty then []
+            else
+                [ { Name = $"Fidelity.{libraryName}.Core"
+                    Description = "Ungrouped functions"
+                    Library = libraryName
+                    Prefixes = []
+                    Functions = result.Ungrouped } ]
         { Library =
             { Name = libraryName
               Header = headerFile
@@ -170,7 +217,7 @@ module MoyaAnalyzer =
           Output =
             { Mode = outputMode
               Directory = outputDir }
-          Namespaces = namespaces }
+          Namespaces = namespaces @ catchAll }
 
     // =========================================================================
     // Declaration Filtering (for scoped generation)

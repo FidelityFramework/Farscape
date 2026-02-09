@@ -56,11 +56,11 @@ module MoyaTypes =
     // Analysis Result Types
     // =========================================================================
 
-    /// A group of functions sharing a common name prefix.
+    /// A group of functions sharing a common naming pattern.
     type PrefixGroup = {
-        /// The common prefix, e.g. "str"
-        Prefix: string
-        /// Function names sharing this prefix
+        /// Matching prefixes, e.g. ["str"] or ["fopen"; "fclose"; "fread"]
+        Prefixes: string list
+        /// Function names in this group
         FunctionNames: string list
         /// Suggested namespace suffix, e.g. "String"
         SuggestedName: string

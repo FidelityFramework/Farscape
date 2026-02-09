@@ -680,8 +680,8 @@ module MoyaAnalyzerTests =
     let ``clusterByPrefix groups functions by shared prefix`` () =
         let names = ["strlen"; "strcmp"; "strcpy"; "memcpy"; "memset"; "abort"]
         let groups, ungrouped = MoyaAnalyzer.clusterByPrefix names
-        Assert.True(groups |> List.exists (fun g -> g.Prefix = "str"))
-        Assert.True(groups |> List.exists (fun g -> g.Prefix = "mem"))
+        Assert.True(groups |> List.exists (fun g -> g.Prefixes |> List.contains "str"))
+        Assert.True(groups |> List.exists (fun g -> g.Prefixes |> List.contains "mem"))
         Assert.Contains("abort", ungrouped)
 
     [<Fact>]

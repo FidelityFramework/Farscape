@@ -26,6 +26,14 @@
     <PackageReference Include="MinVer" Version="6.0.0" PrivateAssets="All" />
   </ItemGroup>
 
+  <!-- Pin FSharp.Core to satisfy transitive dependency from Fidelity.Toml -->
+  <PropertyGroup>
+    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="FSharp.Core" Version="10.0.102" />
+  </ItemGroup>
+
   <!-- SourceLink for GitHub -->
   <ItemGroup>
     <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />

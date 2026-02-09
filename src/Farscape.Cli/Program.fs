@@ -33,16 +33,16 @@ let showConfiguration (options: GenerationOptions) =
 
     printColorLine "Header File:" ConsoleColor.Yellow
     printLine $"  {options.HeaderFile}"
-    
+
     printColorLine "Library Name:" ConsoleColor.Yellow
     printLine $"  {options.LibraryName}"
-    
+
     printColorLine "Output Directory:" ConsoleColor.Yellow
     printLine $"  {options.OutputDirectory}"
-    
+
     printColorLine "Namespace:" ConsoleColor.Yellow
     printLine $"  {options.Namespace}"
-    
+
     printColorLine "Include Paths:" ConsoleColor.Yellow
     if options.IncludePaths = [] then
         printLine "  None"
@@ -84,12 +84,12 @@ let showNextSteps (options: GenerationOptions) =
 
     printLine "How to use the generated bindings:"
     printLine ""
-    
+
     printLine "Build the project:"
     printLine $"  cd {options.OutputDirectory}"
     printLine "  dotnet build"
     printLine ""
-    
+
     printLine "Use in your own project:"
     printLine $"  Add a reference to {options.LibraryName}.dll"
     printLine $"  open {options.Namespace}"
@@ -99,28 +99,17 @@ let showError (message: string) =
     printColorLine $"Error: {message}" ConsoleColor.Red
     printLine ""
 
-let generateCommand = 
-    let header = 
-        Input.Option<FileInfo>(["-h"; "--header"], 
-            // Manually edit underlying S.CL option to add validator logic.
-            fun o -> 
-                o.Description <- "Path to C++ header file"
-                o.IsRequired <- true
-                o.AddValidator(fun result -> 
-                    let file = result.GetValueForOption<FileInfo> o
-                    if not file.Exists then
-                        result.ErrorMessage <- $"Header file not found: {file.FullName}"
-                )
-        )
-    let library =   Input.OptionRequired<string>(["-l"; "--library"], description = "Name of native library to bind to")
-    let output =    Input.Option<string>(["-o"; "--output"], description = "Output directory for generated code", defaultValue = "./output")
-    let ns =        Input.Option<string>(["-n"; "--namespace"], description = "Namespace for generated code", defaultValue = "NativeBindings")
-    let includes =  Input.Option<string[]>(["-i"; "--include-paths"], description = "Additional include paths")
-    let defines =   Input.Option<string[]>(["-d"; "--defines"], description = "Preprocessor definitions (e.g., STM32L552xx)")
-    let verbose =   Input.Option<bool>(["-v"; "--verbose"], description = "Verbose output", defaultValue = false)
-    let outputMode = Input.Option<string>(["-m"; "--output-mode"], description = "Output mode: pinvoke or fidelity", defaultValue = "pinvoke")
+let generateCommand =
+    let header =     Input.option<FileInfo> "--header"        |> desc "Path to C++ header file" |> required |> validateFileExists
+    let library =    Input.option<string> "--library"         |> alias "-l" |> desc "Name of native library to bind to" |> required
+    let output =     Input.option<string> "--output"          |> alias "-o" |> desc "Output directory for generated code" |> def "./output"
+    let ns =         Input.option<string> "--namespace"       |> alias "-n" |> desc "Namespace for generated code" |> def "NativeBindings"
+    let includes =   Input.option<string[]> "--include-paths" |> alias "-i" |> desc "Additional include paths" |> def [||]
+    let defines =    Input.option<string[]> "--defines"       |> alias "-d" |> desc "Preprocessor definitions (e.g., STM32L552xx)" |> def [||]
+    let verbose =    Input.option<bool> "--verbose"           |> alias "-v" |> desc "Verbose output" |> def false
+    let outputMode = Input.option<string> "--output-mode"     |> alias "-m" |> desc "Output mode: pinvoke or fidelity" |> def "pinvoke"
 
-    let handler (header, library, output, ns, includes, defines, verbose, outputMode) =
+    let action (header, library, output, ns, includes, defines, verbose, outputMode) =
         let mode =
             match outputMode with
             | "fidelity" | "Fidelity" -> Farscape.Core.Types.Fidelity
@@ -141,36 +130,26 @@ let generateCommand =
         match runGeneration options with
         | Error errorMsg ->
             showError errorMsg
-            1 // Exit with error code
+            1
         | Ok _ ->
             showNextSteps options
-            0 // Success exit code
+            0
 
     command "generate" {
         description "Generate F# bindings for a native library"
         inputs (header, library, output, ns, includes, defines, verbose, outputMode)
-        setHandler handler
+        setAction action
     }
 
 let moyaAnalyzeCommand =
-    let header =
-        Input.Option<FileInfo>(["-h"; "--header"],
-            fun o ->
-                o.Description <- "Path to C/C++ header file"
-                o.IsRequired <- true
-                o.AddValidator(fun result ->
-                    let file = result.GetValueForOption<FileInfo> o
-                    if not file.Exists then
-                        result.ErrorMessage <- $"Header file not found: {file.FullName}"
-                )
-        )
-    let library =   Input.OptionRequired<string>(["-l"; "--library"], description = "Library name (e.g., libc)")
-    let includes =  Input.Option<string[]>(["-i"; "--include-paths"], description = "Additional include paths")
-    let defines =   Input.Option<string[]>(["-d"; "--defines"], description = "Preprocessor definitions")
-    let output =    Input.Option<string>(["-o"; "--output"], description = "Output directory (default: ./<library>)")
-    let verbose =   Input.Option<bool>(["-v"; "--verbose"], description = "Verbose output", defaultValue = false)
+    let header =   Input.option<FileInfo> "--header"        |> desc "Path to C/C++ header file" |> required |> validateFileExists
+    let library =  Input.option<string> "--library"         |> alias "-l" |> desc "Library name (e.g., libc)" |> required
+    let includes = Input.option<string[]> "--include-paths" |> alias "-i" |> desc "Additional include paths" |> def [||]
+    let defines =  Input.option<string[]> "--defines"       |> alias "-d" |> desc "Preprocessor definitions" |> def [||]
+    let output =   Input.option<string> "--output"          |> alias "-o" |> desc "Output directory (default: ./<library>)" |> def ""
+    let verbose =  Input.option<bool> "--verbose"           |> alias "-v" |> desc "Verbose output" |> def false
 
-    let handler (header: FileInfo, library, includes: string[], defines: string[], output, verbose) =
+    let action (header: FileInfo, library, includes: string[], defines: string[], output, verbose) =
         showHeader ()
         printHeader "Moya: Analyzing header for namespace subdivisions"
         printLine ""
@@ -195,7 +174,8 @@ let moyaAnalyzeCommand =
 
             printColorLine "Prefix Groups:" ConsoleColor.Yellow
             for g in result.Groups do
-                printLine $"  {g.SuggestedName} ({g.Prefix}*): {g.FunctionNames.Length} functions"
+                let patterns = g.Prefixes |> List.map (fun p -> p + "*") |> String.concat ", "
+                printLine $"  {g.SuggestedName} ({patterns}): {g.FunctionNames.Length} functions"
                 if verbose then
                     for fn in g.FunctionNames do
                         printLine $"    - {fn}"
@@ -227,15 +207,15 @@ let moyaAnalyzeCommand =
     command "analyze" {
         description "Analyze a header file and generate a .moya.toml project file"
         inputs (header, library, includes, defines, output, verbose)
-        setHandler handler
+        setAction action
     }
 
 let moyaInitCommand =
-    let library =   Input.OptionRequired<string>(["-l"; "--library"], description = "Library name")
-    let header =    Input.Option<string>(["-h"; "--header"], description = "Path to header file", defaultValue = "")
-    let output =    Input.Option<string>(["-o"; "--output"], description = "Output directory (default: ./<library>)")
+    let library = Input.option<string> "--library" |> alias "-l" |> desc "Library name" |> required
+    let header =  Input.option<string> "--header"  |> desc "Path to header file" |> def ""
+    let output =  Input.option<string> "--output"  |> alias "-o" |> desc "Output directory (default: ./<library>)" |> def ""
 
-    let handler (library, header, output) =
+    let action (library, header, output) =
         let outputDir =
             if String.IsNullOrEmpty output then $"./{library}"
             else output
@@ -273,22 +253,22 @@ let moyaInitCommand =
     command "init" {
         description "Create a skeleton .moya.toml project file"
         inputs (library, header, output)
-        setHandler handler
+        setAction action
     }
 
 let moyaCommand =
     command "moya" {
         description "Namespace analysis and project file management"
-        setHandler id
+        noAction
         addCommand moyaAnalyzeCommand
         addCommand moyaInitCommand
     }
 
 let projectGenerateCommand =
-    let project =   Input.OptionRequired<FileInfo>(["--project"], description = "Path to .moya.toml project file")
-    let verbose =   Input.Option<bool>(["-v"; "--verbose"], description = "Verbose output", defaultValue = false)
+    let project = Input.option<FileInfo> "--project" |> desc "Path to .moya.toml project file" |> required |> validateFileExists
+    let verbose = Input.option<bool> "--verbose"     |> alias "-v" |> desc "Verbose output" |> def false
 
-    let handler (project: FileInfo, verbose) =
+    let action (project: FileInfo, verbose) =
         showHeader ()
         printHeader "Generating Fidelity bindings from project..."
         printLine ""
@@ -309,7 +289,7 @@ let projectGenerateCommand =
     command "project" {
         description "Generate Fidelity bindings from a .moya.toml project file"
         inputs (project, verbose)
-        setHandler handler
+        setAction action
     }
 
 [<EntryPoint>]
