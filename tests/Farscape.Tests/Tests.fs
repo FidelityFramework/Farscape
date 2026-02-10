@@ -375,7 +375,8 @@ module CodeRendererTests =
                 LetBinding("myFunc",
                     [{ Name = "x"; Type = Named "int32" }; { Name = "y"; Type = Named "int32" }],
                     Named "int32",
-                    DefaultOf (Named "int32"))
+                    DefaultOf (Named "int32"),
+                    [])
             ])
         let result = render decl
         Assert.Contains("let myFunc (x: int32) (y: int32) : int32 =", result)
@@ -389,7 +390,8 @@ module CodeRendererTests =
                     [{ Name = "dest"; Type = Generic("nativeptr", Named "byte") }
                      { Name = "src"; Type = Generic("nativeptr", Named "byte") }],
                     Generic("nativeptr", Named "byte"),
-                    DefaultOf (Generic("nativeptr", Named "byte")))
+                    DefaultOf (Generic("nativeptr", Named "byte")),
+                    [])
             ])
         let result = render decl
         Assert.Contains("let strcpy (dest: nativeptr<byte>) (src: nativeptr<byte>) : nativeptr<byte> =", result)
@@ -441,9 +443,23 @@ module CodeRendererTests =
     [<Fact>]
     let ``render zero-param function uses unit`` () =
         let decl = Module("Test", "test",
-            [ LetBinding("abort", [], Unit, DefaultOf Unit) ])
+            [ LetBinding("abort", [], Unit, DefaultOf Unit, []) ])
         let result = render decl
         Assert.Contains("let abort () : unit =", result)
+
+    [<Fact>]
+    let ``render LetBinding with attributes produces attribute lines`` () =
+        let decl = Module("Test", "test",
+            [ LetBinding("memcpy",
+                [{ Name = "dest"; Type = Named "nativeint" }
+                 { Name = "src"; Type = Named "nativeint" }
+                 { Name = "n"; Type = Named "nativeint" }],
+                Named "nativeint",
+                DefaultOf (Named "nativeint"),
+                ["FidelityExtern(\"libc\", \"memcpy\")"]) ])
+        let result = render decl
+        Assert.Contains("[<FidelityExtern(\"libc\", \"memcpy\")>]", result)
+        Assert.Contains("let memcpy (dest: nativeint) (src: nativeint) (n: nativeint) : nativeint =", result)
 
 // =============================================================================
 // FidelityCodeGenerator Integration Tests: end-to-end declaration → source
@@ -603,6 +619,24 @@ module FidelityCodeGeneratorTests =
         Assert.Contains("type Point = {", result)
         Assert.Contains("x: int32", result)
         Assert.Contains("y: int32", result)
+
+    [<Fact>]
+    let ``generate emits FidelityExtern attribute on function bindings`` () =
+        let decls = [
+            CppParser.Declaration.Function (mkFunc "memcpy" "void *" [("__dest", "void *"); ("__src", "const void *"); ("__n", "size_t")])
+            CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
+        ]
+        let result = FidelityCodeGenerator.generate decls "Fidelity.libc.Memory" "libc"
+        Assert.Contains("[<FidelityExtern(\"libc\", \"memcpy\")>]", result)
+        Assert.Contains("let memcpy", result)
+
+    [<Fact>]
+    let ``generate emits FidelityExtern with correct library name`` () =
+        let decls = [
+            CppParser.Declaration.Function (mkFunc "wl_display_connect" "void *" [("__name", "const char *")])
+        ]
+        let result = FidelityCodeGenerator.generate decls "Fidelity.wayland.Display" "wayland-client"
+        Assert.Contains("[<FidelityExtern(\"wayland-client\", \"wl_display_connect\")>]", result)
 
 // =============================================================================
 // MoyaAnalyzer Tests: prefix analysis and declaration filtering

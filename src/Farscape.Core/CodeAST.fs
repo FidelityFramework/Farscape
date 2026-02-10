@@ -58,7 +58,8 @@ module CodeAST =
         /// Blank line separator
         | BlankLine
         /// let binding: let name (p1: t1) (p2: t2) : retType = body
-        | LetBinding of name: string * params': FsParam list * returnType: FsType * body: FsExpr
+        /// Attributes are rendered as [<Attr>] lines before the let.
+        | LetBinding of name: string * params': FsParam list * returnType: FsType * body: FsExpr * attributes: string list
         /// [<Literal>] let name = value
         | LiteralBinding of name: string * value: string
         /// type Name = { field1: type1; field2: type2 }

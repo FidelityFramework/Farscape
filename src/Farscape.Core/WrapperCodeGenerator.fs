@@ -164,7 +164,7 @@ module WrapperCodeGenerator =
 
         [
             XmlDoc (formatDocComment func)
-            LetBinding(func.Name, parameters, retType, body)
+            LetBinding(func.Name, parameters, retType, body, [])
         ]
 
     // =========================================================================

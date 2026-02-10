@@ -7,10 +7,12 @@ open ActivePatterns
 ///
 /// Output is a single .fs file with:
 ///   module Platform.Bindings.{Library}.{Category}
+///   [<FidelityExtern("library", "symbol")>]
 ///   let functionName (param1: type1) (param2: type2) : returnType =
 ///       Unchecked.defaultof<returnType>
 ///
-/// Alex recognizes this pattern and provides platform-specific MLIR implementations.
+/// [<FidelityExtern>] carries library name + symbol through the PSG so Alex can emit
+/// MLIR with fidelity.binding_strategy and fidelity.library_name attributes.
 /// No DllImport, no Marshal, no BCL dependencies.
 ///
 /// Architecture:
@@ -95,7 +97,7 @@ module FidelityCodeGenerator =
         $"{func.ReturnType} {func.Name}({paramStr})"
 
     /// Generate FsDecl list for a single function binding.
-    let private generateFunctionDecls (typedefMap: Map<string, string>) (func: CppParser.FunctionDecl) : FsDecl list =
+    let private generateFunctionDecls (typedefMap: Map<string, string>) (libraryName: string) (func: CppParser.FunctionDecl) : FsDecl list =
         let mapType = mapCTypeToFidelityType typedefMap
         let returnType = mapType func.ReturnType
         let parameters =
@@ -104,7 +106,8 @@ module FidelityCodeGenerator =
                 { FsParam.Name = cleanParamName name; Type = mapType cType })
         [
             XmlDoc (formatDocComment func)
-            LetBinding(func.Name, parameters, returnType, DefaultOf returnType)
+            LetBinding(func.Name, parameters, returnType, DefaultOf returnType,
+                      [$"FidelityExtern(\"{libraryName}\", \"{func.Name}\")"])
         ]
 
     /// Generate FsDecl list for an enum type.
@@ -187,7 +190,7 @@ module FidelityCodeGenerator =
             groups
             |> List.choose (function GFunc f -> Some f | _ -> None)
             |> List.distinctBy (fun f -> f.Name)
-            |> List.collect (generateFunctionDecls typedefMap)
+            |> List.collect (generateFunctionDecls typedefMap libraryName)
         let macros = groups |> List.collect (function GMacro d -> d | _ -> [])
 
         // Phase 4: Build typed FsDecl tree

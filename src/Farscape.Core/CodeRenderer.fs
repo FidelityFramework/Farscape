@@ -66,7 +66,9 @@ module CodeRenderer =
         | BlankLine ->
             sb.AppendLine() |> ignore
 
-        | LetBinding (name, params', retType, body) ->
+        | LetBinding (name, params', retType, body, attributes) ->
+            for attr in attributes do
+                sb.AppendLine($"{prefix}    [<{attr}>]") |> ignore
             let paramStr =
                 if params'.IsEmpty then "()"
                 else params' |> List.map renderParam |> String.concat " "
