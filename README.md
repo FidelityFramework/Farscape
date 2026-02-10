@@ -21,7 +21,7 @@ The codebase is structured around four functional programming patterns that comp
 - **Catamorphism** (`DeclarationAlgebra.fs`): A fold algebra over the Declaration DU; one traversal function serves typedef extraction, function collection, and full code generation through composable algebras
 - **Typed Code AST** (`CodeAST.fs` → `CodeRenderer.fs`): Generation produces `FsDecl` values (typed, inspectable, testable AST nodes), not strings. The ONLY `StringBuilder` in the codebase is the final `CodeRenderer.render`
 
-Farscape is part of the [Fidelity](https://github.com/FidelityFramework) native F# compilation ecosystem.
+Farscape is a key tool for the [Fidelity Framework](https://github.com/FidelityFramework) native F# compilation ecosystem.
 
 ## Architecture
 
