@@ -12,7 +12,7 @@ Under Active Development<br>
 
 ## Overview
 
-Farscape automatically generates F# bindings from C header files. It uses **clang** for robust header parsing and **XParsec** parser combinators for post-processing C type strings and macro values, producing type-safe F# code that integrates with the Fidelity native compilation toolchain.
+Farscape automatically generates F# bindings from C header files. It uses **clang** for robust header parsing and **XParsec** parser combinators for post-processing C type declarations and preprocessor macro values, producing type-safe F# code that integrates with the Fidelity native compilation toolchain.
 
 The codebase is structured around four functional programming patterns that compose cleanly:
 
