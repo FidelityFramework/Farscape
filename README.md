@@ -40,7 +40,7 @@ flowchart TD
 
 ### Functional Patterns in Action
 
-**XParsec parser** decomposes a C type string:
+**XParsec parser** decomposes a C type declaration:
 
 ```fsharp
 // CTypeParser.fs: monadic parser for C types
