@@ -3,7 +3,7 @@ namespace Farscape.Core
 open System
 open System.Diagnostics
 open System.IO
-open System.Text.Json
+open FSharp.Data
 open XParsec
 open XParsec.Parsers
 open XParsec.Combinators
@@ -159,42 +159,41 @@ module CppParser =
     // =========================================================================
 
     /// Get string property from JSON element
-    let private getString (element: JsonElement) (prop: string) : string option =
+    let private getString (element: JsonValue) (prop: string) : string option =
         match element.TryGetProperty(prop) with
-        | true, value when value.ValueKind = JsonValueKind.String -> Some (value.GetString())
+        | Some (JsonValue.String s) -> Some s
         | _ -> None
 
     /// Get string property with default value
-    let private getStringOr (element: JsonElement) (prop: string) (defaultVal: string) : string =
+    let private getStringOr (element: JsonValue) (prop: string) (defaultVal: string) : string =
         getString element prop |> Option.defaultValue defaultVal
 
     /// Get integer property (signed)
-    let private getInt64 (element: JsonElement) (prop: string) : int64 option =
+    let private getInt64 (element: JsonValue) (prop: string) : int64 option =
         match element.TryGetProperty(prop) with
-        | true, value when value.ValueKind = JsonValueKind.Number -> Some (value.GetInt64())
+        | Some (JsonValue.Number d) -> Some (int64 d)
         | _ -> None
 
     /// Get boolean property
-    let private getBool (element: JsonElement) (prop: string) : bool =
+    let private getBool (element: JsonValue) (prop: string) : bool =
         match element.TryGetProperty(prop) with
-        | true, value when value.ValueKind = JsonValueKind.True -> true
+        | Some (JsonValue.Boolean b) -> b
         | _ -> false
 
     /// Get array property
-    let private getArray (element: JsonElement) (prop: string) : JsonElement seq =
+    let private getArray (element: JsonValue) (prop: string) : JsonValue seq =
         match element.TryGetProperty(prop) with
-        | true, value when value.ValueKind = JsonValueKind.Array ->
-            value.EnumerateArray() |> Seq.map id
+        | Some (JsonValue.Array elements) -> elements :> JsonValue seq
         | _ -> Seq.empty
 
     /// Get nested object property
-    let private getObject (element: JsonElement) (prop: string) : JsonElement option =
+    let private getObject (element: JsonValue) (prop: string) : JsonValue option =
         match element.TryGetProperty(prop) with
-        | true, value when value.ValueKind = JsonValueKind.Object -> Some value
+        | Some (JsonValue.Record _ as obj) -> Some obj
         | _ -> None
 
     /// Check if a declaration is from an included file (vs the main file)
-    let private isFromIncludedFile (element: JsonElement) : bool =
+    let private isFromIncludedFile (element: JsonValue) : bool =
         match getObject element "loc" with
         | Some loc ->
             match getObject loc "includedFrom" with
@@ -204,7 +203,7 @@ module CppParser =
 
     /// Extract file from location info, tracking spillover from previous declarations
     /// Clang JSON only includes 'file' on the first decl from each file, subsequent ones just have line/offset
-    let private getFileFromLoc (element: JsonElement) (lastKnownFile: string option) : string option =
+    let private getFileFromLoc (element: JsonValue) (lastKnownFile: string option) : string option =
         match getString element "file" with
         | Some f -> Some f
         | None ->
@@ -224,7 +223,7 @@ module CppParser =
                 | None -> lastKnownFile
 
     /// Extract type string from type object
-    let private getQualType (element: JsonElement) : string =
+    let private getQualType (element: JsonValue) : string =
         match getObject element "type" with
         | Some typeObj -> getStringOr typeObj "qualType" "unknown"
         | None -> "unknown"
@@ -279,7 +278,7 @@ module CppParser =
 
     /// Extract raw attribute data from a FunctionDecl's inner nodes.
     /// Filters for child nodes with kind ending in "Attr" (excluding BuiltinAttr).
-    let private extractAttributes (node: JsonElement) : AttributeData list =
+    let private extractAttributes (node: JsonValue) : AttributeData list =
         getArray node "inner"
         |> Seq.filter (fun inner ->
             let kind = getStringOr inner "kind" ""
@@ -305,7 +304,7 @@ module CppParser =
         |> List.ofSeq
 
     /// Process FunctionDecl AST node
-    let private processFunctionDecl (node: JsonElement) : FunctionDecl option =
+    let private processFunctionDecl (node: JsonValue) : FunctionDecl option =
         match getString node "name" with
         | None | Some "" -> None
         | Some name ->
@@ -336,7 +335,7 @@ module CppParser =
             }
 
     /// Process FieldDecl AST node
-    let private processFieldDecl (node: JsonElement) : FieldDecl option =
+    let private processFieldDecl (node: JsonValue) : FieldDecl option =
         match getString node "name" with
         | None | Some "" -> None
         | Some fieldName ->
@@ -345,7 +344,7 @@ module CppParser =
             Some { fieldInfo with Name = fieldName }
 
     /// Process RecordDecl (struct/union) AST node
-    let private processRecordDecl (node: JsonElement) : StructDecl option =
+    let private processRecordDecl (node: JsonValue) : StructDecl option =
         let name = getString node "name"
         let tagUsed = getStringOr node "tagUsed" "struct"
         let isUnion = tagUsed = "union"
@@ -365,7 +364,7 @@ module CppParser =
         | _ -> None
 
     /// Process EnumConstantDecl AST node
-    let private processEnumConstant (node: JsonElement) : EnumValue option =
+    let private processEnumConstant (node: JsonValue) : EnumValue option =
         match getString node "name" with
         | None | Some "" -> None
         | Some constName ->
@@ -387,7 +386,7 @@ module CppParser =
             }
 
     /// Process EnumDecl AST node
-    let private processEnumDecl (node: JsonElement) : EnumDecl option =
+    let private processEnumDecl (node: JsonValue) : EnumDecl option =
         let name = getString node "name"
         let values =
             getArray node "inner"
@@ -410,7 +409,7 @@ module CppParser =
         | _ -> None
 
     /// Process TypedefDecl AST node
-    let private processTypedefDecl (node: JsonElement) : TypedefInfo option =
+    let private processTypedefDecl (node: JsonValue) : TypedefInfo option =
         match getString node "name" with
         | None | Some "" -> None
         | Some name ->
@@ -424,7 +423,7 @@ module CppParser =
     /// Walk AST tree and extract declarations from the target file
     /// Uses mutable state to track file across sibling nodes (clang only emits file once per file change)
     let private walkAst
-        (root: JsonElement)
+        (root: JsonValue)
         (targetFile: string)
         (verbose: bool)
         : Declaration list =
@@ -433,7 +432,7 @@ module CppParser =
         let mutable currentFile: string option = None
 
         /// Update file tracking from a node's location
-        let updateFileTracking (node: JsonElement) =
+        let updateFileTracking (node: JsonValue) =
             match getObject node "loc" with
             | Some loc ->
                 // Check if this is from an included file
@@ -451,7 +450,7 @@ module CppParser =
             | None -> ()
 
         /// Check if current node is from target file (not from include)
-        let isFromTargetFile (node: JsonElement) =
+        let isFromTargetFile (node: JsonValue) =
             match getObject node "loc" with
             | Some loc ->
                 // If has includedFrom, it's from a different file
@@ -465,7 +464,7 @@ module CppParser =
             | None -> false
 
         /// Process a single node
-        let rec processNode (node: JsonElement) =
+        let rec processNode (node: JsonValue) =
             updateFileTracking node
 
             let isImplicit = getBool node "isImplicit"
@@ -744,8 +743,7 @@ module CppParser =
                     if options.Verbose then
                         printfn "[CppParser] Parsing JSON AST..."
 
-                    let doc = JsonDocument.Parse(jsonOutput)
-                    let root = doc.RootElement
+                    let root = JsonValue.Parse(jsonOutput)
                     let targetFile = Path.GetFileName(options.HeaderFile)
 
                     let declarations = walkAst root targetFile options.Verbose
