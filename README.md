@@ -16,7 +16,7 @@ Farscape automatically generates F# bindings from C header files. It uses **clan
 
 The codebase is structured around four functional programming patterns that compose cleanly:
 
-- **XParsec Parser Combinators** (`CTypeParser.fs`): Monadic parsers decompose C type strings (`const char *` → `{ BaseType = "char"; PointerDepth = 1 }`), classify macro values, and parse numeric literals, replacing all Regex usage
+- **XParsec Parser Combinators** (`CTypeParser.fs`): Monadic parsers decompose C type declarations (`const char *` → `{ BaseType = "char"; PointerDepth = 1 }`), classify preprocessor macro values, and parse numeric literals, replacing all Regex usage
 - **Active Patterns** (`ActivePatterns.fs`): XParsec-backed active patterns (`ParsedCType`, `CharPointer|VoidPointer|TypedPointer|ValueType`, `CompilerBuiltin|InternalMacro|UserMacro`, `IntegerLiteral`) provide structural decomposition at match sites
 - **Catamorphism** (`DeclarationAlgebra.fs`): A fold algebra over the Declaration DU; one traversal function serves typedef extraction, function collection, and full code generation through composable algebras
 - **Typed Code AST** (`CodeAST.fs` → `CodeRenderer.fs`): Generation produces `FsDecl` values (typed, inspectable, testable AST nodes), not strings. The ONLY `StringBuilder` in the codebase is the final `CodeRenderer.render`
