@@ -226,7 +226,7 @@ let moyaInitCommand =
         let project : MoyaProject = {
             Library = {
                 Name = library
-                Header = if String.IsNullOrEmpty header then $"/usr/include/{library}.h" else header
+                Headers = [if String.IsNullOrEmpty header then $"/usr/include/{library}.h" else header]
                 IncludePaths = []
                 Defines = []
             }

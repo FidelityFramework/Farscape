@@ -116,18 +116,25 @@ module BindingGenerator =
 
     /// Generate scoped Fidelity bindings from a .moya.toml project file.
     /// Each [[namespace]] section produces a separate F# module.
+    /// Supports multi-header projects: parses each header independently, merges with dedup.
     /// When generateWrappers is true, also generates Layer 2 idiomatic wrappers.
     let generateFromProject (projectPath: string) (verbose: bool) (generateWrappers: bool) : Result<GenerationResult, string> =
         match MoyaSerializer.loadFromFile projectPath with
         | Error e -> Error $"Failed to load project: {e}"
         | Ok project ->
-            let headerPath = project.Library.Header
-            logVerbose $"Parsing header: {headerPath}" verbose
+            let parseResults =
+                project.Library.Headers |> List.map (fun headerPath ->
+                    logVerbose $"Parsing header: {headerPath}" verbose
+                    CppParser.parseWithDefines headerPath project.Library.IncludePaths project.Library.Defines verbose)
 
-            match CppParser.parseWithDefines headerPath project.Library.IncludePaths project.Library.Defines verbose with
-            | Error e -> Error $"Failed to parse header: {e}"
-            | Ok declarations ->
-                logVerbose $"Parsed {declarations.Length} declarations" verbose
+            let errors = parseResults |> List.choose (function Error e -> Some e | _ -> None)
+            if not errors.IsEmpty then
+                let msg = String.concat "; " errors
+                Error $"Failed to parse headers: {msg}"
+            else
+                let allDeclLists = parseResults |> List.choose (function Ok d -> Some d | _ -> None)
+                let declarations = DeclarationAlgebra.mergeDeclarations allDeclLists
+                logVerbose $"Merged {declarations.Length} declarations from {project.Library.Headers.Length} header(s)" verbose
 
                 Directory.CreateDirectory(project.Output.Directory) |> ignore
 

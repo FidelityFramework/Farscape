@@ -59,3 +59,29 @@ module DeclarationAlgebra =
         OnMacro     = fun _ -> None
         OnNamespace = fun _ -> None
     }
+
+    /// Extract the identifying name from any declaration variant.
+    /// Used for deduplication when merging declarations from multiple headers.
+    let declarationNameAlgebra : DeclarationAlgebra<string option> = {
+        OnFunction  = fun f -> Some f.Name
+        OnStruct    = fun s -> if s.Name <> "" then Some s.Name else None
+        OnEnum      = fun e -> if e.Name <> "" then Some e.Name else None
+        OnTypedef   = fun t -> Some t.Name
+        OnMacro     = fun m -> Some m.Name
+        OnNamespace = fun n -> Some n.Name
+        OnClass     = fun c -> if c.Name <> "" then Some c.Name else None
+    }
+
+    /// Merge declaration lists from multiple headers, deduplicating by name.
+    /// First-occurrence-wins: if the same typedef/struct/enum/macro appears
+    /// in multiple headers (common for shared system types like size_t, pid_t),
+    /// the first parsed version is kept.
+    let mergeDeclarations (declLists: CppParser.Declaration list list) : CppParser.Declaration list =
+        let seen = System.Collections.Generic.HashSet<string>()
+        declLists
+        |> List.concat
+        |> List.filter (fun decl ->
+            let names = cataDeclarations declarationNameAlgebra [decl]
+            match names with
+            | [Some name] -> seen.Add(name)
+            | _ -> true)

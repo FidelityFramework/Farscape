@@ -29,13 +29,19 @@ module MoyaTypes =
     type LibrarySpec = {
         /// Library name, e.g. "libc"
         Name: string
-        /// Path to the primary header file
-        Header: string
+        /// Paths to header files (one or more)
+        Headers: string list
         /// Additional include paths for clang
         IncludePaths: string list
         /// Preprocessor defines
         Defines: string list
     }
+    with
+        /// Backward-compat: returns the single header (or first if multiple).
+        member this.Header =
+            match this.Headers with
+            | h :: _ -> h
+            | [] -> failwith "LibrarySpec.Headers must not be empty"
 
     /// Output configuration in a .moya.toml [output] section.
     type OutputSpec = {

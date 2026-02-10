@@ -346,6 +346,33 @@ module DeclarationAlgebraTests =
             |> List.map fst
         Assert.Equal<string list>(["A"; "B"; "C"], results)
 
+    [<Fact>]
+    let ``mergeDeclarations deduplicates shared typedefs`` () =
+        let typedef1 = CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
+        let typedef2 = CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
+        let fn1 = CppParser.Declaration.Function (mkFunc "read" "ssize_t" [("fd", "int")])
+        let fn2 = CppParser.Declaration.Function (mkFunc "open" "int" [("path", "const char *")])
+        let merged = DeclarationAlgebra.mergeDeclarations [[typedef1; fn1]; [typedef2; fn2]]
+        Assert.Equal(3, merged.Length)
+
+    [<Fact>]
+    let ``mergeDeclarations preserves order from first list`` () =
+        let merged = DeclarationAlgebra.mergeDeclarations [
+            [CppParser.Declaration.Function (mkFunc "read" "int" [])
+             CppParser.Declaration.Function (mkFunc "write" "int" [])]
+            [CppParser.Declaration.Function (mkFunc "open" "int" [])]
+        ]
+        Assert.Equal(3, merged.Length)
+
+    [<Fact>]
+    let ``mergeDeclarations with single list is identity`` () =
+        let input = [
+            CppParser.Declaration.Function (mkFunc "read" "int" [])
+            CppParser.Declaration.Function (mkFunc "write" "int" [])
+        ]
+        let merged = DeclarationAlgebra.mergeDeclarations [input]
+        Assert.Equal(input.Length, merged.Length)
+
 // =============================================================================
 // CodeAST + CodeRenderer Tests: typed AST to F# source
 // =============================================================================
@@ -799,7 +826,7 @@ module MoyaSerializerTests =
     let private sampleProject : MoyaTypes.MoyaProject = {
         Library = {
             Name = "libc"
-            Header = "/usr/include/string.h"
+            Headers = ["/usr/include/string.h"]
             IncludePaths = ["/usr/include"]
             Defines = ["_GNU_SOURCE"]
         }
@@ -898,6 +925,46 @@ prefixes = ["str"]
         match MoyaSerializer.loadFromFile "/nonexistent/path.moya.toml" with
         | Error _ -> ()
         | Ok _ -> Assert.Fail "Should return Error for missing file"
+
+    [<Fact>]
+    let ``multi-header project serializes with headers array`` () =
+        let project = { sampleProject with
+                          Library = { sampleProject.Library with
+                                        Headers = ["/usr/include/unistd.h"; "/usr/include/fcntl.h"] } }
+        let toml = MoyaSerializer.toTomlString project
+        Assert.Contains("headers", toml)
+        Assert.Contains("/usr/include/unistd.h", toml)
+        Assert.Contains("/usr/include/fcntl.h", toml)
+
+    [<Fact>]
+    let ``multi-header round-trip preserves all headers`` () =
+        let project = { sampleProject with
+                          Library = { sampleProject.Library with
+                                        Headers = ["/usr/include/unistd.h"; "/usr/include/fcntl.h"] } }
+        let toml = MoyaSerializer.toTomlString project
+        match Fidelity.Toml.Toml.parse toml with
+        | Ok doc ->
+            match MoyaSerializer.deserialize doc with
+            | Ok roundTripped ->
+                Assert.Equal<string list>(project.Library.Headers, roundTripped.Library.Headers)
+            | Error e -> Assert.Fail $"Deserialize failed: {e}"
+        | Error e -> Assert.Fail $"Parse failed: {e}"
+
+    [<Fact>]
+    let ``single header backward compat still works`` () =
+        let toml = "[library]\nname = \"test\"\nheader = \"test.h\"\n[output]\nmode = \"fidelity\"\ndirectory = \"./out\""
+        let doc = Fidelity.Toml.Toml.parseOrFail toml
+        match MoyaSerializer.deserialize doc with
+        | Ok project -> Assert.Equal<string list>(["test.h"], project.Library.Headers)
+        | Error e -> Assert.Fail $"Should parse single header: {e}"
+
+    [<Fact>]
+    let ``deserialize rejects empty headers array`` () =
+        let toml = "[library]\nname = \"test\"\nheaders = []\n[output]\nmode = \"fidelity\"\ndirectory = \"./out\""
+        let doc = Fidelity.Toml.Toml.parseOrFail toml
+        match MoyaSerializer.deserialize doc with
+        | Error _ -> ()
+        | Ok _ -> Assert.Fail "Should reject empty headers"
 
 // =============================================================================
 // WrapperPatternAnalyzer Tests: Attribute mapping and inference

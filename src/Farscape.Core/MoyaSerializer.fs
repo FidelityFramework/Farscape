@@ -15,11 +15,16 @@ module MoyaSerializer =
     // =========================================================================
 
     /// Convert a LibrarySpec to a TomlTable.
+    /// Single header serializes as `header = "..."` for backward compat.
+    /// Multiple headers serialize as `headers = [...]`.
     let private serializeLibrary (lib: LibrarySpec) : TomlValue =
         let table =
             TomlTable.empty
             |> TomlTable.add "name" (TomlValue.String lib.Name)
-            |> TomlTable.add "header" (TomlValue.String lib.Header)
+        let table =
+            match lib.Headers with
+            | [single] -> TomlTable.add "header" (TomlValue.String single) table
+            | multiple -> TomlTable.add "headers" (TomlValue.Array (multiple |> List.map TomlValue.String)) table
         let table =
             if lib.IncludePaths.IsEmpty then table
             else TomlTable.add "include_paths" (TomlValue.Array (lib.IncludePaths |> List.map TomlValue.String)) table
@@ -78,14 +83,27 @@ module MoyaSerializer =
         | _ -> []
 
     /// Parse a LibrarySpec from the [library] table.
+    /// Accepts either `headers = [...]` (new) or `header = "..."` (backward compat).
     let private deserializeLibrary (doc: TomlDocument) : Result<LibrarySpec, string> =
         match Toml.getTable "library" doc with
         | None -> Error "Missing [library] section"
         | Some table ->
-            match requireString "name" "library" table, requireString "header" "library" table with
-            | Ok name, Ok header ->
+            let nameResult = requireString "name" "library" table
+            let headersResult =
+                match TomlTable.tryFind "headers" table with
+                | Some (TomlValue.Array arr) ->
+                    let headers = arr |> List.choose (function TomlValue.String s -> Some s | _ -> None)
+                    if headers.IsEmpty then Error "[library].headers must not be empty"
+                    else Ok headers
+                | Some _ -> Error "[library].headers must be an array of strings"
+                | None ->
+                    match requireString "header" "library" table with
+                    | Ok h -> Ok [h]
+                    | Error _ -> Error "[library] requires either 'header' or 'headers'"
+            match nameResult, headersResult with
+            | Ok name, Ok headers ->
                 Ok { Name = name
-                     Header = header
+                     Headers = headers
                      IncludePaths = optionalStringArray "include_paths" table
                      Defines = optionalStringArray "defines" table }
             | Error e, _ | _, Error e -> Error e
