@@ -26,20 +26,17 @@ module WrapperCodeGenerator =
     // =========================================================================
 
     /// Compute the wrapper's F# return type from ReturnSemantic and the raw mapped return type.
-    let private wrapperReturnType (semantic: ReturnSemantic) (rawRetType: FsType) : FsType =
+    let private wrapperReturnType (semantic: ReturnSemantic) (rawRetType: FsType) (useErrno: bool) : FsType =
         match semantic with
         | CountOrError ->
-            // Result<rawRetType, rawRetType>
-            Generic("Result", rawRetType)
+            if useErrno then Generic2("Result", rawRetType, Named "CError")
+            else Generic("Result", rawRetType)
         | ZeroSuccessOrError ->
-            // Result<unit, int32>
-            Generic("Result", Unit)
-        | AllocatedPointer ->
-            // Result<nativeint, unit>
-            Generic("Result", Named "nativeint")
-        | OpaqueHandleReturn ->
-            // Result<nativeint, unit>
-            Generic("Result", Named "nativeint")
+            if useErrno then Generic2("Result", Unit, Named "CError")
+            else Generic("Result", Unit)
+        | AllocatedPointer | OpaqueHandleReturn ->
+            if useErrno then Generic2("Result", Named "nativeint", Named "CError")
+            else Generic("Result", Named "nativeint")
         | PureValue ->
             rawRetType
         | NeverReturns ->
@@ -60,42 +57,51 @@ module WrapperCodeGenerator =
     /// let result = Bindings.read fd buf count
     /// if result >= 0n then Ok result
     /// else Error result
-    let private countOrErrorBody (bindingsModule: string) (funcName: string) (paramNames: string list) : FsExpr =
+    let private countOrErrorBody (bindingsModule: string) (funcName: string) (paramNames: string list) (useErrno: bool) : FsExpr =
         let rawCall = buildRawCall bindingsModule funcName paramNames
+        let errorExpr =
+            if useErrno then FunctionCall("", "captureError", [Literal "()"])
+            else Identifier "result"
         LetIn("result", rawCall,
             IfThenElse(
                 Comparison(Identifier "result", ">=", Literal "0n"),
                 ResultOk(Identifier "result"),
-                ResultError(Identifier "result")))
+                ResultError(errorExpr)))
 
     /// Generate wrapper body for ZeroSuccessOrError pattern (e.g., fclose, fseek).
     /// let result = Bindings.fclose stream
     /// if result = 0l then Ok ()
     /// else Error result
-    let private zeroSuccessBody (bindingsModule: string) (funcName: string) (paramNames: string list) : FsExpr =
+    let private zeroSuccessBody (bindingsModule: string) (funcName: string) (paramNames: string list) (useErrno: bool) : FsExpr =
         let rawCall = buildRawCall bindingsModule funcName paramNames
+        let errorExpr =
+            if useErrno then FunctionCall("", "captureError", [Literal "()"])
+            else Identifier "result"
         LetIn("result", rawCall,
             IfThenElse(
                 Comparison(Identifier "result", "=", Literal "0l"),
                 ResultOk(Literal "()"),
-                ResultError(Identifier "result")))
+                ResultError(errorExpr)))
 
     /// Generate wrapper body for AllocatedPointer pattern (e.g., malloc, calloc).
     /// let result = Bindings.malloc size
     /// if result <> 0n then Ok result
     /// else Error ()
-    let private allocatedPointerBody (bindingsModule: string) (funcName: string) (paramNames: string list) : FsExpr =
+    let private allocatedPointerBody (bindingsModule: string) (funcName: string) (paramNames: string list) (useErrno: bool) : FsExpr =
         let rawCall = buildRawCall bindingsModule funcName paramNames
+        let errorExpr =
+            if useErrno then FunctionCall("", "captureError", [Literal "()"])
+            else Literal "()"
         LetIn("result", rawCall,
             IfThenElse(
                 Comparison(Identifier "result", "<>", Literal "0n"),
                 ResultOk(Identifier "result"),
-                ResultError(Literal "()")))
+                ResultError(errorExpr)))
 
     /// Generate wrapper body for OpaqueHandleReturn pattern (e.g., fopen).
     /// Same structure as AllocatedPointer; null check.
-    let private opaqueHandleBody (bindingsModule: string) (funcName: string) (paramNames: string list) : FsExpr =
-        allocatedPointerBody bindingsModule funcName paramNames
+    let private opaqueHandleBody (bindingsModule: string) (funcName: string) (paramNames: string list) (useErrno: bool) : FsExpr =
+        allocatedPointerBody bindingsModule funcName paramNames useErrno
 
     /// Generate wrapper body for PureValue pattern (e.g., abs, strlen).
     /// Direct delegation: Bindings.strlen s
@@ -118,12 +124,13 @@ module WrapperCodeGenerator =
         (funcName: string)
         (paramNames: string list)
         (semantic: ReturnSemantic)
+        (useErrno: bool)
         : FsExpr =
         match semantic with
-        | CountOrError       -> countOrErrorBody bindingsModule funcName paramNames
-        | ZeroSuccessOrError -> zeroSuccessBody bindingsModule funcName paramNames
-        | AllocatedPointer   -> allocatedPointerBody bindingsModule funcName paramNames
-        | OpaqueHandleReturn -> opaqueHandleBody bindingsModule funcName paramNames
+        | CountOrError       -> countOrErrorBody bindingsModule funcName paramNames useErrno
+        | ZeroSuccessOrError -> zeroSuccessBody bindingsModule funcName paramNames useErrno
+        | AllocatedPointer   -> allocatedPointerBody bindingsModule funcName paramNames useErrno
+        | OpaqueHandleReturn -> opaqueHandleBody bindingsModule funcName paramNames useErrno
         | PureValue          -> pureValueBody bindingsModule funcName paramNames
         | NeverReturns       -> neverReturnsBody bindingsModule funcName paramNames
         | VoidReturn         -> voidReturnBody bindingsModule funcName paramNames
@@ -144,6 +151,7 @@ module WrapperCodeGenerator =
     let private generateWrapperDecls
         (typedefMap: Map<string, string>)
         (bindingsModule: string)
+        (useErrno: bool)
         (func: CppParser.FunctionDecl)
         : FsDecl list =
 
@@ -157,10 +165,10 @@ module WrapperCodeGenerator =
                 { FsParam.Name = cleanParamName name; Type = mapType cType })
 
         let rawRetType = mapType func.ReturnType
-        let retType = wrapperReturnType pattern.ReturnSemantic rawRetType
+        let retType = wrapperReturnType pattern.ReturnSemantic rawRetType useErrno
 
         let paramNames = parameters |> List.map (fun p -> p.Name)
-        let body = generateBody bindingsModule func.Name paramNames pattern.ReturnSemantic
+        let body = generateBody bindingsModule func.Name paramNames pattern.ReturnSemantic useErrno
 
         [
             XmlDoc (formatDocComment func)
@@ -194,7 +202,10 @@ module WrapperCodeGenerator =
         (wrapperNamespace: string)
         (libraryName: string)
         (bindingsModule: string)
+        (errnoModuleName: string option)
         : string =
+
+        let useErrno = errnoModuleName.IsSome
 
         // Phase 1: Build typedef resolution map (shared with FidelityCodeGenerator)
         let typedefMap = FidelityCodeGenerator.buildTypedefMap declarations
@@ -208,11 +219,35 @@ module WrapperCodeGenerator =
             groups
             |> List.choose (function WFunc f -> Some f | WNone -> None)
             |> List.distinctBy (fun f -> f.Name)
-            |> List.collect (generateWrapperDecls typedefMap bindingsModule)
+            |> List.collect (generateWrapperDecls typedefMap bindingsModule useErrno)
 
         // Phase 4: Build typed FsDecl tree; wrapper module opens the bindings module
         let openDecl = Comment $"open {bindingsModule}"
-        let allDecls = openDecl :: BlankLine :: functions
+
+        // Errno support: open errno module and generate captureError helper
+        let errnoDecls =
+            match errnoModuleName with
+            | Some modName ->
+                let openErrno = Comment $"open {modName}"
+                let openNativeInterop = Comment "open Microsoft.FSharp.NativeInterop"
+                // captureError helper: captures errno and builds CError with description
+                let captureErrorBody =
+                    LetIn("code",
+                        MethodCall(
+                            FunctionCall(bindingsModule, "__errno_location", [Literal "()"]),
+                            "NativePtr.read"),
+                        RecordConstruction [
+                            ("Code", Identifier "code")
+                            ("Description", FunctionCall("Errno", "describe", [Identifier "code"]))
+                        ])
+                let captureErrorDecl =
+                    LetBinding("captureError", [], Named "CError", captureErrorBody, [])
+                [ openErrno; openNativeInterop; BlankLine
+                  XmlDoc "Capture errno and build CError with description from header comments."
+                  captureErrorDecl; BlankLine ]
+            | None -> []
+
+        let allDecls = openDecl :: errnoDecls @ BlankLine :: functions
         let moduleDecl = Module(wrapperNamespace, libraryName, allDecls)
 
         // Phase 5: Render to string (the ONLY StringBuilder, in CodeRenderer)

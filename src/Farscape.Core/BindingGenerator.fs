@@ -73,7 +73,7 @@ module BindingGenerator =
                         logVerbose "Generating idiomatic F# wrappers..." options.Verbose
                         let wrapperNamespace = $"{options.Namespace}.Wrappers"
                         let wrapperCode =
-                            WrapperCodeGenerator.generate declarations wrapperNamespace options.LibraryName options.Namespace
+                            WrapperCodeGenerator.generate declarations wrapperNamespace options.LibraryName options.Namespace None
                         let wrapperPath = Path.Combine(options.OutputDirectory, $"{lastSegment}Wrappers.fs")
                         File.WriteAllText(wrapperPath, wrapperCode)
                         logVerbose $"Wrapper module written to: {wrapperPath}" options.Verbose
@@ -138,6 +138,13 @@ module BindingGenerator =
 
                 Directory.CreateDirectory(project.Output.Directory) |> ignore
 
+                // Determine errno module name from error convention configuration
+                let errnoModuleName =
+                    match project.ErrorConventions with
+                    | Some spec when spec.Default = MoyaTypes.Errno ->
+                        Some $"Fidelity.{project.Library.Name}.Errno"
+                    | _ -> None
+
                 let allFiles =
                     project.Namespaces |> List.collect (fun ns ->
                         let filtered = MoyaAnalyzer.filterDeclarationsForNamespace ns declarations
@@ -151,7 +158,7 @@ module BindingGenerator =
                         if generateWrappers then
                             let wrapperNamespace = $"{ns.Name}.Wrappers"
                             let wrapperCode =
-                                WrapperCodeGenerator.generate filtered wrapperNamespace ns.Library ns.Name
+                                WrapperCodeGenerator.generate filtered wrapperNamespace ns.Library ns.Name errnoModuleName
                             let wrapperPath = Path.Combine(project.Output.Directory, $"{lastSegment}Wrappers.fs")
                             File.WriteAllText(wrapperPath, wrapperCode)
                             logVerbose $"Wrapper module: {wrapperPath}" verbose

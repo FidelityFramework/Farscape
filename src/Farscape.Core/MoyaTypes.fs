@@ -51,11 +51,34 @@ module MoyaTypes =
         Directory: string
     }
 
+    // =========================================================================
+    // Error Convention Types
+    // =========================================================================
+
+    /// Error handling convention for a library or function.
+    type ErrorConvention =
+        /// Errors reported via errno (POSIX/libc pattern)
+        | Errno
+        /// Nonzero return value IS the error code (pthread pattern)
+        | ReturnCode
+        /// No error convention; function doesn't report errors
+        | NoErrorConvention
+
+    /// Error convention configuration for a library.
+    type ErrorConventionSpec = {
+        /// Default convention for all functions in this library
+        Default: ErrorConvention
+        /// Per-function overrides (function name → convention)
+        Overrides: Map<string, ErrorConvention>
+    }
+
     /// Complete Moya project, corresponding to a .moya.toml file.
     type MoyaProject = {
         Library: LibrarySpec
         Output: OutputSpec
         Namespaces: NamespaceSpec list
+        /// Error convention configuration (None = no errno support)
+        ErrorConventions: ErrorConventionSpec option
     }
 
     // =========================================================================

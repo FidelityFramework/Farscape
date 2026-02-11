@@ -30,12 +30,14 @@ The `Unchecked.defaultof<T>` body is a placeholder. FNCS type-checks it. Baker r
 
 ### Layer 2: Idiomatic F# Wrappers (implemented)
 Safe functional APIs that call Layer 1:
-- C error codes → Result types (voption semantics, stack-allocated)
-- Raw pointers → typed nativeptr with lengths
+- C error codes → `Result<T, CError>` with errno capture + description from header comments
+- `CError` is `[<Struct>]` (stack-allocated): Code (int32) + Description (rodata string pointer)
+- `Errno.describe` function compiles to jump table over rodata strings — O(1), zero allocation
 - Return semantic classification (7 patterns driven by 12 clang attribute types)
+- Error convention configurable via Moya TOML `[error_conventions]` (errno vs return_code)
 - All wrappers compile to zero-overhead native code via type erasure
 
-Layer 2 is implemented via WrapperPatternAnalyzer + WrapperCodeGenerator. CLI: `--output-mode fidelity-wrappers`
+Layer 2 is implemented via WrapperPatternAnalyzer + WrapperCodeGenerator + ErrnoModuleGenerator. CLI: `--output-mode fidelity-wrappers`
 
 ## Output Modes
 

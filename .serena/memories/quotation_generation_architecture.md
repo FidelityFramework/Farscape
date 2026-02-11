@@ -72,7 +72,10 @@ This is what makes Farscape part of Fidelity's memory safety story.
 
 Layer 2 wrappers are implemented and working:
 - WrapperPatternAnalyzer: 12 clang attribute types, 7 return semantic patterns
-- WrapperCodeGenerator: Catamorphism-based FsDecl tree generation
+- WrapperCodeGenerator: Catamorphism-based FsDecl tree generation, errno-aware error paths
+- ErrnoModuleGenerator: CError struct + Errno module with describe function from raw header comments
+- Error paths return `Result<T, CError>` with errno code + description string (zero allocation)
+- Moya TOML `[error_conventions]` configures errno vs return_code per-library/per-function
 - CLI: `--output-mode fidelity-wrappers`
 
 ## Output Modes

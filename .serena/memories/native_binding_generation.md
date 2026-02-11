@@ -21,12 +21,14 @@ let write (fd: int32) (buf: nativeint) (count: nativeint) : int64 =
 
 ### Layer 2: Idiomatic F# Wrappers
 ```fsharp
-let write (fd: int32) (buf: nativeint) (count: nativeint) : Result<int64, int64> =
+/// ssize_t write(int fd, const void *buf, size_t count)
+let write (fd: int32) (buf: nativeint) (count: nativeint) : Result<nativeint, CError> =
     let result = Platform.Bindings.Libc.IO.write fd buf count
-    if result >= 0L then Ok result
-    else Error result
+    if result >= 0n then Ok result
+    else Error (captureError ())
 ```
 
+Error path returns `CError` struct with errno code + description string from header comments.
 Both layers flow through: FNCS → Baker → Alex → MLIR → LLVM → native binary. Wrappers compile to zero overhead via type erasure.
 
 ## What Farscape Parses from C Headers

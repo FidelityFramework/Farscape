@@ -238,6 +238,7 @@ let moyaInitCommand =
                   Prefixes = []
                   Functions = [] }
             ]
+            ErrorConventions = None
         }
 
         let tomlPath = Path.Combine(outputDir, $"{library}.moya.toml")

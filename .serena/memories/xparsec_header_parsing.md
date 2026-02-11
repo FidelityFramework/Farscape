@@ -54,8 +54,9 @@ Inline functions can't be passed as first-class values to combinators like `skip
 |------|---------|
 | `CTypeParser.fs` | XParsec parsers: `pCType`, `pMacroLine`, `pIntegerLiteral`, `pArraySize` |
 | `ActivePatterns.fs` | XParsec-backed active patterns: `ParsedCType`, `IntegerLiteral`, `ArrayType` |
-| `CppParser.fs` | Inline `MacroParsers` class for macro line parsing (compile order constraint) |
+| `CppParser.fs` | Inline `MacroParsers` class + raw header comment extraction (`clang -H` include discovery + file-level `#define ... /* comment */` parsing) |
 | `TypeMapper.fs` | Inline `pArrayLen` parser for array size extraction |
+| `ErrnoModuleGenerator.fs` | Uses filtered macros with documentation to generate Errno module + CError struct |
 
 ## Compile Order Constraint
 
@@ -73,6 +74,16 @@ type CTypeInfo = { BaseType: string; PointerDepth: int }
 - Function pointer types (containing `(*)`) detected by string check before XParsec parsing; always map to `nativeint`
 - Typedef-resolved types also checked for `(*)` to handle `__compar_fn_t` → `int (*)(const void *, const void *)`
 
+## Raw Header Comment Extraction (Feb 2026)
+
+CppParser.fs now includes a **raw header comment enrichment pipeline**:
+1. `clang -H` discovers the include file tree from a root header
+2. Each file is read and `#define NAME VALUE /* comment */` lines are parsed for trailing comments
+3. Parsed `MacroDecl` records are enriched with `Documentation: string option` from raw header comments
+4. This feeds into `ErrnoModuleGenerator` for errno constant descriptions and Errno.describe function
+
+The pipeline also works for non-errno libraries (e.g. curl error codes with `/* description */` comments).
+
 ## Tests
 
-89 real unit tests in `tests/Farscape.Tests/Tests.fs` covering all XParsec parsers, active patterns, catamorphism, CodeRenderer, and FidelityCodeGenerator end-to-end.
+185+ unit tests in `tests/Farscape.Tests/Tests.fs` covering all XParsec parsers, active patterns, catamorphism, CodeRenderer, and FidelityCodeGenerator end-to-end.

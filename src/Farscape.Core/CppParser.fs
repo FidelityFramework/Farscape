@@ -99,6 +99,8 @@ module CppParser =
         Name: string
         Kind: MacroKind
         RawValue: string
+        /// Documentation comment from raw header text (e.g., /* Operation not permitted */)
+        Documentation: string option
     }
 
     /// Union type for all supported declarations
@@ -595,6 +597,7 @@ module CppParser =
                     Name = name
                     Kind = FunctionLike (Seq.toList args, body)
                     RawValue = body
+                    Documentation = None
                 }
                 return macro
             }
@@ -609,6 +612,7 @@ module CppParser =
                     Name = name
                     Kind = classifyObjectMacroValue trimmed
                     RawValue = trimmed
+                    Documentation = None
                 }
                 return macro
             }
@@ -621,6 +625,7 @@ module CppParser =
                     Name = name
                     Kind = SimpleValue ""
                     RawValue = ""
+                    Documentation = None
                 }
                 return macro
             }
@@ -653,6 +658,57 @@ module CppParser =
         elif name.StartsWith("_") && name.Length > 1 && Char.IsUpper(name.[1]) then false
         elif prefixes.IsEmpty then true
         else prefixes |> List.exists (fun p -> name.StartsWith(p))
+
+    // =========================================================================
+    // Raw Header Comment Extraction
+    // =========================================================================
+
+    /// Extract trailing comment from a #define line in raw header text.
+    /// Handles both /* ... */ and // ... comment styles.
+    /// Returns just the comment text without delimiters.
+    let private extractTrailingComment (line: string) : string option =
+        // Look for /* ... */ comment
+        match line.IndexOf("/*") with
+        | -1 ->
+            // Look for // comment
+            match line.IndexOf("//") with
+            | -1 -> None
+            | idx ->
+                let comment = line.Substring(idx + 2).Trim()
+                if comment.Length > 0 then Some comment else None
+        | idx ->
+            let afterOpen = line.Substring(idx + 2)
+            match afterOpen.IndexOf("*/") with
+            | -1 -> None  // Unclosed comment — skip
+            | endIdx ->
+                let comment = afterOpen.Substring(0, endIdx).Trim()
+                if comment.Length > 0 then Some comment else None
+
+    /// Scan a single file's raw text for #define lines and extract macro name → comment mappings.
+    let private extractMacroCommentsFromFile (filePath: string) : Map<string, string> =
+        if not (File.Exists filePath) then Map.empty
+        else
+            try
+                File.ReadAllLines(filePath)
+                |> Array.choose (fun line ->
+                    let trimmed = line.TrimStart()
+                    if trimmed.StartsWith("#define") then
+                        // Parse: #define NAME ...rest... /* comment */
+                        let afterDefine = trimmed.Substring(7).TrimStart()
+                        // Extract the macro name (first identifier)
+                        let nameEnd =
+                            afterDefine
+                            |> Seq.tryFindIndex (fun c -> not (Char.IsLetterOrDigit c || c = '_'))
+                            |> Option.defaultValue afterDefine.Length
+                        if nameEnd > 0 then
+                            let name = afterDefine.Substring(0, nameEnd)
+                            match extractTrailingComment afterDefine with
+                            | Some comment -> Some (name, comment)
+                            | None -> None
+                        else None
+                    else None)
+                |> Map.ofArray
+            with _ -> Map.empty
 
     // =========================================================================
     // Clang Invocation
@@ -718,6 +774,64 @@ module CppParser =
         runClang args ["-E"; "-dM"; options.HeaderFile] options.Verbose
 
     // =========================================================================
+    // Include Tree Discovery + Macro Documentation Enrichment
+    // =========================================================================
+
+    /// Parse clang -H output (from stderr) to get the include file list.
+    /// Format: ". /path/to/file" with dots indicating depth.
+    let private parseIncludeList (clangHOutput: string) : string list =
+        clangHOutput.Split([|'\n'; '\r'|], StringSplitOptions.RemoveEmptyEntries)
+        |> Array.choose (fun line ->
+            let trimmed = line.TrimStart('.')
+            let path = trimmed.TrimStart()
+            if File.Exists path then Some path else None)
+        |> Array.distinct
+        |> List.ofArray
+
+    /// Run clang -H to discover the include file tree (files listed on stderr).
+    let private runClangIncludes (options: HeaderParserOptions) : string list =
+        let clangArgs = buildClangArgs options
+        for arg in ["-H"; "-E"; "-o"; "/dev/null"; options.HeaderFile] do
+            clangArgs.Add arg
+
+        let startInfo = ProcessStartInfo()
+        startInfo.FileName <- "clang"
+        startInfo.Arguments <- String.Join(" ", clangArgs :> string seq)
+        startInfo.RedirectStandardOutput <- true
+        startInfo.RedirectStandardError <- true
+        startInfo.UseShellExecute <- false
+        startInfo.CreateNoWindow <- true
+
+        try
+            use proc = Process.Start(startInfo)
+            proc.StandardOutput.ReadToEnd() |> ignore
+            let stderr = proc.StandardError.ReadToEnd()
+            proc.WaitForExit()
+            options.HeaderFile :: parseIncludeList stderr
+        with _ ->
+            [options.HeaderFile]
+
+    /// Build a complete macro name → documentation map by scanning raw header files.
+    /// Uses clang -H to discover the include tree, then reads each file's #define comments.
+    let private buildMacroDocumentationMap (options: HeaderParserOptions) : Map<string, string> =
+        let files = runClangIncludes options
+        files
+        |> List.map extractMacroCommentsFromFile
+        |> List.fold (fun acc map ->
+            Map.fold (fun s k v -> Map.add k v s) acc map) Map.empty
+
+    /// Enrich a list of MacroDecl with documentation from raw header comments.
+    let private enrichMacrosWithDocumentation
+        (docMap: Map<string, string>)
+        (macros: MacroDecl list)
+        : MacroDecl list =
+        macros
+        |> List.map (fun m ->
+            match Map.tryFind m.Name docMap with
+            | Some doc -> { m with Documentation = Some doc }
+            | None -> m)
+
+    // =========================================================================
     // Public API
     // =========================================================================
 
@@ -769,7 +883,15 @@ module CppParser =
                                 if options.Verbose then
                                     printfn "[CppParser] Extracted %d macros" (List.length allMacros)
 
-                                allMacros
+                                // Pass 3: Enrich macros with documentation from raw header comments
+                                let docMap = buildMacroDocumentationMap options
+                                let enriched = enrichMacrosWithDocumentation docMap allMacros
+
+                                if options.Verbose then
+                                    let docCount = enriched |> List.filter (fun m -> m.Documentation.IsSome) |> List.length
+                                    printfn "[CppParser] Enriched %d/%d macros with documentation" docCount (List.length enriched)
+
+                                enriched
                         else
                             []
 

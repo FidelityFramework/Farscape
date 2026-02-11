@@ -13,6 +13,7 @@ module CodeRenderer =
     let rec renderType = function
         | Named n -> n
         | Generic (outer, inner) -> $"{outer}<{renderType inner}>"
+        | Generic2 (outer, a, b) -> $"{outer}<{renderType a}, {renderType b}>"
         | Unit -> "unit"
 
     /// Render an FsParam to "(name: type)" form
@@ -43,6 +44,18 @@ module CodeRenderer =
             | _ -> $"Error ({renderExpr indent expr})"
         | LetIn (name, binding, body) ->
             $"let {name} = {renderExpr indent binding}\n{indent}{renderExpr indent body}"
+        | RecordConstruction fields ->
+            let fieldStr =
+                fields
+                |> List.map (fun (name, expr) -> $"{name} = {renderExpr indent expr}")
+                |> String.concat "; "
+            $"{{ {fieldStr} }}"
+        | MatchExpr (scrutinee, cases) ->
+            let caseStr =
+                cases
+                |> List.map (fun (pattern, body) -> $"\n{indent}| {pattern} -> {renderExpr indent body}")
+                |> String.concat ""
+            $"match {renderExpr indent scrutinee} with{caseStr}"
 
     /// Render a single FsDecl node to the StringBuilder at the given indentation level
     let rec private renderDecl (sb: StringBuilder) (indent: int) (decl: FsDecl) =
@@ -82,10 +95,12 @@ module CodeRenderer =
             sb.AppendLine($"{prefix}[<Literal>]") |> ignore
             sb.AppendLine($"{prefix}let {name} = {value}") |> ignore
 
-        | RecordType (name, fields, doc) ->
+        | RecordType (name, fields, doc, attributes) ->
             match doc with
             | Some d -> sb.AppendLine($"{prefix}/// {d}") |> ignore
             | None -> ()
+            for attr in attributes do
+                sb.AppendLine($"{prefix}[<{attr}>]") |> ignore
             sb.AppendLine($"{prefix}type {name} = {{") |> ignore
             for (fname, ftype) in fields do
                 sb.AppendLine($"{prefix}    {fname}: {renderType ftype}") |> ignore

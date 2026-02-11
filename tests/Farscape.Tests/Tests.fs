@@ -445,7 +445,7 @@ module CodeRendererTests =
     [<Fact>]
     let ``render RecordType produces F# record`` () =
         let decl = Module("Test.Module", "test",
-            [ RecordType("Point", [("x", Named "int32"); ("y", Named "int32")], Some "A 2D point") ])
+            [ RecordType("Point", [("x", Named "int32"); ("y", Named "int32")], Some "A 2D point", []) ])
         let result = render decl
         Assert.Contains("type Point = {", result)
         Assert.Contains("x: int32", result)
@@ -593,10 +593,10 @@ module FidelityCodeGeneratorTests =
     let ``generate emits numeric macro constants`` () =
         let decls = [
             CppParser.Declaration.Macro {
-                Name = "EXIT_SUCCESS"; Kind = CppParser.SimpleValue "0"; RawValue = "0"
+                Name = "EXIT_SUCCESS"; Kind = CppParser.SimpleValue "0"; RawValue = "0"; Documentation = None
             }
             CppParser.Declaration.Macro {
-                Name = "EXIT_FAILURE"; Kind = CppParser.SimpleValue "1"; RawValue = "1"
+                Name = "EXIT_FAILURE"; Kind = CppParser.SimpleValue "1"; RawValue = "1"; Documentation = None
             }
         ]
         let result = FidelityCodeGenerator.generate decls "Test" "test"
@@ -607,8 +607,8 @@ module FidelityCodeGeneratorTests =
     [<Fact>]
     let ``generate filters compiler builtin macros`` () =
         let decls = [
-            CppParser.Declaration.Macro { Name = "__STDC__"; Kind = CppParser.SimpleValue "1"; RawValue = "1" }
-            CppParser.Declaration.Macro { Name = "FOO"; Kind = CppParser.SimpleValue "42"; RawValue = "42" }
+            CppParser.Declaration.Macro { Name = "__STDC__"; Kind = CppParser.SimpleValue "1"; RawValue = "1"; Documentation = None }
+            CppParser.Declaration.Macro { Name = "FOO"; Kind = CppParser.SimpleValue "42"; RawValue = "42"; Documentation = None }
         ]
         let result = FidelityCodeGenerator.generate decls "Test" "test"
         Assert.DoesNotContain("__STDC__", result)
@@ -843,6 +843,7 @@ module MoyaSerializerTests =
               Prefixes = ["read"; "write"]
               Functions = ["pipe"] }
         ]
+        ErrorConventions = None
     }
 
     [<Fact>]
@@ -965,6 +966,67 @@ prefixes = ["str"]
         match MoyaSerializer.deserialize doc with
         | Error _ -> ()
         | Ok _ -> Assert.Fail "Should reject empty headers"
+
+// =============================================================================
+// Error Convention TOML Tests
+// =============================================================================
+
+module ErrorConventionTomlTests =
+
+    open MoyaTypes
+
+    [<Fact>]
+    let ``error conventions round-trip through TOML`` () =
+        let project : MoyaProject = {
+            Library = { Name = "libc"; Headers = ["/usr/include/stdio.h"]; IncludePaths = []; Defines = [] }
+            Output = { Mode = "fidelity"; Directory = "./out" }
+            Namespaces = []
+            ErrorConventions = Some {
+                Default = Errno
+                Overrides = Map.ofList [("pthread_create", ReturnCode); ("strtol", NoErrorConvention)]
+            }
+        }
+        let toml = MoyaSerializer.toTomlString project
+        Assert.Contains("error_conventions", toml)
+        Assert.Contains("errno", toml)
+        match Fidelity.Toml.Toml.parse toml with
+        | Error e -> Assert.Fail $"Parse failed: {e}"
+        | Ok doc ->
+            match MoyaSerializer.deserialize doc with
+            | Error e -> Assert.Fail $"Deserialize failed: {e}"
+            | Ok roundTripped ->
+                Assert.True(roundTripped.ErrorConventions.IsSome)
+                let spec = roundTripped.ErrorConventions.Value
+                Assert.Equal(Errno, spec.Default)
+                Assert.Equal(ReturnCode, spec.Overrides.["pthread_create"])
+                Assert.Equal(NoErrorConvention, spec.Overrides.["strtol"])
+
+    [<Fact>]
+    let ``missing error_conventions deserializes as None`` () =
+        let toml = "[library]\nname = \"test\"\nheader = \"test.h\"\n[output]\nmode = \"fidelity\"\ndirectory = \"./out\""
+        let doc = Fidelity.Toml.Toml.parseOrFail toml
+        match MoyaSerializer.deserialize doc with
+        | Error e -> Assert.Fail $"Deserialize failed: {e}"
+        | Ok project -> Assert.True(project.ErrorConventions.IsNone)
+
+    [<Fact>]
+    let ``error conventions with no overrides`` () =
+        let project : MoyaProject = {
+            Library = { Name = "libc"; Headers = ["/usr/include/stdio.h"]; IncludePaths = []; Defines = [] }
+            Output = { Mode = "fidelity"; Directory = "./out" }
+            Namespaces = []
+            ErrorConventions = Some { Default = Errno; Overrides = Map.empty }
+        }
+        let toml = MoyaSerializer.toTomlString project
+        match Fidelity.Toml.Toml.parse toml with
+        | Error e -> Assert.Fail $"Parse failed: {e}"
+        | Ok doc ->
+            match MoyaSerializer.deserialize doc with
+            | Error e -> Assert.Fail $"Deserialize failed: {e}"
+            | Ok rt ->
+                Assert.True(rt.ErrorConventions.IsSome)
+                Assert.Equal(Errno, rt.ErrorConventions.Value.Default)
+                Assert.True(rt.ErrorConventions.Value.Overrides.IsEmpty)
 
 // =============================================================================
 // WrapperPatternAnalyzer Tests: Attribute mapping and inference
@@ -1170,7 +1232,7 @@ module WrapperCodeGeneratorTests =
 
     let private generateSingle name retType parms attrs =
         let decls = [ mkDecl name retType parms attrs ]
-        WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test"
+        WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" None
 
     [<Fact>]
     let ``CountOrError wrapper generates Result return and comparison`` () =
@@ -1258,8 +1320,257 @@ module WrapperCodeGeneratorTests =
             mkDecl "read" "ssize_t" [("fd", "int"); ("buf", "void *"); ("count", "size_t")] []
             mkDecl "write" "ssize_t" [("fd", "int"); ("buf", "const void *"); ("count", "size_t")] []
         ]
-        let output = WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test"
+        let output = WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" None
         // Count occurrences of "let read"; should be exactly 1
         let readCount = output.Split("let read") |> Array.length
         Assert.Equal(2, readCount) // split produces N+1 parts for N occurrences
         Assert.Contains("let write", output)
+
+// =============================================================================
+// Errno-Enabled Wrapper Generation Tests
+// =============================================================================
+
+module ErrnoWrapperTests =
+
+    let private mkDecl name retType parms attrs =
+        CppParser.Declaration.Function
+            { Name = name; ReturnType = retType; Parameters = parms; Documentation = None
+              IsVirtual = false; IsStatic = false; IsInline = false; Attributes = attrs }
+
+    let private generateWithErrno name retType parms attrs =
+        let decls = [ mkDecl name retType parms attrs ]
+        WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" (Some "Fidelity.Errno")
+
+    [<Fact>]
+    let ``errno-enabled wrapper uses Result<T, CError> return type`` () =
+        let output = generateWithErrno "read" "ssize_t"
+                        [("fd", "int"); ("buf", "void *"); ("count", "size_t")]
+                        []
+        Assert.Contains("Result<nativeint, CError>", output)
+
+    [<Fact>]
+    let ``errno-enabled wrapper includes captureError helper`` () =
+        let output = generateWithErrno "read" "ssize_t"
+                        [("fd", "int"); ("buf", "void *"); ("count", "size_t")]
+                        []
+        Assert.Contains("let captureError", output)
+        Assert.Contains("NativePtr.read", output)
+        Assert.Contains("__errno_location", output)
+        Assert.Contains("Errno.describe", output)
+
+    [<Fact>]
+    let ``errno-enabled wrapper opens errno module`` () =
+        let output = generateWithErrno "read" "ssize_t"
+                        [("fd", "int"); ("buf", "void *"); ("count", "size_t")]
+                        []
+        Assert.Contains("open Fidelity.Errno", output)
+        Assert.Contains("open Microsoft.FSharp.NativeInterop", output)
+
+    [<Fact>]
+    let ``errno-enabled CountOrError calls captureError in error path`` () =
+        let output = generateWithErrno "read" "ssize_t"
+                        [("fd", "int"); ("buf", "void *"); ("count", "size_t")]
+                        []
+        Assert.Contains("Error (captureError ())", output)
+        Assert.Contains("Ok result", output)
+
+    [<Fact>]
+    let ``errno-enabled ZeroSuccessOrError calls captureError`` () =
+        let output = generateWithErrno "fclose" "int"
+                        [("stream", "void *")]
+                        []
+        Assert.Contains("Result<unit, CError>", output)
+        Assert.Contains("Error (captureError ())", output)
+
+    [<Fact>]
+    let ``errno-enabled AllocatedPointer calls captureError`` () =
+        let output = generateWithErrno "malloc" "void *"
+                        [("size", "size_t")]
+                        [{ CppParser.AttributeData.Kind = "MallocAttr"; Args = []; StringArg = None }]
+        Assert.Contains("Result<nativeint, CError>", output)
+        Assert.Contains("Error (captureError ())", output)
+
+    [<Fact>]
+    let ``errno-enabled captureError builds CError record`` () =
+        let output = generateWithErrno "read" "ssize_t"
+                        [("fd", "int"); ("buf", "void *"); ("count", "size_t")]
+                        []
+        // captureError body should construct { Code = code; Description = Errno.describe code }
+        Assert.Contains("Code = code", output)
+        Assert.Contains("Description = Errno.describe code", output)
+
+    [<Fact>]
+    let ``PureValue wrapper unchanged with errno enabled`` () =
+        let output = generateWithErrno "strlen" "size_t"
+                        [("s", "const char *")]
+                        [{ CppParser.AttributeData.Kind = "PureAttr"; Args = []; StringArg = None }]
+        // Pure functions don't use Result wrapping — direct delegation
+        Assert.Contains("let strlen", output)
+        Assert.DoesNotContain("Result<", output.Split("let strlen").[1])
+
+// =============================================================================
+// Raw Header Comment Extraction Tests
+// =============================================================================
+
+module RawHeaderCommentTests =
+
+    open Farscape.Core.CodeAST
+    open Farscape.Core.CodeRenderer
+
+    [<Fact>]
+    let ``Generic2 renders two-parameter generic type`` () =
+        let ty = Generic2("Result", Named "nativeint", Named "CError")
+        Assert.Equal("Result<nativeint, CError>", renderType ty)
+
+    [<Fact>]
+    let ``RecordConstruction renders struct literal`` () =
+        let expr = RecordConstruction [("Code", Literal "42"); ("Description", Literal "\"test\"")]
+        let result = renderExpr "        " expr
+        Assert.Equal("{ Code = 42; Description = \"test\" }", result)
+
+    [<Fact>]
+    let ``errno.h macros get documentation from raw header comments`` () =
+        let options : CppParser.HeaderParserOptions = {
+            HeaderFile = "/usr/include/errno.h"
+            IncludePaths = []
+            Defines = []
+            Verbose = false
+            IncludeMacros = true
+            MacroPrefixes = ["E"]
+        }
+        match CppParser.parseHeaderFull options with
+        | Error err -> Assert.Fail $"Parse failed: {err}"
+        | Ok result ->
+            // Should find errno macros
+            Assert.NotEmpty result.Macros
+            // EPERM should have documentation "Operation not permitted"
+            let eperm = result.Macros |> List.tryFind (fun m -> m.Name = "EPERM")
+            Assert.True(eperm.IsSome, "EPERM macro not found")
+            Assert.True(eperm.Value.Documentation.IsSome, "EPERM should have documentation")
+            Assert.Equal("Operation not permitted", eperm.Value.Documentation.Value)
+            // ENOENT should have documentation
+            let enoent = result.Macros |> List.tryFind (fun m -> m.Name = "ENOENT")
+            Assert.True(enoent.IsSome, "ENOENT macro not found")
+            Assert.Equal("No such file or directory", enoent.Value.Documentation.Value)
+
+module ErrnoModuleGeneratorTests =
+
+    open Farscape.Core.CodeAST
+    open Farscape.Core.CodeRenderer
+    open Farscape.Core.ErrnoModuleGenerator
+
+    [<Fact>]
+    let ``MatchExpr renders match expression with cases`` () =
+        let expr = MatchExpr(
+                        Identifier "code",
+                        [ ("1", Literal "\"one\"")
+                          ("2", Literal "\"two\"")
+                          ("_", Literal "\"unknown\"") ])
+        let result = renderExpr "        " expr
+        Assert.Contains("match code with", result)
+        Assert.Contains("| 1 -> \"one\"", result)
+        Assert.Contains("| 2 -> \"two\"", result)
+        Assert.Contains("| _ -> \"unknown\"", result)
+
+    [<Fact>]
+    let ``RecordType with Struct attribute renders correctly`` () =
+        let decl = RecordType("CError", [("Code", Named "int32"); ("Description", Named "string")], Some "Error type", ["Struct"])
+        let rendered = CodeRenderer.render (Module("Test", "test", [decl]))
+        Assert.Contains("[<Struct>]", rendered)
+        Assert.Contains("type CError = {", rendered)
+        Assert.Contains("Code: int32", rendered)
+        Assert.Contains("Description: string", rendered)
+
+    [<Fact>]
+    let ``filterErrnoMacros extracts E* constants with integer values`` () =
+        let macros : CppParser.MacroDecl list = [
+            { Name = "EPERM"; Kind = CppParser.SimpleValue "1"; RawValue = "1"; Documentation = Some "Operation not permitted" }
+            { Name = "ENOENT"; Kind = CppParser.SimpleValue "2"; RawValue = "2"; Documentation = Some "No such file or directory" }
+            { Name = "NOT_ERRNO"; Kind = CppParser.SimpleValue "42"; RawValue = "42"; Documentation = None }
+            { Name = "EMAX_SOMETHING"; Kind = CppParser.SimpleValue "abc"; RawValue = "abc"; Documentation = None }
+            { Name = "EAGAIN"; Kind = CppParser.SimpleValue "11"; RawValue = "11"; Documentation = Some "Try again" }
+        ]
+        let result = filterErrnoMacros macros
+        Assert.Equal(3, result.Length)
+        Assert.Equal("EPERM", result.[0].Name)
+        Assert.Equal(1L, result.[0].Value)
+        Assert.Equal(Some "Operation not permitted", result.[0].Description)
+        Assert.Equal("ENOENT", result.[1].Name)
+        Assert.Equal("EAGAIN", result.[2].Name)
+
+    [<Fact>]
+    let ``generateCErrorType produces Struct-attributed record`` () =
+        let decls = generateCErrorType ()
+        Assert.Equal(1, decls.Length)
+        match decls.[0] with
+        | RecordType (name, fields, doc, attrs) ->
+            Assert.Equal("CError", name)
+            Assert.Equal(2, fields.Length)
+            Assert.Equal("Code", fst fields.[0])
+            Assert.Equal("Description", fst fields.[1])
+            Assert.Contains("Struct", attrs)
+            Assert.True(doc.IsSome)
+        | _ -> Assert.Fail "Expected RecordType"
+
+    [<Fact>]
+    let ``generateErrnoDecls produces Literal constants and describe function`` () =
+        let constants = [
+            { Name = "EPERM"; Value = 1L; Description = Some "Operation not permitted" }
+            { Name = "ENOENT"; Value = 2L; Description = Some "No such file or directory" }
+        ]
+        let decls = generateErrnoDecls constants
+        // Should have XmlDoc + LiteralBinding for each constant, then BlankLine + 2 XmlDocs + describe LetBinding
+        let literals = decls |> List.choose (function LiteralBinding (n, v) -> Some (n, v) | _ -> None)
+        Assert.Equal(2, literals.Length)
+        Assert.Equal(("EPERM", "1"), literals.[0])
+        Assert.Equal(("ENOENT", "2"), literals.[1])
+        // Should have a describe LetBinding
+        let letBindings = decls |> List.choose (function LetBinding (n, _, _, _, _) -> Some n | _ -> None)
+        Assert.Contains("describe", letBindings)
+
+    [<Fact>]
+    let ``generate renders complete errno module from macros`` () =
+        let macros : CppParser.MacroDecl list = [
+            { Name = "EPERM"; Kind = CppParser.SimpleValue "1"; RawValue = "1"; Documentation = Some "Operation not permitted" }
+            { Name = "ENOENT"; Kind = CppParser.SimpleValue "2"; RawValue = "2"; Documentation = Some "No such file or directory" }
+        ]
+        let result = ErrnoModuleGenerator.generate macros "Fidelity.Errno" "libc"
+        Assert.True(result.IsSome)
+        let output = result.Value
+        Assert.Contains("[<Struct>]", output)
+        Assert.Contains("type CError = {", output)
+        Assert.Contains("Code: int32", output)
+        Assert.Contains("[<Literal>]", output)
+        Assert.Contains("let EPERM = 1", output)
+        Assert.Contains("let ENOENT = 2", output)
+        Assert.Contains("/// Operation not permitted", output)
+        Assert.Contains("let describe (code: int32) : string =", output)
+        Assert.Contains("| EPERM -> \"Operation not permitted\"", output)
+        Assert.Contains("| ENOENT -> \"No such file or directory\"", output)
+        Assert.Contains("| _ -> \"Unknown error\"", output)
+
+    [<Fact>]
+    let ``generate with live errno.h produces complete module`` () =
+        let options : CppParser.HeaderParserOptions = {
+            HeaderFile = "/usr/include/errno.h"
+            IncludePaths = []
+            Defines = []
+            Verbose = false
+            IncludeMacros = true
+            MacroPrefixes = ["E"]
+        }
+        match CppParser.parseHeaderFull options with
+        | Error err -> Assert.Fail $"Parse failed: {err}"
+        | Ok result ->
+            let output = ErrnoModuleGenerator.generate result.Macros "Fidelity.Errno" "errno"
+            Assert.True(output.IsSome, "Should generate errno module")
+            let rendered = output.Value
+            // Verify structural elements
+            Assert.Contains("[<Struct>]", rendered)
+            Assert.Contains("type CError = {", rendered)
+            Assert.Contains("let describe (code: int32) : string =", rendered)
+            // Verify specific constants with descriptions
+            Assert.Contains("let EPERM = 1", rendered)
+            Assert.Contains("| EPERM -> \"Operation not permitted\"", rendered)
+            Assert.Contains("let ENOENT = 2", rendered)
+            Assert.Contains("| ENOENT -> \"No such file or directory\"", rendered)

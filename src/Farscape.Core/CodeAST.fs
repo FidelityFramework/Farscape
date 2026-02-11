@@ -13,6 +13,8 @@ module CodeAST =
         | Named of string
         /// Generic type: "nativeptr<byte>" → Generic("nativeptr", Named "byte")
         | Generic of string * FsType
+        /// Two-parameter generic: "Result<nativeint, CError>" → Generic2("Result", Named "nativeint", Named "CError")
+        | Generic2 of string * FsType * FsType
         /// Unit type (special case for void returns)
         | Unit
 
@@ -40,6 +42,10 @@ module CodeAST =
         | ResultError of FsExpr
         /// Let binding in expression: let result = binding in body
         | LetIn of name: string * binding: FsExpr * body: FsExpr
+        /// Record/struct construction: { Field1 = expr1; Field2 = expr2 }
+        | RecordConstruction of fields: (string * FsExpr) list
+        /// Match expression: match scrutinee with | pattern1 -> body1 | pattern2 -> body2
+        | MatchExpr of scrutinee: FsExpr * cases: (string * FsExpr) list
 
     /// A function parameter
     type FsParam = {
@@ -63,6 +69,7 @@ module CodeAST =
         /// [<Literal>] let name = value
         | LiteralBinding of name: string * value: string
         /// type Name = { field1: type1; field2: type2 }
-        | RecordType of name: string * fields: (string * FsType) list * doc: string option
+        /// Attributes are rendered as [<Attr>] lines before the type.
+        | RecordType of name: string * fields: (string * FsType) list * doc: string option * attributes: string list
         /// type Name = | Case1 = 0L | Case2 = 1L
         | EnumType of name: string * values: (string * int64) list * doc: string option

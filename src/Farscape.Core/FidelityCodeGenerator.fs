@@ -118,7 +118,7 @@ module FidelityCodeGenerator =
     let private generateStructDecl (typedefMap: Map<string, string>) (s: CppParser.StructDecl) : FsDecl list =
         let mapType = mapCTypeToFidelityType typedefMap
         let fields = s.Fields |> List.map (fun f -> (f.Name, mapType f.Type))
-        [ RecordType(s.Name, fields, s.Documentation) ]
+        [ RecordType(s.Name, fields, s.Documentation, []) ]
 
     /// Generate FsDecl list for a macro constant (numeric values only).
     /// Uses CompilerBuiltin/InternalMacro/UserMacro active patterns for classification

@@ -53,12 +53,37 @@ module MoyaSerializer =
             else TomlTable.add "functions" (TomlValue.Array (ns.Functions |> List.map TomlValue.String)) table
         TomlValue.Table table
 
+    /// Serialize an ErrorConvention to its TOML string value.
+    let private serializeConvention (c: ErrorConvention) : string =
+        match c with
+        | Errno -> "errno"
+        | ReturnCode -> "return_code"
+        | NoErrorConvention -> "none"
+
+    /// Serialize ErrorConventionSpec to a TOML table value.
+    let private serializeErrorConventions (spec: ErrorConventionSpec) : TomlValue =
+        let table =
+            TomlTable.empty
+            |> TomlTable.add "default" (TomlValue.String (serializeConvention spec.Default))
+        let table =
+            if spec.Overrides.IsEmpty then table
+            else
+                let overrideTable =
+                    spec.Overrides
+                    |> Map.fold (fun t k v -> TomlTable.add k (TomlValue.String (serializeConvention v)) t) TomlTable.empty
+                TomlTable.add "overrides" (TomlValue.Table overrideTable) table
+        TomlValue.Table table
+
     /// Serialize a complete MoyaProject to a TomlDocument.
     let serialize (project: MoyaProject) : TomlDocument =
-        TomlTable.empty
-        |> TomlTable.add "library" (serializeLibrary project.Library)
-        |> TomlTable.add "output" (serializeOutput project.Output)
-        |> TomlTable.add "namespace" (TomlValue.Array (project.Namespaces |> List.map serializeNamespace))
+        let table =
+            TomlTable.empty
+            |> TomlTable.add "library" (serializeLibrary project.Library)
+            |> TomlTable.add "output" (serializeOutput project.Output)
+            |> TomlTable.add "namespace" (TomlValue.Array (project.Namespaces |> List.map serializeNamespace))
+        match project.ErrorConventions with
+        | Some spec -> table |> TomlTable.add "error_conventions" (serializeErrorConventions spec)
+        | None -> table
 
     /// Render a MoyaProject to a TOML string.
     let toTomlString (project: MoyaProject) : string =
@@ -149,13 +174,44 @@ module MoyaSerializer =
                 Error (String.concat "; " errors)
         | _ -> Error "'namespace' must be an array of tables"
 
+    /// Parse an error convention string to ErrorConvention.
+    let private parseConvention (s: string) : ErrorConvention =
+        match s.ToLowerInvariant() with
+        | "errno" -> Errno
+        | "return_code" -> ReturnCode
+        | _ -> NoErrorConvention
+
+    /// Deserialize the optional [error_conventions] section.
+    let private deserializeErrorConventions (doc: TomlDocument) : ErrorConventionSpec option =
+        match Toml.getValue "error_conventions" doc with
+        | None -> None
+        | Some (TomlValue.Table table) ->
+            let defaultConv =
+                match TomlTable.tryFind "default" table with
+                | Some (TomlValue.String s) -> parseConvention s
+                | _ -> NoErrorConvention
+            let overrides =
+                match TomlTable.tryFind "overrides" table with
+                | Some (TomlValue.Table overrideTable) ->
+                    overrideTable
+                    |> Map.toSeq
+                    |> Seq.choose (fun (k, v) ->
+                        match v with
+                        | TomlValue.String s -> Some (k, parseConvention s)
+                        | _ -> None)
+                    |> Map.ofSeq
+                | _ -> Map.empty
+            Some { Default = defaultConv; Overrides = overrides }
+        | _ -> None
+
     /// Deserialize a TomlDocument to a MoyaProject.
     let deserialize (doc: TomlDocument) : Result<MoyaProject, string> =
         match deserializeLibrary doc, deserializeOutput doc, deserializeNamespaces doc with
         | Ok lib, Ok output, Ok namespaces ->
             Ok { Library = lib
                  Output = output
-                 Namespaces = namespaces }
+                 Namespaces = namespaces
+                 ErrorConventions = deserializeErrorConventions doc }
         | Error e, _, _ | _, Error e, _ | _, _, Error e -> Error e
 
     // =========================================================================

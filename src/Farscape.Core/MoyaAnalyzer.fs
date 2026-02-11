@@ -217,7 +217,8 @@ module MoyaAnalyzer =
           Output =
             { Mode = outputMode
               Directory = outputDir }
-          Namespaces = namespaces @ catchAll }
+          Namespaces = namespaces @ catchAll
+          ErrorConventions = None }
 
     // =========================================================================
     // Declaration Filtering (for scoped generation)

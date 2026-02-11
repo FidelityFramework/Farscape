@@ -104,6 +104,7 @@ module CTypeParser =
                     Name = name
                     Kind = CppParser.FunctionLike (Seq.toList args, body)
                     RawValue = body
+                    Documentation = None
                 }
                 return macro
             }
@@ -118,6 +119,7 @@ module CTypeParser =
                     Name = name
                     Kind = classifyObjectMacroValue trimmed
                     RawValue = trimmed
+                    Documentation = None
                 }
                 return macro
             }
@@ -130,6 +132,7 @@ module CTypeParser =
                     Name = name
                     Kind = CppParser.SimpleValue ""
                     RawValue = ""
+                    Documentation = None
                 }
                 return macro
             }
