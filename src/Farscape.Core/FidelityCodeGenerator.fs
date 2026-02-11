@@ -2,6 +2,7 @@ namespace Farscape.Core
 
 open CodeAST
 open ActivePatterns
+open Types
 
 /// Generates F# source in the Platform.Bindings pattern for Fidelity/Firefly consumption.
 ///
@@ -66,8 +67,9 @@ module FidelityCodeGenerator =
 
     /// Map a C type string to an FsType suitable for Fidelity native compilation.
     /// Uses ParsedCType active pattern (XParsec-backed) instead of Regex/string munging.
+    /// PlatformABI determines concrete widths for C int/long (resolved at generation time).
     /// Used by both FidelityCodeGenerator (Layer 1) and WrapperCodeGenerator (Layer 2).
-    let mapCTypeToFidelityType (typedefMap: Map<string, string>) (cType: string) : FsType =
+    let mapCTypeToFidelityType (typedefMap: Map<string, string>) (model: PlatformABI) (cType: string) : FsType =
         // Function pointer types like "void (*)(void)" contain (*); always nativeint
         if cType.Contains("(*)") then Named "nativeint"
         else
@@ -76,7 +78,7 @@ module FidelityCodeGenerator =
             info |> mapTypeInfo (fun baseType ->
                 // Check type dictionary FIRST — preserves platform-abstract types
                 // e.g. size_t → unativeint directly, skipping typedef chain size_t → unsigned long → unativeint
-                let direct = TypeMapper.getFSharpType baseType
+                let direct = TypeMapper.getFSharpType model baseType
                 if direct <> baseType then
                     Named direct
                 else
@@ -87,9 +89,9 @@ module FidelityCodeGenerator =
                     match resolved with
                     | ParsedCType resolvedInfo ->
                         resolvedInfo |> mapTypeInfo (fun resolvedBase ->
-                            Named (TypeMapper.getFSharpType resolvedBase))
-                    | _ -> Named (TypeMapper.getFSharpType resolved))
-        | _ -> Named (TypeMapper.getFSharpType cType)
+                            Named (TypeMapper.getFSharpType model resolvedBase))
+                    | _ -> Named (TypeMapper.getFSharpType model resolved))
+        | _ -> Named (TypeMapper.getFSharpType model cType)
 
     // =========================================================================
     // Declaration Generation Helpers (produce FsDecl, not strings)
@@ -111,8 +113,8 @@ module FidelityCodeGenerator =
             [ XmlDoc cSignature ]
 
     /// Generate FsDecl list for a single function binding.
-    let private generateFunctionDecls (typedefMap: Map<string, string>) (libraryName: string) (func: CppParser.FunctionDecl) : FsDecl list =
-        let mapType = mapCTypeToFidelityType typedefMap
+    let private generateFunctionDecls (typedefMap: Map<string, string>) (model: PlatformABI) (libraryName: string) (func: CppParser.FunctionDecl) : FsDecl list =
+        let mapType = mapCTypeToFidelityType typedefMap model
         let returnType = mapType func.ReturnType
         let parameters =
             func.Parameters
@@ -129,8 +131,8 @@ module FidelityCodeGenerator =
         [ EnumType(e.Name, e.Values |> List.map (fun v -> (v.Name, v.Value)), e.Documentation) ]
 
     /// Generate FsDecl list for a struct type (as F# record).
-    let private generateStructDecl (typedefMap: Map<string, string>) (s: CppParser.StructDecl) : FsDecl list =
-        let mapType = mapCTypeToFidelityType typedefMap
+    let private generateStructDecl (typedefMap: Map<string, string>) (model: PlatformABI) (s: CppParser.StructDecl) : FsDecl list =
+        let mapType = mapCTypeToFidelityType typedefMap model
         let fields = s.Fields |> List.map (fun f -> (f.Name, mapType f.Type))
         [ RecordType(s.Name, fields, s.Documentation, []) ]
 
@@ -170,9 +172,9 @@ module FidelityCodeGenerator =
 
     /// Generation algebra: maps each Declaration variant to a DeclGroup.
     /// This is the SINGLE traversal of declarations for code generation.
-    let private generationAlgebra (typedefMap: Map<string, string>) : DeclarationAlgebra.DeclarationAlgebra<DeclGroup> = {
+    let private generationAlgebra (typedefMap: Map<string, string>) (model: PlatformABI) : DeclarationAlgebra.DeclarationAlgebra<DeclGroup> = {
         OnEnum = fun e -> if e.Name <> "" then GEnum (generateEnumDecl e) else GNone
-        OnStruct = fun s -> if s.Name <> "" then GStruct (generateStructDecl typedefMap s) else GNone
+        OnStruct = fun s -> if s.Name <> "" then GStruct (generateStructDecl typedefMap model s) else GNone
         OnFunction = fun f -> GFunc f
         OnMacro = fun m ->
             let decls = generateMacroDeclIfNumeric m
@@ -184,10 +186,12 @@ module FidelityCodeGenerator =
 
     /// Generate a complete Fidelity binding source file from parsed declarations.
     /// Architecture: Catamorphism → FsDecl tree → CodeRenderer.render
+    /// PlatformABI determines concrete widths for C int/long in NTU output.
     let generate
         (declarations: CppParser.Declaration list)
         (namespace': string)
         (libraryName: string)
+        (model: PlatformABI)
         : string =
 
         // Phase 1: Build typedef resolution map (catamorphism + pure recursion)
@@ -195,7 +199,7 @@ module FidelityCodeGenerator =
 
         // Phase 2: Categorize declarations via catamorphism (ONE pass)
         let groups =
-            DeclarationAlgebra.cataDeclarations (generationAlgebra typedefMap) declarations
+            DeclarationAlgebra.cataDeclarations (generationAlgebra typedefMap model) declarations
 
         // Phase 3: Assemble categories (pure functional fold)
         let enums = groups |> List.collect (function GEnum d -> d | _ -> [])
@@ -204,7 +208,7 @@ module FidelityCodeGenerator =
             groups
             |> List.choose (function GFunc f -> Some f | _ -> None)
             |> List.distinctBy (fun f -> f.Name)
-            |> List.collect (generateFunctionDecls typedefMap libraryName)
+            |> List.collect (generateFunctionDecls typedefMap model libraryName)
         let macros = groups |> List.collect (function GMacro d -> d | _ -> [])
 
         // Phase 4: Build typed FsDecl tree

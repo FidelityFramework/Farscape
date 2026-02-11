@@ -6,23 +6,13 @@ namespace Farscape.Core
 /// for a specific platform's ABI. This is fundamentally different from the NTU type
 /// dictionary (TypeMapper), which emits platform-abstract types for Fidelity/FNCS.
 ///
-/// Key differences from TypeMapper:
-///   - C long → platform-specific (int64 on LP64, int32 on LLP64/ILP32)
-///   - C int → int32 on all modern platforms (but parameterized for IP16)
+/// Key difference from TypeMapper:
 ///   - char* → string (CLR handles marshalling), not nativeptr<byte>
-///   - No nativeint for C long (nativeint is pointer-width, C long is not on LLP64)
+/// Both TypeMapper and PInvokeTypeMapper resolve C int/long per PlatformABI.
+/// PlatformABI is defined in Types.fs (shared).
 module PInvokeTypeMapper =
 
-    /// Platform ABI determines concrete widths for platform-dependent types.
-    /// LP64:  int=32, long=64, ptr=64 (Linux, macOS, most Unix)
-    /// LLP64: int=32, long=32, ptr=64 (Windows x64)
-    /// ILP32: int=32, long=32, ptr=32 (32-bit systems)
-    /// IP16:  int=16, long=32, ptr=16/32 (AVR, MSP430, some embedded)
-    type PlatformABI =
-        | LP64
-        | LLP64
-        | ILP32
-        | IP16
+    open Types
 
     let private intWidth = function
         | LP64 | LLP64 | ILP32 -> 32

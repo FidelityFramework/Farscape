@@ -17,8 +17,9 @@ module BindingGenerator =
         Verbose: bool
         OutputMode: OutputMode
         GenerateWrappers: bool
-        /// Platform ABI for P/Invoke type resolution. Ignored for Fidelity output.
-        PInvokeDataModel: PInvokeTypeMapper.PlatformABI
+        /// Platform ABI for type width resolution (C int/long).
+        /// Used by both Fidelity (NTU) and P/Invoke (CLR) output paths.
+        DataModel: PlatformABI
     }
 
     /// Extract struct/class type names from declarations using catamorphism.
@@ -79,7 +80,7 @@ module BindingGenerator =
             match options.OutputMode with
             | Fidelity ->
                 logVerbose "Generating Fidelity F# source..." options.Verbose
-                let generatedCode = FidelityCodeGenerator.generate declarations options.Namespace options.LibraryName
+                let generatedCode = FidelityCodeGenerator.generate declarations options.Namespace options.LibraryName options.DataModel
 
                 let lastSegment = options.Namespace.Split('.') |> Array.last
                 let outputFileName = $"{lastSegment}.fs"
@@ -93,7 +94,7 @@ module BindingGenerator =
                         logVerbose "Generating idiomatic F# wrappers..." options.Verbose
                         let wrapperNamespace = $"{options.Namespace}.Wrappers"
                         let wrapperCode =
-                            WrapperCodeGenerator.generate declarations wrapperNamespace options.LibraryName options.Namespace None
+                            WrapperCodeGenerator.generate declarations wrapperNamespace options.LibraryName options.Namespace None options.DataModel
                         let wrapperPath = Path.Combine(options.OutputDirectory, $"{lastSegment}Wrappers.fs")
                         File.WriteAllText(wrapperPath, wrapperCode)
                         logVerbose $"Wrapper module written to: {wrapperPath}" options.Verbose
@@ -107,7 +108,7 @@ module BindingGenerator =
 
             | PInvoke ->
                 logVerbose "Generating P/Invoke F# source..." options.Verbose
-                let generatedCode = PInvokeCodeGenerator.generate declarations options.Namespace options.LibraryName options.PInvokeDataModel
+                let generatedCode = PInvokeCodeGenerator.generate declarations options.Namespace options.LibraryName options.DataModel
 
                 let lastSegment = options.Namespace.Split('.') |> Array.last
                 let outputFileName = $"{lastSegment}.fs"
@@ -131,7 +132,7 @@ module BindingGenerator =
     /// Supports multi-header projects: parses each header independently, merges with dedup.
     /// When generateWrappers is true, also generates Layer 2 idiomatic wrappers.
     /// When dotnet is true, generates P/Invoke bindings instead of Fidelity.
-    let generateFromProject (projectPath: string) (verbose: bool) (generateWrappers: bool) (dotnet: bool) (dataModel: PInvokeTypeMapper.PlatformABI) : Result<GenerationResult, string> =
+    let generateFromProject (projectPath: string) (verbose: bool) (generateWrappers: bool) (dotnet: bool) (dataModel: PlatformABI) : Result<GenerationResult, string> =
         match MoyaSerializer.loadFromFile projectPath with
         | Error e -> Error $"Failed to load project: {e}"
         | Ok project ->
@@ -164,7 +165,7 @@ module BindingGenerator =
                         logVerbose $"Namespace {ns.Name}: {filtered.Length} declarations" verbose
                         let code =
                             if dotnet then PInvokeCodeGenerator.generate filtered ns.Name ns.Library dataModel
-                            else FidelityCodeGenerator.generate filtered ns.Name ns.Library
+                            else FidelityCodeGenerator.generate filtered ns.Name ns.Library dataModel
                         let lastSegment = ns.Name.Split('.') |> Array.last
                         let fileName = $"{lastSegment}.fs"
                         let outputPath = Path.Combine(project.Output.Directory, fileName)
@@ -173,7 +174,7 @@ module BindingGenerator =
                         if generateWrappers && not dotnet then
                             let wrapperNamespace = $"{ns.Name}.Wrappers"
                             let wrapperCode =
-                                WrapperCodeGenerator.generate filtered wrapperNamespace ns.Library ns.Name errnoModuleName
+                                WrapperCodeGenerator.generate filtered wrapperNamespace ns.Library ns.Name errnoModuleName dataModel
                             let wrapperPath = Path.Combine(project.Output.Directory, $"{lastSegment}Wrappers.fs")
                             File.WriteAllText(wrapperPath, wrapperCode)
                             logVerbose $"Wrapper module: {wrapperPath}" verbose

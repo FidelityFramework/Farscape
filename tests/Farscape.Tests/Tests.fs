@@ -554,7 +554,7 @@ module FidelityCodeGeneratorTests =
         let decls = [
             CppParser.Declaration.Function (mkFunc "getpid" "int" [])
         ]
-        let result = FidelityCodeGenerator.generate decls "Fidelity.libc.Test" "libc"
+        let result = FidelityCodeGenerator.generate decls "Fidelity.libc.Test" "libc" Types.LP64
         Assert.Contains("module Fidelity.libc.Test", result)
         Assert.Contains("let getpid () : int32 =", result)
         Assert.Contains("Unchecked.defaultof<int32>", result)
@@ -564,7 +564,7 @@ module FidelityCodeGeneratorTests =
         let decls = [
             CppParser.Declaration.Function (mkFunc "strlen" "unsigned long" [("__s", "const char *")])
         ]
-        let result = FidelityCodeGenerator.generate decls "Test" "test"
+        let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
         Assert.Contains("(s: nativeptr<byte>)", result)
 
     [<Fact>]
@@ -573,7 +573,7 @@ module FidelityCodeGeneratorTests =
             CppParser.Declaration.Function (mkFunc "memset" "void *" [("__s", "void *"); ("__c", "int"); ("__n", "size_t")])
             CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
         ]
-        let result = FidelityCodeGenerator.generate decls "Test" "test"
+        let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
         Assert.Contains("(s: nativeint)", result)
         Assert.Contains(": nativeint =", result)
 
@@ -582,7 +582,7 @@ module FidelityCodeGeneratorTests =
         let decls = [
             CppParser.Declaration.Function (mkFunc "atexit" "int" [("__func", "void (*)(void)")])
         ]
-        let result = FidelityCodeGenerator.generate decls "Test" "test"
+        let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
         Assert.Contains("(func: nativeint)", result)
 
     [<Fact>]
@@ -595,7 +595,7 @@ module FidelityCodeGeneratorTests =
             ])
             CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
         ]
-        let result = FidelityCodeGenerator.generate decls "Test" "test"
+        let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
         Assert.Contains("(compar: nativeint)", result)
 
     [<Fact>]
@@ -604,7 +604,7 @@ module FidelityCodeGeneratorTests =
             CppParser.Declaration.Function (mkFunc "mbtowc" "int" [("__pwc", "wchar_t *"); ("__s", "const char *"); ("__n", "size_t")])
             CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
         ]
-        let result = FidelityCodeGenerator.generate decls "Test" "test"
+        let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
         // wchar_t * should be nativeint, not nativeptr<byte>
         Assert.Contains("(pwc: nativeint)", result)
 
@@ -618,7 +618,7 @@ module FidelityCodeGeneratorTests =
                 Name = "EXIT_FAILURE"; Kind = CppParser.SimpleValue "1"; RawValue = "1"; Documentation = None
             }
         ]
-        let result = FidelityCodeGenerator.generate decls "Test" "test"
+        let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
         Assert.Contains("[<Literal>]", result)
         Assert.Contains("let EXIT_SUCCESS = 0", result)
         Assert.Contains("let EXIT_FAILURE = 1", result)
@@ -629,7 +629,7 @@ module FidelityCodeGeneratorTests =
             CppParser.Declaration.Macro { Name = "__STDC__"; Kind = CppParser.SimpleValue "1"; RawValue = "1"; Documentation = None }
             CppParser.Declaration.Macro { Name = "FOO"; Kind = CppParser.SimpleValue "42"; RawValue = "42"; Documentation = None }
         ]
-        let result = FidelityCodeGenerator.generate decls "Test" "test"
+        let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
         Assert.DoesNotContain("__STDC__", result)
         Assert.Contains("let FOO = 42", result)
 
@@ -639,7 +639,7 @@ module FidelityCodeGeneratorTests =
             CppParser.Declaration.Function (mkFunc "read" "int" [("__fd", "int")])
             CppParser.Declaration.Function (mkFunc "read" "int" [("__fd", "int")])
         ]
-        let result = FidelityCodeGenerator.generate decls "Test" "test"
+        let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
         let occurrences =
             result.Split("let read ")
             |> Array.length
@@ -651,7 +651,7 @@ module FidelityCodeGeneratorTests =
         let decls = [
             CppParser.Declaration.Enum (mkEnum "Flags" [mkEnumVal "A" 0L; mkEnumVal "B" 1L] (Some "Test flags"))
         ]
-        let result = FidelityCodeGenerator.generate decls "Test" "test"
+        let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
         Assert.Contains("type Flags =", result)
         Assert.Contains("| A = 0L", result)
         Assert.Contains("| B = 1L", result)
@@ -661,7 +661,7 @@ module FidelityCodeGeneratorTests =
         let decls = [
             CppParser.Declaration.Struct (mkStruct "Point" [mkField "x" "int"; mkField "y" "int"] (Some "A point"))
         ]
-        let result = FidelityCodeGenerator.generate decls "Test" "test"
+        let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
         Assert.Contains("type Point = {", result)
         Assert.Contains("x: int32", result)
         Assert.Contains("y: int32", result)
@@ -672,7 +672,7 @@ module FidelityCodeGeneratorTests =
             CppParser.Declaration.Function (mkFunc "memcpy" "void *" [("__dest", "void *"); ("__src", "const void *"); ("__n", "size_t")])
             CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
         ]
-        let result = FidelityCodeGenerator.generate decls "Fidelity.libc.Memory" "libc"
+        let result = FidelityCodeGenerator.generate decls "Fidelity.libc.Memory" "libc" Types.LP64
         Assert.Contains("[<FidelityExtern(\"libc\", \"memcpy\")>]", result)
         Assert.Contains("let memcpy", result)
 
@@ -681,7 +681,7 @@ module FidelityCodeGeneratorTests =
         let decls = [
             CppParser.Declaration.Function (mkFunc "wl_display_connect" "void *" [("__name", "const char *")])
         ]
-        let result = FidelityCodeGenerator.generate decls "Fidelity.wayland.Display" "wayland-client"
+        let result = FidelityCodeGenerator.generate decls "Fidelity.wayland.Display" "wayland-client" Types.LP64
         Assert.Contains("[<FidelityExtern(\"wayland-client\", \"wl_display_connect\")>]", result)
 
 // =============================================================================
@@ -1251,7 +1251,7 @@ module WrapperCodeGeneratorTests =
 
     let private generateSingle name retType parms attrs =
         let decls = [ mkDecl name retType parms attrs ]
-        WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" None
+        WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" None Types.LP64
 
     [<Fact>]
     let ``CountOrError wrapper generates Result return and comparison`` () =
@@ -1339,7 +1339,7 @@ module WrapperCodeGeneratorTests =
             mkDecl "read" "ssize_t" [("fd", "int"); ("buf", "void *"); ("count", "size_t")] []
             mkDecl "write" "ssize_t" [("fd", "int"); ("buf", "const void *"); ("count", "size_t")] []
         ]
-        let output = WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" None
+        let output = WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" None Types.LP64
         // Count occurrences of "let read"; should be exactly 1
         let readCount = output.Split("let read") |> Array.length
         Assert.Equal(2, readCount) // split produces N+1 parts for N occurrences
@@ -1358,7 +1358,7 @@ module ErrnoWrapperTests =
 
     let private generateWithErrno name retType parms attrs =
         let decls = [ mkDecl name retType parms attrs ]
-        WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" (Some "Fidelity.Errno")
+        WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" (Some "Fidelity.Errno") Types.LP64
 
     [<Fact>]
     let ``errno-enabled wrapper uses Result<T, CError> return type`` () =
@@ -1615,7 +1615,7 @@ module DocumentationExtractionTests =
                           (Some "Read NBYTES into BUF from FD. Return the number read, -1 for errors or 0 for EOF.")
         let decls = FidelityCodeGenerator.generate
                         [ CppParser.Declaration.Function func ]
-                        "Fidelity.libc.Test" "libc"
+                        "Fidelity.libc.Test" "libc" Types.LP64
         // Should contain the description from the header comment
         Assert.Contains("/// Read NBYTES into BUF from FD.", decls)
         // Should contain the C signature
@@ -1626,7 +1626,7 @@ module DocumentationExtractionTests =
         let func = mkFunc "getpid" "int" [] None
         let decls = FidelityCodeGenerator.generate
                         [ CppParser.Declaration.Function func ]
-                        "Fidelity.libc.Test" "libc"
+                        "Fidelity.libc.Test" "libc" Types.LP64
         Assert.Contains("/// C signature: int getpid()", decls)
         // Should NOT have a blank XML doc line (no description to separate from)
         Assert.DoesNotContain("/// \n", decls)
@@ -1635,7 +1635,7 @@ module DocumentationExtractionTests =
     let ``wrapper with documented function produces description and C signature`` () =
         let decls = [ mkDecl "read" "ssize_t" [("fd", "int"); ("buf", "void *"); ("count", "size_t")]
                               (Some "Read NBYTES into BUF from FD.") ]
-        let output = WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" None
+        let output = WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" None Types.LP64
         Assert.Contains("/// Read NBYTES into BUF from FD.", output)
         Assert.Contains("/// C signature: ssize_t read(int fd, void * buf, size_t count)", output)
 
@@ -1647,7 +1647,7 @@ module DocumentationExtractionTests =
                 { Name = "y"; Type = "int"; IsConst = false; IsVolatile = false; IsArray = false; ArraySize = None }
               ]; Documentation = Some "A point in 2D space."; IsUnion = false }
         let decls = [ CppParser.Declaration.Struct s ]
-        let output = FidelityCodeGenerator.generate decls "Fidelity.test" "test"
+        let output = FidelityCodeGenerator.generate decls "Fidelity.test" "test" Types.LP64
         Assert.Contains("/// A point in 2D space.", output)
 
     [<Fact>]
@@ -1659,7 +1659,7 @@ module DocumentationExtractionTests =
                 { Name = "BLUE"; Value = 2L; Documentation = None }
               ]; Documentation = Some "Color values for rendering."; UnderlyingType = None }
         let decls = [ CppParser.Declaration.Enum e ]
-        let output = FidelityCodeGenerator.generate decls "Fidelity.test" "test"
+        let output = FidelityCodeGenerator.generate decls "Fidelity.test" "test" Types.LP64
         Assert.Contains("/// Color values for rendering.", output)
 
     [<Fact>]
@@ -1847,7 +1847,7 @@ module PInvokeCodeGeneratorTests =
         let decls = [
             CppParser.Declaration.Function (mkFunc "getpid" "int" [])
         ]
-        let result = PInvokeCodeGenerator.generate decls "NativeBindings.libc" "libc" PInvokeTypeMapper.LP64
+        let result = PInvokeCodeGenerator.generate decls "NativeBindings.libc" "libc" Types.LP64
         Assert.Contains("[<DllImport(\"libc\", CallingConvention = CallingConvention.Cdecl)>]", result)
         Assert.Contains("extern int32 getpid()", result)
 
@@ -1856,7 +1856,7 @@ module PInvokeCodeGeneratorTests =
         let decls = [
             CppParser.Declaration.Function (mkFunc "puts" "int" [("s", "const char *")])
         ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" PInvokeTypeMapper.LP64
+        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
         Assert.Contains("string s", result)
 
     [<Fact>]
@@ -1865,7 +1865,7 @@ module PInvokeCodeGeneratorTests =
             CppParser.Declaration.Function (mkFunc "memset" "void *" [("s", "void *"); ("c", "int"); ("n", "size_t")])
             CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
         ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" PInvokeTypeMapper.LP64
+        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
         Assert.Contains("nativeint s", result)
         Assert.Contains("extern nativeint memset", result)
 
@@ -1874,7 +1874,7 @@ module PInvokeCodeGeneratorTests =
         let decls = [
             CppParser.Declaration.Function (mkFunc "getpid" "int" [])
         ]
-        let result = PInvokeCodeGenerator.generate decls "NativeBindings.libc" "libc" PInvokeTypeMapper.LP64
+        let result = PInvokeCodeGenerator.generate decls "NativeBindings.libc" "libc" Types.LP64
         Assert.Contains("module NativeBindings.libc", result)
         Assert.Contains(".NET P/Invoke binding for libc", result)
 
@@ -1883,7 +1883,7 @@ module PInvokeCodeGeneratorTests =
         let decls = [
             CppParser.Declaration.Function (mkFunc "getpid" "int" [])
         ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" PInvokeTypeMapper.LP64
+        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
         Assert.Contains("open System.Runtime.InteropServices", result)
 
     [<Fact>]
@@ -1891,7 +1891,7 @@ module PInvokeCodeGeneratorTests =
         let decls = [
             CppParser.Declaration.Struct (mkStruct "Point" [mkField "x" "int"; mkField "y" "int"] (Some "A point"))
         ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "test" PInvokeTypeMapper.LP64
+        let result = PInvokeCodeGenerator.generate decls "Test" "test" Types.LP64
         Assert.Contains("[<Struct>]", result)
         Assert.Contains("[<StructLayout(LayoutKind.Sequential)>]", result)
         Assert.Contains("type Point = {", result)
@@ -1901,7 +1901,7 @@ module PInvokeCodeGeneratorTests =
         let decls = [
             CppParser.Declaration.Enum (mkEnum "Flags" [mkEnumVal "A" 0L; mkEnumVal "B" 1L] (Some "Test flags"))
         ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "test" PInvokeTypeMapper.LP64
+        let result = PInvokeCodeGenerator.generate decls "Test" "test" Types.LP64
         Assert.Contains("type Flags =", result)
         Assert.Contains("| A = 0L", result)
         Assert.Contains("| B = 1L", result)
@@ -1913,7 +1913,7 @@ module PInvokeCodeGeneratorTests =
                 Name = "EXIT_SUCCESS"; Kind = CppParser.SimpleValue "0"; RawValue = "0"; Documentation = None
             }
         ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "test" PInvokeTypeMapper.LP64
+        let result = PInvokeCodeGenerator.generate decls "Test" "test" Types.LP64
         Assert.Contains("[<Literal>]", result)
         Assert.Contains("let EXIT_SUCCESS = 0", result)
 
@@ -1923,7 +1923,7 @@ module PInvokeCodeGeneratorTests =
             CppParser.Declaration.Function (mkFunc "read" "int" [("fd", "int")])
             CppParser.Declaration.Function (mkFunc "read" "int" [("fd", "int")])
         ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "test" PInvokeTypeMapper.LP64
+        let result = PInvokeCodeGenerator.generate decls "Test" "test" Types.LP64
         let occurrences = result.Split("extern int32 read(") |> Array.length
         Assert.Equal(2, occurrences)
 
@@ -1934,7 +1934,7 @@ module PInvokeCodeGeneratorTests =
                 [("fd", "int"); ("buf", "void *"); ("count", "size_t")]
                 (Some "Read from a file descriptor."))
         ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" PInvokeTypeMapper.LP64
+        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
         Assert.Contains("/// Read from a file descriptor.", result)
         Assert.Contains("/// C signature: ssize_t read(int fd, void * buf, size_t count)", result)
 
@@ -1943,7 +1943,7 @@ module PInvokeCodeGeneratorTests =
         let decls = [
             CppParser.Declaration.Function (mkFunc "atexit" "int" [("func", "void (*)(void)")])
         ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "test" PInvokeTypeMapper.LP64
+        let result = PInvokeCodeGenerator.generate decls "Test" "test" Types.LP64
         Assert.Contains("nativeint func", result)
 
     [<Fact>]
@@ -1952,7 +1952,7 @@ module PInvokeCodeGeneratorTests =
             CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
             CppParser.Declaration.Function (mkFunc "malloc" "void *" [("size", "size_t")])
         ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" PInvokeTypeMapper.LP64
+        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
         // size_t resolves via dictionary (unativeint), NOT via typedef chain
         Assert.Contains("unativeint size", result)
 
@@ -1962,8 +1962,8 @@ module PInvokeCodeGeneratorTests =
             CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
             CppParser.Declaration.Function (mkFunc "write" "ssize_t" [("fd", "int"); ("count", "size_t")])
         ]
-        let fidelityResult = FidelityCodeGenerator.generate decls "Test" "test"
-        let pinvokeResult = PInvokeCodeGenerator.generate decls "Test" "libc" PInvokeTypeMapper.LP64
+        let fidelityResult = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
+        let pinvokeResult = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
         // Both should use unativeint (dictionary-first), not uint64 (typedef-concretized)
         Assert.Contains("unativeint", fidelityResult)
         Assert.DoesNotContain("uint64", fidelityResult)
@@ -1971,14 +1971,18 @@ module PInvokeCodeGeneratorTests =
         Assert.DoesNotContain("uint64", pinvokeResult)
 
     [<Fact>]
-    let ``long stays platform-abstract`` () =
+    let ``Fidelity long resolves to platform-specific width`` () =
         let decls = [
             CppParser.Declaration.Function (mkFunc "lseek" "long" [("fd", "int"); ("offset", "long")])
         ]
-        let result = FidelityCodeGenerator.generate decls "Test" "test"
-        // long → nativeint (platform-abstract), not int64 (LP64-baked)
-        Assert.Contains("nativeint", result)
-        Assert.DoesNotContain("int64", result)
+        // LP64: C long = 64-bit → int64
+        let lp64 = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
+        Assert.Contains("int64", lp64)
+        Assert.DoesNotContain("nativeint", lp64)
+        // LLP64: C long = 32-bit → int32
+        let llp64 = FidelityCodeGenerator.generate decls "Test" "test" Types.LLP64
+        Assert.Contains("int32", llp64)
+        Assert.DoesNotContain("int64", llp64)
 
     [<Fact>]
     let ``unknown typedef resolves correctly`` () =
@@ -1986,7 +1990,7 @@ module PInvokeCodeGeneratorTests =
             CppParser.Declaration.Typedef (mkTypedef "my_custom_t" "int")
             CppParser.Declaration.Function (mkFunc "custom_fn" "void" [("x", "my_custom_t")])
         ]
-        let result = FidelityCodeGenerator.generate decls "Test" "test"
+        let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
         // my_custom_t not in dictionary, so typedef resolves: my_custom_t → int → int32
         Assert.Contains("int32", result)
 
@@ -1995,7 +1999,7 @@ module PInvokeCodeGeneratorTests =
         let decls = [
             CppParser.Declaration.Function (mkFunc "puts" "int" [("s", "const char *")])
         ]
-        let result = FidelityCodeGenerator.generate decls "Test" "test"
+        let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
         Assert.Contains("nativeptr<byte>", result)
 
     [<Fact>]
@@ -2003,7 +2007,7 @@ module PInvokeCodeGeneratorTests =
         let decls = [
             CppParser.Declaration.Function (mkFunc "puts" "int" [("s", "const char *")])
         ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" PInvokeTypeMapper.LP64
+        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
         Assert.Contains("string s", result)
 
     // =========================================================================
@@ -2016,7 +2020,7 @@ module PInvokeCodeGeneratorTests =
         let decls = [
             CppParser.Declaration.Function (mkFunc "lseek" "long" [("fd", "int"); ("offset", "long")])
         ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" PInvokeTypeMapper.LP64
+        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
         Assert.Contains("int64", result)
         Assert.DoesNotContain("nativeint", result)
 
@@ -2025,7 +2029,7 @@ module PInvokeCodeGeneratorTests =
         let decls = [
             CppParser.Declaration.Function (mkFunc "lseek" "long" [("fd", "int"); ("offset", "long")])
         ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" PInvokeTypeMapper.LLP64
+        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LLP64
         Assert.Contains("int32", result)
         Assert.DoesNotContain("int64", result)
         Assert.DoesNotContain("nativeint", result)
@@ -2035,7 +2039,7 @@ module PInvokeCodeGeneratorTests =
         let decls = [
             CppParser.Declaration.Function (mkFunc "lseek" "long" [("fd", "int"); ("offset", "long")])
         ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" PInvokeTypeMapper.ILP32
+        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.ILP32
         Assert.Contains("int32", result)
         Assert.DoesNotContain("int64", result)
 
@@ -2044,7 +2048,7 @@ module PInvokeCodeGeneratorTests =
         let decls = [
             CppParser.Declaration.Function (mkFunc "getpid" "int" [])
         ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" PInvokeTypeMapper.IP16
+        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.IP16
         Assert.Contains("int16", result)
         Assert.DoesNotContain("int32", result)
 
@@ -2053,7 +2057,7 @@ module PInvokeCodeGeneratorTests =
         let decls = [
             CppParser.Declaration.Function (mkFunc "getpid" "int" [])
         ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" PInvokeTypeMapper.LP64
+        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
         Assert.Contains("int32", result)
 
     [<Fact>]
@@ -2061,7 +2065,7 @@ module PInvokeCodeGeneratorTests =
         let decls = [
             CppParser.Declaration.Function (mkFunc "fn" "unsigned long" [])
         ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" PInvokeTypeMapper.LP64
+        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
         Assert.Contains("uint64", result)
 
     [<Fact>]
@@ -2069,7 +2073,7 @@ module PInvokeCodeGeneratorTests =
         let decls = [
             CppParser.Declaration.Function (mkFunc "fn" "unsigned long" [])
         ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" PInvokeTypeMapper.LLP64
+        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LLP64
         Assert.Contains("uint32", result)
         Assert.DoesNotContain("uint64", result)
 
@@ -2078,10 +2082,10 @@ module PInvokeCodeGeneratorTests =
         let decls = [
             CppParser.Declaration.Function (mkFunc "fn" "int32_t" [("x", "uint64_t")])
         ]
-        let lp64 = PInvokeCodeGenerator.generate decls "Test" "libc" PInvokeTypeMapper.LP64
-        let llp64 = PInvokeCodeGenerator.generate decls "Test" "libc" PInvokeTypeMapper.LLP64
-        let ilp32 = PInvokeCodeGenerator.generate decls "Test" "libc" PInvokeTypeMapper.ILP32
-        let ip16 = PInvokeCodeGenerator.generate decls "Test" "libc" PInvokeTypeMapper.IP16
+        let lp64 = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
+        let llp64 = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LLP64
+        let ilp32 = PInvokeCodeGenerator.generate decls "Test" "libc" Types.ILP32
+        let ip16 = PInvokeCodeGenerator.generate decls "Test" "libc" Types.IP16
         // Fixed-width types identical on all platforms
         Assert.Equal(lp64, llp64)
         Assert.Equal(lp64, ilp32)
@@ -2093,7 +2097,7 @@ module PInvokeCodeGeneratorTests =
             CppParser.Declaration.Function (mkFunc "puts" "int" [("s", "const char *")])
             CppParser.Declaration.Function (mkFunc "memset" "void *" [("s", "void *"); ("c", "int")])
         ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" PInvokeTypeMapper.LP64
+        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
         Assert.DoesNotContain("nativeptr<", result)
 
     [<Fact>]
@@ -2101,7 +2105,7 @@ module PInvokeCodeGeneratorTests =
         let decls = [
             CppParser.Declaration.Function (mkFunc "getpid" "int" [])
         ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" PInvokeTypeMapper.LP64
+        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
         Assert.DoesNotContain("FidelityExtern", result)
 
     [<Fact>]
@@ -2109,18 +2113,20 @@ module PInvokeCodeGeneratorTests =
         let decls = [
             CppParser.Declaration.Function (mkFunc "getpid" "int" [])
         ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" PInvokeTypeMapper.LP64
+        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
         Assert.DoesNotContain("Unchecked.defaultof", result)
 
     [<Fact>]
-    let ``Fidelity long stays abstract while PInvoke long is concrete`` () =
+    let ``Fidelity and PInvoke both resolve long per platform`` () =
         let decls = [
             CppParser.Declaration.Function (mkFunc "lseek" "long" [("offset", "long")])
         ]
-        let fidelity = FidelityCodeGenerator.generate decls "Test" "test"
-        let pinvoke = PInvokeCodeGenerator.generate decls "Test" "libc" PInvokeTypeMapper.LP64
-        // Fidelity: nativeint (abstract, deferred to NTU)
-        Assert.Contains("nativeint", fidelity)
-        // P/Invoke LP64: int64 (concrete, matches ABI)
+        // Both Fidelity and P/Invoke now resolve C long to concrete widths per PlatformABI
+        let fidelity = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
+        let pinvoke = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
+        // LP64: both emit int64 for C long
+        Assert.Contains("int64", fidelity)
         Assert.Contains("int64", pinvoke)
+        // Neither should use nativeint for C long (nativeint is pointer-width, C long is not on LLP64)
+        Assert.DoesNotContain("nativeint", fidelity)
         Assert.DoesNotContain("nativeint", pinvoke)

@@ -112,15 +112,15 @@ let generateCommand =
     let parseOutputMode (modeStr: string) =
         let lower = modeStr.ToLowerInvariant()
         match lower with
-        | "fidelity-wrappers" -> Farscape.Core.Types.Fidelity, true, PInvokeTypeMapper.LP64
+        | "fidelity-wrappers" -> Farscape.Core.Types.Fidelity, true, Farscape.Core.Types.LP64
         | s when s.StartsWith("dotnet") || s.StartsWith("pinvoke") ->
             let model =
-                if s.Contains(":llp64") then PInvokeTypeMapper.LLP64
-                elif s.Contains(":ilp32") then PInvokeTypeMapper.ILP32
-                elif s.Contains(":ip16") then PInvokeTypeMapper.IP16
-                else PInvokeTypeMapper.LP64
+                if s.Contains(":llp64") then Farscape.Core.Types.LLP64
+                elif s.Contains(":ilp32") then Farscape.Core.Types.ILP32
+                elif s.Contains(":ip16") then Farscape.Core.Types.IP16
+                else Farscape.Core.Types.LP64
             Farscape.Core.Types.PInvoke, false, model
-        | _ -> Farscape.Core.Types.Fidelity, false, PInvokeTypeMapper.LP64
+        | _ -> Farscape.Core.Types.Fidelity, false, Farscape.Core.Types.LP64
 
     let action (header, library, output, ns, includes, defines, verbose, outputMode) =
         let mode, wrappers, dataModel = parseOutputMode outputMode
@@ -134,7 +134,7 @@ let generateCommand =
             Verbose = verbose
             OutputMode = mode
             GenerateWrappers = wrappers
-            PInvokeDataModel = dataModel
+            DataModel = dataModel
         }
         showHeader()
         showConfiguration options
@@ -285,10 +285,10 @@ let projectGenerateCommand =
     let dataModel = Input.option<string> "--data-model"    |> desc "Platform ABI for P/Invoke: lp64 (default), llp64, ilp32, ip16" |> def "lp64"
 
     let parseDataModel = function
-        | "llp64" | "LLP64" -> PInvokeTypeMapper.LLP64
-        | "ilp32" | "ILP32" -> PInvokeTypeMapper.ILP32
-        | "ip16"  | "IP16"  -> PInvokeTypeMapper.IP16
-        | _                 -> PInvokeTypeMapper.LP64
+        | "llp64" | "LLP64" -> Farscape.Core.Types.LLP64
+        | "ilp32" | "ILP32" -> Farscape.Core.Types.ILP32
+        | "ip16"  | "IP16"  -> Farscape.Core.Types.IP16
+        | _                 -> Farscape.Core.Types.LP64
 
     let action (project: FileInfo, verbose, wrappers, dotnet, dataModel) =
         showHeader ()

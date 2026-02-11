@@ -2,6 +2,7 @@ namespace Farscape.Core
 
 open CodeAST
 open ActivePatterns
+open Types
 open WrapperTypes
 
 /// Generates Layer 2 idiomatic F# wrapper functions that call Layer 1 Platform.Bindings stubs.
@@ -157,12 +158,13 @@ module WrapperCodeGenerator =
     /// Generate FsDecl list for a single wrapper function.
     let private generateWrapperDecls
         (typedefMap: Map<string, string>)
+        (model: PlatformABI)
         (bindingsModule: string)
         (useErrno: bool)
         (func: CppParser.FunctionDecl)
         : FsDecl list =
 
-        let mapType = FidelityCodeGenerator.mapCTypeToFidelityType typedefMap
+        let mapType = FidelityCodeGenerator.mapCTypeToFidelityType typedefMap model
         let pattern = WrapperPatternAnalyzer.analyze func typedefMap
 
         // Parameter types match the raw stubs exactly
@@ -204,12 +206,14 @@ module WrapperCodeGenerator =
 
     /// Generate a complete wrapper module from parsed declarations.
     /// Architecture: Catamorphism → WrapperPattern → FsExpr tree → FsDecl → CodeRenderer.render
+    /// PlatformABI determines concrete widths for C int/long in NTU output.
     let generate
         (declarations: CppParser.Declaration list)
         (wrapperNamespace: string)
         (libraryName: string)
         (bindingsModule: string)
         (errnoModuleName: string option)
+        (model: PlatformABI)
         : string =
 
         let useErrno = errnoModuleName.IsSome
@@ -226,7 +230,7 @@ module WrapperCodeGenerator =
             groups
             |> List.choose (function WFunc f -> Some f | WNone -> None)
             |> List.distinctBy (fun f -> f.Name)
-            |> List.collect (generateWrapperDecls typedefMap bindingsModule useErrno)
+            |> List.collect (generateWrapperDecls typedefMap model bindingsModule useErrno)
 
         // Phase 4: Build typed FsDecl tree; wrapper module opens the bindings module
         let openDecl = Comment $"open {bindingsModule}"

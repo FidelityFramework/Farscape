@@ -3,6 +3,7 @@ namespace Farscape.Core
 open System
 open System.Collections.Generic
 open System.Runtime.InteropServices
+open Types
 open XParsec
 open XParsec.Parsers
 open XParsec.Combinators
@@ -19,28 +20,55 @@ module TypeMapper =
         IsArray: bool
         ArrayLength: int option
     }
-    
-    let private typeMap = 
+
+    let private intWidth = function
+        | LP64 | LLP64 | ILP32 -> 32
+        | IP16 -> 16
+
+    let private longWidth = function
+        | LP64 -> 64
+        | LLP64 | ILP32 | IP16 -> 32
+
+    let private fsharpIntType bits =
+        match bits with
+        | 16 -> "int16"
+        | 32 -> "int32"
+        | 64 -> "int64"
+        | _ -> "int32"
+
+    let private fsharpUintType bits =
+        match bits with
+        | 16 -> "uint16"
+        | 32 -> "uint32"
+        | 64 -> "uint64"
+        | _ -> "uint32"
+
+    let private makeTypeMap (model: PlatformABI) =
+        let intType = fsharpIntType (intWidth model)
+        let uintType = fsharpUintType (intWidth model)
+        let longType = fsharpIntType (longWidth model)
+        let ulongType = fsharpUintType (longWidth model)
         dict [
-            // Primitive types
-            "void", "unit" 
+            // Primitive types — int/long widths determined by platform ABI
+            "void", "unit"
             "bool", "bool"
             "char", "byte"
             "signed char", "sbyte"
             "unsigned char", "byte"
             "short", "int16"
             "unsigned short", "uint16"
-            "int", "int32"
-            "unsigned int", "uint32"
-            "long", "nativeint" // platform-sized: 32-bit on ILP32/LLP64, 64-bit on LP64
-            "long int", "nativeint"
-            "unsigned long", "unativeint"
-            "unsigned long int", "unativeint"
+            "int", intType
+            "unsigned int", uintType
+            "long", longType
+            "long int", longType
+            "unsigned long", ulongType
+            "unsigned long int", ulongType
             "long long", "int64"
             "unsigned long long", "uint64"
             "float", "single"
             "double", "double"
             "long double", "double" // F# has no 80-bit float; best approximation
+            // Fixed-width types — same on all platforms
             "int8_t", "sbyte"
             "uint8_t", "byte"
             "int16_t", "int16"
@@ -49,12 +77,13 @@ module TypeMapper =
             "uint32_t", "uint32"
             "int64_t", "int64"
             "uint64_t", "uint64"
+            // Pointer-width types — NTU Resolved Pointer (nativeint/unativeint)
             "size_t", "unativeint"
             "ssize_t", "nativeint"
             "ptrdiff_t", "nativeint"
             "intptr_t", "nativeint"
             "uintptr_t", "unativeint"
-            // POSIX types (LP64)
+            // POSIX types (concrete widths)
             "off_t", "int64"
             "pid_t", "int32"
             "uid_t", "uint32"
@@ -112,10 +141,20 @@ module TypeMapper =
             "wchar_t*", "string"
             "const wchar_t*", "string"
         ]
+
+    /// Cached type maps per platform ABI.
+    let private typeMaps =
+        Map.ofList [
+            LP64, makeTypeMap LP64
+            LLP64, makeTypeMap LLP64
+            ILP32, makeTypeMap ILP32
+            IP16, makeTypeMap IP16
+        ]
     
     let isPrimitiveType (typeName: string) =
-        typeMap.ContainsKey(typeName) || 
-        typeName.EndsWith("*") && typeMap.ContainsKey(typeName)
+        let tm = typeMaps.[LP64] // primitiveness doesn't depend on platform
+        tm.ContainsKey(typeName) ||
+        typeName.EndsWith("*") && tm.ContainsKey(typeName)
     
     let isPointerType (typeName: string) =
         typeName.Contains("*") || typeName.EndsWith("&")
@@ -152,9 +191,10 @@ module TypeMapper =
             .Replace("union ", "")
             .Trim()
 
-    let getFSharpType (cppType: string) : string =
+    let getFSharpType (model: PlatformABI) (cppType: string) : string =
+        let typeMap = typeMaps.[model]
         let cleaned = cleanTypeName cppType
-        
+
         if typeMap.ContainsKey(cleaned) then
             typeMap.[cleaned]
         elif typeMap.ContainsKey(cppType) then
@@ -180,10 +220,10 @@ module TypeMapper =
                 
         marshalType |> Option.map (fun t -> MarshalAsAttribute(t))
 
-    let mapType (cppType: string) : TypeMapping =
+    let mapType (model: PlatformABI) (cppType: string) : TypeMapping =
         {
             OriginalName = cppType
-            FSharpName = getFSharpType cppType
+            FSharpName = getFSharpType model cppType
             MarshalAs = getMarshalAs cppType
             IsPointer = isPointerType cppType
             IsConst = isConstType cppType
@@ -192,21 +232,22 @@ module TypeMapper =
             ArrayLength = getArrayLength cppType
         }
 
-    let mapTypes (declarations: CppParser.Declaration list) : TypeMapping list =
+    let mapTypes (model: PlatformABI) (declarations: CppParser.Declaration list) : TypeMapping list =
+        let mt = mapType model
         let rec collectTypes (decls: CppParser.Declaration list) : TypeMapping list =
             decls |> List.collect (fun decl ->
                 match decl with
                 | CppParser.Declaration.Function f ->
-                    mapType f.ReturnType :: (f.Parameters |> List.map (fun (_, pt) -> mapType pt))
+                    mt f.ReturnType :: (f.Parameters |> List.map (fun (_, pt) -> mt pt))
                 | CppParser.Declaration.Struct s ->
-                    mapType s.Name :: (s.Fields |> List.map (fun f -> mapType f.Type))
+                    mt s.Name :: (s.Fields |> List.map (fun f -> mt f.Type))
                 | CppParser.Declaration.Macro _ -> []
-                | CppParser.Declaration.Enum e -> [mapType e.Name]
-                | CppParser.Declaration.Typedef t -> [mapType t.Name; mapType t.UnderlyingType]
+                | CppParser.Declaration.Enum e -> [mt e.Name]
+                | CppParser.Declaration.Typedef t -> [mt t.Name; mt t.UnderlyingType]
                 | CppParser.Declaration.Namespace ns -> collectTypes ns.Declarations
                 | CppParser.Declaration.Class c ->
-                    mapType c.Name
-                    :: (c.Fields |> List.map (fun f -> mapType f.Type))
+                    mt c.Name
+                    :: (c.Fields |> List.map (fun f -> mt f.Type))
                     @ collectTypes c.Methods)
         collectTypes declarations
         |> List.distinctBy (fun t -> t.OriginalName)

@@ -76,8 +76,35 @@ Two completely separate type dictionaries:
 - **PInvokeTypeMapper.fs** (CLR): `long` → `int64`/`int32` per `PlatformABI`. Used by P/Invoke only.
 - `PlatformABI` type: LP64 | LLP64 | ILP32 | IP16
 
-## FNCS Type System
-- int → NTUint (platform word), size_t → NTUsize
+## FNCS Type System (Width-as-Dimension, Feb 2026)
+- `int` → `NTUint (Resolved Register)` (platform word), `size_t` → `NTUsize`
+- `int32` → `NTUint (Fixed 32)`, `int64` → `NTUint (Fixed 64)` (width-fixed)
+- `nativeint` → `NTUint (Resolved Pointer)` (pointer-sized)
+- Width is a first-class dimension: `NTUWidth = Fixed of bits | Resolved of WidthDimension`
+- `PlatformContext.Dimensions: Map<WidthDimension, int>` resolves `Resolved` widths
+- `NTUother` eliminated — no escape hatch
 - Strings are UTF-8 fat pointers (ptr + len), not .NET UTF-16
 - Option/Result are stack-allocated tagged structs
 - Memory regions (Stack, Arena, Peripheral) tracked at type level
+
+## Farscape's Role in the Dimensional Architecture (Feb 2026)
+
+**Farscape is a second-order consumer of the NTU's dimensional type system, not a driver.**
+
+Farscape exposed the C `int`/`long` width problem that catalyzed the broader NTU dimensional
+rethinking. But the solution lives in the NTU and Fidelity.Platform, not in Farscape.
+
+**For Fidelity output**: Farscape uses PlatformABI to resolve C-specific widths at generation
+time, emitting Fixed-width NTU types. C `int` on LP64 → `int32` (Fixed 32). C `long` on LP64
+→ `int64` (Fixed 64). Only genuinely platform-abstract types (`size_t → unativeint`,
+`intptr_t → nativeint`) use Resolved dimensions.
+
+**The bigger picture**: The NTU is evolving into a multi-dimensional type substrate where width
+is the first axis, with memory space, access pattern, alignment, and tensor shape as future
+axes. This supports multi-stack targeting (CPU/GPU/FPGA/NPU) with BAREWire reconciliation
+between graph sections. Full design in fsnative-spec `ntu-dimensional-architecture.md`.
+
+**What this means for Farscape**: No changes needed beyond PlatformABI-aware Fidelity output.
+New NTU dimensions come from Fidelity.Platform, not from binding generators. Farscape binds
+C/C++ libraries for targets where C FFI exists (desktop, MCU, GPU host-side). Targets without
+C FFI (FPGA fabric, NPU tiles) don't need Farscape — they use Fidelity.Platform + BAREWire.

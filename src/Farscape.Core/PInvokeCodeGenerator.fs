@@ -2,6 +2,7 @@ namespace Farscape.Core
 
 open CodeAST
 open ActivePatterns
+open Types
 
 /// Generates F# source with traditional .NET P/Invoke bindings ([<DllImport>] + extern).
 ///
@@ -39,7 +40,7 @@ module PInvokeCodeGenerator =
     /// Key difference from Fidelity: char* → string (CLR handles marshalling),
     /// whereas Fidelity maps char* → nativeptr<byte> (no marshalling in NTU).
     /// Uses PInvokeTypeMapper with concrete platform-specific widths.
-    let private mapCTypeToPInvokeType (typedefMap: Map<string, string>) (model: PInvokeTypeMapper.PlatformABI) (cType: string) : FsType =
+    let private mapCTypeToPInvokeType (typedefMap: Map<string, string>) (model: PlatformABI) (cType: string) : FsType =
         if cType.Contains("(*)") then Named "nativeint"
         else
         match cType with
@@ -66,7 +67,7 @@ module PInvokeCodeGenerator =
     // =========================================================================
 
     /// Generate FsDecl list for a single P/Invoke extern declaration.
-    let private generateFunctionDecls (typedefMap: Map<string, string>) (model: PInvokeTypeMapper.PlatformABI) (libraryName: string) (func: CppParser.FunctionDecl) : FsDecl list =
+    let private generateFunctionDecls (typedefMap: Map<string, string>) (model: PlatformABI) (libraryName: string) (func: CppParser.FunctionDecl) : FsDecl list =
         let mapType = mapCTypeToPInvokeType typedefMap model
         let returnType = mapType func.ReturnType
         let parameters =
@@ -81,7 +82,7 @@ module PInvokeCodeGenerator =
         [ EnumType(e.Name, e.Values |> List.map (fun v -> (v.Name, v.Value)), e.Documentation) ]
 
     /// Generate FsDecl list for a struct type (as F# record with StructLayout).
-    let private generateStructDecl (typedefMap: Map<string, string>) (model: PInvokeTypeMapper.PlatformABI) (s: CppParser.StructDecl) : FsDecl list =
+    let private generateStructDecl (typedefMap: Map<string, string>) (model: PlatformABI) (s: CppParser.StructDecl) : FsDecl list =
         let mapType = mapCTypeToPInvokeType typedefMap model
         let fields = s.Fields |> List.map (fun f -> (f.Name, mapType f.Type))
         [ RecordType(s.Name, fields, s.Documentation, ["Struct"; "StructLayout(LayoutKind.Sequential)"]) ]
@@ -118,7 +119,7 @@ module PInvokeCodeGenerator =
         | GNone
 
     /// Generation algebra: maps each Declaration variant to a DeclGroup.
-    let private generationAlgebra (typedefMap: Map<string, string>) (model: PInvokeTypeMapper.PlatformABI) : DeclarationAlgebra.DeclarationAlgebra<DeclGroup> = {
+    let private generationAlgebra (typedefMap: Map<string, string>) (model: PlatformABI) : DeclarationAlgebra.DeclarationAlgebra<DeclGroup> = {
         OnEnum = fun e -> if e.Name <> "" then GEnum (generateEnumDecl e) else GNone
         OnStruct = fun s -> if s.Name <> "" then GStruct (generateStructDecl typedefMap model s) else GNone
         OnFunction = fun f -> GFunc f
@@ -139,7 +140,7 @@ module PInvokeCodeGenerator =
         (declarations: CppParser.Declaration list)
         (namespace': string)
         (libraryName: string)
-        (model: PInvokeTypeMapper.PlatformABI)
+        (model: PlatformABI)
         : string =
 
         // Phase 1: Build typedef resolution map (catamorphism + pure recursion)
