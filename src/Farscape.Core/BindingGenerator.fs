@@ -1,8 +1,6 @@
 namespace Farscape.Core
 
 open System.IO
-open ProjectOptions
-open CodeGenerator
 open Types
 open MoyaTypes
 
@@ -19,6 +17,8 @@ module BindingGenerator =
         Verbose: bool
         OutputMode: OutputMode
         GenerateWrappers: bool
+        /// Platform ABI for P/Invoke type resolution. Ignored for Fidelity output.
+        PInvokeDataModel: PInvokeTypeMapper.PlatformABI
     }
 
     /// Extract struct/class type names from declarations using catamorphism.
@@ -36,6 +36,26 @@ module BindingGenerator =
         OutputFiles: string list
         DeclarationCount: int
     }
+
+    /// Generate a minimal .fsproj for P/Invoke output.
+    let private generateFsproj (namespace': string) (compileItems: string list) : string =
+        let items =
+            compileItems
+            |> List.map (fun f -> $"    <Compile Include=\"{f}\" />")
+            |> String.concat "\n"
+        $"""<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>{namespace'}</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+{items}
+  </ItemGroup>
+
+</Project>
+"""
 
     /// Generate F# bindings from a C/C++ header file
     /// Returns Result to enforce proper error handling - fails fast on parse errors
@@ -86,31 +106,23 @@ module BindingGenerator =
                 }
 
             | PInvoke ->
-                logVerbose "Generating P/Invoke F# code..." options.Verbose
-                let generatedCode = generateCode declarations options.Namespace options.LibraryName
+                logVerbose "Generating P/Invoke F# source..." options.Verbose
+                let generatedCode = PInvokeCodeGenerator.generate declarations options.Namespace options.LibraryName options.PInvokeDataModel
 
-                logVerbose "Creating project files..." options.Verbose
-                let projectOptions : ProjectOptions = {
-                    ProjectName = options.LibraryName
-                    Namespace = options.Namespace
-                    OutputDirectory = options.OutputDirectory
-                    References = []
-                    NuGetPackages = [
-                        ("System.Memory", "4.5.5")
-                        ("System.Runtime.CompilerServices.Unsafe", "6.0.0")
-                    ]
-                    HeaderFile = options.HeaderFile.FullName
-                    LibraryName = options.LibraryName
-                    IncludePaths = options.IncludePaths
-                    Verbose = options.Verbose
-                }
+                let lastSegment = options.Namespace.Split('.') |> Array.last
+                let outputFileName = $"{lastSegment}.fs"
+                let outputPath = Path.Combine(options.OutputDirectory, outputFileName)
+                File.WriteAllText(outputPath, generatedCode)
 
-                let (solutionPath, libraryPath, testPath) = Project.generateProject projectOptions generatedCode
+                logVerbose $"P/Invoke binding written to: {outputPath}" options.Verbose
 
-                logVerbose "Binding generation completed successfully." options.Verbose
+                let fsprojPath = Path.Combine(options.OutputDirectory, $"{options.LibraryName}.fsproj")
+                File.WriteAllText(fsprojPath, generateFsproj options.Namespace [outputFileName])
+
+                logVerbose $"Project file written to: {fsprojPath}" options.Verbose
 
                 Ok {
-                    OutputFiles = [solutionPath; libraryPath; testPath]
+                    OutputFiles = [outputPath; fsprojPath]
                     DeclarationCount = declarations.Length
                 }
 
@@ -118,7 +130,8 @@ module BindingGenerator =
     /// Each [[namespace]] section produces a separate F# module.
     /// Supports multi-header projects: parses each header independently, merges with dedup.
     /// When generateWrappers is true, also generates Layer 2 idiomatic wrappers.
-    let generateFromProject (projectPath: string) (verbose: bool) (generateWrappers: bool) : Result<GenerationResult, string> =
+    /// When dotnet is true, generates P/Invoke bindings instead of Fidelity.
+    let generateFromProject (projectPath: string) (verbose: bool) (generateWrappers: bool) (dotnet: bool) (dataModel: PInvokeTypeMapper.PlatformABI) : Result<GenerationResult, string> =
         match MoyaSerializer.loadFromFile projectPath with
         | Error e -> Error $"Failed to load project: {e}"
         | Ok project ->
@@ -149,13 +162,15 @@ module BindingGenerator =
                     project.Namespaces |> List.collect (fun ns ->
                         let filtered = MoyaAnalyzer.filterDeclarationsForNamespace ns declarations
                         logVerbose $"Namespace {ns.Name}: {filtered.Length} declarations" verbose
-                        let code = FidelityCodeGenerator.generate filtered ns.Name ns.Library
+                        let code =
+                            if dotnet then PInvokeCodeGenerator.generate filtered ns.Name ns.Library dataModel
+                            else FidelityCodeGenerator.generate filtered ns.Name ns.Library
                         let lastSegment = ns.Name.Split('.') |> Array.last
                         let fileName = $"{lastSegment}.fs"
                         let outputPath = Path.Combine(project.Output.Directory, fileName)
                         File.WriteAllText(outputPath, code)
 
-                        if generateWrappers then
+                        if generateWrappers && not dotnet then
                             let wrapperNamespace = $"{ns.Name}.Wrappers"
                             let wrapperCode =
                                 WrapperCodeGenerator.generate filtered wrapperNamespace ns.Library ns.Name errnoModuleName
@@ -166,7 +181,17 @@ module BindingGenerator =
                         else
                             [outputPath])
 
+                // For P/Invoke mode, also generate a .fsproj
+                let projectFiles =
+                    if dotnet then
+                        let fsFiles = allFiles |> List.map Path.GetFileName
+                        let fsprojPath = Path.Combine(project.Output.Directory, $"{project.Library.Name}.fsproj")
+                        File.WriteAllText(fsprojPath, generateFsproj (project.Namespaces |> List.head |> fun ns -> ns.Name) fsFiles)
+                        logVerbose $"Project file written to: {fsprojPath}" verbose
+                        allFiles @ [fsprojPath]
+                    else allFiles
+
                 Ok {
-                    OutputFiles = allFiles
+                    OutputFiles = projectFiles
                     DeclarationCount = declarations.Length
                 }

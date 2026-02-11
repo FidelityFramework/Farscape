@@ -32,10 +32,10 @@ module TypeMapper =
             "unsigned short", "uint16"
             "int", "int32"
             "unsigned int", "uint32"
-            "long", "int64" // LP64: long is 64-bit on Linux/macOS x86_64
-            "long int", "int64"
-            "unsigned long", "uint64"
-            "unsigned long int", "uint64"
+            "long", "nativeint" // platform-sized: 32-bit on ILP32/LLP64, 64-bit on LP64
+            "long int", "nativeint"
+            "unsigned long", "unativeint"
+            "unsigned long int", "unativeint"
             "long long", "int64"
             "unsigned long long", "uint64"
             "float", "single"
@@ -49,7 +49,7 @@ module TypeMapper =
             "uint32_t", "uint32"
             "int64_t", "int64"
             "uint64_t", "uint64"
-            "size_t", "nativeint"
+            "size_t", "unativeint"
             "ssize_t", "nativeint"
             "ptrdiff_t", "nativeint"
             "intptr_t", "nativeint"

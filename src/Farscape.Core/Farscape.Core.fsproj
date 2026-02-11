@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -9,10 +9,10 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="ProjectOptions.fs" />
     <Compile Include="Types.fs" />
     <Compile Include="CppParser.fs" />
     <Compile Include="TypeMapper.fs" />
+    <Compile Include="PInvokeTypeMapper.fs" />
     <Compile Include="CTypeParser.fs" />
     <Compile Include="ActivePatterns.fs" />
     <Compile Include="MoyaTypes.fs" />
@@ -24,12 +24,9 @@
     <Compile Include="CodeAST.fs" />
     <Compile Include="CodeRenderer.fs" />
     <Compile Include="FidelityCodeGenerator.fs" />
+    <Compile Include="PInvokeCodeGenerator.fs" />
     <Compile Include="WrapperCodeGenerator.fs" />
     <Compile Include="ErrnoModuleGenerator.fs" />
-    <Compile Include="MemoryManager.fs" />
-    <Compile Include="DelegatePointer.fs" />
-    <Compile Include="CodeGenerator.fs" />
-    <Compile Include="Project.fs" />
     <Compile Include="BindingGenerator.fs" />
   </ItemGroup>
 

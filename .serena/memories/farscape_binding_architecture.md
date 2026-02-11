@@ -69,6 +69,13 @@ These are not optional future features. They are what makes Farscape part of Fid
 - **C++ support**: Plugify ABI intelligence for virtual tables, templates, RAII, exception boundaries
 - **fsnx interactive mode**: Dynamic FFI for development, static binding for release builds
 
+## Type System Separation (Feb 2026)
+
+Two completely separate type dictionaries:
+- **TypeMapper.fs** (NTU): `long` → `nativeint` (abstract), `char*` → `nativeptr<byte>`. Used by Fidelity + Layer 2.
+- **PInvokeTypeMapper.fs** (CLR): `long` → `int64`/`int32` per `PlatformABI`. Used by P/Invoke only.
+- `PlatformABI` type: LP64 | LLP64 | ILP32 | IP16
+
 ## FNCS Type System
 - int → NTUint (platform word), size_t → NTUsize
 - Strings are UTF-8 fat pointers (ptr + len), not .NET UTF-16

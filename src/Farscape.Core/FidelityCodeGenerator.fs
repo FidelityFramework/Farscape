@@ -74,14 +74,21 @@ module FidelityCodeGenerator =
         match cType with
         | ParsedCType info ->
             info |> mapTypeInfo (fun baseType ->
-                let resolved = resolveType typedefMap baseType
-                if resolved.Contains("(*)") then Named "nativeint"
+                // Check type dictionary FIRST — preserves platform-abstract types
+                // e.g. size_t → unativeint directly, skipping typedef chain size_t → unsigned long → unativeint
+                let direct = TypeMapper.getFSharpType baseType
+                if direct <> baseType then
+                    Named direct
                 else
-                match resolved with
-                | ParsedCType resolvedInfo ->
-                    resolvedInfo |> mapTypeInfo (fun resolvedBase ->
-                        Named (TypeMapper.getFSharpType resolvedBase))
-                | _ -> Named (TypeMapper.getFSharpType resolved))
+                    // Unknown type: try typedef resolution
+                    let resolved = resolveType typedefMap baseType
+                    if resolved.Contains("(*)") then Named "nativeint"
+                    else
+                    match resolved with
+                    | ParsedCType resolvedInfo ->
+                        resolvedInfo |> mapTypeInfo (fun resolvedBase ->
+                            Named (TypeMapper.getFSharpType resolvedBase))
+                    | _ -> Named (TypeMapper.getFSharpType resolved))
         | _ -> Named (TypeMapper.getFSharpType cType)
 
     // =========================================================================
@@ -89,7 +96,7 @@ module FidelityCodeGenerator =
     // =========================================================================
 
     /// Format XML doc declarations: description (from header comment) + C signature.
-    let private formatDocDecls (func: CppParser.FunctionDecl) : FsDecl list =
+    let formatDocDecls (func: CppParser.FunctionDecl) : FsDecl list =
         let paramStr =
             func.Parameters
             |> List.map (fun (name, typ) -> $"{typ} {name}")
@@ -206,7 +213,7 @@ module FidelityCodeGenerator =
             else Comment "// Macro constants" :: macros @ [BlankLine]
 
         let allDecls = enums @ structs @ functions @ macroSection
-        let moduleDecl = Module(namespace', libraryName, allDecls)
+        let moduleDecl = Module(namespace', $"Fidelity binding for {libraryName}", allDecls)
 
         // Phase 5: Render to string (the ONLY StringBuilder, in CodeRenderer)
         CodeRenderer.render moduleDecl

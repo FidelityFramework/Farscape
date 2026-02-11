@@ -1,4 +1,4 @@
-﻿module Farscape.Cli.Program
+module Farscape.Cli.Program
 
 open System
 open System.IO
@@ -107,14 +107,23 @@ let generateCommand =
     let includes =   Input.option<string[]> "--include-paths" |> alias "-i" |> desc "Additional include paths" |> def [||]
     let defines =    Input.option<string[]> "--defines"       |> alias "-d" |> desc "Preprocessor definitions (e.g., STM32L552xx)" |> def [||]
     let verbose =    Input.option<bool> "--verbose"           |> alias "-v" |> desc "Verbose output" |> def false
-    let outputMode = Input.option<string> "--output-mode"     |> alias "-m" |> desc "Output mode: pinvoke, fidelity, or fidelity-wrappers" |> def "pinvoke"
+    let outputMode = Input.option<string> "--output-mode"     |> alias "-m" |> desc "Output mode: fidelity, fidelity-wrappers, dotnet, dotnet:lp64, dotnet:llp64, dotnet:ilp32, dotnet:ip16" |> def "fidelity"
+
+    let parseOutputMode (modeStr: string) =
+        let lower = modeStr.ToLowerInvariant()
+        match lower with
+        | "fidelity-wrappers" -> Farscape.Core.Types.Fidelity, true, PInvokeTypeMapper.LP64
+        | s when s.StartsWith("dotnet") || s.StartsWith("pinvoke") ->
+            let model =
+                if s.Contains(":llp64") then PInvokeTypeMapper.LLP64
+                elif s.Contains(":ilp32") then PInvokeTypeMapper.ILP32
+                elif s.Contains(":ip16") then PInvokeTypeMapper.IP16
+                else PInvokeTypeMapper.LP64
+            Farscape.Core.Types.PInvoke, false, model
+        | _ -> Farscape.Core.Types.Fidelity, false, PInvokeTypeMapper.LP64
 
     let action (header, library, output, ns, includes, defines, verbose, outputMode) =
-        let mode, wrappers =
-            match outputMode with
-            | "fidelity-wrappers" | "Fidelity-Wrappers" -> Farscape.Core.Types.Fidelity, true
-            | "fidelity" | "Fidelity" -> Farscape.Core.Types.Fidelity, false
-            | _ -> Farscape.Core.Types.PInvoke, false
+        let mode, wrappers, dataModel = parseOutputMode outputMode
         let options = {
             HeaderFile = header
             LibraryName = library
@@ -125,6 +134,7 @@ let generateCommand =
             Verbose = verbose
             OutputMode = mode
             GenerateWrappers = wrappers
+            PInvokeDataModel = dataModel
         }
         showHeader()
         showConfiguration options
@@ -268,16 +278,25 @@ let moyaCommand =
     }
 
 let projectGenerateCommand =
-    let project = Input.option<FileInfo> "--project" |> desc "Path to .moya.toml project file" |> required |> validateFileExists
-    let verbose = Input.option<bool> "--verbose"     |> alias "-v" |> desc "Verbose output" |> def false
-    let wrappers = Input.option<bool> "--wrappers"   |> alias "-w" |> desc "Also generate idiomatic F# wrappers (Layer 2)" |> def false
+    let project =   Input.option<FileInfo> "--project"     |> desc "Path to .moya.toml project file" |> required |> validateFileExists
+    let verbose =   Input.option<bool> "--verbose"         |> alias "-v" |> desc "Verbose output" |> def false
+    let wrappers =  Input.option<bool> "--wrappers"        |> alias "-w" |> desc "Also generate idiomatic F# wrappers (Layer 2)" |> def false
+    let dotnet =    Input.option<bool> "--dotnet"          |> desc "Generate .NET P/Invoke bindings (DllImport) instead of Fidelity" |> def false
+    let dataModel = Input.option<string> "--data-model"    |> desc "Platform ABI for P/Invoke: lp64 (default), llp64, ilp32, ip16" |> def "lp64"
 
-    let action (project: FileInfo, verbose, wrappers) =
+    let parseDataModel = function
+        | "llp64" | "LLP64" -> PInvokeTypeMapper.LLP64
+        | "ilp32" | "ILP32" -> PInvokeTypeMapper.ILP32
+        | "ip16"  | "IP16"  -> PInvokeTypeMapper.IP16
+        | _                 -> PInvokeTypeMapper.LP64
+
+    let action (project: FileInfo, verbose, wrappers, dotnet, dataModel) =
         showHeader ()
-        printHeader "Generating Fidelity bindings from project..."
+        let modeLabel = if dotnet then "P/Invoke" else "Fidelity"
+        printHeader $"Generating {modeLabel} bindings from project..."
         printLine ""
 
-        match BindingGenerator.generateFromProject project.FullName verbose wrappers with
+        match BindingGenerator.generateFromProject project.FullName verbose wrappers dotnet (parseDataModel dataModel) with
         | Error e ->
             showError e
             1
@@ -291,8 +310,8 @@ let projectGenerateCommand =
             0
 
     command "project" {
-        description "Generate Fidelity bindings from a .moya.toml project file"
-        inputs (project, verbose, wrappers)
+        description "Generate bindings from a .moya.toml project file"
+        inputs (project, verbose, wrappers, dotnet, dataModel)
         setAction action
     }
 
