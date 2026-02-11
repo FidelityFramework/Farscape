@@ -139,13 +139,20 @@ module WrapperCodeGenerator =
     // Declaration Generation
     // =========================================================================
 
-    /// Format the original C signature as an XML doc comment string.
-    let private formatDocComment (func: CppParser.FunctionDecl) : string =
+    /// Format XML doc declarations: description (from header comment) + C signature.
+    let private formatDocDecls (func: CppParser.FunctionDecl) : FsDecl list =
         let paramStr =
             func.Parameters
             |> List.map (fun (name, typ) -> $"{typ} {name}")
             |> String.concat ", "
-        $"{func.ReturnType} {func.Name}({paramStr})"
+        let cSignature = $"C signature: {func.ReturnType} {func.Name}({paramStr})"
+        match func.Documentation with
+        | Some doc ->
+            [ XmlDoc doc
+              XmlDoc ""
+              XmlDoc cSignature ]
+        | None ->
+            [ XmlDoc cSignature ]
 
     /// Generate FsDecl list for a single wrapper function.
     let private generateWrapperDecls
@@ -170,8 +177,8 @@ module WrapperCodeGenerator =
         let paramNames = parameters |> List.map (fun p -> p.Name)
         let body = generateBody bindingsModule func.Name paramNames pattern.ReturnSemantic useErrno
 
+        formatDocDecls func @
         [
-            XmlDoc (formatDocComment func)
             LetBinding(func.Name, parameters, retType, body, [])
         ]
 

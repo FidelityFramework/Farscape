@@ -88,13 +88,20 @@ module FidelityCodeGenerator =
     // Declaration Generation Helpers (produce FsDecl, not strings)
     // =========================================================================
 
-    /// Format the original C signature as an XML doc comment string.
-    let private formatDocComment (func: CppParser.FunctionDecl) : string =
+    /// Format XML doc declarations: description (from header comment) + C signature.
+    let private formatDocDecls (func: CppParser.FunctionDecl) : FsDecl list =
         let paramStr =
             func.Parameters
             |> List.map (fun (name, typ) -> $"{typ} {name}")
             |> String.concat ", "
-        $"{func.ReturnType} {func.Name}({paramStr})"
+        let cSignature = $"C signature: {func.ReturnType} {func.Name}({paramStr})"
+        match func.Documentation with
+        | Some doc ->
+            [ XmlDoc doc
+              XmlDoc ""
+              XmlDoc cSignature ]
+        | None ->
+            [ XmlDoc cSignature ]
 
     /// Generate FsDecl list for a single function binding.
     let private generateFunctionDecls (typedefMap: Map<string, string>) (libraryName: string) (func: CppParser.FunctionDecl) : FsDecl list =
@@ -104,8 +111,8 @@ module FidelityCodeGenerator =
             func.Parameters
             |> List.map (fun (name, cType) ->
                 { FsParam.Name = cleanParamName name; Type = mapType cType })
+        formatDocDecls func @
         [
-            XmlDoc (formatDocComment func)
             LetBinding(func.Name, parameters, returnType, DefaultOf returnType,
                       [$"FidelityExtern(\"{libraryName}\", \"{func.Name}\")"])
         ]

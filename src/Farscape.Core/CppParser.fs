@@ -188,6 +188,34 @@ module CppParser =
         | Some (JsonValue.Array elements) -> elements :> JsonValue seq
         | _ -> Seq.empty
 
+    /// Recursively collect TextComment text from a FullComment AST node.
+    /// FullComment → ParagraphComment → TextComment (with .text field).
+    /// Multi-line comments produce multiple TextComment nodes; we join them.
+    let rec private extractTextFromComment (node: JsonValue) : string list =
+        let kind = getStringOr node "kind" ""
+        if kind = "TextComment" then
+            match getString node "text" with
+            | Some t -> [t.Trim()]
+            | None -> []
+        else
+            getArray node "inner"
+            |> Seq.collect extractTextFromComment
+            |> List.ofSeq
+
+    /// Extract documentation string from a declaration's inner nodes.
+    /// Looks for FullComment nodes (produced by -fparse-all-comments) and
+    /// joins all TextComment text into a single documentation string.
+    let private extractDocumentation (node: JsonValue) : string option =
+        let texts =
+            getArray node "inner"
+            |> Seq.filter (fun inner -> getStringOr inner "kind" "" = "FullComment")
+            |> Seq.collect extractTextFromComment
+            |> Seq.filter (fun t -> t <> "")
+            |> List.ofSeq
+        match texts with
+        | [] -> None
+        | lines -> Some (String.concat " " lines)
+
     /// Get nested object property
     let private getObject (element: JsonValue) (prop: string) : JsonValue option =
         match element.TryGetProperty(prop) with
@@ -324,12 +352,13 @@ module CppParser =
             let isStatic = getStringOr node "storageClass" "" = "static"
             let isInline = getBool node "inline"
             let attributes = extractAttributes node
+            let documentation = extractDocumentation node
 
             Some {
                 Name = name
                 ReturnType = returnType
                 Parameters = parameters
-                Documentation = None
+                Documentation = documentation
                 IsVirtual = false
                 IsStatic = isStatic
                 IsInline = isInline
@@ -350,6 +379,7 @@ module CppParser =
         let name = getString node "name"
         let tagUsed = getStringOr node "tagUsed" "struct"
         let isUnion = tagUsed = "union"
+        let documentation = extractDocumentation node
 
         let fields =
             getArray node "inner"
@@ -360,9 +390,9 @@ module CppParser =
 
         match name, fields with
         | Some n, _ when not (String.IsNullOrEmpty(n)) ->
-            Some { Name = n; Fields = fields; Documentation = None; IsUnion = isUnion }
+            Some { Name = n; Fields = fields; Documentation = documentation; IsUnion = isUnion }
         | _, fs when not fs.IsEmpty ->
-            Some { Name = ""; Fields = fields; Documentation = None; IsUnion = isUnion }
+            Some { Name = ""; Fields = fields; Documentation = documentation; IsUnion = isUnion }
         | _ -> None
 
     /// Process EnumConstantDecl AST node
@@ -390,6 +420,7 @@ module CppParser =
     /// Process EnumDecl AST node
     let private processEnumDecl (node: JsonValue) : EnumDecl option =
         let name = getString node "name"
+        let documentation = extractDocumentation node
         let values =
             getArray node "inner"
             |> Seq.filter (fun inner ->
@@ -405,9 +436,9 @@ module CppParser =
 
         match name, values with
         | Some n, _ when not (String.IsNullOrEmpty(n)) ->
-            Some { Name = n; Values = values; Documentation = None; UnderlyingType = underlyingType }
+            Some { Name = n; Values = values; Documentation = documentation; UnderlyingType = underlyingType }
         | _, vs when not vs.IsEmpty ->
-            Some { Name = ""; Values = values; Documentation = None; UnderlyingType = underlyingType }
+            Some { Name = ""; Values = values; Documentation = documentation; UnderlyingType = underlyingType }
         | _ -> None
 
     /// Process TypedefDecl AST node
@@ -766,7 +797,7 @@ module CppParser =
     /// Run clang AST dump
     let private runClangAst (options: HeaderParserOptions) : Result<string, string> =
         let args = buildClangArgs options
-        runClang args ["-Xclang"; "-ast-dump=json"; "-fsyntax-only"; options.HeaderFile] options.Verbose
+        runClang args ["-Xclang"; "-ast-dump=json"; "-fsyntax-only"; "-fparse-all-comments"; options.HeaderFile] options.Verbose
 
     /// Run clang preprocessor for macros
     let private runClangMacros (options: HeaderParserOptions) : Result<string, string> =

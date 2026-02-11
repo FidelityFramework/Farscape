@@ -54,7 +54,7 @@ Inline functions can't be passed as first-class values to combinators like `skip
 |------|---------|
 | `CTypeParser.fs` | XParsec parsers: `pCType`, `pMacroLine`, `pIntegerLiteral`, `pArraySize` |
 | `ActivePatterns.fs` | XParsec-backed active patterns: `ParsedCType`, `IntegerLiteral`, `ArrayType` |
-| `CppParser.fs` | Inline `MacroParsers` class + raw header comment extraction (`clang -H` include discovery + file-level `#define ... /* comment */` parsing) |
+| `CppParser.fs` | Inline `MacroParsers` class + raw header comment extraction + `-fparse-all-comments` AST documentation extraction |
 | `TypeMapper.fs` | Inline `pArrayLen` parser for array size extraction |
 | `ErrnoModuleGenerator.fs` | Uses filtered macros with documentation to generate Errno module + CError struct |
 
@@ -84,6 +84,17 @@ CppParser.fs now includes a **raw header comment enrichment pipeline**:
 
 The pipeline also works for non-errno libraries (e.g. curl error codes with `/* description */` comments).
 
+## AST Documentation Extraction via -fparse-all-comments (Feb 2026)
+
+CppParser.fs now passes `-fparse-all-comments` to clang's JSON AST dump. This causes clang to attach
+`FullComment` nodes to declarations that have preceding `/* */` or `//` comments. The extraction pipeline:
+1. `extractTextFromComment` recursively collects `TextComment.text` values from `FullComment` → `ParagraphComment` → `TextComment` tree
+2. `extractDocumentation` finds `FullComment` nodes in a declaration's `inner` array and joins text into a single string
+3. `processFunctionDecl`, `processRecordDecl`, `processEnumDecl` all populate `Documentation: string option`
+4. `formatDocDecls` in both `FidelityCodeGenerator.fs` and `WrapperCodeGenerator.fs` emits multi-line XML docs: description line + blank line + C signature line
+
+This provides design-time XML documentation for LSP/IDE support on all generated function bindings.
+
 ## Tests
 
-185+ unit tests in `tests/Farscape.Tests/Tests.fs` covering all XParsec parsers, active patterns, catamorphism, CodeRenderer, and FidelityCodeGenerator end-to-end.
+194+ unit tests in `tests/Farscape.Tests/Tests.fs` covering all XParsec parsers, active patterns, catamorphism, CodeRenderer, and FidelityCodeGenerator end-to-end.
