@@ -78,7 +78,7 @@ module PilotTypes =
     }
 
     /// Generation options from [options] section of .pilot.toml
-    type GenerationOptions = {
+    type ProjectOptions = {
         /// Struct names requiring ABI-exact layout (e.g., ioctl args, DMA descriptors)
         AbiCriticalStructs: string list
         /// Whether to generate BAREWire StructDescriptor values
@@ -93,7 +93,7 @@ module PilotTypes =
         /// Error convention configuration (None = no errno support)
         ErrorConventions: ErrorConventionSpec option
         /// Generation options (None = defaults)
-        Options: GenerationOptions option
+        Options: ProjectOptions option
     }
 
     // =========================================================================

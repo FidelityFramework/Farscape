@@ -90,7 +90,7 @@ module PilotSerializer =
                 TomlTable.add "overrides" (TomlValue.Table overrideTable) table
         TomlValue.Table table
 
-    let private serializeOptions (opts: GenerationOptions) : TomlValue =
+    let private serializeOptions (opts: ProjectOptions) : TomlValue =
         let table = TomlTable.empty
         let table =
             if opts.AbiCriticalStructs.IsEmpty then table
@@ -248,7 +248,7 @@ module PilotSerializer =
             Some { Default = defaultConv; Overrides = overrides }
         | _ -> None
 
-    let private deserializeOptions (doc: TomlDocument) : GenerationOptions option =
+    let private deserializeOptions (doc: TomlDocument) : ProjectOptions option =
         match Toml.getValue "options" doc with
         | None -> None
         | Some (TomlValue.Table table) ->
