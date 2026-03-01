@@ -259,12 +259,136 @@ let pilotInitCommand =
         setAction action
     }
 
+let pilotDiscoverCommand =
+    let directory = Input.option<DirectoryInfo> "--directory" |> desc "Root directory to scan for source assets" |> required
+    let library =  Input.option<string> "--library"          |> alias "-l" |> desc "Library name hint (optional)" |> def ""
+    let output =   Input.option<string> "--output"           |> alias "-o" |> desc "Output directory for generated .pilot.toml (default: ./<library>)" |> def ""
+    let verbose =  Input.option<bool> "--verbose"            |> alias "-v" |> desc "Verbose: show all discovered files" |> def false
+
+    let action (directory: DirectoryInfo, library, output, verbose) =
+        showHeader ()
+        printHeader "Pilot Discovery: Scanning for source assets"
+        printLine ""
+
+        let libraryHint = if String.IsNullOrEmpty library then None else Some library
+        let result = PilotDiscovery.discoverFromDirectory directory.FullName libraryHint
+
+        // Check for errors
+        let hasErrors =
+            result.Diagnostics |> List.exists (function
+                | PilotDiscovery.DiagError _ -> true
+                | _ -> false)
+
+        if hasErrors then
+            for diag in result.Diagnostics do
+                match diag with
+                | PilotDiscovery.DiagError (PilotDiscovery.DirectoryNotFound p) ->
+                    showError $"Directory not found: {p}"
+                | PilotDiscovery.DiagError (PilotDiscovery.NoParseableFiles p) ->
+                    showError $"No parseable files found in: {p}"
+                | _ -> ()
+            1
+        else
+            // Classification summary
+            let cHeaders = result.Files |> List.choose (function PilotDiscovery.CHeader (p, _, _) -> Some p | _ -> None)
+            let cppHeaders = result.Files |> List.choose (function PilotDiscovery.CppHeader (p, _, _) -> Some p | _ -> None)
+            let protocols = result.Files |> List.choose (function PilotDiscovery.ProtocolXml (p, _) -> Some p | _ -> None)
+            let pkgConfigs = result.Files |> List.choose (function PilotDiscovery.PkgConfig (p, _) -> Some p | _ -> None)
+            let buildFiles = result.Files |> List.choose (function PilotDiscovery.BuildSystemFile (p, _) -> Some p | _ -> None)
+
+            printColorLine $"Scanned: {directory.FullName}" ConsoleColor.White
+            printLine $"  C headers:     {cHeaders.Length}"
+            printLine $"  C++ headers:   {cppHeaders.Length}"
+            printLine $"  Protocol XMLs: {protocols.Length}"
+            printLine $"  Pkg-config:    {pkgConfigs.Length}"
+            printLine $"  Build files:   {buildFiles.Length}"
+            printLine ""
+
+            if verbose then
+                if not cHeaders.IsEmpty then
+                    printColorLine "C Headers:" ConsoleColor.Yellow
+                    for p in cHeaders do printLine $"  {p}"
+                if not cppHeaders.IsEmpty then
+                    printColorLine "C++ Headers:" ConsoleColor.Yellow
+                    for p in cppHeaders do printLine $"  {p}"
+                if not protocols.IsEmpty then
+                    printColorLine "Protocol XMLs:" ConsoleColor.Yellow
+                    for p in protocols do printLine $"  {p}"
+                printLine ""
+
+            // Show diagnostics
+            let warnings = result.Diagnostics |> List.choose (function PilotDiscovery.DiagWarning w -> Some w | _ -> None)
+            let suggestions = result.Diagnostics |> List.choose (function PilotDiscovery.DiagSuggestion s -> Some s | _ -> None)
+
+            if not warnings.IsEmpty then
+                printColorLine "Warnings:" ConsoleColor.Yellow
+                for w in warnings do
+                    match w with
+                    | PilotDiscovery.NoUmbrellaHeader n ->
+                        printLine $"  No umbrella header found among {n} headers"
+                    | PilotDiscovery.InternalHeadersFound n ->
+                        printLine $"  {n} internal/private header(s) found (excluded)"
+                    | PilotDiscovery.MixedLanguage ->
+                        printLine "  Mixed C and C++ headers — verify intended API surface"
+                    | PilotDiscovery.LargeHeaderCount n ->
+                        printLine $"  {n} headers found — consider using an umbrella header"
+                printLine ""
+
+            if not suggestions.IsEmpty then
+                printColorLine "Suggestions:" ConsoleColor.Green
+                for s in suggestions do
+                    match s with
+                    | PilotDiscovery.PkgConfigFound (name, libName, incPath) ->
+                        let lib = libName |> Option.map (fun l -> $", library: {l}") |> Option.defaultValue ""
+                        let inc = incPath |> Option.map (fun p -> $", include: {p}") |> Option.defaultValue ""
+                        printLine $"  pkg-config: {name}{lib}{inc}"
+                    | PilotDiscovery.UmbrellaDetected (file, _, _) ->
+                        printLine $"  Umbrella header detected: {file}"
+                    | PilotDiscovery.ProtocolsFound n ->
+                        printLine $"  {n} protocol XML file(s) found"
+                    | PilotDiscovery.ExternCDetected file ->
+                        printLine $"  C++ with extern \"C\" surface: {file}"
+                printLine ""
+
+            // Generate .pilot.toml
+            let libName =
+                match libraryHint with
+                | Some n -> n
+                | None -> result.SuggestedLibraryName |> Option.defaultValue "unknown"
+
+            let outputDir =
+                if String.IsNullOrEmpty output then $"./{libName}"
+                else output
+            Directory.CreateDirectory(outputDir) |> ignore
+
+            let project = PilotDiscovery.toPilotProject libName "fidelity" outputDir result
+            let tomlPath = Path.Combine(outputDir, $"{libName}.pilot.toml")
+
+            match PilotSerializer.saveToFile tomlPath project with
+            | Error e ->
+                showError $"Failed to write project file: {e}"
+                1
+            | Ok () ->
+                printColorLine $"Project file written: {tomlPath}" ConsoleColor.Green
+                printLine ""
+                printLine "Next steps:"
+                printLine $"  1. Review and edit: {tomlPath}"
+                printLine $"  2. Generate bindings: farscape project --project {tomlPath}"
+                0
+
+    command "discover" {
+        description "Scan a directory tree and generate a .pilot.toml from discovered source assets"
+        inputs (directory, library, output, verbose)
+        setAction action
+    }
+
 let pilotCommand =
     command "pilot" {
         description "Namespace analysis and project file management"
         noAction
         addCommand pilotAnalyzeCommand
         addCommand pilotInitCommand
+        addCommand pilotDiscoverCommand
     }
 
 let projectGenerateCommand =

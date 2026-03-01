@@ -23,6 +23,7 @@
     <Compile Include="WaylandProtocolParserTests.fs" />
     <Compile Include="DocumentationExtractionTests.fs" />
     <Compile Include="OpaqueHandleTests.fs" />
+    <Compile Include="PilotDiscoveryTests.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

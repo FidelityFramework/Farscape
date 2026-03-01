@@ -17,6 +17,7 @@
     <Compile Include="PilotTypes.fs" />
     <Compile Include="DeclarationAlgebra.fs" />
     <Compile Include="PilotAnalyzer.fs" />
+    <Compile Include="PilotDiscovery.fs" />
     <Compile Include="PilotSerializer.fs" />
     <Compile Include="WaylandProtocolParser.fs" />
     <Compile Include="WrapperTypes.fs" />
