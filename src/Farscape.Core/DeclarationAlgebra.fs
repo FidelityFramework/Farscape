@@ -17,6 +17,7 @@ module DeclarationAlgebra =
         OnMacro:     CppParser.MacroDecl     -> 'R
         OnNamespace: CppParser.NamespaceDecl -> 'R
         OnClass:     CppParser.ClassDecl     -> 'R
+        OnDelegate:  CppParser.DelegateDecl  -> 'R
     }
 
     /// The catamorphism: apply an algebra to each declaration in a list.
@@ -30,7 +31,8 @@ module DeclarationAlgebra =
             | CppParser.Declaration.Typedef t   -> algebra.OnTypedef t
             | CppParser.Declaration.Macro m     -> algebra.OnMacro m
             | CppParser.Declaration.Namespace n -> algebra.OnNamespace n
-            | CppParser.Declaration.Class c     -> algebra.OnClass c)
+            | CppParser.Declaration.Class c     -> algebra.OnClass c
+            | CppParser.Declaration.Delegate d  -> algebra.OnDelegate d)
 
     // =========================================================================
     // Pre-built Algebras
@@ -46,6 +48,7 @@ module DeclarationAlgebra =
         OnMacro     = fun _ -> None
         OnNamespace = fun _ -> None
         OnClass     = fun _ -> None
+        OnDelegate  = fun _ -> None
     }
 
     /// Extract struct names from declarations (includes forward declarations).
@@ -58,6 +61,7 @@ module DeclarationAlgebra =
         OnTypedef   = fun _ -> None
         OnMacro     = fun _ -> None
         OnNamespace = fun _ -> None
+        OnDelegate  = fun _ -> None
     }
 
     /// Extract names of fully-defined structs (those with fields).
@@ -71,6 +75,7 @@ module DeclarationAlgebra =
         OnTypedef   = fun _ -> None
         OnMacro     = fun _ -> None
         OnNamespace = fun _ -> None
+        OnDelegate  = fun _ -> None
     }
 
     /// Extract the identifying name from any declaration variant.
@@ -83,6 +88,7 @@ module DeclarationAlgebra =
         OnMacro     = fun m -> Some m.Name
         OnNamespace = fun n -> Some n.Name
         OnClass     = fun c -> if c.Name <> "" then Some c.Name else None
+        OnDelegate  = fun d -> Some d.Name
     }
 
     /// Merge declaration lists from multiple headers, deduplicating by name.

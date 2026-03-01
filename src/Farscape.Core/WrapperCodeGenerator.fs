@@ -229,6 +229,7 @@ module WrapperCodeGenerator =
         OnTypedef = fun _ -> WNone
         OnNamespace = fun _ -> WNone
         OnClass = fun _ -> WNone
+        OnDelegate = fun _ -> WNone
     }
 
     /// Generate a complete wrapper module from parsed declarations.

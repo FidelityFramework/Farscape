@@ -72,6 +72,7 @@ module PilotAnalyzer =
         OnMacro     = fun _ -> None
         OnNamespace = fun _ -> None
         OnClass     = fun _ -> None
+        OnDelegate  = fun _ -> None
     }
 
     /// Extract all function names from a declaration list using the catamorphism.
@@ -199,7 +200,8 @@ module PilotAnalyzer =
                   Description = description
                   Library = libraryName
                   Prefixes = effectivePrefixes
-                  Functions = explicitFunctions })
+                  Functions = explicitFunctions
+                  XmlInterfaces = [] })
         // Add catch-all namespace for ungrouped functions
         let catchAll =
             if result.Ungrouped.IsEmpty then []
@@ -208,10 +210,12 @@ module PilotAnalyzer =
                     Description = "Ungrouped functions"
                     Library = libraryName
                     Prefixes = []
-                    Functions = result.Ungrouped } ]
+                    Functions = result.Ungrouped
+                    XmlInterfaces = [] } ]
         { Library =
             { Name = libraryName
               Headers = [headerFile]
+              XmlProtocols = []
               IncludePaths = includePaths
               Defines = defines }
           Output =
@@ -225,21 +229,63 @@ module PilotAnalyzer =
     // Declaration Filtering (for scoped generation)
     // =========================================================================
 
+    /// Extract the identifying name from any declaration (for filtering).
+    let private declarationName (decl: CppParser.Declaration) : string option =
+        match decl with
+        | CppParser.Declaration.Function f -> Some f.Name
+        | CppParser.Declaration.Struct s -> if s.Name <> "" then Some s.Name else None
+        | CppParser.Declaration.Enum e -> if e.Name <> "" then Some e.Name else None
+        | CppParser.Declaration.Typedef t -> Some t.Name
+        | CppParser.Declaration.Macro m -> Some m.Name
+        | CppParser.Declaration.Namespace n -> Some n.Name
+        | CppParser.Declaration.Class c -> if c.Name <> "" then Some c.Name else None
+        | CppParser.Declaration.Delegate d -> Some d.Name
+
+    /// Convert snake_case to PascalCase (for matching delegate names to interfaces).
+    let private toPascalCase (s: string) =
+        s.Split('_')
+        |> Array.map (fun part ->
+            if part.Length = 0 then ""
+            else (string (System.Char.ToUpper part[0])) + part[1..])
+        |> String.concat ""
+
     /// Filter declarations to only those matching a NamespaceSpec.
     /// A function matches if:
     ///   1. Its name starts with any prefix in spec.Prefixes, OR
     ///   2. Its name is explicitly listed in spec.Functions
+    /// When XmlInterfaces is non-empty, declarations from XML protocols are
+    /// included if their name starts with any listed interface name (snake_case)
+    /// or matches a delegate name pattern (PascalCase).
     /// Non-function declarations (structs, enums, typedefs, macros) pass through
-    /// unfiltered since they may be needed by any namespace.
+    /// unfiltered when no XmlInterfaces filter is active.
     let filterDeclarationsForNamespace
         (spec: NamespaceSpec)
         (declarations: CppParser.Declaration list) : CppParser.Declaration list =
         let explicitSet = Set.ofList spec.Functions
+        let xmlInterfacePascals =
+            spec.XmlInterfaces |> List.map toPascalCase
         declarations |> List.filter (fun decl ->
             match decl with
             | CppParser.Declaration.Function f ->
                 let matchesPrefix =
-                    spec.Prefixes |> List.exists (fun prefix -> f.Name.StartsWith(prefix))
+                    spec.Prefixes |> List.exists (fun prefix -> f.Name.StartsWith prefix)
                 let matchesExplicit = Set.contains f.Name explicitSet
-                matchesPrefix || matchesExplicit
+                let matchesXmlInterface =
+                    spec.XmlInterfaces |> List.exists (fun iface ->
+                        f.Name.StartsWith(iface + "_") || f.Name = iface)
+                matchesPrefix || matchesExplicit || matchesXmlInterface
+            | _ when not spec.XmlInterfaces.IsEmpty ->
+                // When XML interface filtering is active, non-function declarations
+                // must also match: name starts with interface name (snake_case)
+                // or matches delegate PascalCase pattern
+                match declarationName decl with
+                | Some name ->
+                    let matchesSnake =
+                        spec.XmlInterfaces |> List.exists (fun iface ->
+                            name.StartsWith(iface + "_") || name = iface)
+                    let matchesPascal =
+                        xmlInterfacePascals |> List.exists (fun pascal ->
+                            name.StartsWith pascal)
+                    matchesSnake || matchesPascal
+                | None -> true
             | _ -> true)

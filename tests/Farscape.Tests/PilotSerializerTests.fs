@@ -11,6 +11,7 @@ let private sampleProject : PilotTypes.PilotProject = {
     Library = {
         Name = "libc"
         Headers = ["/usr/include/string.h"]
+        XmlProtocols = []
         IncludePaths = ["/usr/include"]
         Defines = ["_GNU_SOURCE"]
     }
@@ -20,12 +21,14 @@ let private sampleProject : PilotTypes.PilotProject = {
           Description = "Memory operations"
           Library = "libc"
           Prefixes = ["mem"; "str"]
-          Functions = [] }
+          Functions = []
+          XmlInterfaces = [] }
         { Name = "Fidelity.libc.IO"
           Description = "I/O operations"
           Library = "libc"
           Prefixes = ["read"; "write"]
-          Functions = ["pipe"] }
+          Functions = ["pipe"]
+          XmlInterfaces = [] }
     ]
     ErrorConventions = None
     Options = None
@@ -45,7 +48,7 @@ let ``serialize produces valid TOML with all sections`` () =
 [<Fact>]
 let ``round-trip serialize then deserialize produces identical project`` () =
     let toml = PilotSerializer.toTomlString sampleProject
-    match Fidelity.Toml.Toml.parse toml with
+    match Fidelity.Data.TOML.Toml.parse toml with
     | Ok doc ->
         match PilotSerializer.deserialize doc with
         | Ok roundTripped ->
@@ -64,14 +67,14 @@ let ``round-trip serialize then deserialize produces identical project`` () =
 
 [<Fact>]
 let ``deserialize returns Error for missing library section`` () =
-    let doc = Fidelity.Toml.Toml.parseOrFail "[output]\nmode = \"fidelity\"\ndirectory = \"./out\""
+    let doc = Fidelity.Data.TOML.Toml.parseOrFail "[output]\nmode = \"fidelity\"\ndirectory = \"./out\""
     match PilotSerializer.deserialize doc with
     | Error _ -> ()
     | Ok _ -> Assert.Fail "Should return Error for missing [library]"
 
 [<Fact>]
 let ``deserialize returns Error for missing output section`` () =
-    let doc = Fidelity.Toml.Toml.parseOrFail "[library]\nname = \"test\"\nheader = \"test.h\""
+    let doc = Fidelity.Data.TOML.Toml.parseOrFail "[library]\nname = \"test\"\nheader = \"test.h\""
     match PilotSerializer.deserialize doc with
     | Error _ -> ()
     | Ok _ -> Assert.Fail "Should return Error for missing [output]"
@@ -79,7 +82,7 @@ let ``deserialize returns Error for missing output section`` () =
 [<Fact>]
 let ``deserialize handles empty namespace array`` () =
     let toml = "[library]\nname = \"test\"\nheader = \"test.h\"\n[output]\nmode = \"fidelity\"\ndirectory = \"./out\""
-    let doc = Fidelity.Toml.Toml.parseOrFail toml
+    let doc = Fidelity.Data.TOML.Toml.parseOrFail toml
     match PilotSerializer.deserialize doc with
     | Ok project -> Assert.Empty(project.Namespaces)
     | Error e -> Assert.Fail $"Should succeed with no namespaces: {e}"
@@ -99,7 +102,7 @@ description = "String ops"
 library = "test"
 prefixes = ["str"]
 """
-    let doc = Fidelity.Toml.Toml.parseOrFail toml
+    let doc = Fidelity.Data.TOML.Toml.parseOrFail toml
     match PilotSerializer.deserialize doc with
     | Ok project ->
         Assert.Equal(1, project.Namespaces.Length)
@@ -128,7 +131,7 @@ let ``multi-header round-trip preserves all headers`` () =
                       Library = { sampleProject.Library with
                                     Headers = ["/usr/include/unistd.h"; "/usr/include/fcntl.h"] } }
     let toml = PilotSerializer.toTomlString project
-    match Fidelity.Toml.Toml.parse toml with
+    match Fidelity.Data.TOML.Toml.parse toml with
     | Ok doc ->
         match PilotSerializer.deserialize doc with
         | Ok roundTripped ->
@@ -139,7 +142,7 @@ let ``multi-header round-trip preserves all headers`` () =
 [<Fact>]
 let ``single header backward compat still works`` () =
     let toml = "[library]\nname = \"test\"\nheader = \"test.h\"\n[output]\nmode = \"fidelity\"\ndirectory = \"./out\""
-    let doc = Fidelity.Toml.Toml.parseOrFail toml
+    let doc = Fidelity.Data.TOML.Toml.parseOrFail toml
     match PilotSerializer.deserialize doc with
     | Ok project -> Assert.Equal<string list>(["test.h"], project.Library.Headers)
     | Error e -> Assert.Fail $"Should parse single header: {e}"
@@ -147,7 +150,7 @@ let ``single header backward compat still works`` () =
 [<Fact>]
 let ``deserialize rejects empty headers array`` () =
     let toml = "[library]\nname = \"test\"\nheaders = []\n[output]\nmode = \"fidelity\"\ndirectory = \"./out\""
-    let doc = Fidelity.Toml.Toml.parseOrFail toml
+    let doc = Fidelity.Data.TOML.Toml.parseOrFail toml
     match PilotSerializer.deserialize doc with
     | Error _ -> ()
     | Ok _ -> Assert.Fail "Should reject empty headers"
@@ -163,7 +166,7 @@ module ErrorConventionTomlTests =
     [<Fact>]
     let ``error conventions round-trip through TOML`` () =
         let project : PilotProject = {
-            Library = { Name = "libc"; Headers = ["/usr/include/stdio.h"]; IncludePaths = []; Defines = [] }
+            Library = { Name = "libc"; Headers = ["/usr/include/stdio.h"]; XmlProtocols = []; IncludePaths = []; Defines = [] }
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
             ErrorConventions = Some {
@@ -175,7 +178,7 @@ module ErrorConventionTomlTests =
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("error_conventions", toml)
         Assert.Contains("errno", toml)
-        match Fidelity.Toml.Toml.parse toml with
+        match Fidelity.Data.TOML.Toml.parse toml with
         | Error e -> Assert.Fail $"Parse failed: {e}"
         | Ok doc ->
             match PilotSerializer.deserialize doc with
@@ -190,7 +193,7 @@ module ErrorConventionTomlTests =
     [<Fact>]
     let ``missing error_conventions deserializes as None`` () =
         let toml = "[library]\nname = \"test\"\nheader = \"test.h\"\n[output]\nmode = \"fidelity\"\ndirectory = \"./out\""
-        let doc = Fidelity.Toml.Toml.parseOrFail toml
+        let doc = Fidelity.Data.TOML.Toml.parseOrFail toml
         match PilotSerializer.deserialize doc with
         | Error e -> Assert.Fail $"Deserialize failed: {e}"
         | Ok project -> Assert.True(project.ErrorConventions.IsNone)
@@ -198,7 +201,7 @@ module ErrorConventionTomlTests =
     [<Fact>]
     let ``enum error code convention round-trips through TOML`` () =
         let project : PilotProject = {
-            Library = { Name = "hip"; Headers = ["/opt/rocm/include/hip/hip_runtime_api.h"]; IncludePaths = []; Defines = [] }
+            Library = { Name = "hip"; Headers = ["/opt/rocm/include/hip/hip_runtime_api.h"]; XmlProtocols = []; IncludePaths = []; Defines = [] }
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
             ErrorConventions = Some {
@@ -215,7 +218,7 @@ module ErrorConventionTomlTests =
         Assert.Contains("hipSuccess", toml)
         Assert.Contains("error_string_fn", toml)
         Assert.Contains("error_name_fn", toml)
-        match Fidelity.Toml.Toml.parse toml with
+        match Fidelity.Data.TOML.Toml.parse toml with
         | Error e -> Assert.Fail $"Parse failed: {e}"
         | Ok doc ->
             match PilotSerializer.deserialize doc with
@@ -234,7 +237,7 @@ module ErrorConventionTomlTests =
     [<Fact>]
     let ``enum error code with only required fields round-trips`` () =
         let project : PilotProject = {
-            Library = { Name = "xrt"; Headers = ["xrt.h"]; IncludePaths = []; Defines = [] }
+            Library = { Name = "xrt"; Headers = ["xrt.h"]; XmlProtocols = []; IncludePaths = []; Defines = [] }
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
             ErrorConventions = Some {
@@ -247,7 +250,7 @@ module ErrorConventionTomlTests =
         // Should NOT contain optional fn fields
         Assert.DoesNotContain("error_string_fn", toml)
         Assert.DoesNotContain("error_name_fn", toml)
-        match Fidelity.Toml.Toml.parse toml with
+        match Fidelity.Data.TOML.Toml.parse toml with
         | Error e -> Assert.Fail $"Parse failed: {e}"
         | Ok doc ->
             match PilotSerializer.deserialize doc with
@@ -264,14 +267,14 @@ module ErrorConventionTomlTests =
     [<Fact>]
     let ``error conventions with no overrides`` () =
         let project : PilotProject = {
-            Library = { Name = "libc"; Headers = ["/usr/include/stdio.h"]; IncludePaths = []; Defines = [] }
+            Library = { Name = "libc"; Headers = ["/usr/include/stdio.h"]; XmlProtocols = []; IncludePaths = []; Defines = [] }
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
             ErrorConventions = Some { Default = Errno; Overrides = Map.empty }
             Options = None
         }
         let toml = PilotSerializer.toTomlString project
-        match Fidelity.Toml.Toml.parse toml with
+        match Fidelity.Data.TOML.Toml.parse toml with
         | Error e -> Assert.Fail $"Parse failed: {e}"
         | Ok doc ->
             match PilotSerializer.deserialize doc with

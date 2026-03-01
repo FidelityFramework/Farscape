@@ -86,3 +86,6 @@ module CodeAST =
         /// ABI-critical struct with explicit layout.
         /// Rendered with [<StructLayout(LayoutKind.Explicit, Size=N)>] [<Struct>] and per-field [<FieldOffset(N)>].
         | ExplicitLayoutRecord of name: string * fields: ExplicitField list * sizeBytes: int * doc: string option
+        /// Delegate type: type Name = delegate of p1: T1 * p2: T2 -> ReturnType
+        /// Used for Wayland event handlers and other callback types.
+        | DelegateType of name: string * parameters: (string * FsType) list * returnType: FsType * doc: string option

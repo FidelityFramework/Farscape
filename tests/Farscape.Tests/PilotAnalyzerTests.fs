@@ -100,7 +100,7 @@ let ``analyze produces correct AnalysisResult`` () =
 let ``filterDeclarationsForNamespace keeps functions matching prefix`` () =
     let spec : PilotTypes.NamespaceSpec =
         { Name = "Test.String"; Description = ""; Library = "libc"
-          Prefixes = ["str"]; Functions = [] }
+          Prefixes = ["str"]; Functions = []; XmlInterfaces = [] }
     let decls = [
         CppParser.Declaration.Function (mkFunc "strlen" "unsigned long" [])
         CppParser.Declaration.Function (mkFunc "memcpy" "void *" [])
@@ -114,7 +114,7 @@ let ``filterDeclarationsForNamespace keeps functions matching prefix`` () =
 let ``filterDeclarationsForNamespace keeps explicitly listed functions`` () =
     let spec : PilotTypes.NamespaceSpec =
         { Name = "Test.Misc"; Description = ""; Library = "libc"
-          Prefixes = []; Functions = ["abort"; "exit"] }
+          Prefixes = []; Functions = ["abort"; "exit"]; XmlInterfaces = [] }
     let decls = [
         CppParser.Declaration.Function (mkFunc "abort" "void" [])
         CppParser.Declaration.Function (mkFunc "exit" "void" [])
@@ -130,7 +130,7 @@ let ``filterDeclarationsForNamespace keeps explicitly listed functions`` () =
 let ``filterDeclarationsForNamespace passes through non-function declarations`` () =
     let spec : PilotTypes.NamespaceSpec =
         { Name = "Test.String"; Description = ""; Library = "libc"
-          Prefixes = ["str"]; Functions = [] }
+          Prefixes = ["str"]; Functions = []; XmlInterfaces = [] }
     let decls = [
         CppParser.Declaration.Struct (mkStructSimple "size_t")
         CppParser.Declaration.Enum (mkEnumSimple "Flags")

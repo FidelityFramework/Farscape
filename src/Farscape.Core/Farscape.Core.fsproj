@@ -18,6 +18,7 @@
     <Compile Include="DeclarationAlgebra.fs" />
     <Compile Include="PilotAnalyzer.fs" />
     <Compile Include="PilotSerializer.fs" />
+    <Compile Include="WaylandProtocolParser.fs" />
     <Compile Include="WrapperTypes.fs" />
     <Compile Include="WrapperPatternAnalyzer.fs" />
     <Compile Include="CodeAST.fs" />
@@ -32,7 +33,7 @@
 
   <ItemGroup>
     <PackageReference Include="FSharp.Data" Version="6.6.0" />
-    <PackageReference Include="Fidelity.Toml" Version="0.1.1" />
+    <ProjectReference Include="../../../Fidelity.Data/src/Fidelity.Data/Fidelity.Data.fsproj" />
   </ItemGroup>
 
   <!-- XParsec: NuGet for packaging, local project ref for dev override -->

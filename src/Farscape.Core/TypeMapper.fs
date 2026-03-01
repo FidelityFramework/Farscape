@@ -248,6 +248,8 @@ module TypeMapper =
                 | CppParser.Declaration.Class c ->
                     mt c.Name
                     :: (c.Fields |> List.map (fun f -> mt f.Type))
-                    @ collectTypes c.Methods)
+                    @ collectTypes c.Methods
+                | CppParser.Declaration.Delegate d ->
+                    mt d.ReturnType :: (d.Parameters |> List.map (fun (_, pt) -> mt pt)))
         collectTypes declarations
         |> List.distinctBy (fun t -> t.OriginalName)

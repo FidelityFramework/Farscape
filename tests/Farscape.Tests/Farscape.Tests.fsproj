@@ -20,6 +20,7 @@
     <Compile Include="ErrnoModuleGeneratorTests.fs" />
     <Compile Include="EnumErrorModuleGeneratorTests.fs" />
     <Compile Include="StructLayoutTests.fs" />
+    <Compile Include="WaylandProtocolParserTests.fs" />
     <Compile Include="DocumentationExtractionTests.fs" />
     <Compile Include="OpaqueHandleTests.fs" />
     <Compile Include="Program.fs" />
@@ -27,7 +28,7 @@
 
   <ItemGroup>
     <PackageReference Include="coverlet.collector" Version="6.0.2" />
-    <PackageReference Include="Fidelity.Toml" Version="0.1.1" />
+    <ProjectReference Include="../../../Fidelity.Data/src/Fidelity.Data/Fidelity.Data.fsproj" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />

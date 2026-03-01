@@ -26,7 +26,7 @@
     <PackageReference Include="MinVer" Version="6.0.0" PrivateAssets="All" />
   </ItemGroup>
 
-  <!-- Pin FSharp.Core to satisfy transitive dependency from Fidelity.Toml -->
+  <!-- Pin FSharp.Core to satisfy transitive dependency from Fidelity.Data -->
   <PropertyGroup>
     <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
   </PropertyGroup>

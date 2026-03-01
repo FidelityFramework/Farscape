@@ -186,7 +186,7 @@ directory = "./out"
 abi_critical_structs = ["drm_mode_create_dumb", "drm_mode_map_dumb"]
 generate_descriptors = true
 """
-        match Fidelity.Toml.Toml.parse toml with
+        match Fidelity.Data.TOML.Toml.parse toml with
         | Error e -> Assert.Fail $"Parse failed: {e}"
         | Ok doc ->
             match PilotSerializer.deserialize doc with
@@ -201,7 +201,7 @@ generate_descriptors = true
     [<Fact>]
     let ``round-trip options with generate_descriptors`` () =
         let project : PilotProject = {
-            Library = { Name = "drm"; Headers = ["xf86drm.h"]; IncludePaths = []; Defines = [] }
+            Library = { Name = "drm"; Headers = ["xf86drm.h"]; XmlProtocols = []; IncludePaths = []; Defines = [] }
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
             ErrorConventions = None
@@ -210,7 +210,7 @@ generate_descriptors = true
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("abi_critical_structs", toml)
         Assert.Contains("generate_descriptors", toml)
-        match Fidelity.Toml.Toml.parse toml with
+        match Fidelity.Data.TOML.Toml.parse toml with
         | Error e -> Assert.Fail $"Parse failed: {e}"
         | Ok doc ->
             match PilotSerializer.deserialize doc with
@@ -230,7 +230,7 @@ header = "stdio.h"
 mode = "fidelity"
 directory = "./out"
 """
-        match Fidelity.Toml.Toml.parse toml with
+        match Fidelity.Data.TOML.Toml.parse toml with
         | Error e -> Assert.Fail $"Parse failed: {e}"
         | Ok doc ->
             match PilotSerializer.deserialize doc with

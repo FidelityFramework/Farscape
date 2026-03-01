@@ -1,11 +1,11 @@
 namespace Farscape.Core
 
-open Fidelity.Toml
+open Fidelity.Data.TOML
 open PilotTypes
 
 /// Serialization and deserialization of PilotProject to/from TOML format.
 ///
-/// Uses Fidelity.Toml 0.1.1 for type-safe TOML handling.
+/// Uses Fidelity.Data for type-safe TOML handling.
 /// All functions are pure: TomlDocument → Result<PilotProject, string>
 /// and PilotProject → TomlDocument.
 module PilotSerializer =
@@ -25,6 +25,9 @@ module PilotSerializer =
             match lib.Headers with
             | [single] -> TomlTable.add "header" (TomlValue.String single) table
             | multiple -> TomlTable.add "headers" (TomlValue.Array (multiple |> List.map TomlValue.String)) table
+        let table =
+            if lib.XmlProtocols.IsEmpty then table
+            else TomlTable.add "xml_protocols" (TomlValue.Array (lib.XmlProtocols |> List.map TomlValue.String)) table
         let table =
             if lib.IncludePaths.IsEmpty then table
             else TomlTable.add "include_paths" (TomlValue.Array (lib.IncludePaths |> List.map TomlValue.String)) table
@@ -51,6 +54,9 @@ module PilotSerializer =
         let table =
             if ns.Functions.IsEmpty then table
             else TomlTable.add "functions" (TomlValue.Array (ns.Functions |> List.map TomlValue.String)) table
+        let table =
+            if ns.XmlInterfaces.IsEmpty then table
+            else TomlTable.add "xml_interfaces" (TomlValue.Array (ns.XmlInterfaces |> List.map TomlValue.String)) table
         TomlValue.Table table
 
     /// Serialize an ErrorConvention to its TOML string value.
@@ -160,6 +166,7 @@ module PilotSerializer =
             | Ok name, Ok headers ->
                 Ok { Name = name
                      Headers = headers
+                     XmlProtocols = optionalStringArray "xml_protocols" table
                      IncludePaths = optionalStringArray "include_paths" table
                      Defines = optionalStringArray "defines" table }
             | Error e, _ | _, Error e -> Error e
@@ -184,7 +191,8 @@ module PilotSerializer =
                  Description = description
                  Library = library
                  Prefixes = optionalStringArray "prefixes" table
-                 Functions = optionalStringArray "functions" table }
+                 Functions = optionalStringArray "functions" table
+                 XmlInterfaces = optionalStringArray "xml_interfaces" table }
         | Error e, _, _ | _, Error e, _ | _, _, Error e -> Error e
 
     /// Parse the [[namespace]] array from a document.

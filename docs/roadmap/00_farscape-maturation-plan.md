@@ -97,6 +97,137 @@ This `[sources]` section replaces the current `[library].headers` field and open
 
 Pilot is the navigator. It reads the project file, decides the route (which headers, which protocols, which namespaces, which functions, which error conventions), and steers the parsing and generation pipeline. Farscape is the ship, Pilot navigates it through the binding space.
 
+### 3.5 Pilot Discovery: Generalized Source Asset Discovery
+
+**Problem**: Every `[sources]` and `[library].headers` entry in this document is a manually specified absolute path. For an SDK with 50 headers, a Wayland install with 30 protocol XMLs, or a vendor tree with nested include directories, this is untenable. Pilot claims to be a navigator, but a navigator that requires the crew to hand-draw the map first is not navigating — it is following instructions.
+
+A navigator discovers. Given a directory, Pilot should scan for everything it knows how to parse, classify what it finds, flag ambiguities, and produce a curated `.pilot.toml`. The discovery is driven by Pilot's available parsers, not by foreknowledge of the target library.
+
+#### 3.5.1 Discovery Model
+
+```
+farscape pilot discover /opt/rocm/include --library amdhip64
+farscape pilot discover /usr/share/wayland-protocols
+farscape pilot discover /opt/xilinx/xrt/include --library xrt
+```
+
+Pilot walks the directory tree recursively and classifies files by what it can process:
+
+| File Pattern | Classification | Parser |
+|---|---|---|
+| `*.h` | C header candidate | CppParser (clang) |
+| `*.hpp`, `*.hxx`, `*.hh` | C++ header candidate | CppParser (clang, C++ mode) |
+| `*.xml` with `<protocol>` root | Wayland protocol XML | WaylandProtocolParser |
+| `*.xml` with `<node>` root | D-Bus introspection XML | Future parser |
+| `*.xml` with `<registry>` root | Vulkan/OpenCL registry | Future parser |
+| `*.pc` | pkg-config metadata | Metadata extraction |
+| `CMakeLists.txt`, `meson.build` | Build system metadata | Metadata extraction |
+
+Discovery is parser-driven: if Pilot has no parser for a file type, it does not discover it. As parsers are added (Phase 1.5 adds XML protocols), the discovery surface grows automatically.
+
+#### 3.5.2 C vs C++ Heuristics
+
+Not all `.h` files are equal. Discovery classifies headers by inspecting content:
+
+**C indicators**: No `namespace`, no `class`, no templates. May contain `extern "C"` guards. Functions declared at file scope. Typical of POSIX, kernel, driver APIs.
+
+**C++ indicators**: `namespace` declarations, `class`/`struct` with methods, template parameters, `std::` references, `*.hpp`/`*.hxx` extension. Typical of HIP, XRT, Qt.
+
+**Hybrid**: `extern "C" { }` blocks wrapping C-linkage functions inside otherwise C++ headers. Common in HIP (`hip_runtime_api.h` is C++ but the API surface is `extern "C"`). Discovery should flag these and note the bindable C surface.
+
+**Umbrella detection**: A header that has a high `#include` count relative to its own declaration count is likely an umbrella. Discovery should identify these as preferred entry points (e.g., `hip_runtime.h` includes `hip_runtime_api.h` and others).
+
+**Skip heuristics**: Files matching `*_internal.h`, `*_private.h`, `*_impl.h`, `detail/*`, `internal/*` are typically not public API. Discovery includes them in the scan but flags them for exclusion.
+
+#### 3.5.3 Metadata Extraction
+
+When discovery finds pkg-config `.pc` files or build system files in the tree, it extracts hints:
+
+- **pkg-config**: Library name (`Name:`), include paths (`Cflags: -I...`), link flags (`Libs: -l...`). This can auto-populate `[library].name`, `[library].include_paths`.
+- **CMake**: `find_package` target names, `target_include_directories` paths.
+- **meson**: `dependency()` names, include directory declarations.
+
+These are suggestions, not authoritative. Discovery reports them as hints that the user (or TUI) can accept or override.
+
+#### 3.5.4 Warning and Error Classification
+
+Discovery results include typed diagnostics:
+
+**Errors** (discovery cannot proceed or results are empty):
+- `NoParseableFiles`: "No files found that Pilot knows how to parse in {directory}"
+- `DirectoryNotFound`: "Directory {path} does not exist"
+
+**Warnings** (discovery succeeded but results may need curation):
+- `NoUmbrellaHeader`: "Found {n} headers but no obvious umbrella — consider specifying entry points"
+- `InternalHeadersFound`: "Found {n} headers matching internal/private patterns — excluded by default"
+- `MixedLanguage`: "Directory contains both C and C++ headers — verify intended API surface"
+- `LargeHeaderCount`: "Found {n} headers — consider using an umbrella header or filtering by prefix"
+- `OrphanIncludes`: "Headers reference include paths not found in the scanned tree"
+
+**Suggestions** (actionable intelligence):
+- `PkgConfigFound`: "Found {name}.pc — library name '{lib}', include path '{path}'"
+- `UmbrellaDetected`: "{file} appears to be an umbrella header ({n} includes, {m} own declarations)"
+- `ProtocolsFound`: "Found {n} Wayland protocol XML files"
+- `ExternCDetected`: "{file} is C++ with extern \"C\" API surface — bindable"
+
+#### 3.5.5 Output Modes
+
+**Non-interactive** (default): Discovery runs, prints classified results with diagnostics to stdout, writes a `.pilot.toml` with discovered sources pre-populated. The user edits the TOML and runs `farscape project`.
+
+```
+farscape pilot discover /opt/rocm/include --library amdhip64 --output ./rocm
+```
+
+**Interactive / TUI** (future, via Thuja): Discovery results are presented in an MVU-driven terminal interface. The user can select/deselect files, accept/reject suggestions, mark headers as umbrella vs individual, and preview the resulting `.pilot.toml` before saving. This replaces the discover-then-edit-TOML workflow with a single interactive session.
+
+```
+farscape pilot discover /opt/rocm/include --library amdhip64 --interactive
+```
+
+#### 3.5.6 Architecture
+
+The discovery logic is pure — no IO decisions, no TOML writing. It returns a typed result that the CLI/TUI layer consumes.
+
+**New module**: `PilotDiscovery.fs` in `Farscape.Core`, positioned after `PilotAnalyzer.fs`. Same pattern: `PilotAnalyzer.analyze` returns `AnalysisResult`, `PilotDiscovery.discover` returns `DiscoveryResult`.
+
+```fsharp
+type FileClassification =
+    | CHeader of path: string * isUmbrella: bool * isInternal: bool
+    | CppHeader of path: string * hasExternC: bool * isInternal: bool
+    | ProtocolXml of path: string * format: XmlProtocolFormat
+    | PkgConfig of path: string * metadata: PkgConfigInfo
+    | BuildSystemFile of path: string * kind: BuildSystemKind
+
+type Diagnostic =
+    | Error of DiscoveryError
+    | Warning of DiscoveryWarning
+    | Suggestion of DiscoverySuggestion
+
+type DiscoveryResult = {
+    RootDirectory: string
+    Files: FileClassification list
+    Diagnostics: Diagnostic list
+    SuggestedLibraryName: string option
+    SuggestedIncludePaths: string list
+}
+```
+
+**CLI integration**: New `pilot discover` subcommand in `Program.fs`. Non-interactive mode calls `PilotDiscovery.discover`, formats output, optionally writes `.pilot.toml` via `PilotSerializer`.
+
+**TUI integration** (future): `PilotInteractive.fs` in `Farscape.Cli` consumes `DiscoveryResult` as the initial MVU model state. The TUI renders the file list with diagnostics, allows curation, and persists on exit.
+
+| Module | Location | Responsibility |
+|---|---|---|
+| `PilotDiscovery.fs` | `Farscape.Core` (after `PilotAnalyzer.fs`) | Pure discovery logic: directory → `DiscoveryResult` |
+| `pilot discover` command | `Farscape.Cli/Program.fs` | CLI entry point, non-interactive output + TOML generation |
+| `PilotInteractive.fs` (future) | `Farscape.Cli` | Thuja MVU TUI for interactive curation |
+
+#### 3.5.7 Relationship to Other Phases
+
+Discovery is not a hard prerequisite for any phase in this plan — every phase can proceed with manually specified paths. However, discovery dramatically improves the developer experience for Phases 2 and 3, where the SDK structures are well-known and the header counts are non-trivial. The TUI mode is a natural companion to `pilot analyze` (Section 3.2) and can be introduced incrementally.
+
+Discovery also scales beyond this plan: when Farscape gains parsers for Rust crate manifests, Python stubs, or GStreamer plugin registries, the discovery infrastructure is already in place. Point Pilot at a directory, let it find what it can.
+
 ---
 
 ## 4. Phase 1: Code Generator Extensions
@@ -648,7 +779,8 @@ binding          (libdrm + libgbm + Wayland XML)
 | `WrapperCodeGenerator.fs` | 1.3 | Generate `Result<T, ErrorStruct>` wrappers using `ErrorStruct.capture` |
 | New: `WaylandProtocolParser.fs` | 1.5 | XParsec-based XML parser producing `Declaration` list |
 | `BindingGenerator.fs` | 0, 1.5 | Use `PilotProject`; route XML protocols to new parser; merge declarations |
-| `Program.fs` (CLI) | 0 | `pilot` subcommand; accept `.pilot.toml` |
+| New: `PilotDiscovery.fs` | 0 | Generalized source asset discovery: directory → classified file list with diagnostics |
+| `Program.fs` (CLI) | 0 | `pilot` subcommand; accept `.pilot.toml`; `pilot discover` for asset discovery |
 
 ---
 

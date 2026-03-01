@@ -89,19 +89,36 @@ module BindingGenerator =
         match PilotSerializer.loadFromFile projectPath with
         | Error e -> Error $"Failed to load project: {e}"
         | Ok project ->
-            let parseResults =
+            // Parse C/C++ headers
+            let headerResults =
                 project.Library.Headers |> List.map (fun headerPath ->
                     logVerbose $"Parsing header: {headerPath}" verbose
                     CppParser.parseWithDefines headerPath project.Library.IncludePaths project.Library.Defines verbose)
 
-            let errors = parseResults |> List.choose (function Error e -> Some e | _ -> None)
-            if not errors.IsEmpty then
-                let msg = String.concat "; " errors
+            let headerErrors = headerResults |> List.choose (function Error e -> Some e | _ -> None)
+            if not headerErrors.IsEmpty then
+                let msg = String.concat "; " headerErrors
                 Error $"Failed to parse headers: {msg}"
+
+            // Parse XML protocol files (Wayland, etc.)
             else
-                let allDeclLists = parseResults |> List.choose (function Ok d -> Some d | _ -> None)
+            let xmlResults =
+                project.Library.XmlProtocols |> List.map (fun xmlPath ->
+                    logVerbose $"Parsing XML protocol: {xmlPath}" verbose
+                    WaylandProtocolParser.parseFile xmlPath)
+
+            let xmlErrors = xmlResults |> List.choose (function Error e -> Some e | _ -> None)
+            if not xmlErrors.IsEmpty then
+                let msg = String.concat "; " xmlErrors
+                Error $"Failed to parse XML protocols: {msg}"
+            else
+
+                let headerDeclLists = headerResults |> List.choose (function Ok d -> Some d | _ -> None)
+                let xmlDeclLists = xmlResults |> List.choose (function Ok d -> Some d | _ -> None)
+                let allDeclLists = headerDeclLists @ xmlDeclLists
                 let declarations = DeclarationAlgebra.mergeDeclarations allDeclLists
-                logVerbose $"Merged {declarations.Length} declarations from {project.Library.Headers.Length} header(s)" verbose
+                let sourceCount = project.Library.Headers.Length + project.Library.XmlProtocols.Length
+                logVerbose $"Merged {declarations.Length} declarations from {sourceCount} source(s)" verbose
 
                 Directory.CreateDirectory(project.Output.Directory) |> ignore
 

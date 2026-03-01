@@ -105,6 +105,15 @@ module CppParser =
         Documentation: string option
     }
 
+    /// Delegate (function pointer type with a name). Used for Wayland event handlers
+    /// and any other callback type parsed from structured API definitions.
+    type DelegateDecl = {
+        Name: string
+        Parameters: (string * string) list
+        ReturnType: string
+        Documentation: string option
+    }
+
     /// Union type for all supported declarations
     type Declaration =
         | Function of FunctionDecl
@@ -114,6 +123,7 @@ module CppParser =
         | Macro of MacroDecl
         | Namespace of NamespaceDecl
         | Class of ClassDecl
+        | Delegate of DelegateDecl
 
     and NamespaceDecl = {
         Name: string

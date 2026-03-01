@@ -136,6 +136,19 @@ module CodeRenderer =
             sb.AppendLine($"{prefix}}}") |> ignore
             sb.AppendLine() |> ignore
 
+        | DelegateType (name, parameters, returnType, doc) ->
+            match doc with
+            | Some d -> sb.AppendLine($"{prefix}/// {d}") |> ignore
+            | None -> ()
+            let paramStr =
+                if parameters.IsEmpty then "unit"
+                else
+                    parameters
+                    |> List.map (fun (pname, ptype) -> $"{pname}: {renderType ptype}")
+                    |> String.concat " * "
+            sb.AppendLine($"{prefix}type {name} = delegate of {paramStr} -> {renderType returnType}") |> ignore
+            sb.AppendLine() |> ignore
+
 
     /// Render a complete FsDecl tree to an F# source string.
     /// This is the single entry point; the ONLY StringBuilder in Farscape.

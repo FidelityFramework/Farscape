@@ -227,6 +227,7 @@ module FidelityCodeGenerator =
         | GStruct of FsDecl list
         | GFunc of CppParser.FunctionDecl
         | GMacro of FsDecl list
+        | GDelegate of FsDecl list
         | GNone
 
     /// Generation algebra: maps each Declaration variant to a DeclGroup.
@@ -250,6 +251,11 @@ module FidelityCodeGenerator =
         OnTypedef = fun _ -> GNone
         OnNamespace = fun _ -> GNone
         OnClass = fun _ -> GNone
+        OnDelegate = fun d ->
+            let mapType = mapCTypeToFidelityType typedefMap model opaqueHandles
+            let params' = d.Parameters |> List.map (fun (name, cType) -> (name, mapType cType))
+            let retType = mapType d.ReturnType
+            GDelegate [ DelegateType(d.Name, params', retType, d.Documentation) ]
     }
 
     /// Generate a complete Fidelity binding source file from parsed declarations.
@@ -278,6 +284,7 @@ module FidelityCodeGenerator =
 
         // Phase 3: Assemble categories (pure functional fold)
         let enums = groups |> List.collect (function GEnum d -> d | _ -> [])
+        let delegates = groups |> List.collect (function GDelegate d -> d | _ -> [])
         let structs = groups |> List.collect (function GStruct d -> d | _ -> [])
         let functions =
             groups
@@ -291,7 +298,7 @@ module FidelityCodeGenerator =
             if macros.IsEmpty then []
             else Comment "// Macro constants" :: macros @ [BlankLine]
 
-        let allDecls = opaqueHandleDecls @ enums @ structs @ functions @ macroSection
+        let allDecls = opaqueHandleDecls @ enums @ delegates @ structs @ functions @ macroSection
         let moduleDecl = Module(namespace', $"Fidelity binding for {libraryName}", allDecls)
 
         // Phase 5: Render to string (the ONLY StringBuilder, in CodeRenderer)
