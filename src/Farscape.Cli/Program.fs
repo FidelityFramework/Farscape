@@ -228,6 +228,7 @@ let pilotInitCommand =
                 IncludePaths = []
                 Defines = []
                 TransitiveHeaders = []
+                MacroPrefixes = []
             }
             Output = { Mode = "fidelity"; Directory = outputDir }
             Namespaces = [

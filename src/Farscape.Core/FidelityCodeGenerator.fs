@@ -112,8 +112,8 @@ module FidelityCodeGenerator =
     let mapCTypeToFidelityType (typedefMap: Map<string, string>) (model: PlatformABI) (opaqueHandles: Set<string>) (cType: string) : FsType =
         // Opaque handle types preserve their wrapper struct name
         if opaqueHandles.Contains(cType) then Named cType
-        // Function pointer types like "void (*)(void)" contain (*); always nativeint
-        elif cType.Contains("(*)") then Named "nativeint"
+        // Function pointer types: "void (*)(void)" or "void (**)(void)"; always nativeint
+        elif cType.Contains("(*)") || cType.Contains("(**)") then Named "nativeint"
         else
         match cType with
         | ParsedCType info ->

@@ -1204,6 +1204,7 @@ module CppParser =
         (includePaths: string list)
         (defines: string list)
         (transitiveHeaders: string list)
+        (macroPrefixes: string list)
         (verbose: bool) : Result<Declaration list, string> =
 
         let options = {
@@ -1212,7 +1213,7 @@ module CppParser =
             Defines = defines
             Verbose = verbose
             IncludeMacros = true
-            MacroPrefixes = []
+            MacroPrefixes = macroPrefixes
             TransitiveHeaders = transitiveHeaders
         }
         parseHeader options

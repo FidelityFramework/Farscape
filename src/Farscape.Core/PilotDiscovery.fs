@@ -409,6 +409,7 @@ module PilotDiscovery =
             IncludePaths = result.SuggestedIncludePaths
             Defines = []
             TransitiveHeaders = []
+            MacroPrefixes = []
           }
           Output = { Mode = outputMode; Directory = outputDir }
           Namespaces = [

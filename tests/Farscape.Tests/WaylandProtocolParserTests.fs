@@ -372,6 +372,7 @@ let ``PilotSerializer round-trips xml_protocols`` () =
             IncludePaths = []
             Defines = []
             TransitiveHeaders = []
+            MacroPrefixes = []
         }
         Output = { Mode = "fidelity"; Directory = "./out" }
         Namespaces = []
@@ -396,6 +397,7 @@ let ``PilotSerializer round-trips xml_interfaces`` () =
             IncludePaths = []
             Defines = []
             TransitiveHeaders = []
+            MacroPrefixes = []
         }
         Output = { Mode = "fidelity"; Directory = "./out" }
         Namespaces = [{

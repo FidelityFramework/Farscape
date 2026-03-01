@@ -105,7 +105,7 @@ module BindingGenerator =
             let headerResults =
                 project.Library.Headers |> List.map (fun headerPath ->
                     logVerbose $"Parsing header: {headerPath}" verbose
-                    CppParser.parseWithTransitiveHeaders headerPath project.Library.IncludePaths project.Library.Defines project.Library.TransitiveHeaders verbose)
+                    CppParser.parseWithTransitiveHeaders headerPath project.Library.IncludePaths project.Library.Defines project.Library.TransitiveHeaders project.Library.MacroPrefixes verbose)
 
             let headerErrors = headerResults |> List.choose (function Error e -> Some e | _ -> None)
             if not headerErrors.IsEmpty then

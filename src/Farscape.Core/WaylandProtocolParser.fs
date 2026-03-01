@@ -89,9 +89,12 @@ module WaylandProtocolParser =
         | _ -> None
 
     /// Helper: get first child <description> summary text.
+    /// Normalizes whitespace (collapses newlines and runs of spaces into single spaces).
     let private descriptionOf (el: XmlNode) : string option =
         XmlNode.element "description" el
         |> Option.bind (fun desc -> attrOpt "summary" desc)
+        |> Option.map (fun s ->
+            System.Text.RegularExpressions.Regex.Replace(s, @"\s+", " ").Trim())
 
     /// Parse an arg type string to WaylandArgType.
     let private parseArgType (s: string) : WaylandArgType =
