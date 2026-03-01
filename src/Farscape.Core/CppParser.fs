@@ -205,6 +205,10 @@ module CppParser =
     let private getInt64 (element: JsonValue) (prop: string) : int64 option =
         match element.TryGetProperty(prop) with
         | Some (JsonValue.Number d) -> Some (int64 d)
+        | Some (JsonValue.String s) ->
+            match System.Int64.TryParse(s) with
+            | true, v -> Some v
+            | _ -> None
         | _ -> None
 
     /// Get boolean property
@@ -443,38 +447,41 @@ module CppParser =
             Some { Name = ""; Fields = fields; Documentation = documentation; IsUnion = isUnion }
         | _ -> None
 
-    /// Process EnumConstantDecl AST node
-    let private processEnumConstant (node: JsonValue) : EnumValue option =
-        match getString node "name" with
-        | None | Some "" -> None
-        | Some constName ->
-            // Try to get value - handle both positive and negative
-            let value =
-                getArray node "inner"
-                |> Seq.tryPick (fun inner ->
-                    match getInt64 inner "value" with
-                    | Some v -> Some v
-                    | None ->
-                        getArray inner "inner"
-                        |> Seq.tryPick (fun nested -> getInt64 nested "value"))
-                |> Option.defaultValue 0L
-
-            Some {
-                Name = constName
-                Value = value
-                Documentation = None
-            }
+    /// Extract the explicit value from an EnumConstantDecl AST node, if present.
+    /// Returns None when the enum constant has no initializer (implicit sequential value).
+    let private extractEnumConstantValue (node: JsonValue) : int64 option =
+        getArray node "inner"
+        |> Seq.tryPick (fun inner ->
+            match getStringOr inner "kind" "" with
+            | "ConstantExpr" | "IntegerLiteral" ->
+                getInt64 inner "value"
+            | _ ->
+                getArray inner "inner"
+                |> Seq.tryPick (fun nested -> getInt64 nested "value"))
 
     /// Process EnumDecl AST node
     let private processEnumDecl (node: JsonValue) : EnumDecl option =
         let name = getString node "name"
         let documentation = extractDocumentation node
+        // Process enum constants with auto-increment for implicit values.
+        // C rule: first implicit value is 0, subsequent implicit values are previous + 1,
+        // explicit values reset the counter.
         let values =
-            getArray node "inner"
-            |> Seq.filter (fun inner ->
-                getStringOr inner "kind" "" = "EnumConstantDecl")
-            |> Seq.choose processEnumConstant
-            |> List.ofSeq
+            let constants =
+                getArray node "inner"
+                |> Seq.filter (fun inner ->
+                    getStringOr inner "kind" "" = "EnumConstantDecl")
+            let mutable nextValue = 0L
+            [ for constNode in constants do
+                match getString constNode "name" with
+                | None | Some "" -> ()
+                | Some constName ->
+                    let value =
+                        match extractEnumConstantValue constNode with
+                        | Some explicit -> explicit
+                        | None -> nextValue
+                    nextValue <- value + 1L
+                    yield { Name = constName; Value = value; Documentation = None } ]
 
         // Try to get fixed underlying type
         let underlyingType =

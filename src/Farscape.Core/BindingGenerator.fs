@@ -58,7 +58,7 @@ module BindingGenerator =
             let generatedCode = FidelityCodeGenerator.generate declarations options.Namespace options.LibraryName options.DataModel Map.empty
 
             let lastSegment = options.Namespace.Split('.') |> Array.last
-            let outputFileName = $"{lastSegment}.fs"
+            let outputFileName = $"{lastSegment}.clef"
             let outputPath = Path.Combine(options.OutputDirectory, outputFileName)
             File.WriteAllText(outputPath, generatedCode)
 
@@ -70,7 +70,7 @@ module BindingGenerator =
                     let wrapperNamespace = $"{options.Namespace}.Wrappers"
                     let wrapperCode =
                         WrapperCodeGenerator.generate declarations wrapperNamespace options.LibraryName options.Namespace WrapperTypes.NoErrors options.DataModel
-                    let wrapperPath = Path.Combine(options.OutputDirectory, $"{lastSegment}Wrappers.fs")
+                    let wrapperPath = Path.Combine(options.OutputDirectory, $"{lastSegment}Wrappers.clef")
                     File.WriteAllText(wrapperPath, wrapperCode)
                     logVerbose $"Wrapper module written to: {wrapperPath}" options.Verbose
                     [wrapperPath]
@@ -120,7 +120,14 @@ module BindingGenerator =
                 let sourceCount = project.Library.Headers.Length + project.Library.XmlProtocols.Length
                 logVerbose $"Merged {declarations.Length} declarations from {sourceCount} source(s)" verbose
 
-                Directory.CreateDirectory(project.Output.Directory) |> ignore
+                // Resolve output directory relative to the project file location
+                let projectDir = Path.GetDirectoryName(Path.GetFullPath(projectPath))
+                let outputDir =
+                    if Path.IsPathRooted(project.Output.Directory) then
+                        project.Output.Directory
+                    else
+                        Path.GetFullPath(Path.Combine(projectDir, project.Output.Directory))
+                Directory.CreateDirectory(outputDir) |> ignore
 
                 // Determine error handling strategy from convention configuration
                 let errorHandling =
@@ -172,7 +179,7 @@ module BindingGenerator =
                                     let errorNs = $"Fidelity.{project.Library.Name}.{config.ErrorStructName}"
                                     match EnumErrorModuleGenerator.generate enumDecl config errorNs with
                                     | Some output ->
-                                        let errorPath = Path.Combine(project.Output.Directory, $"{config.ErrorStructName}.fs")
+                                        let errorPath = Path.Combine(outputDir, $"{config.ErrorStructName}.clef")
                                         File.WriteAllText(errorPath, output)
                                         logVerbose $"Error module: {errorPath}" verbose
                                         [errorPath]
@@ -202,7 +209,7 @@ module BindingGenerator =
                             let opaqueHandles = FidelityCodeGenerator.detectOpaqueHandles declarations
                             let descriptorNs = $"Fidelity.{project.Library.Name}.Descriptors"
                             let descriptorCode = DescriptorGenerator.generate abiStructDecls descriptorNs typedefMap dataModel opaqueHandles
-                            let descriptorPath = Path.Combine(project.Output.Directory, "Descriptors.fs")
+                            let descriptorPath = Path.Combine(outputDir, "Descriptors.clef")
                             File.WriteAllText(descriptorPath, descriptorCode)
                             logVerbose $"Descriptor module: {descriptorPath}" verbose
                             [descriptorPath]
@@ -215,15 +222,15 @@ module BindingGenerator =
                         logVerbose $"Namespace {ns.Name}: {filtered.Length} declarations" verbose
                         let code = FidelityCodeGenerator.generate filtered ns.Name ns.Library dataModel structLayouts
                         let lastSegment = ns.Name.Split('.') |> Array.last
-                        let fileName = $"{lastSegment}.fs"
-                        let outputPath = Path.Combine(project.Output.Directory, fileName)
+                        let fileName = $"{lastSegment}.clef"
+                        let outputPath = Path.Combine(outputDir, fileName)
                         File.WriteAllText(outputPath, code)
 
                         if generateWrappers then
                             let wrapperNamespace = $"{ns.Name}.Wrappers"
                             let wrapperCode =
                                 WrapperCodeGenerator.generate filtered wrapperNamespace ns.Library ns.Name errorHandling dataModel
-                            let wrapperPath = Path.Combine(project.Output.Directory, $"{lastSegment}Wrappers.fs")
+                            let wrapperPath = Path.Combine(outputDir, $"{lastSegment}Wrappers.clef")
                             File.WriteAllText(wrapperPath, wrapperCode)
                             logVerbose $"Wrapper module: {wrapperPath}" verbose
                             [outputPath; wrapperPath]

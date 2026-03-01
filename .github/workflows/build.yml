@@ -14,6 +14,12 @@ jobs:
         with:
           fetch-depth: 0  # Full history for MinVer
 
+      - uses: actions/checkout@v4
+        with:
+          repository: FidelityFramework/Fidelity.Data
+          ref: v0.1.0
+          path: ../Fidelity.Data
+
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
