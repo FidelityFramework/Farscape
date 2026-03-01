@@ -39,6 +39,9 @@ module PilotTypes =
         IncludePaths: string list
         /// Preprocessor defines
         Defines: string list
+        /// Filenames of transitively-included headers whose types should also be extracted.
+        /// e.g. ["driver_types.h"] when parsing hip_runtime_api.h which #includes it.
+        TransitiveHeaders: string list
     }
     with
         /// Backward-compat: returns the single header (or first if multiple).

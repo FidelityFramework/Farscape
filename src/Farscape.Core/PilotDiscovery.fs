@@ -408,6 +408,7 @@ module PilotDiscovery =
             XmlProtocols = xmlProtocols
             IncludePaths = result.SuggestedIncludePaths
             Defines = []
+            TransitiveHeaders = []
           }
           Output = { Mode = outputMode; Directory = outputDir }
           Namespaces = [

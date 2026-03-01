@@ -34,6 +34,9 @@ module PilotSerializer =
         let table =
             if lib.Defines.IsEmpty then table
             else TomlTable.add "defines" (TomlValue.Array (lib.Defines |> List.map TomlValue.String)) table
+        let table =
+            if lib.TransitiveHeaders.IsEmpty then table
+            else TomlTable.add "transitive_headers" (TomlValue.Array (lib.TransitiveHeaders |> List.map TomlValue.String)) table
         TomlValue.Table table
 
     /// Convert an OutputSpec to a TomlTable.
@@ -168,7 +171,8 @@ module PilotSerializer =
                      Headers = headers
                      XmlProtocols = optionalStringArray "xml_protocols" table
                      IncludePaths = optionalStringArray "include_paths" table
-                     Defines = optionalStringArray "defines" table }
+                     Defines = optionalStringArray "defines" table
+                     TransitiveHeaders = optionalStringArray "transitive_headers" table }
             | Error e, _ | _, Error e -> Error e
 
     /// Parse an OutputSpec from the [output] table.

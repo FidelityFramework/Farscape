@@ -81,8 +81,20 @@ module BindingGenerator =
                 DeclarationCount = declarations.Length
             }
 
+    /// Derive the common namespace prefix from project namespace names.
+    /// e.g., ["Fidelity.ROCm.Device"; "Fidelity.ROCm.Memory"] → "Fidelity.ROCm"
+    let private deriveNamespacePrefix (project: PilotProject) : string =
+        match project.Namespaces with
+        | [] -> $"Fidelity.{project.Library.Name}"
+        | first :: _ ->
+            let segments = first.Name.Split('.')
+            if segments.Length >= 2 then
+                segments.[..segments.Length-2] |> String.concat "."
+            else first.Name
+
     /// Generate scoped Fidelity bindings from a .pilot.toml project file.
-    /// Each [[namespace]] section produces a separate Clef module.
+    /// Each [[namespace]] section produces a subfolder with Types.clef + functions .clef.
+    /// Shared types (referenced by 2+ namespaces) go into a root Types.clef.
     /// Supports multi-header projects: parses each header independently, merges with dedup.
     /// When generateWrappers is true, also generates Layer 2 idiomatic wrappers.
     let generateFromProject (projectPath: string) (verbose: bool) (generateWrappers: bool) (dataModel: PlatformABI) : Result<GenerationResult, string> =
@@ -93,7 +105,7 @@ module BindingGenerator =
             let headerResults =
                 project.Library.Headers |> List.map (fun headerPath ->
                     logVerbose $"Parsing header: {headerPath}" verbose
-                    CppParser.parseWithDefines headerPath project.Library.IncludePaths project.Library.Defines verbose)
+                    CppParser.parseWithTransitiveHeaders headerPath project.Library.IncludePaths project.Library.Defines project.Library.TransitiveHeaders verbose)
 
             let headerErrors = headerResults |> List.choose (function Error e -> Some e | _ -> None)
             if not headerErrors.IsEmpty then
@@ -129,27 +141,12 @@ module BindingGenerator =
                         Path.GetFullPath(Path.Combine(projectDir, project.Output.Directory))
                 Directory.CreateDirectory(outputDir) |> ignore
 
-                // Determine error handling strategy from convention configuration
-                let errorHandling =
-                    match project.ErrorConventions with
-                    | Some spec ->
-                        match spec.Default with
-                        | PilotTypes.Errno ->
-                            WrapperTypes.UseErrno $"Fidelity.{project.Library.Name}.Errno"
-                        | PilotTypes.EnumErrorCode (errorType, successValue, _, _) ->
-                            let structName = EnumErrorModuleGenerator.deriveErrorStructName errorType
-                            WrapperTypes.UseEnumError (errorType, successValue, structName,
-                                                      $"Fidelity.{project.Library.Name}.{structName}")
-                        | _ -> WrapperTypes.NoErrors
-                    | None -> WrapperTypes.NoErrors
-
-                // Extract struct layouts for ABI-critical structs (clang third pass)
-                let abiStructNames =
-                    match project.Options with
-                    | Some opts when not opts.AbiCriticalStructs.IsEmpty -> opts.AbiCriticalStructs
-                    | _ -> []
-
+                // Build generation context once from the full declaration list
                 let structLayouts =
+                    let abiStructNames =
+                        match project.Options with
+                        | Some opts when not opts.AbiCriticalStructs.IsEmpty -> opts.AbiCriticalStructs
+                        | _ -> []
                     if abiStructNames.IsEmpty then Map.empty
                     else
                         let headerFile = project.Library.Headers |> List.head
@@ -161,7 +158,43 @@ module BindingGenerator =
                             logVerbose $"Warning: struct layout extraction failed: {e}" verbose
                             Map.empty
 
-                // Generate enum error module if convention is EnumErrorCode
+                let ctx = FidelityCodeGenerator.buildGenerationContext declarations dataModel structLayouts
+
+                // Derive common namespace prefix for the project
+                let nsPrefix = deriveNamespacePrefix project
+
+                // Determine error handling strategy from convention configuration
+                let errorHandling =
+                    match project.ErrorConventions with
+                    | Some spec ->
+                        match spec.Default with
+                        | PilotTypes.Errno ->
+                            WrapperTypes.UseErrno $"{nsPrefix}.Errno"
+                        | PilotTypes.EnumErrorCode (errorType, successValue, _, _) ->
+                            let structName = EnumErrorModuleGenerator.deriveErrorStructName errorType
+                            WrapperTypes.UseEnumError (errorType, successValue, structName,
+                                                      $"{nsPrefix}.{structName}")
+                        | _ -> WrapperTypes.NoErrors
+                    | None -> WrapperTypes.NoErrors
+
+                // Classify types across namespaces: shared vs local
+                let classification = PilotAnalyzer.classifyProjectTypes project.Namespaces declarations
+                let sharedCount = classification.SharedTypes.Count
+                let localCounts = classification.LocalTypes |> Map.toList |> List.sumBy (fun (_, s) -> s.Count)
+                logVerbose $"Type classification: {sharedCount} shared, {localCounts} local across {project.Namespaces.Length} namespaces" verbose
+
+                // ── Shared Types.clef (root level) ──────────────────────────
+                let sharedTypesNs = $"{nsPrefix}.Types"
+                let sharedTypeDecls = PilotAnalyzer.filterTypesOnly classification.SharedTypes declarations
+                let sharedHandles = Set.intersect ctx.OpaqueHandles classification.SharedTypes
+                let sharedCode =
+                    FidelityCodeGenerator.generateModule ctx sharedHandles sharedTypeDecls
+                        sharedTypesNs project.Library.Name "Shared type definitions" []
+                let sharedTypesPath = Path.Combine(outputDir, "Types.clef")
+                File.WriteAllText(sharedTypesPath, sharedCode)
+                logVerbose $"Shared types module: {sharedTypesPath} ({classification.SharedTypes.Count} types)" verbose
+
+                // ── Error module ────────────────────────────────────────────
                 let errorModuleFiles =
                     match errorHandling with
                     | WrapperTypes.UseEnumError (errorType, _, _, _) ->
@@ -176,7 +209,7 @@ module BindingGenerator =
                                 match spec.Default with
                                 | PilotTypes.EnumErrorCode (et, sv, esFn, enFn) ->
                                     let config = EnumErrorModuleGenerator.makeConfig et sv esFn enFn
-                                    let errorNs = $"Fidelity.{project.Library.Name}.{config.ErrorStructName}"
+                                    let errorNs = $"{nsPrefix}.{config.ErrorStructName}"
                                     match EnumErrorModuleGenerator.generate enumDecl config errorNs with
                                     | Some output ->
                                         let errorPath = Path.Combine(outputDir, $"{config.ErrorStructName}.clef")
@@ -191,7 +224,7 @@ module BindingGenerator =
                             []
                     | _ -> []
 
-                // Generate BAREWire descriptors if configured
+                // ── BAREWire descriptors ─────────────────────────────────────
                 let descriptorFiles =
                     let generateDescriptors =
                         match project.Options with
@@ -205,37 +238,74 @@ module BindingGenerator =
                                 | _ -> None)
                         if abiStructDecls.IsEmpty then []
                         else
-                            let typedefMap = FidelityCodeGenerator.buildTypedefMap declarations
-                            let opaqueHandles = FidelityCodeGenerator.detectOpaqueHandles declarations
-                            let descriptorNs = $"Fidelity.{project.Library.Name}.Descriptors"
-                            let descriptorCode = DescriptorGenerator.generate abiStructDecls descriptorNs typedefMap dataModel opaqueHandles
+                            let descriptorNs = $"{nsPrefix}.Descriptors"
+                            let descriptorCode =
+                                DescriptorGenerator.generate abiStructDecls descriptorNs
+                                    ctx.TypedefMap dataModel ctx.OpaqueHandles
                             let descriptorPath = Path.Combine(outputDir, "Descriptors.clef")
                             File.WriteAllText(descriptorPath, descriptorCode)
                             logVerbose $"Descriptor module: {descriptorPath}" verbose
                             [descriptorPath]
                     else []
 
-                let allFiles =
-                    errorModuleFiles @ descriptorFiles @
-                    (project.Namespaces |> List.collect (fun ns ->
-                        let filtered = PilotAnalyzer.filterDeclarationsForNamespace ns declarations
-                        logVerbose $"Namespace {ns.Name}: {filtered.Length} declarations" verbose
-                        let code = FidelityCodeGenerator.generate filtered ns.Name ns.Library dataModel structLayouts
+                // ── Namespace subfolders ─────────────────────────────────────
+                let nsFiles =
+                    project.Namespaces |> List.collect (fun ns ->
                         let lastSegment = ns.Name.Split('.') |> Array.last
-                        let fileName = $"{lastSegment}.clef"
-                        let outputPath = Path.Combine(outputDir, fileName)
-                        File.WriteAllText(outputPath, code)
+                        let nsDir = Path.Combine(outputDir, lastSegment)
+                        Directory.CreateDirectory(nsDir) |> ignore
 
-                        if generateWrappers then
-                            let wrapperNamespace = $"{ns.Name}.Wrappers"
-                            let wrapperCode =
-                                WrapperCodeGenerator.generate filtered wrapperNamespace ns.Library ns.Name errorHandling dataModel
-                            let wrapperPath = Path.Combine(outputDir, $"{lastSegment}Wrappers.clef")
-                            File.WriteAllText(wrapperPath, wrapperCode)
-                            logVerbose $"Wrapper module: {wrapperPath}" verbose
-                            [outputPath; wrapperPath]
-                        else
-                            [outputPath]))
+                        let localTypeNames =
+                            match Map.tryFind ns.Name classification.LocalTypes with
+                            | Some names -> names
+                            | None -> Set.empty
+
+                        // ── Local Types.clef (if namespace has local types) ──
+                        let localTypesNs = $"{ns.Name}.Types"
+                        let localTypeFiles =
+                            if localTypeNames.IsEmpty then []
+                            else
+                                let localTypeDecls = PilotAnalyzer.filterTypesOnly localTypeNames declarations
+                                let localHandles = Set.intersect ctx.OpaqueHandles localTypeNames
+                                let localCode =
+                                    FidelityCodeGenerator.generateModule ctx localHandles localTypeDecls
+                                        localTypesNs ns.Library "Local type definitions" [sharedTypesNs]
+                                let localTypesPath = Path.Combine(nsDir, "Types.clef")
+                                File.WriteAllText(localTypesPath, localCode)
+                                logVerbose $"  {lastSegment}/Types.clef ({localTypeNames.Count} types)" verbose
+                                [localTypesPath]
+
+                        // ── Functions .clef ──────────────────────────────────
+                        let funcOpenModules =
+                            if localTypeNames.IsEmpty then [sharedTypesNs]
+                            else [sharedTypesNs; localTypesNs]
+                        let funcDecls =
+                            PilotAnalyzer.filterDeclarationsWithTypes ns Set.empty declarations
+                        let funcCount =
+                            funcDecls |> List.filter (function CppParser.Declaration.Function _ -> true | _ -> false) |> List.length
+                        let funcCode =
+                            FidelityCodeGenerator.generateModule ctx Set.empty funcDecls
+                                ns.Name ns.Library $"{lastSegment} function declarations" funcOpenModules
+                        let funcPath = Path.Combine(nsDir, $"{lastSegment}.clef")
+                        File.WriteAllText(funcPath, funcCode)
+                        logVerbose $"  {lastSegment}/{lastSegment}.clef ({funcCount} functions)" verbose
+
+                        // ── Wrappers (optional) ─────────────────────────────
+                        let wrapperFiles =
+                            if generateWrappers then
+                                let allNsDecls = PilotAnalyzer.filterDeclarationsForNamespace ns declarations
+                                let wrapperNamespace = $"{ns.Name}.Wrappers"
+                                let wrapperCode =
+                                    WrapperCodeGenerator.generate allNsDecls wrapperNamespace ns.Library ns.Name errorHandling dataModel
+                                let wrapperPath = Path.Combine(nsDir, $"{lastSegment}Wrappers.clef")
+                                File.WriteAllText(wrapperPath, wrapperCode)
+                                logVerbose $"  {lastSegment}/{lastSegment}Wrappers.clef" verbose
+                                [wrapperPath]
+                            else []
+
+                        localTypeFiles @ [funcPath] @ wrapperFiles)
+
+                let allFiles = [sharedTypesPath] @ errorModuleFiles @ descriptorFiles @ nsFiles
 
                 Ok {
                     OutputFiles = allFiles

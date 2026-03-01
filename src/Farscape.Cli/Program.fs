@@ -227,6 +227,7 @@ let pilotInitCommand =
                 XmlProtocols = []
                 IncludePaths = []
                 Defines = []
+                TransitiveHeaders = []
             }
             Output = { Mode = "fidelity"; Directory = outputDir }
             Namespaces = [

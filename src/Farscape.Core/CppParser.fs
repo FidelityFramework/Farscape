@@ -175,6 +175,9 @@ module CppParser =
         IncludeMacros: bool
         /// Filter to only include macros matching these prefixes (empty = all)
         MacroPrefixes: string list
+        /// Filenames of transitively-included headers whose declarations should also be extracted.
+        /// e.g. ["driver_types.h"] when the primary header #includes them.
+        TransitiveHeaders: string list
     }
 
     /// Create default parser options for a header file
@@ -185,6 +188,7 @@ module CppParser =
         Verbose = false
         IncludeMacros = true
         MacroPrefixes = []
+        TransitiveHeaders = []
     }
 
     // =========================================================================
@@ -513,42 +517,38 @@ module CppParser =
     let private walkAst
         (root: JsonValue)
         (targetFile: string)
+        (transitiveHeaders: string list)
         (verbose: bool)
         : Declaration list =
 
         let results = ResizeArray<Declaration>()
         let mutable currentFile: string option = None
+        // All accepted filenames: primary target + any transitive headers
+        let acceptedFiles = targetFile :: transitiveHeaders
 
-        /// Update file tracking from a node's location
+        /// Update file tracking from a node's location.
+        /// Always prefer the direct "file" field (actual source location)
+        /// over "includedFrom" (which points to the includer).
         let updateFileTracking (node: JsonValue) =
             match getObject node "loc" with
             | Some loc ->
-                // Check if this is from an included file
-                match getObject loc "includedFrom" with
-                | Some incl ->
-                    // This declaration is from an included file
-                    match getString incl "file" with
-                    | Some f -> currentFile <- Some f
-                    | None -> ()
+                match getString loc "file" with
+                | Some f -> currentFile <- Some f
                 | None ->
-                    // Not from include, check for file field
-                    match getString loc "file" with
-                    | Some f -> currentFile <- Some f
-                    | None -> () // Keep using current file for same-file decls
+                    match getObject loc "includedFrom" with
+                    | Some incl ->
+                        match getString incl "file" with
+                        | Some f -> currentFile <- Some f
+                        | None -> ()
+                    | None -> ()
             | None -> ()
 
-        /// Check if current node is from target file (not from include)
+        /// Check if current node is from any accepted target file.
         let isFromTargetFile (node: JsonValue) =
-            match getObject node "loc" with
-            | Some loc ->
-                // If has includedFrom, it's from a different file
-                match getObject loc "includedFrom" with
-                | Some _ -> false
-                | None ->
-                    // Check if we're in target file
-                    match currentFile with
-                    | Some f -> f.EndsWith(targetFile) || f = targetFile
-                    | None -> false
+            match currentFile with
+            | Some f ->
+                acceptedFiles |> List.exists (fun tf ->
+                    f.EndsWith(tf) || f = tf)
             | None -> false
 
         /// Process a single node
@@ -1111,7 +1111,7 @@ module CppParser =
                     let root = JsonValue.Parse(jsonOutput)
                     let targetFile = Path.GetFileName(options.HeaderFile)
 
-                    let declarations = walkAst root targetFile options.Verbose
+                    let declarations = walkAst root targetFile options.TransitiveHeaders options.Verbose
 
                     if options.Verbose then
                         printfn "[CppParser] Extracted %d AST declarations" (List.length declarations)
@@ -1176,6 +1176,7 @@ module CppParser =
             Verbose = verbose
             IncludeMacros = true
             MacroPrefixes = []
+            TransitiveHeaders = []
         }
         parseHeader options
 
@@ -1193,6 +1194,26 @@ module CppParser =
             Verbose = verbose
             IncludeMacros = true
             MacroPrefixes = []
+            TransitiveHeaders = []
+        }
+        parseHeader options
+
+    /// Parse with defines and transitive headers for SDK multi-file APIs
+    let parseWithTransitiveHeaders
+        (headerFile: string)
+        (includePaths: string list)
+        (defines: string list)
+        (transitiveHeaders: string list)
+        (verbose: bool) : Result<Declaration list, string> =
+
+        let options = {
+            HeaderFile = headerFile
+            IncludePaths = includePaths
+            Defines = defines
+            Verbose = verbose
+            IncludeMacros = true
+            MacroPrefixes = []
+            TransitiveHeaders = transitiveHeaders
         }
         parseHeader options
 
@@ -1209,6 +1230,7 @@ module CppParser =
             Defines = defines
             Verbose = verbose
             IncludeMacros = true
-            MacroPrefixes = []  // Include all macros for CMSIS
+            MacroPrefixes = []
+            TransitiveHeaders = []
         }
         parseHeaderFull options

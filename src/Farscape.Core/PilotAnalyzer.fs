@@ -217,7 +217,8 @@ module PilotAnalyzer =
               Headers = [headerFile]
               XmlProtocols = []
               IncludePaths = includePaths
-              Defines = defines }
+              Defines = defines
+              TransitiveHeaders = [] }
           Output =
             { Mode = outputMode
               Directory = outputDir }
@@ -289,3 +290,112 @@ module PilotAnalyzer =
                     matchesSnake || matchesPascal
                 | None -> true
             | _ -> true)
+
+    // =========================================================================
+    // Type-Dependency Analysis (for multi-namespace projects)
+    // =========================================================================
+
+    /// Extract base C type names referenced by a function's parameters and return type.
+    /// Uses CTypeParser to correctly strip qualifiers and pointer depth.
+    let extractFunctionTypeRefs (func: CppParser.FunctionDecl) : Set<string> =
+        let extractBase (cType: string) =
+            match CTypeParser.tryParseCType cType with
+            | Some info -> info.BaseType
+            | None -> cType.Trim()
+        let allRawTypes = func.ReturnType :: (func.Parameters |> List.map snd)
+        allRawTypes |> List.map extractBase |> Set.ofList
+
+    /// Get the set of all non-function declaration names (types, enums, structs, typedefs, macros).
+    let declaredTypeNames (declarations: CppParser.Declaration list) : Set<string> =
+        declarations
+        |> List.choose (fun d ->
+            match d with
+            | CppParser.Declaration.Function _ -> None
+            | _ -> declarationName d)
+        |> Set.ofList
+
+    /// Determine which declared type names are referenced by a list of functions.
+    let referencedTypeNames (functions: CppParser.FunctionDecl list) (declNames: Set<string>) : Set<string> =
+        let allRefs = functions |> List.map extractFunctionTypeRefs |> Set.unionMany
+        Set.intersect allRefs declNames
+
+    /// Result of type classification for multi-namespace code generation.
+    type TypeClassification = {
+        /// Types referenced by 2+ namespaces, plus orphan types (unreferenced by any).
+        SharedTypes: Set<string>
+        /// Namespace name -> set of type names local to that namespace only.
+        LocalTypes: Map<string, Set<string>>
+    }
+
+    /// Classify types across namespaces for a multi-namespace project.
+    /// Types referenced by 2+ namespaces go to shared; 1 namespace = local; 0 = shared (orphan).
+    let classifyProjectTypes
+        (namespaces: NamespaceSpec list)
+        (declarations: CppParser.Declaration list) : TypeClassification =
+        let allDeclNames = declaredTypeNames declarations
+
+        // For each namespace, determine which types its functions reference
+        let nsTypeRefs =
+            namespaces |> List.map (fun ns ->
+                let filtered = filterDeclarationsForNamespace ns declarations
+                let funcs =
+                    filtered |> List.choose (function
+                        | CppParser.Declaration.Function f -> Some f
+                        | _ -> None)
+                (ns.Name, referencedTypeNames funcs allDeclNames))
+
+        // Count how many namespaces reference each type
+        let typeCounts =
+            nsTypeRefs
+            |> List.collect (fun (_, refs) -> Set.toList refs)
+            |> List.countBy id
+            |> Map.ofList
+
+        let referencedByAny = nsTypeRefs |> List.map snd |> Set.unionMany
+        let orphans = Set.difference allDeclNames referencedByAny
+
+        let shared =
+            typeCounts
+            |> Map.toSeq
+            |> Seq.filter (fun (_, count) -> count >= 2)
+            |> Seq.map fst
+            |> Set.ofSeq
+            |> Set.union orphans
+
+        let localTypes =
+            nsTypeRefs |> List.map (fun (nsName, refs) ->
+                (nsName, Set.difference refs shared))
+            |> Map.ofList
+
+        { SharedTypes = shared; LocalTypes = localTypes }
+
+    /// Filter declarations to only types (no functions) whose names are in the given set.
+    let filterTypesOnly (typeNames: Set<string>) (declarations: CppParser.Declaration list) : CppParser.Declaration list =
+        declarations |> List.filter (fun decl ->
+            match decl with
+            | CppParser.Declaration.Function _ -> false
+            | _ ->
+                match declarationName decl with
+                | Some name -> Set.contains name typeNames
+                | None -> false)
+
+    /// Filter declarations for a namespace: functions by prefix/name, types by explicit set.
+    let filterDeclarationsWithTypes
+        (spec: NamespaceSpec)
+        (typeNames: Set<string>)
+        (declarations: CppParser.Declaration list) : CppParser.Declaration list =
+        let explicitSet = Set.ofList spec.Functions
+        declarations |> List.filter (fun decl ->
+            match decl with
+            | CppParser.Declaration.Function f ->
+                let matchesPrefix =
+                    spec.Prefixes |> List.exists (fun prefix -> f.Name.StartsWith prefix)
+                let matchesExplicit = Set.contains f.Name explicitSet
+                let matchesXmlInterface =
+                    spec.XmlInterfaces |> List.exists (fun iface ->
+                        f.Name.StartsWith(iface + "_") || f.Name = iface)
+                matchesPrefix || matchesExplicit || matchesXmlInterface
+            | _ ->
+                match declarationName decl with
+                | Some name -> Set.contains name typeNames
+                | None -> false)

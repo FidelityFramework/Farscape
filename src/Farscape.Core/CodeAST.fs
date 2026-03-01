@@ -89,3 +89,5 @@ module CodeAST =
         /// Delegate type: type Name = delegate of p1: T1 * p2: T2 -> ReturnType
         /// Used for Wayland event handlers and other callback types.
         | DelegateType of name: string * parameters: (string * FsType) list * returnType: FsType * doc: string option
+        /// Open directive: open Fidelity.ROCm.Types
+        | OpenModule of name: string

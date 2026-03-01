@@ -258,6 +258,76 @@ module FidelityCodeGenerator =
             GDelegate [ DelegateType(d.Name, params', retType, d.Documentation) ]
     }
 
+    // =========================================================================
+    // Generation Context (pre-computed from full declaration list)
+    // =========================================================================
+
+    /// Pre-computed resolution context built once from the full declaration list.
+    /// Passed to generateModule so each sub-file gets correct type resolution
+    /// even when it only contains a subset of declarations.
+    type GenerationContext = {
+        TypedefMap: Map<string, string>
+        OpaqueHandles: Set<string>
+        DataModel: PlatformABI
+        StructLayouts: Map<string, CppParser.StructLayoutInfo>
+    }
+
+    /// Build a GenerationContext from the full, unfiltered declaration list.
+    let buildGenerationContext
+        (declarations: CppParser.Declaration list)
+        (model: PlatformABI)
+        (structLayouts: Map<string, CppParser.StructLayoutInfo>)
+        : GenerationContext =
+        { TypedefMap = buildTypedefMap declarations
+          OpaqueHandles = detectOpaqueHandles declarations
+          DataModel = model
+          StructLayouts = structLayouts }
+
+    /// Generate a Clef module with explicit control over what gets emitted.
+    /// Uses the full GenerationContext for type resolution, but only declares
+    /// the opaque handles in handlesToDeclare and the declarations passed in.
+    /// openModules are emitted as `open` directives after the module header.
+    let generateModule
+        (ctx: GenerationContext)
+        (handlesToDeclare: Set<string>)
+        (declarations: CppParser.Declaration list)
+        (namespace': string)
+        (libraryName: string)
+        (comment: string)
+        (openModules: string list)
+        : string =
+
+        let opaqueHandleDecls = generateOpaqueHandleDecls handlesToDeclare
+
+        let groups =
+            DeclarationAlgebra.cataDeclarations
+                (generationAlgebra ctx.TypedefMap ctx.DataModel ctx.OpaqueHandles ctx.StructLayouts)
+                declarations
+
+        let enums = groups |> List.collect (function GEnum d -> d | _ -> [])
+        let delegates = groups |> List.collect (function GDelegate d -> d | _ -> [])
+        let structs = groups |> List.collect (function GStruct d -> d | _ -> [])
+        let functions =
+            groups
+            |> List.choose (function GFunc f -> Some f | _ -> None)
+            |> List.distinctBy (fun f -> f.Name)
+            |> List.collect (generateFunctionDecls ctx.TypedefMap ctx.DataModel ctx.OpaqueHandles libraryName)
+        let macros = groups |> List.collect (function GMacro d -> d | _ -> [])
+
+        let macroSection =
+            if macros.IsEmpty then []
+            else Comment "// Macro constants" :: macros @ [BlankLine]
+
+        let openDecls = openModules |> List.map OpenModule
+        let allDecls = openDecls @ opaqueHandleDecls @ enums @ delegates @ structs @ functions @ macroSection
+        let moduleDecl = Module(namespace', comment, allDecls)
+
+        CodeRenderer.render moduleDecl
+
+    // =========================================================================
+    // Original API (backward compatible, used for single-file generation)
+    // =========================================================================
+
     /// Generate a complete Fidelity binding source file from parsed declarations.
     /// Architecture: Pre-passes build context → Algebra captures context in closure → Catamorphism → FsDecl tree → Render
     /// PlatformABI determines concrete widths for C int/long in NTU output.
@@ -269,37 +339,5 @@ module FidelityCodeGenerator =
         (model: PlatformABI)
         (structLayouts: Map<string, CppParser.StructLayoutInfo>)
         : string =
-
-        // Phase 1: Build typedef resolution map (catamorphism + pure recursion)
-        let typedefMap = buildTypedefMap declarations
-
-        // Phase 1.5: Detect opaque handle typedefs (pre-pass)
-        let opaqueHandles = detectOpaqueHandles declarations
-        let opaqueHandleDecls = generateOpaqueHandleDecls opaqueHandles
-
-        // Phase 2: Categorize declarations via catamorphism (ONE pass)
-        // All context (typedef map, model, opaque handles, struct layouts) captured in algebra closure
-        let groups =
-            DeclarationAlgebra.cataDeclarations (generationAlgebra typedefMap model opaqueHandles structLayouts) declarations
-
-        // Phase 3: Assemble categories (pure functional fold)
-        let enums = groups |> List.collect (function GEnum d -> d | _ -> [])
-        let delegates = groups |> List.collect (function GDelegate d -> d | _ -> [])
-        let structs = groups |> List.collect (function GStruct d -> d | _ -> [])
-        let functions =
-            groups
-            |> List.choose (function GFunc f -> Some f | _ -> None)
-            |> List.distinctBy (fun f -> f.Name)
-            |> List.collect (generateFunctionDecls typedefMap model opaqueHandles libraryName)
-        let macros = groups |> List.collect (function GMacro d -> d | _ -> [])
-
-        // Phase 4: Build typed FsDecl tree
-        let macroSection =
-            if macros.IsEmpty then []
-            else Comment "// Macro constants" :: macros @ [BlankLine]
-
-        let allDecls = opaqueHandleDecls @ enums @ delegates @ structs @ functions @ macroSection
-        let moduleDecl = Module(namespace', $"Fidelity binding for {libraryName}", allDecls)
-
-        // Phase 5: Render to string (the ONLY StringBuilder, in CodeRenderer)
-        CodeRenderer.render moduleDecl
+        let ctx = buildGenerationContext declarations model structLayouts
+        generateModule ctx ctx.OpaqueHandles declarations namespace' libraryName $"Fidelity binding for {libraryName}" []

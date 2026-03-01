@@ -259,6 +259,7 @@ module LiveHipTests =
                 Verbose = false
                 IncludeMacros = false
                 MacroPrefixes = []
+                TransitiveHeaders = []
             }
             match CppParser.parseHeader options with
             | Error err -> Assert.Fail $"Parse failed: {err}"

@@ -14,6 +14,7 @@ let private sampleProject : PilotTypes.PilotProject = {
         XmlProtocols = []
         IncludePaths = ["/usr/include"]
         Defines = ["_GNU_SOURCE"]
+        TransitiveHeaders = []
     }
     Output = { Mode = "fidelity"; Directory = "./bindings" }
     Namespaces = [
@@ -166,7 +167,7 @@ module ErrorConventionTomlTests =
     [<Fact>]
     let ``error conventions round-trip through TOML`` () =
         let project : PilotProject = {
-            Library = { Name = "libc"; Headers = ["/usr/include/stdio.h"]; XmlProtocols = []; IncludePaths = []; Defines = [] }
+            Library = { Name = "libc"; Headers = ["/usr/include/stdio.h"]; XmlProtocols = []; IncludePaths = []; Defines = []; TransitiveHeaders = [] }
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
             ErrorConventions = Some {
@@ -201,7 +202,7 @@ module ErrorConventionTomlTests =
     [<Fact>]
     let ``enum error code convention round-trips through TOML`` () =
         let project : PilotProject = {
-            Library = { Name = "hip"; Headers = ["/opt/rocm/include/hip/hip_runtime_api.h"]; XmlProtocols = []; IncludePaths = []; Defines = [] }
+            Library = { Name = "hip"; Headers = ["/opt/rocm/include/hip/hip_runtime_api.h"]; XmlProtocols = []; IncludePaths = []; Defines = []; TransitiveHeaders = [] }
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
             ErrorConventions = Some {
@@ -237,7 +238,7 @@ module ErrorConventionTomlTests =
     [<Fact>]
     let ``enum error code with only required fields round-trips`` () =
         let project : PilotProject = {
-            Library = { Name = "xrt"; Headers = ["xrt.h"]; XmlProtocols = []; IncludePaths = []; Defines = [] }
+            Library = { Name = "xrt"; Headers = ["xrt.h"]; XmlProtocols = []; IncludePaths = []; Defines = []; TransitiveHeaders = [] }
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
             ErrorConventions = Some {
@@ -267,7 +268,7 @@ module ErrorConventionTomlTests =
     [<Fact>]
     let ``error conventions with no overrides`` () =
         let project : PilotProject = {
-            Library = { Name = "libc"; Headers = ["/usr/include/stdio.h"]; XmlProtocols = []; IncludePaths = []; Defines = [] }
+            Library = { Name = "libc"; Headers = ["/usr/include/stdio.h"]; XmlProtocols = []; IncludePaths = []; Defines = []; TransitiveHeaders = [] }
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
             ErrorConventions = Some { Default = Errno; Overrides = Map.empty }
