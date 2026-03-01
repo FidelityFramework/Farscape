@@ -1,17 +1,17 @@
 namespace Farscape.Core
 
 open Fidelity.Toml
-open MoyaTypes
+open PilotTypes
 
-/// Serialization and deserialization of MoyaProject to/from TOML format.
+/// Serialization and deserialization of PilotProject to/from TOML format.
 ///
 /// Uses Fidelity.Toml 0.1.1 for type-safe TOML handling.
-/// All functions are pure: TomlDocument → Result<MoyaProject, string>
-/// and MoyaProject → TomlDocument.
-module MoyaSerializer =
+/// All functions are pure: TomlDocument → Result<PilotProject, string>
+/// and PilotProject → TomlDocument.
+module PilotSerializer =
 
     // =========================================================================
-    // Serialization: MoyaProject → TomlDocument
+    // Serialization: PilotProject → TomlDocument
     // =========================================================================
 
     /// Convert a LibrarySpec to a TomlTable.
@@ -74,8 +74,8 @@ module MoyaSerializer =
                 TomlTable.add "overrides" (TomlValue.Table overrideTable) table
         TomlValue.Table table
 
-    /// Serialize a complete MoyaProject to a TomlDocument.
-    let serialize (project: MoyaProject) : TomlDocument =
+    /// Serialize a complete PilotProject to a TomlDocument.
+    let serialize (project: PilotProject) : TomlDocument =
         let table =
             TomlTable.empty
             |> TomlTable.add "library" (serializeLibrary project.Library)
@@ -85,12 +85,12 @@ module MoyaSerializer =
         | Some spec -> table |> TomlTable.add "error_conventions" (serializeErrorConventions spec)
         | None -> table
 
-    /// Render a MoyaProject to a TOML string.
-    let toTomlString (project: MoyaProject) : string =
+    /// Render a PilotProject to a TOML string.
+    let toTomlString (project: PilotProject) : string =
         project |> serialize |> Toml.serialize
 
     // =========================================================================
-    // Deserialization: TomlDocument → Result<MoyaProject, string>
+    // Deserialization: TomlDocument → Result<PilotProject, string>
     // =========================================================================
 
     /// Helper: require a string field from a TomlTable.
@@ -204,8 +204,8 @@ module MoyaSerializer =
             Some { Default = defaultConv; Overrides = overrides }
         | _ -> None
 
-    /// Deserialize a TomlDocument to a MoyaProject.
-    let deserialize (doc: TomlDocument) : Result<MoyaProject, string> =
+    /// Deserialize a TomlDocument to a PilotProject.
+    let deserialize (doc: TomlDocument) : Result<PilotProject, string> =
         match deserializeLibrary doc, deserializeOutput doc, deserializeNamespaces doc with
         | Ok lib, Ok output, Ok namespaces ->
             Ok { Library = lib
@@ -218,8 +218,8 @@ module MoyaSerializer =
     // File I/O
     // =========================================================================
 
-    /// Load a MoyaProject from a TOML file path.
-    let loadFromFile (path: string) : Result<MoyaProject, string> =
+    /// Load a PilotProject from a TOML file path.
+    let loadFromFile (path: string) : Result<PilotProject, string> =
         try
             let content = System.IO.File.ReadAllText(path)
             match Toml.parse content with
@@ -228,8 +228,8 @@ module MoyaSerializer =
         with ex ->
             Error $"Failed to read file: {ex.Message}"
 
-    /// Save a MoyaProject to a TOML file.
-    let saveToFile (path: string) (project: MoyaProject) : Result<unit, string> =
+    /// Save a PilotProject to a TOML file.
+    let saveToFile (path: string) (project: PilotProject) : Result<unit, string> =
         try
             let content = toTomlString project
             System.IO.File.WriteAllText(path, content)

@@ -6,7 +6,7 @@ open Farscape.Core
 open FSharp.SystemCommandLine
 open Input
 open Farscape.Core.BindingGenerator
-open Farscape.Core.MoyaTypes
+open Farscape.Core.PilotTypes
 
 let printLine (text: string) =
     Console.WriteLine(text)
@@ -25,7 +25,7 @@ let printHeader (text: string) =
     printColorLine line ConsoleColor.Cyan
 
 let showHeader () =
-    printHeader "Farscape: F# Native Library Binding Generator"
+    printHeader "Farscape: Clef Native Library Binding Generator"
 
 let showConfiguration (options: GenerationOptions) =
     printHeader "Configuration"
@@ -61,7 +61,7 @@ let showConfiguration (options: GenerationOptions) =
 
 let runGeneration (options: GenerationOptions) : Result<GenerationResult, string> =
     // Show generating message
-    printHeader "Generating F# bindings..."
+    printHeader "Generating Clef bindings..."
     printLine ""
 
     match BindingGenerator.generateBindings options with
@@ -82,17 +82,12 @@ let showNextSteps (options: GenerationOptions) =
     printHeader "Next Steps"
     printLine ""
 
-    printLine "How to use the generated bindings:"
+    printLine "The generated Fidelity binding declarations are ready for"
+    printLine "integration with the Composer compilation pipeline."
     printLine ""
 
-    printLine "Build the project:"
-    printLine $"  cd {options.OutputDirectory}"
-    printLine "  dotnet build"
-    printLine ""
-
-    printLine "Use in your own project:"
-    printLine $"  Add a reference to {options.LibraryName}.dll"
-    printLine $"  open {options.Namespace}"
+    printLine $"Output directory: {options.OutputDirectory}"
+    printLine $"Namespace: {options.Namespace}"
     printLine ""
 
 let showError (message: string) =
@@ -107,23 +102,16 @@ let generateCommand =
     let includes =   Input.option<string[]> "--include-paths" |> alias "-i" |> desc "Additional include paths" |> def [||]
     let defines =    Input.option<string[]> "--defines"       |> alias "-d" |> desc "Preprocessor definitions (e.g., STM32L552xx)" |> def [||]
     let verbose =    Input.option<bool> "--verbose"           |> alias "-v" |> desc "Verbose output" |> def false
-    let outputMode = Input.option<string> "--output-mode"     |> alias "-m" |> desc "Output mode: fidelity, fidelity-wrappers, dotnet, dotnet:lp64, dotnet:llp64, dotnet:ilp32, dotnet:ip16" |> def "fidelity"
+    let outputMode = Input.option<string> "--output-mode"     |> alias "-m" |> desc "Output mode: fidelity, fidelity-wrappers" |> def "fidelity"
 
     let parseOutputMode (modeStr: string) =
         let lower = modeStr.ToLowerInvariant()
         match lower with
-        | "fidelity-wrappers" -> Farscape.Core.Types.Fidelity, true, Farscape.Core.Types.LP64
-        | s when s.StartsWith("dotnet") || s.StartsWith("pinvoke") ->
-            let model =
-                if s.Contains(":llp64") then Farscape.Core.Types.LLP64
-                elif s.Contains(":ilp32") then Farscape.Core.Types.ILP32
-                elif s.Contains(":ip16") then Farscape.Core.Types.IP16
-                else Farscape.Core.Types.LP64
-            Farscape.Core.Types.PInvoke, false, model
-        | _ -> Farscape.Core.Types.Fidelity, false, Farscape.Core.Types.LP64
+        | "fidelity-wrappers" -> true, Farscape.Core.Types.LP64
+        | _ -> false, Farscape.Core.Types.LP64
 
     let action (header, library, output, ns, includes, defines, verbose, outputMode) =
-        let mode, wrappers, dataModel = parseOutputMode outputMode
+        let wrappers, dataModel = parseOutputMode outputMode
         let options = {
             HeaderFile = header
             LibraryName = library
@@ -132,7 +120,6 @@ let generateCommand =
             IncludePaths = includes |> Array.toList
             Defines = defines |> Array.toList
             Verbose = verbose
-            OutputMode = mode
             GenerateWrappers = wrappers
             DataModel = dataModel
         }
@@ -148,12 +135,12 @@ let generateCommand =
             0
 
     command "generate" {
-        description "Generate F# bindings for a native library"
+        description "Generate Clef bindings for a native library"
         inputs (header, library, output, ns, includes, defines, verbose, outputMode)
         setAction action
     }
 
-let moyaAnalyzeCommand =
+let pilotAnalyzeCommand =
     let header =   Input.option<FileInfo> "--header"        |> desc "Path to C/C++ header file" |> required |> validateFileExists
     let library =  Input.option<string> "--library"         |> alias "-l" |> desc "Library name (e.g., libc)" |> required
     let includes = Input.option<string[]> "--include-paths" |> alias "-i" |> desc "Additional include paths" |> def [||]
@@ -163,7 +150,7 @@ let moyaAnalyzeCommand =
 
     let action (header: FileInfo, library, includes: string[], defines: string[], output, verbose) =
         showHeader ()
-        printHeader "Moya: Analyzing header for namespace subdivisions"
+        printHeader "Pilot: Analyzing header for namespace subdivisions"
         printLine ""
 
         let outputDir =
@@ -179,7 +166,7 @@ let moyaAnalyzeCommand =
             showError $"Failed to parse header: {e}"
             1
         | Ok declarations ->
-            let result = MoyaAnalyzer.analyze declarations
+            let result = PilotAnalyzer.analyze declarations
 
             printColorLine $"Parsed {declarations.Length} declarations, {result.TotalFunctions} functions" ConsoleColor.White
             printLine ""
@@ -199,11 +186,11 @@ let moyaAnalyzeCommand =
                     printLine $"    - {fn}"
 
             let project =
-                MoyaAnalyzer.toMoyaProject library header.FullName includePaths definesList "fidelity" outputDir result
+                PilotAnalyzer.toPilotProject library header.FullName includePaths definesList "fidelity" outputDir result
 
-            let tomlPath = Path.Combine(outputDir, $"{library}.moya.toml")
+            let tomlPath = Path.Combine(outputDir, $"{library}.pilot.toml")
 
-            match MoyaSerializer.saveToFile tomlPath project with
+            match PilotSerializer.saveToFile tomlPath project with
             | Error e ->
                 showError $"Failed to write project file: {e}"
                 1
@@ -217,12 +204,12 @@ let moyaAnalyzeCommand =
                 0
 
     command "analyze" {
-        description "Analyze a header file and generate a .moya.toml project file"
+        description "Analyze a header file and generate a .pilot.toml project file"
         inputs (header, library, includes, defines, output, verbose)
         setAction action
     }
 
-let moyaInitCommand =
+let pilotInitCommand =
     let library = Input.option<string> "--library" |> alias "-l" |> desc "Library name" |> required
     let header =  Input.option<string> "--header"  |> desc "Path to header file" |> def ""
     let output =  Input.option<string> "--output"  |> alias "-o" |> desc "Output directory (default: ./<library>)" |> def ""
@@ -233,7 +220,7 @@ let moyaInitCommand =
             else output
         Directory.CreateDirectory(outputDir) |> ignore
 
-        let project : MoyaProject = {
+        let project : PilotProject = {
             Library = {
                 Name = library
                 Headers = [if String.IsNullOrEmpty header then $"/usr/include/{library}.h" else header]
@@ -251,9 +238,9 @@ let moyaInitCommand =
             ErrorConventions = None
         }
 
-        let tomlPath = Path.Combine(outputDir, $"{library}.moya.toml")
+        let tomlPath = Path.Combine(outputDir, $"{library}.pilot.toml")
 
-        match MoyaSerializer.saveToFile tomlPath project with
+        match PilotSerializer.saveToFile tomlPath project with
         | Error e ->
             showError $"Failed to write: {e}"
             1
@@ -264,39 +251,30 @@ let moyaInitCommand =
             0
 
     command "init" {
-        description "Create a skeleton .moya.toml project file"
+        description "Create a skeleton .pilot.toml project file"
         inputs (library, header, output)
         setAction action
     }
 
-let moyaCommand =
-    command "moya" {
+let pilotCommand =
+    command "pilot" {
         description "Namespace analysis and project file management"
         noAction
-        addCommand moyaAnalyzeCommand
-        addCommand moyaInitCommand
+        addCommand pilotAnalyzeCommand
+        addCommand pilotInitCommand
     }
 
 let projectGenerateCommand =
-    let project =   Input.option<FileInfo> "--project"     |> desc "Path to .moya.toml project file" |> required |> validateFileExists
+    let project =   Input.option<FileInfo> "--project"     |> desc "Path to .pilot.toml project file" |> required |> validateFileExists
     let verbose =   Input.option<bool> "--verbose"         |> alias "-v" |> desc "Verbose output" |> def false
-    let wrappers =  Input.option<bool> "--wrappers"        |> alias "-w" |> desc "Also generate idiomatic F# wrappers (Layer 2)" |> def false
-    let dotnet =    Input.option<bool> "--dotnet"          |> desc "Generate .NET P/Invoke bindings (DllImport) instead of Fidelity" |> def false
-    let dataModel = Input.option<string> "--data-model"    |> desc "Platform ABI for P/Invoke: lp64 (default), llp64, ilp32, ip16" |> def "lp64"
+    let wrappers =  Input.option<bool> "--wrappers"        |> alias "-w" |> desc "Also generate idiomatic Clef wrappers (Layer 2)" |> def false
 
-    let parseDataModel = function
-        | "llp64" | "LLP64" -> Farscape.Core.Types.LLP64
-        | "ilp32" | "ILP32" -> Farscape.Core.Types.ILP32
-        | "ip16"  | "IP16"  -> Farscape.Core.Types.IP16
-        | _                 -> Farscape.Core.Types.LP64
-
-    let action (project: FileInfo, verbose, wrappers, dotnet, dataModel) =
+    let action (project: FileInfo, verbose, wrappers) =
         showHeader ()
-        let modeLabel = if dotnet then "P/Invoke" else "Fidelity"
-        printHeader $"Generating {modeLabel} bindings from project..."
+        printHeader "Generating Fidelity bindings from project..."
         printLine ""
 
-        match BindingGenerator.generateFromProject project.FullName verbose wrappers dotnet (parseDataModel dataModel) with
+        match BindingGenerator.generateFromProject project.FullName verbose wrappers Farscape.Core.Types.LP64 with
         | Error e ->
             showError e
             1
@@ -310,17 +288,17 @@ let projectGenerateCommand =
             0
 
     command "project" {
-        description "Generate bindings from a .moya.toml project file"
-        inputs (project, verbose, wrappers, dotnet, dataModel)
+        description "Generate bindings from a .pilot.toml project file"
+        inputs (project, verbose, wrappers)
         setAction action
     }
 
 [<EntryPoint>]
 let main argv =
     rootCommand argv {
-        description "Farscape: F# Native Library Binding Generator"
+        description "Farscape: Clef Native Library Binding Generator"
         noAction
         addCommand generateCommand
-        addCommand moyaCommand
+        addCommand pilotCommand
         addCommand projectGenerateCommand
     }

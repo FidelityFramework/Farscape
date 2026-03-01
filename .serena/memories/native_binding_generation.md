@@ -2,13 +2,13 @@
 
 ## Position in the Architecture
 
-Farscape is the **binding generator** for the Fidelity native compilation pipeline. It transforms C headers into F# source with `[<FidelityExtern>]` attributes and BAREWire memory descriptors:
+Farscape is the **binding generator** for the Fidelity native compilation pipeline. It transforms C headers into Clef source with `[<FidelityExtern>]` attributes and BAREWire memory descriptors:
 
 ```
-C Headers → Farscape → F# Source (FidelityExtern stubs + Wrappers + Descriptors)
+C Headers → Farscape → Clef Source (FidelityExtern declarations + Wrappers + Descriptors)
 ```
 
-Farscape runs at **generation time**, before Firefly compilation. It is a .NET tool (`dotnet tool install -g farscape`).
+Farscape runs at **generation time**, before Composer compilation.
 
 ## Two-Layer Output (Both Implemented)
 
@@ -19,7 +19,7 @@ let write (fd: int32) (buf: nativeint) (count: nativeint) : int64 =
     Unchecked.defaultof<int64>
 ```
 
-### Layer 2: Idiomatic F# Wrappers
+### Layer 2: Idiomatic Clef Wrappers
 ```fsharp
 /// ssize_t write(int fd, const void *buf, size_t count)
 let write (fd: int32) (buf: nativeint) (count: nativeint) : Result<nativeint, CError> =
@@ -29,21 +29,21 @@ let write (fd: int32) (buf: nativeint) (count: nativeint) : Result<nativeint, CE
 ```
 
 Error path returns `CError` struct with errno code + description string from header comments.
-Both layers flow through: FNCS → Baker → Alex → MLIR → LLVM → native binary. Wrappers compile to zero overhead via type erasure.
+Both layers flow through: CCS → Baker → Alex → MLIR → LLVM → native binary. Wrappers compile to zero overhead via type erasure.
 
 ## What Farscape Parses from C Headers
 
-| C Construct | F# Output |
+| C Construct | Clef Output |
 |-------------|-----------|
-| `typedef struct {...} xxx_ctrl_t` | PeripheralDescriptor + F# record |
+| `typedef struct {...} xxx_ctrl_t` | PeripheralDescriptor + Clef record |
 | `__IO uint32_t FIELD` | Register with Access = ReadWrite |
 | `__I uint32_t FIELD` | Register with Access = ReadOnly |
 | `__O uint32_t FIELD` | Register with Access = WriteOnly |
 | `#define XXX_BASE (addr)` | Instance address in Instances map |
 | `#define XXX_Pos (n)` | BitField position |
 | `#define XXX_Msk (m)` | BitField width (computed from mask) |
-| `typedef enum {...}` | F# discriminated union |
-| `RetType FuncName(params)` | FidelityExtern stub + optional wrapper |
+| `typedef enum {...}` | Clef discriminated union |
+| `RetType FuncName(params)` | FidelityExtern binding declaration + optional wrapper |
 
 ## Sliced Package Architecture
 
@@ -59,7 +59,7 @@ Reachability analysis means only functions actually called get MLIR emissions. U
 
 ## TOML Artifacts (Distinct Roles)
 
-- **Moya TOML** (`.moya.toml`): Namespace analysis and grouping by C function prefix patterns
+- **Pilot TOML** (`.pilot.toml`): Namespace analysis and grouping by C function prefix patterns
 - **fidproj TOML**: Generated library project file for the Fidelity build system
 
 These are separate artifacts with completely different purposes.
@@ -69,22 +69,22 @@ These are separate artifacts with completely different purposes.
 - Generate MLIR or LLVM code (Alex does this)
 - Make platform-specific code generation decisions (Alex does this)
 - Compile the vendor library itself (pre-compiled by vendor)
-- Use P/Invoke within the Fidelity framework (FidelityExtern only)
+- Use P/Invoke (Farscape is Fidelity-only, no .NET interop)
 
 ## Current Focus
 
-Libc dynamic binding: generating FidelityExtern stubs for standard library headers (unistd.h, string.h, stdlib.h).
+Libc dynamic binding: generating FidelityExtern binding declarations for standard library headers (unistd.h, string.h, stdlib.h).
 
 ## Roadmap
 
 - **Static binding**: LLVM LTO for statically bound libraries
 - **C++ support**: Plugify ABI intelligence
-- **fsnx interactive mode**: Dynamic FFI for dev, static for release
+- **Interactive mode**: Dynamic FFI for dev, static for release (naming TBD)
 
 ## Relationship to Other Projects
 
 | Project | Relationship |
 |---------|-------------|
 | **BAREWire** | Farscape uses BAREWire types; generates memory descriptors |
-| **Firefly** | Firefly compiles Farscape's output; Alex handles FidelityExtern |
-| **FNCS** | Type-checks Farscape's output in NTU |
+| **Composer** | Composer compiles Farscape's output; Alex (Composer's middle-end) handles FidelityExtern |
+| **CCS** | Clef Compiler Service; type-checks Farscape's output in NTU. Baker operates within CCS |

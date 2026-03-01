@@ -1,6 +1,6 @@
 # BAREWire Integration
 
-Farscape generates BAREWire hardware descriptors from parsed C headers. This document describes how Farscape populates BAREWire types and how the generated descriptors are consumed by Firefly/Alex.
+Farscape generates BAREWire hardware descriptors from parsed C headers. This document describes how Farscape populates BAREWire types and how the generated descriptors are consumed by Composer/Alex.
 
 ## Core Infrastructure
 
@@ -11,7 +11,7 @@ Reading header AST to capture precise memory/type layout is foundational to Fide
 ```mermaid
 flowchart TD
     A["CMSIS/HAL Headers"] --> B["Farscape (parse)"]
-    B --> C["Types.fs<br/>(F# structs using NTU types)"]
+    B --> C["Types.fs<br/>(Clef structs using NTU types)"]
     B --> D["Bindings.fs<br/>(FidelityExtern declarations)"]
     B --> E["Descriptors.fs<br/>(BAREWire types)"]
     E --> F["BAREWire"]
@@ -175,14 +175,14 @@ let mapQualifiersToAccess (qualifiers: CQualifier list) : AccessKind =
 
 Access constraints are **hardware-enforced**. The generated `AccessKind` informs:
 
-1. **FNCS type checking**: Fields carry access constraints through the type system
+1. **CCS type checking**: Fields carry access constraints through the type system
 2. **Alex MLIR emission**: Prevents invalid read-modify-write on write-only registers
 3. **Compile-time safety**: Attempts to read a write-only register produce compile errors
 
 Example error:
 
 ```fsharp
-// F# code (using Farscape-generated bindings)
+// Clef code (using Farscape-generated bindings)
 let value = gpio.BSRR  // Attempt to read write-only register
 
 // Compile error:
@@ -193,7 +193,7 @@ let value = gpio.BSRR  // Attempt to read write-only register
 
 ### Descriptors.fs
 
-Farscape generates a complete F# module:
+Farscape generates a complete Clef module:
 
 ```fsharp
 namespace CMSIS.STM32L5.Descriptors
@@ -240,7 +240,7 @@ let allDescriptors = [
 ]
 ```
 
-## Consumption by Firefly/Alex
+## Consumption by Composer/Alex
 
 ### Memory Catalog
 
@@ -338,5 +338,5 @@ Farscape extracts these into `BitFieldDescriptor`:
 | Document | Location |
 |----------|----------|
 | BAREWire Hardware Descriptors | `~/repos/BAREWire/docs/08 Hardware Descriptors.md` |
-| FNCS Integration | `./03_fsnative_Integration.md` |
-| Memory Interlock Requirements | `~/repos/Firefly/docs/Memory_Interlock_Requirements.md` |
+| CCS Integration | `./03_fsnative_Integration.md` |
+| Composer Memory Interlock | `~/repos/Firefly/docs/Memory_Interlock_Requirements.md` |

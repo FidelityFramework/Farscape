@@ -115,16 +115,6 @@ module CodeRenderer =
                 sb.AppendLine($"{prefix}    | {vname} = {vval}L") |> ignore
             sb.AppendLine() |> ignore
 
-        | ExternDecl (name, params', retType, libraryName) ->
-            sb.AppendLine($"{prefix}    [<DllImport(\"{libraryName}\", CallingConvention = CallingConvention.Cdecl)>]") |> ignore
-            let paramStr =
-                if params'.IsEmpty then ""
-                else
-                    params'
-                    |> List.map (fun p -> $"{renderType p.Type} {p.Name}")
-                    |> String.concat ", "
-            sb.AppendLine($"{prefix}    extern {renderType retType} {name}({paramStr})") |> ignore
-            sb.AppendLine() |> ignore
 
     /// Render a complete FsDecl tree to an F# source string.
     /// This is the single entry point; the ONLY StringBuilder in Farscape.

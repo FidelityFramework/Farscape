@@ -2,7 +2,7 @@
 
 ## Context
 
-Farscape generates `[<FidelityExtern>]` bindings from C headers via Moya-scoped generation. This document defines the standard libc library decomposition for the Fidelity ecosystem: which functions belong in which libraries, what is excluded (already native), and how multi-header generation should work.
+Farscape generates `[<FidelityExtern>]` bindings from C headers via Pilot-scoped generation. This document defines the standard libc library decomposition for the Fidelity ecosystem: which functions belong in which libraries, what is excluded (already native), and how multi-header generation should work.
 
 ## The libc Surface
 
@@ -10,7 +10,7 @@ libc is the kernel interface abstraction. If something is a syscall, libc wraps 
 
 libc functions fall into two categories:
 
-1. **Already lowered natively** by MLIR/FNCS (exclude from generation)
+1. **Already lowered natively** by MLIR/CCS (exclude from generation)
 2. **OS interaction** that cannot be expressed as MLIR ops (generate bindings)
 
 ### Excluded: Already Native
@@ -18,11 +18,11 @@ libc functions fall into two categories:
 | Category | Examples | Native path |
 |----------|----------|-------------|
 | Memory allocation | malloc, free, calloc, realloc | `memref.alloc` / `memref.dealloc` via MLIR lowering |
-| String operations | strlen, strcmp, strcpy, memcpy, memset | FNCS string intrinsics |
+| String operations | strlen, strcmp, strcpy, memcpy, memset | CCS string intrinsics |
 | Math | sin, cos, sqrt, pow, fabs | LLVM math intrinsics |
 | Conversion | atoi, strtol, strtod | Fidelity.Platform Format/Parse modules |
 
-These are handled at the MLIR or FNCS level and do not need Farscape bindings. Generating them would create redundant, competing paths.
+These are handled at the MLIR or CCS level and do not need Farscape bindings. Generating them would create redundant, competing paths.
 
 ### Included: OS Interaction
 
@@ -73,7 +73,7 @@ Directory traversal and filesystem manipulation.
 | `chdir` | `int chdir(const char *path)` | Change working directory |
 | `chmod` | `int chmod(const char *path, mode_t mode)` | Change file permissions |
 
-**Struct dependencies:** `struct dirent`, `struct stat` (passed through by Moya filtering)
+**Struct dependencies:** `struct dirent`, `struct stat` (passed through by Pilot filtering)
 
 ### Fidelity.libc.Process
 
@@ -157,7 +157,7 @@ The stdio layer is not a good binding target for Fidelity because:
 
 1. **Opaque state**: `FILE*` internal structure is implementation-defined and varies across libc implementations (glibc vs musl vs macOS libSystem)
 2. **Redundant buffering**: Fidelity's string and I/O infrastructure already handles buffering at the MLIR level
-3. **Format strings**: `printf`-family functions use C varargs, which do not map cleanly to F# calling conventions
+3. **Format strings**: `printf`-family functions use C varargs, which do not map cleanly to Clef calling conventions
 
 The low-level I/O layer provides everything stdio does, minus the buffering (which Fidelity can implement natively) and minus varargs formatting (which Fidelity's Format module handles).
 
@@ -208,7 +208,7 @@ The developer writes `Console.write "hello"` and never sees the binding layer. T
 
 ### The Problem
 
-Moya's current `[library]` section has a single `header` field. But logical library decompositions frequently span multiple C headers:
+Pilot's current `[library]` section has a single `header` field. But logical library decompositions frequently span multiple C headers:
 
 | Library | Headers needed |
 |---------|---------------|
@@ -223,9 +223,9 @@ Only `Fidelity.libc.Signal` maps to a single header. Every other library draws f
 
 ### Current Workaround
 
-Use one `.moya.toml` file per header, with explicit `functions` lists scoping to only the needed functions. This works but requires multiple generation passes and produces separate output files that must be manually combined.
+Use one `.pilot.toml` file per header, with explicit `functions` lists scoping to only the needed functions. This works but requires multiple generation passes and produces separate output files that must be manually combined.
 
-### Proposed Enhancement: Multi-Header Moya
+### Proposed Enhancement: Multi-Header Pilot
 
 Extend `[library]` to accept a header list:
 
@@ -238,9 +238,9 @@ headers = [
 ]
 ```
 
-Farscape would run clang's two-pass extraction (JSON AST + macros) against each header, merge the declaration lists, deduplicate shared typedefs, and then apply Moya's namespace filtering to the merged set.
+Farscape would run clang's two-pass extraction (JSON AST + macros) against each header, merge the declaration lists, deduplicate shared typedefs, and then apply Pilot's namespace filtering to the merged set.
 
-This is a natural evolution: the clang parsing and Moya filtering stages are already independent. The only new work is the merge-and-deduplicate step between them. The single dual-pass process handles all headers, and Moya's `[[namespace]]` sections slice the merged declarations into the desired library exports.
+This is a natural evolution: the clang parsing and Pilot filtering stages are already independent. The only new work is the merge-and-deduplicate step between them. The single dual-pass process handles all headers, and Pilot's `[[namespace]]` sections slice the merged declarations into the desired library exports.
 
 ```
 Multiple C Headers
@@ -248,7 +248,7 @@ Multiple C Headers
     v  (clang dual-pass per header)
 Merged Declaration List
     |
-    v  (Moya namespace filtering)
+    v  (Pilot namespace filtering)
 Fidelity.libc.IO        -- read, write, open, close, lseek, stat
 Fidelity.libc.FileSystem -- opendir, readdir, mkdir, rmdir, rename
 Fidelity.libc.Process    -- exit, fork, exec, waitpid, getenv
@@ -257,27 +257,27 @@ Fidelity.libc.Time       -- clock_gettime, nanosleep, time
 Fidelity.libc.Net        -- socket, bind, listen, accept, send, recv
 ```
 
-One moya.toml, one `farscape project` invocation, six library outputs. This is the forcing function: libc standardization requires multi-header support to be practical, and multi-header support makes all future library generation (GTK, SDL, OpenSSL, etc.) significantly cleaner.
+One pilot.toml, one `farscape project` invocation, six library outputs. This is the forcing function: libc standardization requires multi-header support to be practical, and multi-header support makes all future library generation (GTK, SDL, OpenSSL, etc.) significantly cleaner.
 
 ## Generation Recipes
 
 ### Minimal Console (implemented now)
 
-Two separate moya.toml files, one per header:
+Two separate pilot.toml files, one per header:
 
 ```
 Farscape_samples/
   Fidelity.libc.IO/
-    unistd.moya.toml    # functions = ["read", "write", "_exit"]
+    unistd.pilot.toml    # functions = ["read", "write", "_exit"]
     IO.fs                # 3 FidelityExtern stubs + macros
   Fidelity.libc.Process/
-    stdlib.moya.toml     # functions = ["exit"]
+    stdlib.pilot.toml     # functions = ["exit"]
     Process.fs           # 1 FidelityExtern stub + macros
 ```
 
 ### Full libc (requires multi-header enhancement)
 
-Single moya.toml with merged headers:
+Single pilot.toml with merged headers:
 
 ```toml
 [library]

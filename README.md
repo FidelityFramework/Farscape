@@ -1,6 +1,6 @@
 # Farscape
 
-F# bindings generator for C libraries, part of the Fidelity native compilation ecosystem.
+Clef bindings generator for C libraries, part of the Fidelity native compilation ecosystem.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![License: Commercial](https://img.shields.io/badge/License-Commercial-orange.svg)](Commercial.md)
@@ -12,7 +12,7 @@ Under Active Development<br>
 
 ## Overview
 
-Farscape automatically generates F# bindings from C header files. It uses **clang** for robust header parsing and **XParsec** parser combinators for post-processing C type declarations and preprocessor macro values, producing type-safe F# code that integrates with the Fidelity native compilation toolchain.
+Farscape automatically generates Clef bindings from C header files. It uses **clang** for robust header parsing and **XParsec** parser combinators for post-processing C type declarations and preprocessor macro values, producing type-safe Clef code that integrates with the Fidelity native compilation toolchain.
 
 The codebase is structured around four functional programming patterns that compose cleanly:
 
@@ -21,7 +21,7 @@ The codebase is structured around four functional programming patterns that comp
 - **Catamorphism** (`DeclarationAlgebra.fs`): A fold algebra over the Declaration DU; one traversal function serves typedef extraction, function collection, and full code generation through composable algebras
 - **Typed Code AST** (`CodeAST.fs` → `CodeRenderer.fs`): Generation produces `FsDecl` values (typed, inspectable, testable AST nodes), not strings. The ONLY `StringBuilder` in the codebase is the final `CodeRenderer.render`
 
-Farscape is a key tool for the [Fidelity Framework](https://github.com/FidelityFramework) native F# compilation ecosystem.
+Farscape is a key tool for the [Fidelity Framework](https://github.com/FidelityFramework) native Clef compilation ecosystem.
 
 ## Architecture
 
@@ -61,7 +61,7 @@ static let pCType =
 match "const char *" with
 | ParsedCType (CharPointer) -> Generic("nativeptr", Named "byte")
 | ParsedCType (VoidPointer) -> Named "nativeint"
-| ParsedCType (ValueType t) -> Named (TypeMapper.getFSharpType t)
+| ParsedCType (ValueType t) -> Named (TypeMapper.getFSharpType model t)
 ```
 
 **Catamorphism** folds an algebra over all declarations in one pass:
@@ -87,16 +87,21 @@ LetBinding("memcpy",
 
 | Module | Purpose |
 |--------|---------|
+| `Types.fs` | Shared types: `OutputMode`, `PlatformABI` (LP64/LLP64/ILP32/IP16) |
 | `CppParser.fs` | Clang two-pass parsing: JSON AST + macro extraction |
+| `TypeMapper.fs` | NTU type dictionary: C types → Clef types, PlatformABI-parameterized |
 | `CTypeParser.fs` | XParsec parsers for C type strings, macro values, numeric literals |
 | `ActivePatterns.fs` | Type classification, macro filtering, keyword quoting via active patterns |
 | `DeclarationAlgebra.fs` | Catamorphism: fold algebra over Declaration DU |
 | `CodeAST.fs` | Typed code AST: `FsType`, `FsExpr`, `FsDecl` discriminated unions |
 | `CodeRenderer.fs` | Single renderer: `FsDecl → string` (only StringBuilder in the codebase) |
 | `FidelityCodeGenerator.fs` | Fidelity mode: catamorphism → FsDecl tree → rendered source |
-| `TypeMapper.fs` | C-to-F# type dictionary and mapping |
-| `CodeGenerator.fs` | P/Invoke mode: traditional DllImport generation |
-| `BindingGenerator.fs` | Pipeline orchestration |
+| `WrapperPatternAnalyzer.fs` | Layer 2: clang attribute analysis → return semantic + parameter role classification |
+| `WrapperCodeGenerator.fs` | Layer 2: idiomatic Clef wrapper generation with Result types |
+| `ErrnoModuleGenerator.fs` | Error text infrastructure: CError struct, describe jump table, captureError helper |
+| `PilotAnalyzer.fs` | Namespace filtering and declaration scoping from project files |
+| `PilotSerializer.fs` | TOML project file parsing (`.pilot.toml`) |
+| `BindingGenerator.fs` | Pipeline orchestration for single-header and project-based generation |
 
 ## Usage
 
@@ -109,20 +114,12 @@ farscape generate \
     -n Fidelity.libc.Memory \
     -o ./output/
 
-# Generate Fidelity bindings with idiomatic F# wrappers (Layer 2)
+# Generate Fidelity bindings with idiomatic Clef wrappers (Layer 2)
 farscape generate \
     --header /usr/include/unistd.h \
     -l libc \
     -m fidelity-wrappers \
     -n Fidelity.libc.IO \
-    -o ./output/
-
-# Generate P/Invoke bindings (traditional .NET interop)
-farscape generate \
-    --header /usr/include/unistd.h \
-    -l libc \
-    -m pinvoke \
-    -n LibC.IO \
     -o ./output/
 
 # With include paths and defines (for CMSIS headers)
@@ -142,7 +139,7 @@ Options:
   -n, --namespace <namespace>   Namespace for generated code [default: NativeBindings]
   -i, --include-paths <paths>   Additional include paths
   -d, --defines <defines>       Preprocessor definitions
-  -m, --output-mode <mode>      Output mode: pinvoke | fidelity | fidelity-wrappers [default: pinvoke]
+  -m, --output-mode <mode>      Output mode: fidelity | fidelity-wrappers [default: fidelity]
   -v, --verbose                 Verbose output
 ```
 
@@ -150,49 +147,47 @@ Options:
 
 ### Fidelity Mode (`--output-mode fidelity`)
 
-Generates `[<FidelityExtern>]` stubs that feed the FNCS → Baker → Alex → MLIR pipeline:
+Generates `[<FidelityExtern>]` binding declarations that feed the Composer native compilation pipeline:
 
 ```fsharp
 module Fidelity.libc.Memory
 
 // Generated by Farscape, Fidelity binding for libc
-// FNCS type-checks, Baker saturates, Alex emits platform-specific MLIR.
+// Composer type-checks and compiles to native via MLIR/LLVM.
 
     /// void * memcpy(void *restrict __dest, const void *restrict __src, size_t __n)
-    let memcpy (dest: nativeint) (src: nativeint) (n: nativeint) : nativeint =
+    [<FidelityExtern("libc", "memcpy")>]
+    let memcpy (dest: nativeint) (src: nativeint) (n: unativeint) : nativeint =
         Unchecked.defaultof<nativeint>
 
     /// char * strcpy(char *restrict __dest, const char *restrict __src)
+    [<FidelityExtern("libc", "strcpy")>]
     let strcpy (dest: nativeptr<byte>) (src: nativeptr<byte>) : nativeptr<byte> =
         Unchecked.defaultof<nativeptr<byte>>
-
-    /// unsigned long strlen(const char * __s)
-    let strlen (s: nativeptr<byte>) : uint64 =
-        Unchecked.defaultof<uint64>
 ```
-
-### P/Invoke Mode (`--output-mode pinvoke`)
-
-Traditional .NET P/Invoke bindings with DllImport attributes for use with the standard .NET runtime. This mode is for traditional .NET F# interop only; it is not part of the Fidelity framework.
 
 ## Type Mapping
 
+Type widths for `int` and `long` are resolved per PlatformABI (LP64, LLP64, ILP32, IP16). Fixed-width types (`int32_t`, `int64_t`) and pointer-width types (`size_t`, `intptr_t`) are platform-invariant. The `--data-model` CLI option selects the target ABI.
+
 | C Type | F# Type | Notes |
 |--------|---------|-------|
-| `int` / `int32_t` | `int32` | Signed 32-bit |
-| `unsigned int` / `uint32_t` | `uint32` | Unsigned 32-bit |
-| `long` / `long int` | `int64` | Signed 64-bit |
-| `unsigned long` | `uint64` | Unsigned 64-bit |
+| `int` / `int32_t` | `int32` | 32-bit on LP64/LLP64/ILP32; 16-bit on IP16 |
+| `unsigned int` / `uint32_t` | `uint32` | Same width rules as `int` |
+| `long` / `long int` | `int64` (LP64) / `int32` (LLP64, ILP32) | Platform-dependent via PlatformABI |
+| `unsigned long` | `uint64` (LP64) / `uint32` (LLP64, ILP32) | Platform-dependent via PlatformABI |
+| `long long` | `int64` | Always 64-bit |
 | `short` | `int16` | Signed 16-bit |
-| `float` | `float32` | 32-bit float |
-| `double` | `float` | 64-bit float |
+| `float` | `single` | 32-bit float |
+| `double` | `double` | 64-bit float |
 | `char *` | `nativeptr<byte>` | Char pointer (active pattern: `CharPointer`) |
 | `void *` | `nativeint` | Void pointer (active pattern: `VoidPointer`) |
 | `T *` (other) | `nativeint` | Typed pointer (active pattern: `TypedPointer`) |
 | `void (*)(...)` | `nativeint` | Function pointer (detected by `(*)`) |
-| `size_t` | `nativeint` | Platform-sized (via typedef resolution) |
+| `size_t` / `uintptr_t` | `unativeint` | Pointer-width unsigned (NTU Resolved Pointer) |
+| `ssize_t` / `intptr_t` | `nativeint` | Pointer-width signed (NTU Resolved Pointer) |
 
-Type mapping uses XParsec-backed active patterns (`ParsedCType`, `CharPointer`/`VoidPointer`/`TypedPointer`/`ValueType`) with typedef chain resolution.
+Type mapping uses XParsec-backed active patterns (`ParsedCType`, `CharPointer`/`VoidPointer`/`TypedPointer`/`ValueType`) with typedef chain resolution. TypeMapper resolves C `int`/`long` widths per PlatformABI for NTU-correct Fidelity output.
 
 ## Validated Output
 
@@ -209,15 +204,19 @@ Output is byte-identical across runs (deterministic).
 ## Testing
 
 ```bash
-# Run the test suite (89 tests)
+# Run the test suite (194 tests)
 cd tests/Farscape.Tests && dotnet test
 
 # Tests cover:
 #   - CTypeParser: XParsec parsers for C types, macros, integers, arrays
 #   - ActivePatterns: Type decomposition, macro classification, keyword quoting
 #   - DeclarationAlgebra: Catamorphism, typedef/struct extraction, order preservation
-#   - CodeRenderer: FsDecl → F# source for all declaration types
+#   - CodeRenderer: FsDecl → Clef source for all declaration types
 #   - FidelityCodeGenerator: End-to-end declaration → source generation
+#   - WrapperCodeGenerator: Layer 2 wrapper pattern generation
+#   - ErrnoModuleGenerator: Error text infrastructure (CError, describe, captureError)
+#   - PilotAnalyzer/PilotSerializer: Namespace analysis and TOML project round-trip
+#   - Platform ABI: LP64/LLP64/ILP32/IP16 type width resolution
 ```
 
 ## License

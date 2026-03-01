@@ -2,9 +2,9 @@
 
 ## Overview
 
-Farscape is the C header binding generator for the Fidelity native F# compilation ecosystem. It parses C headers using clang and generates type-safe F# bindings with `[<FidelityExtern>]` attributes, with XParsec parser combinators handling C type decomposition and macro classification.
+Farscape is the C header binding generator for the Fidelity native Clef compilation ecosystem. It parses C headers using clang and generates type-safe Clef bindings with `[<FidelityExtern>]` attributes, with XParsec parser combinators handling C type decomposition and macro classification.
 
-There is no P/Invoke in the Fidelity framework. Farscape generates `[<FidelityExtern>]` stubs for the native pipeline (FNCS, Baker, Alex, MLIR, LLVM). A separate P/Invoke mode exists for traditional .NET F# interop only.
+There is no P/Invoke in the Fidelity framework. Farscape generates `[<FidelityExtern>]` binding declarations for the native pipeline (CCS, Baker, Alex, MLIR, LLVM).
 
 ## Table of Contents
 
@@ -12,9 +12,9 @@ There is no P/Invoke in the Fidelity framework. Farscape generates `[<FidelityEx
 
 1. [Architecture Overview](./01_Architecture_Overview.md): Pipeline structure, four architectural patterns, module roles
 2. [BAREWire Integration](./02_BAREWire_Integration.md): Hardware memory/type layout capture from headers
-3. [FNCS Integration](./03_fsnative_Integration.md): How Farscape output feeds the FNCS compilation pipeline
+3. [CCS Integration](./03_fsnative_Integration.md): How Farscape output feeds the CCS compilation pipeline
 4. [XParsec Architecture](./04_XParsec_Architecture.md): Parser combinators, active patterns, catamorphisms, typed code AST
-5. [Wrapper Generation](./05_Wrapper_Generation.md): Layer 2 idiomatic F# wrapper generation
+5. [Wrapper Generation](./05_Wrapper_Generation.md): Layer 2 idiomatic Clef wrapper generation
 
 ## Position in the Fidelity Closed-Loop Pipeline
 
@@ -26,10 +26,9 @@ flowchart TD
         B1["Clang Parser"] --> B2["XParsec +<br/>Active Patterns"] --> B3["Catamorphism + AST<br/>→ CodeRenderer"]
     end
 
-    B --> C["Fidelity Mode<br/>[⟨FidelityExtern⟩] stubs"]
-    B --> D["P/Invoke Mode<br/>DllImport attrs<br/>(traditional .NET only)"]
+    B --> C["Fidelity Mode<br/>[⟨FidelityExtern⟩] binding declarations"]
 
-    C --> E["FNCS → PSG → Baker → Alex → MLIR"]
+    C --> E["CCS → PSG → Baker → Alex → MLIR"]
     E --> G["LLVM → Native Binary"]
 ```
 
@@ -37,9 +36,9 @@ Farscape is one component of a closed-loop native compilation system. `[<Fidelit
 
 ## Two-Layer Binding Model
 
-**Layer 1: Platform.Bindings** - `[<FidelityExtern>]` attributed stubs with `Unchecked.defaultof<T>` bodies. Core infrastructure.
+**Layer 1: Platform.Bindings** - `[<FidelityExtern>]` attributed binding declarations with `Unchecked.defaultof<T>` bodies. Core infrastructure.
 
-**Layer 2: Idiomatic F# Wrappers** (implemented) - Safe functional APIs with Result types, null checking, error handling. Driven by 12 clang attribute types and 7 return semantic patterns.
+**Layer 2: Idiomatic Clef Wrappers** (implemented) - Safe functional APIs with Result types, null checking, error handling. Driven by 12 clang attribute types and 7 return semantic patterns.
 
 ## Core Infrastructure Under Development
 
@@ -51,9 +50,9 @@ These are not optional features. They are what makes Farscape part of Fidelity:
 
 ## Dependencies
 
-### FNCS (F# Native Compiler Services)
+### CCS (Clef Compiler Services)
 
-FNCS is the native type checker that processes Farscape's F# source. It operates in the Native Type Universe (NTU), a BCL-free, freestanding type system with NTUKind types, SRTP resolution, and union-find constraint solving.
+CCS is the native type checker that processes Farscape's Clef source. It operates in the Native Type Universe (NTU), a BCL-free, freestanding type system with NTUKind types, SRTP resolution, and union-find constraint solving.
 
 ### BAREWire (Memory Descriptor Types)
 
@@ -63,9 +62,8 @@ BAREWire provides hardware descriptor types (`PeripheralDescriptor`, `FieldDescr
 
 | Mode | CLI Flag | Target |
 |------|----------|--------|
-| `fidelity` | `--output-mode fidelity` | F# Native / Fidelity pipeline (FidelityExtern) |
-| `fidelity-wrappers` | `--output-mode fidelity-wrappers` | F# Native with Layer 2 wrappers |
-| `pinvoke` | `--output-mode pinvoke` | Traditional .NET F# (DllImport, NOT Fidelity) |
+| `fidelity` | `--output-mode fidelity` | Clef Native / Fidelity pipeline (FidelityExtern) |
+| `fidelity-wrappers` | `--output-mode fidelity-wrappers` | Clef Native with Layer 2 wrappers |
 
 ## What's Implemented
 
@@ -76,10 +74,10 @@ BAREWire provides hardware descriptor types (`PeripheralDescriptor`, `FieldDescr
 - Typed code AST (FsDecl/FsType) with single CodeRenderer
 - Fidelity binding generation (`Unchecked.defaultof` pattern)
 - Layer 2 wrapper generation (WrapperPatternAnalyzer + WrapperCodeGenerator)
-- P/Invoke binding generation (DllImport) for traditional .NET
 - Typedef chain resolution, macro constant extraction
-- Moya namespace analysis and TOML project files
-- 89 unit tests covering all architectural patterns
+- Pilot namespace analysis and TOML project files
+- Errno module generation (CError struct, describe jump table, captureError helper)
+- 194 unit tests covering all architectural patterns
 
 ## Roadmap
 
@@ -88,11 +86,12 @@ BAREWire provides hardware descriptor types (`PeripheralDescriptor`, `FieldDescr
 - CMSIS qualifier extraction (`__I`, `__O`, `__IO` → `AccessKind`)
 - Static binding support (LLVM LTO cross-language inlining)
 - C++ support via Plugify ABI intelligence
+- Migration path toward Atelier Transcribe/Transpose feature
 
 ## Related Documentation
 
 | Document | Location |
 |----------|----------|
 | BAREWire Hardware Descriptors | `~/repos/BAREWire/docs/08 Hardware Descriptors.md` |
-| FNCS Architecture | `~/repos/fsnative/` (Serena project: FNCS) |
-| Memory Interlock Requirements | `~/repos/Firefly/docs/Memory_Interlock_Requirements.md` |
+| CCS Architecture | `~/repos/fsnative/` (Serena project: CCS) |
+| Composer Memory Interlock | `~/repos/Firefly/docs/Memory_Interlock_Requirements.md` |

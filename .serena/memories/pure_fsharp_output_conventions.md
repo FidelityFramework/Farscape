@@ -1,8 +1,8 @@
-# Farscape Pure F# Output Conventions
+# Farscape Pure Clef Output Conventions
 
-## Core Principle: Generate Pure F#
+## Core Principle: Generate Pure Clef
 
-All Farscape output must use pure F# idioms:
+All Farscape output must use pure Clef idioms:
 - Records, not interfaces
 - Discriminated unions, not enums with attributes
 - Module functions, not static methods
@@ -108,7 +108,7 @@ type GpioConfig = { ... }
 
 ## Platform Bindings Convention
 
-For extern declarations, use the module convention (not DllImport):
+For extern declarations, use the module convention:
 
 ```fsharp
 // Generated Platform.Bindings module
@@ -120,13 +120,13 @@ module Platform.Bindings =
 
 Alex recognizes this pattern and provides platform-specific implementations.
 
-## Why Pure F#?
+## Why Pure Clef?
 
 1. **Native Compilation**: BCL patterns require runtime that doesn't exist in Fidelity
 2. **F* Compatibility**: Future proof annotations will be attributes - minimize attribute clutter
 3. **Quotation Friendly**: Records and DUs quote cleanly; interfaces don't
-4. **Composition**: Pure F# composes better than OO hierarchies
+4. **Composition**: Pure Clef composes better than OO hierarchies
 
 ## Canonical Reference
 
-See `~/repos/Firefly/docs/Quotation_Based_Memory_Architecture.md`, "Design Principle 4: Pure F# Idioms"
+See `~/repos/Composer/docs/Quotation_Based_Memory_Architecture.md`, "Design Principle 4: Pure Clef Idioms"

@@ -461,25 +461,6 @@ module CodeRendererTests =
         Assert.Contains("Fidelity binding for libc", result)
 
     [<Fact>]
-    let ``render ExternDecl produces DllImport and extern`` () =
-        let decl = Module("Test", "test",
-            [ ExternDecl("getpid", [], Named "int32", "libc") ])
-        let result = render decl
-        Assert.Contains("[<DllImport(\"libc\", CallingConvention = CallingConvention.Cdecl)>]", result)
-        Assert.Contains("extern int32 getpid()", result)
-
-    [<Fact>]
-    let ``render ExternDecl with params uses C-style syntax`` () =
-        let decl = Module("Test", "test",
-            [ ExternDecl("read", [
-                { Name = "fd"; Type = Named "int32" }
-                { Name = "buf"; Type = Named "nativeint" }
-                { Name = "count"; Type = Named "unativeint" }
-              ], Named "nativeint", "libc") ])
-        let result = render decl
-        Assert.Contains("extern nativeint read(int32 fd, nativeint buf, unativeint count)", result)
-
-    [<Fact>]
     let ``render XmlDoc produces triple-slash comment`` () =
         let decl = Module("Test", "test",
             [ XmlDoc "void foo(int x)" ])
@@ -685,10 +666,10 @@ module FidelityCodeGeneratorTests =
         Assert.Contains("[<FidelityExtern(\"wayland-client\", \"wl_display_connect\")>]", result)
 
 // =============================================================================
-// MoyaAnalyzer Tests: prefix analysis and declaration filtering
+// PilotAnalyzer Tests: prefix analysis and declaration filtering
 // =============================================================================
 
-module MoyaAnalyzerTests =
+module PilotAnalyzerTests =
 
     let private mkFunc name retType parms : CppParser.FunctionDecl =
         { Name = name; ReturnType = retType; Parameters = parms; Documentation = None
@@ -708,7 +689,7 @@ module MoyaAnalyzerTests =
             CppParser.Declaration.Function (mkFunc "strlen" "unsigned long" [])
             CppParser.Declaration.Function (mkFunc "memcpy" "void *" [])
         ]
-        let result = MoyaAnalyzer.extractFunctionNames decls
+        let result = PilotAnalyzer.extractFunctionNames decls
         Assert.Equal(2, result.Length)
         Assert.Contains("strlen", result)
         Assert.Contains("memcpy", result)
@@ -720,7 +701,7 @@ module MoyaAnalyzerTests =
             CppParser.Declaration.Function (mkFunc "read" "int" [])
             CppParser.Declaration.Enum (mkEnum "Flags")
         ]
-        let result = MoyaAnalyzer.extractFunctionNames decls
+        let result = PilotAnalyzer.extractFunctionNames decls
         Assert.Equal(1, result.Length)
         Assert.Equal("read", result[0])
 
@@ -731,7 +712,7 @@ module MoyaAnalyzerTests =
     [<InlineData("gpio_init", "gpio")>]
     [<InlineData("uart_send", "uart")>]
     let ``extractPrefix detects underscore-separated prefixes`` (name: string) (expected: string) =
-        match MoyaAnalyzer.extractPrefix name with
+        match PilotAnalyzer.extractPrefix name with
         | Some prefix -> Assert.Equal(expected, prefix)
         | None -> Assert.Fail $"Expected prefix '{expected}' for '{name}'"
 
@@ -742,7 +723,7 @@ module MoyaAnalyzerTests =
     [<InlineData("memcpy", "mem")>]
     [<InlineData("memset", "mem")>]
     let ``extractPrefix detects known C library prefixes`` (name: string) (expected: string) =
-        match MoyaAnalyzer.extractPrefix name with
+        match PilotAnalyzer.extractPrefix name with
         | Some prefix -> Assert.Equal(expected, prefix)
         | None -> Assert.Fail $"Expected prefix '{expected}' for '{name}'"
 
@@ -750,7 +731,7 @@ module MoyaAnalyzerTests =
     [<InlineData("HAL_GPIO_Init", "HAL_GPIO")>]
     [<InlineData("HAL_UART_Transmit", "HAL_UART")>]
     let ``extractPrefix detects HAL-style prefixes`` (name: string) (expected: string) =
-        match MoyaAnalyzer.extractPrefix name with
+        match PilotAnalyzer.extractPrefix name with
         | Some prefix -> Assert.Equal(expected, prefix)
         | None -> Assert.Fail $"Expected prefix '{expected}' for '{name}'"
 
@@ -759,7 +740,7 @@ module MoyaAnalyzerTests =
     [<Fact>]
     let ``clusterByPrefix groups functions by shared prefix`` () =
         let names = ["strlen"; "strcmp"; "strcpy"; "memcpy"; "memset"; "abort"]
-        let groups, ungrouped = MoyaAnalyzer.clusterByPrefix names
+        let groups, ungrouped = PilotAnalyzer.clusterByPrefix names
         Assert.True(groups |> List.exists (fun g -> g.Prefixes |> List.contains "str"))
         Assert.True(groups |> List.exists (fun g -> g.Prefixes |> List.contains "mem"))
         Assert.Contains("abort", ungrouped)
@@ -767,7 +748,7 @@ module MoyaAnalyzerTests =
     [<Fact>]
     let ``clusterByPrefix respects minimum group size`` () =
         let names = ["strlen"; "abort"; "exit"]
-        let groups, ungrouped = MoyaAnalyzer.clusterByPrefix names
+        let groups, ungrouped = PilotAnalyzer.clusterByPrefix names
         // "strlen" alone is only 1 function with "str" prefix, below minGroupSize, so it goes to ungrouped
         Assert.Contains("strlen", ungrouped)
         // But abort and exit are also singles
@@ -785,7 +766,7 @@ module MoyaAnalyzerTests =
             CppParser.Declaration.Struct (mkStruct "Point")
             CppParser.Declaration.Function (mkFunc "abort" "void" [])
         ]
-        let result = MoyaAnalyzer.analyze decls
+        let result = PilotAnalyzer.analyze decls
         Assert.Equal(5, result.TotalFunctions)
         Assert.True(result.Groups.Length >= 2) // str + mem groups
         Assert.Contains("abort", result.Ungrouped)
@@ -794,21 +775,21 @@ module MoyaAnalyzerTests =
 
     [<Fact>]
     let ``filterDeclarationsForNamespace keeps functions matching prefix`` () =
-        let spec : MoyaTypes.NamespaceSpec =
+        let spec : PilotTypes.NamespaceSpec =
             { Name = "Test.String"; Description = ""; Library = "libc"
               Prefixes = ["str"]; Functions = [] }
         let decls = [
             CppParser.Declaration.Function (mkFunc "strlen" "unsigned long" [])
             CppParser.Declaration.Function (mkFunc "memcpy" "void *" [])
         ]
-        let filtered = MoyaAnalyzer.filterDeclarationsForNamespace spec decls
-        let funcNames = MoyaAnalyzer.extractFunctionNames filtered
+        let filtered = PilotAnalyzer.filterDeclarationsForNamespace spec decls
+        let funcNames = PilotAnalyzer.extractFunctionNames filtered
         Assert.Contains("strlen", funcNames)
         Assert.DoesNotContain("memcpy", funcNames)
 
     [<Fact>]
     let ``filterDeclarationsForNamespace keeps explicitly listed functions`` () =
-        let spec : MoyaTypes.NamespaceSpec =
+        let spec : PilotTypes.NamespaceSpec =
             { Name = "Test.Misc"; Description = ""; Library = "libc"
               Prefixes = []; Functions = ["abort"; "exit"] }
         let decls = [
@@ -816,15 +797,15 @@ module MoyaAnalyzerTests =
             CppParser.Declaration.Function (mkFunc "exit" "void" [])
             CppParser.Declaration.Function (mkFunc "strlen" "unsigned long" [])
         ]
-        let filtered = MoyaAnalyzer.filterDeclarationsForNamespace spec decls
-        let funcNames = MoyaAnalyzer.extractFunctionNames filtered
+        let filtered = PilotAnalyzer.filterDeclarationsForNamespace spec decls
+        let funcNames = PilotAnalyzer.extractFunctionNames filtered
         Assert.Contains("abort", funcNames)
         Assert.Contains("exit", funcNames)
         Assert.DoesNotContain("strlen", funcNames)
 
     [<Fact>]
     let ``filterDeclarationsForNamespace passes through non-function declarations`` () =
-        let spec : MoyaTypes.NamespaceSpec =
+        let spec : PilotTypes.NamespaceSpec =
             { Name = "Test.String"; Description = ""; Library = "libc"
               Prefixes = ["str"]; Functions = [] }
         let decls = [
@@ -832,17 +813,17 @@ module MoyaAnalyzerTests =
             CppParser.Declaration.Enum (mkEnum "Flags")
             CppParser.Declaration.Function (mkFunc "memcpy" "void *" [])
         ]
-        let filtered = MoyaAnalyzer.filterDeclarationsForNamespace spec decls
+        let filtered = PilotAnalyzer.filterDeclarationsForNamespace spec decls
         // Structs and enums pass through, memcpy gets filtered out
         Assert.Equal(2, filtered.Length)
 
 // =============================================================================
-// MoyaSerializer Tests: TOML round-trip and deserialization
+// PilotSerializer Tests: TOML round-trip and deserialization
 // =============================================================================
 
-module MoyaSerializerTests =
+module PilotSerializerTests =
 
-    let private sampleProject : MoyaTypes.MoyaProject = {
+    let private sampleProject : PilotTypes.PilotProject = {
         Library = {
             Name = "libc"
             Headers = ["/usr/include/string.h"]
@@ -867,7 +848,7 @@ module MoyaSerializerTests =
 
     [<Fact>]
     let ``serialize produces valid TOML with all sections`` () =
-        let toml = MoyaSerializer.toTomlString sampleProject
+        let toml = PilotSerializer.toTomlString sampleProject
         Assert.Contains("name = \"libc\"", toml)
         Assert.Contains("header = \"/usr/include/string.h\"", toml)
         Assert.Contains("mode = \"fidelity\"", toml)
@@ -878,10 +859,10 @@ module MoyaSerializerTests =
 
     [<Fact>]
     let ``round-trip serialize then deserialize produces identical project`` () =
-        let toml = MoyaSerializer.toTomlString sampleProject
+        let toml = PilotSerializer.toTomlString sampleProject
         match Fidelity.Toml.Toml.parse toml with
         | Ok doc ->
-            match MoyaSerializer.deserialize doc with
+            match PilotSerializer.deserialize doc with
             | Ok roundTripped ->
                 Assert.Equal(sampleProject.Library.Name, roundTripped.Library.Name)
                 Assert.Equal(sampleProject.Library.Header, roundTripped.Library.Header)
@@ -899,14 +880,14 @@ module MoyaSerializerTests =
     [<Fact>]
     let ``deserialize returns Error for missing library section`` () =
         let doc = Fidelity.Toml.Toml.parseOrFail "[output]\nmode = \"fidelity\"\ndirectory = \"./out\""
-        match MoyaSerializer.deserialize doc with
+        match PilotSerializer.deserialize doc with
         | Error _ -> ()
         | Ok _ -> Assert.Fail "Should return Error for missing [library]"
 
     [<Fact>]
     let ``deserialize returns Error for missing output section`` () =
         let doc = Fidelity.Toml.Toml.parseOrFail "[library]\nname = \"test\"\nheader = \"test.h\""
-        match MoyaSerializer.deserialize doc with
+        match PilotSerializer.deserialize doc with
         | Error _ -> ()
         | Ok _ -> Assert.Fail "Should return Error for missing [output]"
 
@@ -914,7 +895,7 @@ module MoyaSerializerTests =
     let ``deserialize handles empty namespace array`` () =
         let toml = "[library]\nname = \"test\"\nheader = \"test.h\"\n[output]\nmode = \"fidelity\"\ndirectory = \"./out\""
         let doc = Fidelity.Toml.Toml.parseOrFail toml
-        match MoyaSerializer.deserialize doc with
+        match PilotSerializer.deserialize doc with
         | Ok project -> Assert.Empty(project.Namespaces)
         | Error e -> Assert.Fail $"Should succeed with no namespaces: {e}"
 
@@ -934,7 +915,7 @@ library = "test"
 prefixes = ["str"]
 """
         let doc = Fidelity.Toml.Toml.parseOrFail toml
-        match MoyaSerializer.deserialize doc with
+        match PilotSerializer.deserialize doc with
         | Ok project ->
             Assert.Equal(1, project.Namespaces.Length)
             Assert.Empty(project.Namespaces[0].Functions)
@@ -942,7 +923,7 @@ prefixes = ["str"]
 
     [<Fact>]
     let ``loadFromFile returns Error for nonexistent file`` () =
-        match MoyaSerializer.loadFromFile "/nonexistent/path.moya.toml" with
+        match PilotSerializer.loadFromFile "/nonexistent/path.pilot.toml" with
         | Error _ -> ()
         | Ok _ -> Assert.Fail "Should return Error for missing file"
 
@@ -951,7 +932,7 @@ prefixes = ["str"]
         let project = { sampleProject with
                           Library = { sampleProject.Library with
                                         Headers = ["/usr/include/unistd.h"; "/usr/include/fcntl.h"] } }
-        let toml = MoyaSerializer.toTomlString project
+        let toml = PilotSerializer.toTomlString project
         Assert.Contains("headers", toml)
         Assert.Contains("/usr/include/unistd.h", toml)
         Assert.Contains("/usr/include/fcntl.h", toml)
@@ -961,10 +942,10 @@ prefixes = ["str"]
         let project = { sampleProject with
                           Library = { sampleProject.Library with
                                         Headers = ["/usr/include/unistd.h"; "/usr/include/fcntl.h"] } }
-        let toml = MoyaSerializer.toTomlString project
+        let toml = PilotSerializer.toTomlString project
         match Fidelity.Toml.Toml.parse toml with
         | Ok doc ->
-            match MoyaSerializer.deserialize doc with
+            match PilotSerializer.deserialize doc with
             | Ok roundTripped ->
                 Assert.Equal<string list>(project.Library.Headers, roundTripped.Library.Headers)
             | Error e -> Assert.Fail $"Deserialize failed: {e}"
@@ -974,7 +955,7 @@ prefixes = ["str"]
     let ``single header backward compat still works`` () =
         let toml = "[library]\nname = \"test\"\nheader = \"test.h\"\n[output]\nmode = \"fidelity\"\ndirectory = \"./out\""
         let doc = Fidelity.Toml.Toml.parseOrFail toml
-        match MoyaSerializer.deserialize doc with
+        match PilotSerializer.deserialize doc with
         | Ok project -> Assert.Equal<string list>(["test.h"], project.Library.Headers)
         | Error e -> Assert.Fail $"Should parse single header: {e}"
 
@@ -982,7 +963,7 @@ prefixes = ["str"]
     let ``deserialize rejects empty headers array`` () =
         let toml = "[library]\nname = \"test\"\nheaders = []\n[output]\nmode = \"fidelity\"\ndirectory = \"./out\""
         let doc = Fidelity.Toml.Toml.parseOrFail toml
-        match MoyaSerializer.deserialize doc with
+        match PilotSerializer.deserialize doc with
         | Error _ -> ()
         | Ok _ -> Assert.Fail "Should reject empty headers"
 
@@ -992,11 +973,11 @@ prefixes = ["str"]
 
 module ErrorConventionTomlTests =
 
-    open MoyaTypes
+    open PilotTypes
 
     [<Fact>]
     let ``error conventions round-trip through TOML`` () =
-        let project : MoyaProject = {
+        let project : PilotProject = {
             Library = { Name = "libc"; Headers = ["/usr/include/stdio.h"]; IncludePaths = []; Defines = [] }
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
@@ -1005,13 +986,13 @@ module ErrorConventionTomlTests =
                 Overrides = Map.ofList [("pthread_create", ReturnCode); ("strtol", NoErrorConvention)]
             }
         }
-        let toml = MoyaSerializer.toTomlString project
+        let toml = PilotSerializer.toTomlString project
         Assert.Contains("error_conventions", toml)
         Assert.Contains("errno", toml)
         match Fidelity.Toml.Toml.parse toml with
         | Error e -> Assert.Fail $"Parse failed: {e}"
         | Ok doc ->
-            match MoyaSerializer.deserialize doc with
+            match PilotSerializer.deserialize doc with
             | Error e -> Assert.Fail $"Deserialize failed: {e}"
             | Ok roundTripped ->
                 Assert.True(roundTripped.ErrorConventions.IsSome)
@@ -1024,23 +1005,23 @@ module ErrorConventionTomlTests =
     let ``missing error_conventions deserializes as None`` () =
         let toml = "[library]\nname = \"test\"\nheader = \"test.h\"\n[output]\nmode = \"fidelity\"\ndirectory = \"./out\""
         let doc = Fidelity.Toml.Toml.parseOrFail toml
-        match MoyaSerializer.deserialize doc with
+        match PilotSerializer.deserialize doc with
         | Error e -> Assert.Fail $"Deserialize failed: {e}"
         | Ok project -> Assert.True(project.ErrorConventions.IsNone)
 
     [<Fact>]
     let ``error conventions with no overrides`` () =
-        let project : MoyaProject = {
+        let project : PilotProject = {
             Library = { Name = "libc"; Headers = ["/usr/include/stdio.h"]; IncludePaths = []; Defines = [] }
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
             ErrorConventions = Some { Default = Errno; Overrides = Map.empty }
         }
-        let toml = MoyaSerializer.toTomlString project
+        let toml = PilotSerializer.toTomlString project
         match Fidelity.Toml.Toml.parse toml with
         | Error e -> Assert.Fail $"Parse failed: {e}"
         | Ok doc ->
-            match MoyaSerializer.deserialize doc with
+            match PilotSerializer.deserialize doc with
             | Error e -> Assert.Fail $"Deserialize failed: {e}"
             | Ok rt ->
                 Assert.True(rt.ErrorConventions.IsSome)
@@ -1813,320 +1794,4 @@ extern int multi_line_example(int x);
         finally
             System.IO.File.Delete(tmpHeader)
 
-// =============================================================================
-// PInvokeCodeGenerator Tests: P/Invoke binding generation
-// =============================================================================
-
-module PInvokeCodeGeneratorTests =
-
-    let private mkFunc name retType parms : CppParser.FunctionDecl =
-        { Name = name; ReturnType = retType; Parameters = parms; Documentation = None
-          IsVirtual = false; IsStatic = false; IsInline = false; Attributes = [] }
-
-    let private mkFuncDoc name retType parms doc : CppParser.FunctionDecl =
-        { Name = name; ReturnType = retType; Parameters = parms; Documentation = doc
-          IsVirtual = false; IsStatic = false; IsInline = false; Attributes = [] }
-
-    let private mkTypedef name underlying : CppParser.TypedefInfo =
-        { Name = name; UnderlyingType = underlying; Documentation = None }
-
-    let private mkEnum name values doc : CppParser.EnumDecl =
-        { Name = name; Values = values; Documentation = doc; UnderlyingType = None }
-
-    let private mkEnumVal name value : CppParser.EnumValue =
-        { Name = name; Value = value; Documentation = None }
-
-    let private mkStruct name fields doc : CppParser.StructDecl =
-        { Name = name; Fields = fields; Documentation = doc; IsUnion = false }
-
-    let private mkField name typ : CppParser.FieldDecl =
-        { Name = name; Type = typ; IsConst = false; IsVolatile = false; IsArray = false; ArraySize = None }
-
-    [<Fact>]
-    let ``generate produces ExternDecl with DllImport`` () =
-        let decls = [
-            CppParser.Declaration.Function (mkFunc "getpid" "int" [])
-        ]
-        let result = PInvokeCodeGenerator.generate decls "NativeBindings.libc" "libc" Types.LP64
-        Assert.Contains("[<DllImport(\"libc\", CallingConvention = CallingConvention.Cdecl)>]", result)
-        Assert.Contains("extern int32 getpid()", result)
-
-    [<Fact>]
-    let ``generate maps char pointer to string for P/Invoke`` () =
-        let decls = [
-            CppParser.Declaration.Function (mkFunc "puts" "int" [("s", "const char *")])
-        ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
-        Assert.Contains("string s", result)
-
-    [<Fact>]
-    let ``generate maps void pointer to nativeint`` () =
-        let decls = [
-            CppParser.Declaration.Function (mkFunc "memset" "void *" [("s", "void *"); ("c", "int"); ("n", "size_t")])
-            CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
-        ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
-        Assert.Contains("nativeint s", result)
-        Assert.Contains("extern nativeint memset", result)
-
-    [<Fact>]
-    let ``generate produces module header with P/Invoke label`` () =
-        let decls = [
-            CppParser.Declaration.Function (mkFunc "getpid" "int" [])
-        ]
-        let result = PInvokeCodeGenerator.generate decls "NativeBindings.libc" "libc" Types.LP64
-        Assert.Contains("module NativeBindings.libc", result)
-        Assert.Contains(".NET P/Invoke binding for libc", result)
-
-    [<Fact>]
-    let ``generate includes open System.Runtime.InteropServices`` () =
-        let decls = [
-            CppParser.Declaration.Function (mkFunc "getpid" "int" [])
-        ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
-        Assert.Contains("open System.Runtime.InteropServices", result)
-
-    [<Fact>]
-    let ``generate emits struct with StructLayout attribute`` () =
-        let decls = [
-            CppParser.Declaration.Struct (mkStruct "Point" [mkField "x" "int"; mkField "y" "int"] (Some "A point"))
-        ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "test" Types.LP64
-        Assert.Contains("[<Struct>]", result)
-        Assert.Contains("[<StructLayout(LayoutKind.Sequential)>]", result)
-        Assert.Contains("type Point = {", result)
-
-    [<Fact>]
-    let ``generate emits enums same as Fidelity`` () =
-        let decls = [
-            CppParser.Declaration.Enum (mkEnum "Flags" [mkEnumVal "A" 0L; mkEnumVal "B" 1L] (Some "Test flags"))
-        ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "test" Types.LP64
-        Assert.Contains("type Flags =", result)
-        Assert.Contains("| A = 0L", result)
-        Assert.Contains("| B = 1L", result)
-
-    [<Fact>]
-    let ``generate emits macros same as Fidelity`` () =
-        let decls = [
-            CppParser.Declaration.Macro {
-                Name = "EXIT_SUCCESS"; Kind = CppParser.SimpleValue "0"; RawValue = "0"; Documentation = None
-            }
-        ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "test" Types.LP64
-        Assert.Contains("[<Literal>]", result)
-        Assert.Contains("let EXIT_SUCCESS = 0", result)
-
-    [<Fact>]
-    let ``generate deduplicates functions by name`` () =
-        let decls = [
-            CppParser.Declaration.Function (mkFunc "read" "int" [("fd", "int")])
-            CppParser.Declaration.Function (mkFunc "read" "int" [("fd", "int")])
-        ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "test" Types.LP64
-        let occurrences = result.Split("extern int32 read(") |> Array.length
-        Assert.Equal(2, occurrences)
-
-    [<Fact>]
-    let ``generate includes documentation in extern declarations`` () =
-        let decls = [
-            CppParser.Declaration.Function (mkFuncDoc "read" "ssize_t"
-                [("fd", "int"); ("buf", "void *"); ("count", "size_t")]
-                (Some "Read from a file descriptor."))
-        ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
-        Assert.Contains("/// Read from a file descriptor.", result)
-        Assert.Contains("/// C signature: ssize_t read(int fd, void * buf, size_t count)", result)
-
-    [<Fact>]
-    let ``generate handles function pointer params as nativeint`` () =
-        let decls = [
-            CppParser.Declaration.Function (mkFunc "atexit" "int" [("func", "void (*)(void)")])
-        ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "test" Types.LP64
-        Assert.Contains("nativeint func", result)
-
-    [<Fact>]
-    let ``generate resolves typedefs`` () =
-        let decls = [
-            CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
-            CppParser.Declaration.Function (mkFunc "malloc" "void *" [("size", "size_t")])
-        ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
-        // size_t resolves via dictionary (unativeint), NOT via typedef chain
-        Assert.Contains("unativeint size", result)
-
-    [<Fact>]
-    let ``size_t stays platform-abstract despite typedef`` () =
-        let decls = [
-            CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
-            CppParser.Declaration.Function (mkFunc "write" "ssize_t" [("fd", "int"); ("count", "size_t")])
-        ]
-        let fidelityResult = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
-        let pinvokeResult = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
-        // Both should use unativeint (dictionary-first), not uint64 (typedef-concretized)
-        Assert.Contains("unativeint", fidelityResult)
-        Assert.DoesNotContain("uint64", fidelityResult)
-        Assert.Contains("unativeint", pinvokeResult)
-        Assert.DoesNotContain("uint64", pinvokeResult)
-
-    [<Fact>]
-    let ``Fidelity long resolves to platform-specific width`` () =
-        let decls = [
-            CppParser.Declaration.Function (mkFunc "lseek" "long" [("fd", "int"); ("offset", "long")])
-        ]
-        // LP64: C long = 64-bit → int64
-        let lp64 = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
-        Assert.Contains("int64", lp64)
-        Assert.DoesNotContain("nativeint", lp64)
-        // LLP64: C long = 32-bit → int32
-        let llp64 = FidelityCodeGenerator.generate decls "Test" "test" Types.LLP64
-        Assert.Contains("int32", llp64)
-        Assert.DoesNotContain("int64", llp64)
-
-    [<Fact>]
-    let ``unknown typedef resolves correctly`` () =
-        let decls = [
-            CppParser.Declaration.Typedef (mkTypedef "my_custom_t" "int")
-            CppParser.Declaration.Function (mkFunc "custom_fn" "void" [("x", "my_custom_t")])
-        ]
-        let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
-        // my_custom_t not in dictionary, so typedef resolves: my_custom_t → int → int32
-        Assert.Contains("int32", result)
-
-    [<Fact>]
-    let ``Fidelity char pointer maps to nativeptr byte`` () =
-        let decls = [
-            CppParser.Declaration.Function (mkFunc "puts" "int" [("s", "const char *")])
-        ]
-        let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
-        Assert.Contains("nativeptr<byte>", result)
-
-    [<Fact>]
-    let ``PInvoke char pointer maps to string`` () =
-        let decls = [
-            CppParser.Declaration.Function (mkFunc "puts" "int" [("s", "const char *")])
-        ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
-        Assert.Contains("string s", result)
-
-    // =========================================================================
-    // Platform ABI Tests: PInvokeTypeMapper produces correct concrete types
-    // per platform, completely separate from TypeMapper (NTU) output
-    // =========================================================================
-
-    [<Fact>]
-    let ``LP64 long maps to int64`` () =
-        let decls = [
-            CppParser.Declaration.Function (mkFunc "lseek" "long" [("fd", "int"); ("offset", "long")])
-        ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
-        Assert.Contains("int64", result)
-        Assert.DoesNotContain("nativeint", result)
-
-    [<Fact>]
-    let ``LLP64 long maps to int32`` () =
-        let decls = [
-            CppParser.Declaration.Function (mkFunc "lseek" "long" [("fd", "int"); ("offset", "long")])
-        ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LLP64
-        Assert.Contains("int32", result)
-        Assert.DoesNotContain("int64", result)
-        Assert.DoesNotContain("nativeint", result)
-
-    [<Fact>]
-    let ``ILP32 long maps to int32`` () =
-        let decls = [
-            CppParser.Declaration.Function (mkFunc "lseek" "long" [("fd", "int"); ("offset", "long")])
-        ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.ILP32
-        Assert.Contains("int32", result)
-        Assert.DoesNotContain("int64", result)
-
-    [<Fact>]
-    let ``IP16 int maps to int16`` () =
-        let decls = [
-            CppParser.Declaration.Function (mkFunc "getpid" "int" [])
-        ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.IP16
-        Assert.Contains("int16", result)
-        Assert.DoesNotContain("int32", result)
-
-    [<Fact>]
-    let ``LP64 int maps to int32`` () =
-        let decls = [
-            CppParser.Declaration.Function (mkFunc "getpid" "int" [])
-        ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
-        Assert.Contains("int32", result)
-
-    [<Fact>]
-    let ``LP64 unsigned long maps to uint64`` () =
-        let decls = [
-            CppParser.Declaration.Function (mkFunc "fn" "unsigned long" [])
-        ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
-        Assert.Contains("uint64", result)
-
-    [<Fact>]
-    let ``LLP64 unsigned long maps to uint32`` () =
-        let decls = [
-            CppParser.Declaration.Function (mkFunc "fn" "unsigned long" [])
-        ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LLP64
-        Assert.Contains("uint32", result)
-        Assert.DoesNotContain("uint64", result)
-
-    [<Fact>]
-    let ``fixed-width types same across all platforms`` () =
-        let decls = [
-            CppParser.Declaration.Function (mkFunc "fn" "int32_t" [("x", "uint64_t")])
-        ]
-        let lp64 = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
-        let llp64 = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LLP64
-        let ilp32 = PInvokeCodeGenerator.generate decls "Test" "libc" Types.ILP32
-        let ip16 = PInvokeCodeGenerator.generate decls "Test" "libc" Types.IP16
-        // Fixed-width types identical on all platforms
-        Assert.Equal(lp64, llp64)
-        Assert.Equal(lp64, ilp32)
-        Assert.Equal(lp64, ip16)
-
-    [<Fact>]
-    let ``PInvoke output never contains nativeptr`` () =
-        let decls = [
-            CppParser.Declaration.Function (mkFunc "puts" "int" [("s", "const char *")])
-            CppParser.Declaration.Function (mkFunc "memset" "void *" [("s", "void *"); ("c", "int")])
-        ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
-        Assert.DoesNotContain("nativeptr<", result)
-
-    [<Fact>]
-    let ``PInvoke output never contains FidelityExtern`` () =
-        let decls = [
-            CppParser.Declaration.Function (mkFunc "getpid" "int" [])
-        ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
-        Assert.DoesNotContain("FidelityExtern", result)
-
-    [<Fact>]
-    let ``PInvoke output never contains Unchecked.defaultof`` () =
-        let decls = [
-            CppParser.Declaration.Function (mkFunc "getpid" "int" [])
-        ]
-        let result = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
-        Assert.DoesNotContain("Unchecked.defaultof", result)
-
-    [<Fact>]
-    let ``Fidelity and PInvoke both resolve long per platform`` () =
-        let decls = [
-            CppParser.Declaration.Function (mkFunc "lseek" "long" [("offset", "long")])
-        ]
-        // Both Fidelity and P/Invoke now resolve C long to concrete widths per PlatformABI
-        let fidelity = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
-        let pinvoke = PInvokeCodeGenerator.generate decls "Test" "libc" Types.LP64
-        // LP64: both emit int64 for C long
-        Assert.Contains("int64", fidelity)
-        Assert.Contains("int64", pinvoke)
-        // Neither should use nativeint for C long (nativeint is pointer-width, C long is not on LLP64)
-        Assert.DoesNotContain("nativeint", fidelity)
-        Assert.DoesNotContain("nativeint", pinvoke)
+// P/Invoke support has been removed. Farscape generates only Fidelity bindings.

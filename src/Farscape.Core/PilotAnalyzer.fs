@@ -8,9 +8,9 @@ namespace Farscape.Core
 ///   Suffix families handle cross-cutting patterns (printf/scanf).
 ///   Groups sharing a suggested name are merged, then minGroupSize applied.
 ///   Pure functions, no mutable state.
-module MoyaAnalyzer =
+module PilotAnalyzer =
 
-    open MoyaTypes
+    open PilotTypes
 
     // =========================================================================
     // Prefix and Suffix Classification
@@ -159,7 +159,7 @@ module MoyaAnalyzer =
     // =========================================================================
 
     /// Analyze declarations and produce an AnalysisResult.
-    /// This is the main entry point for `farscape moya analyze`.
+    /// This is the main entry point for `farscape pilot analyze`.
     let analyze (declarations: CppParser.Declaration list) : AnalysisResult =
         let names = extractFunctionNames declarations
         let groups, ungrouped = clusterByPrefix names
@@ -167,16 +167,16 @@ module MoyaAnalyzer =
           Ungrouped = ungrouped
           TotalFunctions = names.Length }
 
-    /// Convert an AnalysisResult to a MoyaProject with default settings.
+    /// Convert an AnalysisResult to a PilotProject with default settings.
     /// Ungrouped functions are collected into a catch-all "Core" namespace.
-    let toMoyaProject
+    let toPilotProject
         (libraryName: string)
         (headerFile: string)
         (includePaths: string list)
         (defines: string list)
         (outputMode: string)
         (outputDir: string)
-        (result: AnalysisResult) : MoyaProject =
+        (result: AnalysisResult) : PilotProject =
         let namespaces =
             result.Groups |> List.map (fun g ->
                 // Functions not covered by any prefix go into explicit functions list

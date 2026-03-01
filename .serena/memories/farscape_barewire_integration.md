@@ -12,7 +12,7 @@ Without BAREWire descriptors carrying mapped layout into the codebase, there is 
 
 From "Memory Management By Choice": BAREWire provides an opt-in model where developers accept compiler-generated memory layouts for most code while taking explicit control only where it merits hand-curated optimization.
 
-The developer writes clean F#:
+The developer writes clean Clef:
 ```fsharp
 let toggleLed () =
     R_IOPORT_PinWrite(PORT0, PIN_LED, true)
@@ -30,7 +30,7 @@ The compiler (via tree-shaking/reachability) determines:
 
 For CMSIS/FSP and similar hardware targets, Farscape generates:
 
-1. **F# Types** - Struct definitions (`ioport_ctrl_t`, etc.)
+1. **Clef Types** - Struct definitions (`ioport_ctrl_t`, etc.)
 2. **FidelityExtern Declarations** - Function bindings with `[<FidelityExtern>]` attributes
 3. **Memory Descriptors** - BAREWire-compatible hardware memory catalog
 
@@ -108,7 +108,7 @@ FSP/CMSIS Header (.h)
     ↓ Farscape parses (clang JSON AST + macros)
     ↓
 Farscape Output:
-    ├── Types.fs (F# structs)
+    ├── Types.fs (Clef structs)
     ├── Bindings.fs (FidelityExtern declarations)
     └── Descriptors (BAREWire memory catalog)
     ↓
@@ -133,8 +133,8 @@ The FSP headers get tree-shaken to only what's used:
 ## Developer Experience
 
 1. Add dependency in fidproj: `farscape-ra6m5 = { path = "..." }`
-2. Write clean F# using typed peripheral access
-3. Compile - Firefly handles all memory management
+2. Write clean Clef using typed peripheral access
+3. Compile - Composer handles all memory management
 
 The infrastructure is invisible unless the developer explicitly opts into manual control.
 

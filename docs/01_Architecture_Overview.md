@@ -2,9 +2,9 @@
 
 ## Purpose
 
-Farscape generates F# bindings from C headers for the Fidelity native compilation ecosystem. Unlike traditional FFI tools that target runtime interop, Farscape generates code specifically for ahead-of-time native compilation via Firefly.
+Farscape generates Clef bindings from C headers for the Fidelity native compilation ecosystem. Unlike traditional FFI tools that target runtime interop, Farscape generates code specifically for ahead-of-time native compilation via Composer.
 
-There is no P/Invoke in the Fidelity framework. Farscape generates `[<FidelityExtern>]` attributed stubs that carry library name and symbol metadata through the entire pipeline: FNCS type-checking, Baker saturation, Alex MLIR emission, LLVM compilation. A separate P/Invoke mode exists for traditional .NET F# interop only.
+Farscape generates `[<FidelityExtern>]` attributed binding declarations that carry library name and symbol metadata through the entire Composer pipeline: CCS type-checking, Baker saturation, Alex MLIR emission, LLVM compilation.
 
 ## Design Principles
 
@@ -13,7 +13,7 @@ There is no P/Invoke in the Fidelity framework. Farscape generates `[<FidelityEx
 Farscape is not a standalone binding generator. It is one component of a closed-loop system:
 
 ```
-C Headers → Farscape → [<FidelityExtern>] stubs → FNCS → Baker → Alex → MLIR → LLVM → native binary
+C Headers → Farscape → [<FidelityExtern>] declarations → CCS → Baker → Alex → MLIR → LLVM → native binary
 ```
 
 `[<FidelityExtern>]` carries library name + symbol through the PSG so Alex can emit MLIR with `fidelity.binding_strategy` and `fidelity.library_name` attributes, and the linker auto-collects flags (`-lc`, `-lwayland-client`, etc.).
@@ -29,20 +29,20 @@ Every module in Farscape is built from one of four patterns:
 | Pattern | Module | Purpose |
 |---------|--------|---------|
 | **XParsec Parsers** | `CTypeParser.fs` | Decompose C type strings, parse macros and numeric literals |
-| **Active Patterns** | `ActivePatterns.fs` | Classify types, filter macros, quote F# keywords |
+| **Active Patterns** | `ActivePatterns.fs` | Classify types, filter macros, quote Clef keywords |
 | **Catamorphism** | `DeclarationAlgebra.fs` | Single fold over Declaration DU; the ONLY traversal |
 | **Typed Code AST** | `CodeAST.fs` + `CodeRenderer.fs` | FsDecl tree → F# source (the ONLY StringBuilder) |
 
 ### 4. Two-Layer Binding Model
 
-- **Layer 1**: `[<FidelityExtern>]` stubs with `Unchecked.defaultof<T>` bodies. Alex provides platform-specific MLIR implementations.
-- **Layer 2** (implemented): Idiomatic F# wrappers with Result types, null checking, error handling. Driven by 12 clang attribute types and 7 return semantic patterns. CLI: `--output-mode fidelity-wrappers`
+- **Layer 1**: `[<FidelityExtern>]` binding declarations with `Unchecked.defaultof<T>` bodies. Alex provides platform-specific MLIR implementations.
+- **Layer 2** (implemented): Idiomatic Clef wrappers with Result types, null checking, error handling. Driven by 12 clang attribute types and 7 return semantic patterns. CLI: `--output-mode fidelity-wrappers`
 
 Both layers compile to zero-overhead native code via type erasure. No BCL dependencies in generated code.
 
 ### 5. Deterministic Output
 
-Generated F# source is byte-identical across runs. No hash-dependent ordering, no mutable state in the generation pipeline.
+Generated Clef source is byte-identical across runs. No hash-dependent ordering, no mutable state in the generation pipeline.
 
 ## Pipeline Architecture
 
@@ -57,7 +57,7 @@ flowchart TD
     E --> G
     G --> H["FidelityCodeGenerator.fs<br/>(Layer 1)<br/>Declaration list → FsDecl AST"]
     G --> I["WrapperPatternAnalyzer.fs<br/>(Layer 2)<br/>Clang attrs → WrapperPattern → FsDecl AST<br/>(WrapperCodeGenerator.fs)"]
-    H --> J["CodeRenderer.fs<br/>FsDecl → F# source string<br/>(the ONLY StringBuilder)"]
+    H --> J["CodeRenderer.fs<br/>FsDecl → Clef source string<br/>(the ONLY StringBuilder)"]
     I --> J
 ```
 
@@ -161,7 +161,7 @@ Pre-built algebras: `typedefAlgebra` (extract typedef pairs), `structNameAlgebra
 
 ### CodeAST.fs: Typed Code AST
 
-Typed representation of generated F# code:
+Typed representation of generated Clef code:
 
 ```fsharp
 type FsType = Named of string | Generic of string * FsType | Unit
@@ -182,7 +182,7 @@ type FsDecl =
 
 ### CodeRenderer.fs: Single Renderer
 
-The ONLY `StringBuilder` in Farscape. Converts `FsDecl` tree to F# source string:
+The ONLY `StringBuilder` in Farscape. Converts `FsDecl` tree to Clef source string:
 
 ```fsharp
 let render (decl: FsDecl) : string =
@@ -201,67 +201,60 @@ Wires everything together using one catamorphism pass:
 4. Wrap in `FsDecl.Module`
 5. Render via `CodeRenderer.render`
 
-### TypeMapper.fs: Type Dictionary
+### TypeMapper.fs: NTU Type Dictionary
 
-Pure data mapping from C type names to F# type names. No parsing logic; just a dictionary lookup:
+PlatformABI-parameterized mapping from C type names to NTU Clef type names. C `int`/`long` widths are resolved at generation time per the target platform's ABI:
 
 ```fsharp
-let getFSharpType (cType: string) : string =
-    match cType with
-    | "int" | "int32_t" -> "int32"
-    | "unsigned int" | "uint32_t" -> "uint32"
-    | "char" | "signed char" -> "byte"
-    | "void" -> "unit"
-    | ...
+let getFSharpType (model: PlatformABI) (cppType: string) : string =
+    let typeMap = typeMaps.[model]  // Cached per ABI variant
+    let cleaned = cleanTypeName cppType
+    if typeMap.ContainsKey(cleaned) then typeMap.[cleaned]
+    elif ...
 ```
+
+LP64: `long → int64`. LLP64/ILP32: `long → int32`. Pointer-width types (`size_t`, `intptr_t`) stay `unativeint`/`nativeint` regardless of platform.
 
 ## Output Modes
 
 ### Fidelity Mode
 
-Generates `[<FidelityExtern>]` stubs for the FNCS/Baker/Alex pipeline:
+Generates `[<FidelityExtern>]` binding declarations for the Composer native compilation pipeline:
 
 ```fsharp
 module Fidelity.libc.Memory
 
 // Generated by Farscape, Fidelity binding for libc
-// Alex provides platform-specific MLIR implementations for these bindings.
 
-    /// void * memcpy(void *restrict __dest, const void *restrict __src, size_t __n)
-    let memcpy (dest: nativeint) (src: nativeint) (n: nativeint) : nativeint =
+    /// C signature: void * memcpy(void *restrict __dest, const void *restrict __src, size_t __n)
+    [<FidelityExtern("libc", "memcpy")>]
+    let memcpy (dest: nativeint) (src: nativeint) (n: unativeint) : nativeint =
         Unchecked.defaultof<nativeint>
 ```
-
-### P/Invoke Mode (Traditional .NET Only)
-
-Traditional .NET P/Invoke bindings with DllImport attributes (via `CodeGenerator.fs`). This is NOT part of the Fidelity framework.
 
 ## File Compile Order
 
 ```xml
-<Compile Include="ProjectOptions.fs" />
 <Compile Include="Types.fs" />
 <Compile Include="CppParser.fs" />
 <Compile Include="TypeMapper.fs" />
 <Compile Include="CTypeParser.fs" />
 <Compile Include="ActivePatterns.fs" />
+<Compile Include="PilotTypes.fs" />
 <Compile Include="DeclarationAlgebra.fs" />
-<Compile Include="MoyaAnalyzer.fs" />
-<Compile Include="MoyaSerializer.fs" />
+<Compile Include="PilotAnalyzer.fs" />
+<Compile Include="PilotSerializer.fs" />
 <Compile Include="WrapperTypes.fs" />
 <Compile Include="WrapperPatternAnalyzer.fs" />
 <Compile Include="CodeAST.fs" />
 <Compile Include="CodeRenderer.fs" />
 <Compile Include="FidelityCodeGenerator.fs" />
 <Compile Include="WrapperCodeGenerator.fs" />
-<Compile Include="MemoryManager.fs" />
-<Compile Include="DelegatePointer.fs" />
-<Compile Include="CodeGenerator.fs" />
-<Compile Include="Project.fs" />
+<Compile Include="ErrnoModuleGenerator.fs" />
 <Compile Include="BindingGenerator.fs" />
 ```
 
-Key constraint: `CppParser.fs` compiles before `CTypeParser.fs`; the XParsec parsers are in a separate module downstream of the parser types.
+Key constraint: `CppParser.fs` compiles before `CTypeParser.fs`; the XParsec parsers are in a separate module downstream of the parser types. `Types.fs` provides shared types (`PlatformABI`) used by `TypeMapper.fs` for resolving C type widths.
 
 ## Core Infrastructure Under Development
 
@@ -275,11 +268,11 @@ These are not optional future features. They are what closes the Fidelity system
 
 - Static binding: LLVM LTO cross-language inlining (current focus: libc dynamic binding)
 - C++ support: Plugify ABI intelligence for virtual tables, templates, RAII
-- fsnx interactive mode: Dynamic FFI for development, static binding for release builds
+- Migration path toward Atelier Transcribe/Transpose feature
 
 ## Related Documents
 
 - [BAREWire Integration](./02_BAREWire_Integration.md): Hardware descriptor generation design
-- [FNCS Integration](./03_fsnative_Integration.md): Native type system coordination
+- [CCS Integration](./03_fsnative_Integration.md): Native type system coordination
 - [XParsec Architecture](./04_XParsec_Architecture.md): How Farscape uses XParsec throughout
-- [Wrapper Generation](./05_Wrapper_Generation.md): Layer 2 idiomatic F# wrapper generation
+- [Wrapper Generation](./05_Wrapper_Generation.md): Layer 2 idiomatic Clef wrapper generation

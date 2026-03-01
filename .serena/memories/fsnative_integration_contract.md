@@ -1,14 +1,16 @@
-# Farscape-FNCS Integration Contract
+# Farscape-Composer Integration Contract
 
 ## The Closed-Loop Pipeline
 
-Farscape generates F# source → FNCS type-checks in NTU → Baker saturates intrinsics → Alex emits MLIR → LLVM → native binary.
+Farscape generates Clef source → CCS (Clef Compiler Service) type-checks in NTU → Baker saturates intrinsics → Alex emits MLIR → LLVM → native binary.
+
+Composer is the compilation app. CCS is the type-checking service within it. Baker operates within CCS. Alex is Composer's middle-end (MLIR emission).
 
 This is a closed system. Every component carries binding intent forward.
 
 ## What Farscape Generates
 
-### 1. `[<FidelityExtern>]` Attributed Stubs (core infrastructure)
+### 1. `[<FidelityExtern>]` Attributed Binding Declarations (core infrastructure)
 
 ```fsharp
 [<FidelityExtern("libc", "memcpy")>]
@@ -16,11 +18,11 @@ let memcpy (dest: nativeint) (src: nativeint) (n: nativeint) : nativeint =
     Unchecked.defaultof<nativeint>
 ```
 
-FNCS recognizes `[<FidelityExtern>]` and carries library name + symbol through the PSG. Alex emits MLIR with `fidelity.binding_strategy` and `fidelity.library_name` attributes. The linker auto-collects all referenced libraries and generates appropriate flags (`-lc`, etc.).
+CCS recognizes `[<FidelityExtern>]` and carries library name + symbol through the PSG. Alex emits MLIR with `fidelity.binding_strategy` and `fidelity.library_name` attributes. The linker auto-collects all referenced libraries and generates appropriate flags (`-lc`, etc.).
 
-**Current state**: Stubs generate without the attribute; Alex infers from naming conventions. Adding `[<FidelityExtern>]` is core infrastructure that closes the pipeline loop.
+**Current state**: Declarations generate without the attribute; Alex infers from naming conventions. Adding `[<FidelityExtern>]` is core infrastructure that closes the pipeline loop.
 
-**There is NO P/Invoke in the Fidelity framework. Only FidelityExtern.**
+**Farscape is Fidelity-only. No P/Invoke or .NET interop.**
 
 ### 2. MemoryModel Record (for embedded/CMSIS targets)
 
@@ -38,7 +40,7 @@ type MemoryModel = {
 
 ### 3. Quotations for Nanopass Consumption
 
-Quotations carry hardware memory layout that FNCS nanopasses can inspect:
+Quotations carry hardware memory layout that CCS nanopasses can inspect:
 
 ```fsharp
 let gpioQuotation: Expr<PeripheralDescriptor> = <@
@@ -53,7 +55,7 @@ Quotations must be decomposable (record literals, not function calls).
 
 ### 4. Active Patterns for PSG Recognition
 
-FNCS uses the `Recognize` function during PSG traversal:
+CCS uses the `Recognize` function during PSG traversal:
 
 ```fsharp
 let enrichMemorySemantics (model: MemoryModel) (node: PSGNode) =
@@ -63,7 +65,7 @@ let enrichMemorySemantics (model: MemoryModel) (node: PSGNode) =
     | None -> node
 ```
 
-## What FNCS Expects
+## What CCS Expects
 
 ### Type Definitions (provided by BAREWire)
 
@@ -87,12 +89,12 @@ type MemoryOperation =
 ## The Dependency Chain
 
 ```
-BAREWire (types) ← Farscape (quotations + FidelityExtern stubs) ← FNCS (consumption + type checking)
+BAREWire (types) ← Farscape (quotations + FidelityExtern declarations) ← CCS (consumption + type checking)
 ```
 
 1. **BAREWire** provides type definitions (PeripheralDescriptor, etc.)
-2. **Farscape** generates quotations using those types + FidelityExtern stubs
-3. **FNCS** type-checks stubs, pattern-matches quotations in nanopasses
+2. **Farscape** generates quotations using those types + FidelityExtern binding declarations
+3. **CCS** type-checks declarations, pattern-matches quotations in nanopasses
 
 ## Registration Flow
 
@@ -129,8 +131,8 @@ Alex works ONLY with MLIR. It receives binding metadata via MLIR attributes emit
 - `fidelity.binding_strategy` (static or dynamic)
 - `fidelity.library_name` (library identifier)
 
-Alex does NOT work with F# source or P/Invoke. It transforms MLIR based on binding strategy configuration.
+Alex does NOT work with Clef source directly. It transforms MLIR based on binding strategy configuration.
 
 ## Canonical Reference
 
-See `~/repos/Firefly/docs/Quotation_Based_Memory_Architecture.md` for the complete integration architecture.
+See `~/repos/Composer/docs/Quotation_Based_Memory_Architecture.md` for the complete integration architecture.

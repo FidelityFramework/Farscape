@@ -1,6 +1,6 @@
 # XParsec Architecture in Farscape
 
-Farscape uses XParsec parser combinators throughout its pipeline for **post-processing** C type strings, macro values, and numeric literals produced by clang's two-pass header parsing. This document describes the four F# patterns that structure the codebase.
+Farscape uses XParsec parser combinators throughout its pipeline for **post-processing** C type strings, macro values, and numeric literals produced by clang's two-pass header parsing. This document describes the four Clef patterns that structure the codebase.
 
 ## The Four Patterns
 
@@ -9,7 +9,7 @@ flowchart LR
     A["CTypeParser.fs"] --> B["XParsec parsers<br/>(decompose C types, parse macros)"]
     C["ActivePatterns.fs"] --> D["Active patterns<br/>(classify types, filter macros, quote keywords)"]
     E["DeclarationAlgebra.fs"] --> F["Catamorphism<br/>(single fold over Declaration DU)"]
-    G["CodeAST.fs + CodeRenderer.fs"] --> H["Typed code AST<br/>(FsDecl tree → F# source)"]
+    G["CodeAST.fs + CodeRenderer.fs"] --> H["Typed code AST<br/>(FsDecl tree → Clef source)"]
 ```
 
 ## Pattern 1: XParsec Parser Combinators (`CTypeParser.fs`)
@@ -64,7 +64,7 @@ Concrete instantiation: `type private P = Parsers<ReadableString, ReadableString
 
 ## Pattern 2: Active Patterns (`ActivePatterns.fs`)
 
-Active patterns expose XParsec parsers as F# pattern matching:
+Active patterns expose XParsec parsers as Clef pattern matching:
 
 ### Type Decomposition
 
@@ -106,7 +106,7 @@ let (|CompilerBuiltin|InternalMacro|PredefinedMacro|UserMacro|) (name: string) =
 ### Other Active Patterns
 
 - `(|IntegerLiteral|_|)`: decimal/hex integer parsing via XParsec
-- `(|FSharpKeyword|CleanName|)`: F# keyword detection + backtick quoting
+- `(|FSharpKeyword|CleanName|)`: Clef keyword detection + backtick quoting
 - `(|ArrayType|_|)`: array size extraction from C type strings
 
 ## Pattern 3: Catamorphism (`DeclarationAlgebra.fs`)
@@ -202,7 +202,7 @@ flowchart TD
     B --> C["ActivePatterns.fs<br/>Active patterns wrap XParsec parsers"]
     C --> D["DeclarationAlgebra.fs<br/>Catamorphism: fold algebra<br/>over Declaration DU"]
     D --> E["FidelityCodeGenerator.fs<br/>generationAlgebra → FsDecl list<br/>→ Module wrapper"]
-    E --> F["CodeRenderer.fs<br/>FsDecl → F# source string<br/>(the ONLY StringBuilder)"]
+    E --> F["CodeRenderer.fs<br/>FsDecl → Clef source string<br/>(the ONLY StringBuilder)"]
 ```
 
 One traversal. One algebra. One render.

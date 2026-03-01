@@ -1,24 +1,19 @@
 # Type Mapping Architecture (Feb 2026 — RESOLVED)
 
-## Architecture: Two Separate Type Dictionaries
+## Architecture: Single Type Dictionary (Fidelity-Only)
 
-Farscape uses **two completely separate type dictionaries** for its two output modes:
+Farscape uses a single type dictionary for its Fidelity output (P/Invoke support removed Feb 2026):
 
 ### 1. TypeMapper.fs — NTU Type Dictionary (Fidelity/Native)
-- Maps C types to **NTU-abstract F# types** for Fidelity pipeline
-- `long` → `nativeint` (platform-abstract, deferred to NTU width resolution)
+- Maps C types to **NTU Clef types** for Fidelity pipeline
+- Now takes `PlatformABI` parameter (as of Feb 2026 Phase 3A)
+- `long` → `int64` (LP64) or `int32` (LLP64/ILP32/IP16) — resolved to fixed-width per platform
+- `int` → `int32` (LP64/LLP64/ILP32) or `int16` (IP16) — resolved to fixed-width per platform
 - `char*` → `nativeptr<byte>` (raw native pointer, no marshalling)
-- `size_t` → `unativeint` (pointer-width, NTU resolves)
+- `size_t` → `unativeint` (pointer-width, NTU Resolved Pointer)
+- `intptr_t` → `nativeint` (pointer-width, NTU Resolved Pointer)
 - Used by: FidelityCodeGenerator, WrapperCodeGenerator (Layer 2)
-- Types flow through FNCS → Baker → Alex → MLIR with width resolved at codegen
-
-### 2. PInvokeTypeMapper.fs — CLR Type Dictionary (P/Invoke/.NET)
-- Maps C types to **concrete CLR-marshallable F# types** per platform ABI
-- Takes `PlatformABI` parameter: LP64, LLP64, ILP32, IP16
-- `long` → `int64` (LP64) or `int32` (LLP64/ILP32/IP16)
-- `char*` → `string` (CLR handles marshalling)
-- `int` → `int32` (LP64/LLP64/ILP32) or `int16` (IP16)
-- Used by: PInvokeCodeGenerator only
+- Types flow through CCS → Baker → Alex → MLIR
 
 ### PlatformABI Type
 ```fsharp
@@ -33,14 +28,10 @@ type PlatformABI =
 
 | Component | Type Mapper | char* | long (LP64) | long (LLP64) |
 |-----------|------------|-------|-------------|--------------|
-| Fidelity (Layer 1) | TypeMapper | nativeptr&lt;byte&gt; | nativeint | nativeint |
-| Wrappers (Layer 2) | TypeMapper | nativeptr&lt;byte&gt; | nativeint | nativeint |
-| P/Invoke | PInvokeTypeMapper | string | int64 | int32 |
+| Fidelity (Layer 1) | TypeMapper | nativeptr&lt;byte&gt; | int64 | int32 |
+| Wrappers (Layer 2) | TypeMapper | nativeptr&lt;byte&gt; | int64 | int32 |
 
 ### CLI Integration
-- `farscape generate --output-mode dotnet:lp64` — P/Invoke with LP64 ABI
-- `farscape project --dotnet --data-model llp64` — project mode with LLP64
+- `--output-mode fidelity` or `--output-mode fidelity-wrappers`
 - Default: LP64 when no ABI specified
 
-## Previous Bug (FIXED)
-PInvokeCodeGenerator previously used TypeMapper.getFSharpType (NTU dictionary) for base type resolution. This produced NTU-abstract types (`nativeint` for C `long`) in P/Invoke output — wrong because P/Invoke needs concrete CLR types matching the target ABI. Fixed by creating PInvokeTypeMapper with `PlatformABI` parameter.

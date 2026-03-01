@@ -4,11 +4,9 @@
 
 There is NO P/Invoke in the Fidelity framework. Only `[<FidelityExtern>]`.
 
-P/Invoke mode exists as a separate output target for traditional .NET F# interop. It is not part of the Fidelity pipeline.
-
 ## Current Implementation: Platform.Bindings
 
-Farscape generates Platform.Bindings pattern files with `Unchecked.defaultof<T>` stubs:
+Farscape generates Platform.Bindings pattern files with `Unchecked.defaultof<T>` bodies:
 
 ```fsharp
 module Fidelity.libc.Memory
@@ -44,9 +42,9 @@ let memcpy (dest: nativeint) (src: nativeint) (n: nativeint) : nativeint =
     Unchecked.defaultof<nativeint>
 ```
 
-FNCS recognizes the attribute and carries library name + symbol through the PSG. Alex emits MLIR with `fidelity.binding_strategy` and `fidelity.library_name` attributes. The linker auto-collects library flags.
+CCS recognizes the attribute and carries library name + symbol through the PSG. Alex emits MLIR with `fidelity.binding_strategy` and `fidelity.library_name` attributes. The linker auto-collects library flags.
 
-**Current state**: Stubs generate without the attribute. Adding it is core infrastructure work.
+**Current state**: Declarations generate without the attribute. Adding it is core infrastructure work.
 
 ## Core Infrastructure: Quotation-Based Output
 
@@ -54,7 +52,7 @@ For embedded targets (CMSIS peripherals), Farscape generates quotation semantic 
 
 1. **Expr<PeripheralDescriptor>** - Quotations encoding hardware memory layout
 2. **Active Patterns** - PSG recognition patterns like `(|GpioWritePin|_|)`
-3. **MemoryModel Record** - Integration surface for FNCS nanopass pipeline
+3. **MemoryModel Record** - Integration surface for CCS nanopass pipeline
 
 These require BAREWire descriptor types. This is core infrastructure, not optional.
 
@@ -75,13 +73,12 @@ Layer 2 wrappers are implemented and working:
 - WrapperCodeGenerator: Catamorphism-based FsDecl tree generation, errno-aware error paths
 - ErrnoModuleGenerator: CError struct + Errno module with describe function from raw header comments
 - Error paths return `Result<T, CError>` with errno code + description string (zero allocation)
-- Moya TOML `[error_conventions]` configures errno vs return_code per-library/per-function
+- Pilot TOML `[error_conventions]` configures errno vs return_code per-library/per-function
 - CLI: `--output-mode fidelity-wrappers`
 
 ## Output Modes
 
 | Mode | CLI Flag | Target |
 |------|----------|--------|
-| `fidelity` | `--output-mode fidelity` | F# Native / Fidelity pipeline (FidelityExtern) |
-| `fidelity-wrappers` | `--output-mode fidelity-wrappers` | F# Native with Layer 2 wrappers |
-| `pinvoke` | `--output-mode pinvoke` | Traditional .NET F# (DllImport, NOT Fidelity) |
+| `fidelity` | `--output-mode fidelity` | Clef / Fidelity pipeline (FidelityExtern) |
+| `fidelity-wrappers` | `--output-mode fidelity-wrappers` | Clef with Layer 2 wrappers |

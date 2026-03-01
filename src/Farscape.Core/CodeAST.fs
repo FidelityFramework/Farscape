@@ -73,8 +73,3 @@ module CodeAST =
         | RecordType of name: string * fields: (string * FsType) list * doc: string option * attributes: string list
         /// type Name = | Case1 = 0L | Case2 = 1L
         | EnumType of name: string * values: (string * int64) list * doc: string option
-        /// P/Invoke extern declaration:
-        /// [<DllImport("lib", CallingConvention = CallingConvention.Cdecl)>]
-        /// extern returnType name(type1 p1, type2 p2)
-        /// Uses C-style parameter syntax (type name), comma-separated, no body.
-        | ExternDecl of name: string * params': FsParam list * returnType: FsType * libraryName: string

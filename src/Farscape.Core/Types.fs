@@ -11,14 +11,12 @@ module Types =
         | TimeoutError = 6
 
     /// Output mode for code generation.
-    /// PInvoke: DllImport-based .NET bindings (original mode)
-    /// Fidelity: Platform.Bindings pattern for Firefly native compilation
+    /// Fidelity: [<FidelityExtern>] binding declarations for the Composer native compilation pipeline
     type OutputMode =
-        | PInvoke
         | Fidelity
 
     /// Platform ABI determines concrete widths for platform-dependent C types.
-    /// Used by both TypeMapper (NTU/Fidelity output) and PInvokeTypeMapper (CLR output).
+    /// Used by TypeMapper (NTU/Fidelity output) for resolving C type widths.
     /// LP64:  int=32, long=64, ptr=64 (Linux, macOS, most Unix)
     /// LLP64: int=32, long=32, ptr=64 (Windows x64)
     /// ILP32: int=32, long=32, ptr=32 (32-bit systems)

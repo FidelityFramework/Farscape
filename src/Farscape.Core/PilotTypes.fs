@@ -1,11 +1,11 @@
 namespace Farscape.Core
 
-/// Types for Moya project analysis and TOML-driven scoped binding generation.
+/// Types for Pilot project analysis and TOML-driven scoped binding generation.
 ///
-/// Moya analyzes C library headers to identify rational namespace subdivisions
-/// based on function prefix patterns, then produces .moya.toml project files
+/// Pilot analyzes C library headers to identify rational namespace subdivisions
+/// based on function prefix patterns, then produces .pilot.toml project files
 /// that drive scoped binding generation via `farscape generate --project`.
-module MoyaTypes =
+module PilotTypes =
 
     // =========================================================================
     // TOML Project Model
@@ -13,7 +13,7 @@ module MoyaTypes =
 
     /// A single namespace subdivision, either discovered by analysis or hand-configured.
     type NamespaceSpec = {
-        /// Fully qualified F# module name, e.g. "Fidelity.libc.Memory"
+        /// Fully qualified Clef module name, e.g. "Fidelity.libc.Memory"
         Name: string
         /// Human-readable description of this namespace group
         Description: string
@@ -25,7 +25,7 @@ module MoyaTypes =
         Functions: string list
     }
 
-    /// Library-level metadata in a .moya.toml [library] section.
+    /// Library-level metadata in a .pilot.toml [library] section.
     type LibrarySpec = {
         /// Library name, e.g. "libc"
         Name: string
@@ -43,9 +43,9 @@ module MoyaTypes =
             | h :: _ -> h
             | [] -> failwith "LibrarySpec.Headers must not be empty"
 
-    /// Output configuration in a .moya.toml [output] section.
+    /// Output configuration in a .pilot.toml [output] section.
     type OutputSpec = {
-        /// "fidelity" or "pinvoke"
+        /// Output mode: "fidelity" or "fidelity-wrappers"
         Mode: string
         /// Output directory for generated bindings
         Directory: string
@@ -72,8 +72,8 @@ module MoyaTypes =
         Overrides: Map<string, ErrorConvention>
     }
 
-    /// Complete Moya project, corresponding to a .moya.toml file.
-    type MoyaProject = {
+    /// Complete Pilot project, corresponding to a .pilot.toml file.
+    type PilotProject = {
         Library: LibrarySpec
         Output: OutputSpec
         Namespaces: NamespaceSpec list
