@@ -58,6 +58,7 @@ module PilotSerializer =
         match c with
         | Errno -> "errno"
         | ReturnCode -> "return_code"
+        | EnumErrorCode _ -> "enum_error_code"
         | NoErrorConvention -> "none"
 
     /// Serialize ErrorConventionSpec to a TOML table value.
@@ -65,6 +66,21 @@ module PilotSerializer =
         let table =
             TomlTable.empty
             |> TomlTable.add "default" (TomlValue.String (serializeConvention spec.Default))
+        // For EnumErrorCode, serialize additional fields at the top level
+        let table =
+            match spec.Default with
+            | EnumErrorCode (errorType, successValue, errorStringFn, errorNameFn) ->
+                let t = table
+                         |> TomlTable.add "error_type" (TomlValue.String errorType)
+                         |> TomlTable.add "success_value" (TomlValue.String successValue)
+                let t =
+                    match errorStringFn with
+                    | Some fn -> TomlTable.add "error_string_fn" (TomlValue.String fn) t
+                    | None -> t
+                match errorNameFn with
+                | Some fn -> TomlTable.add "error_name_fn" (TomlValue.String fn) t
+                | None -> t
+            | _ -> table
         let table =
             if spec.Overrides.IsEmpty then table
             else
@@ -174,11 +190,24 @@ module PilotSerializer =
                 Error (String.concat "; " errors)
         | _ -> Error "'namespace' must be an array of tables"
 
+    /// Helper: get an optional string field from a TomlTable.
+    let private optionalString (fieldName: string) (table: TomlTable) : string option =
+        match TomlTable.tryFind fieldName table with
+        | Some (TomlValue.String s) -> Some s
+        | _ -> None
+
     /// Parse an error convention string to ErrorConvention.
-    let private parseConvention (s: string) : ErrorConvention =
+    /// For "enum_error_code", the additional fields are parsed from the table separately.
+    let private parseConvention (s: string) (table: TomlTable) : ErrorConvention =
         match s.ToLowerInvariant() with
         | "errno" -> Errno
         | "return_code" -> ReturnCode
+        | "enum_error_code" ->
+            let errorType = optionalString "error_type" table |> Option.defaultValue ""
+            let successValue = optionalString "success_value" table |> Option.defaultValue ""
+            let errorStringFn = optionalString "error_string_fn" table
+            let errorNameFn = optionalString "error_name_fn" table
+            EnumErrorCode (errorType, successValue, errorStringFn, errorNameFn)
         | _ -> NoErrorConvention
 
     /// Deserialize the optional [error_conventions] section.
@@ -188,7 +217,7 @@ module PilotSerializer =
         | Some (TomlValue.Table table) ->
             let defaultConv =
                 match TomlTable.tryFind "default" table with
-                | Some (TomlValue.String s) -> parseConvention s
+                | Some (TomlValue.String s) -> parseConvention s table
                 | _ -> NoErrorConvention
             let overrides =
                 match TomlTable.tryFind "overrides" table with
@@ -197,7 +226,7 @@ module PilotSerializer =
                     |> Map.toSeq
                     |> Seq.choose (fun (k, v) ->
                         match v with
-                        | TomlValue.String s -> Some (k, parseConvention s)
+                        | TomlValue.String s -> Some (k, parseConvention s TomlTable.empty)
                         | _ -> None)
                     |> Map.ofSeq
                 | _ -> Map.empty

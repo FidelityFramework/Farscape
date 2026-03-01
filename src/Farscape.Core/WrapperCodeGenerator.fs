@@ -38,6 +38,8 @@ module WrapperCodeGenerator =
         | AllocatedPointer | OpaqueHandleReturn ->
             if useErrno then Generic2("Result", Named "nativeint", Named "CError")
             else Generic("Result", Named "nativeint")
+        | EnumReturnError (_, _, errorStructName) ->
+            Generic2("Result", Unit, Named errorStructName)
         | PureValue ->
             rawRetType
         | NeverReturns ->
@@ -104,6 +106,18 @@ module WrapperCodeGenerator =
     let private opaqueHandleBody (bindingsModule: string) (funcName: string) (paramNames: string list) (useErrno: bool) : FsExpr =
         allocatedPointerBody bindingsModule funcName paramNames useErrno
 
+    /// Generate wrapper body for EnumReturnError pattern (e.g., HIP hipStreamCreate).
+    /// let result = Bindings.hipStreamCreate stream
+    /// match result with | hipError_t.hipSuccess -> Ok () | err -> Error (captureError err)
+    let private enumReturnErrorBody (bindingsModule: string) (funcName: string) (paramNames: string list)
+                                    (enumType: string) (successValue: string) : FsExpr =
+        let rawCall = buildRawCall bindingsModule funcName paramNames
+        LetIn("result", rawCall,
+            MatchExpr(Identifier "result", [
+                ($"{enumType}.{successValue}", ResultOk (Literal "()"))
+                ("err", ResultError (FunctionCall("", "captureError", [Identifier "err"])))
+            ]))
+
     /// Generate wrapper body for PureValue pattern (e.g., abs, strlen).
     /// Direct delegation: Bindings.strlen s
     let private pureValueBody (bindingsModule: string) (funcName: string) (paramNames: string list) : FsExpr =
@@ -132,6 +146,8 @@ module WrapperCodeGenerator =
         | ZeroSuccessOrError -> zeroSuccessBody bindingsModule funcName paramNames useErrno
         | AllocatedPointer   -> allocatedPointerBody bindingsModule funcName paramNames useErrno
         | OpaqueHandleReturn -> opaqueHandleBody bindingsModule funcName paramNames useErrno
+        | EnumReturnError (enumType, successValue, _) ->
+            enumReturnErrorBody bindingsModule funcName paramNames enumType successValue
         | PureValue          -> pureValueBody bindingsModule funcName paramNames
         | NeverReturns       -> neverReturnsBody bindingsModule funcName paramNames
         | VoidReturn         -> voidReturnBody bindingsModule funcName paramNames
@@ -161,12 +177,22 @@ module WrapperCodeGenerator =
         (model: PlatformABI)
         (opaqueHandles: Set<string>)
         (bindingsModule: string)
-        (useErrno: bool)
+        (errorHandling: ErrorHandling)
         (func: CppParser.FunctionDecl)
         : FsDecl list =
 
+        let useErrno = match errorHandling with UseErrno _ -> true | _ -> false
         let mapType = FidelityCodeGenerator.mapCTypeToFidelityType typedefMap model opaqueHandles
         let pattern = WrapperPatternAnalyzer.analyze func typedefMap
+
+        // Override ReturnSemantic when enum error convention matches the return type,
+        // but respect attribute-driven semantics (Pure/Const/NoReturn take precedence)
+        let semantic =
+            match errorHandling with
+            | UseEnumError (enumType, successValue, errorStructName, _)
+                when func.ReturnType = enumType && not pattern.IsPure && pattern.ReturnSemantic <> NeverReturns ->
+                EnumReturnError (enumType, successValue, errorStructName)
+            | _ -> pattern.ReturnSemantic
 
         // Parameter types match the raw stubs exactly
         let parameters =
@@ -175,10 +201,10 @@ module WrapperCodeGenerator =
                 { FsParam.Name = cleanParamName name; Type = mapType cType })
 
         let rawRetType = mapType func.ReturnType
-        let retType = wrapperReturnType pattern.ReturnSemantic rawRetType useErrno
+        let retType = wrapperReturnType semantic rawRetType useErrno
 
         let paramNames = parameters |> List.map (fun p -> p.Name)
-        let body = generateBody bindingsModule func.Name paramNames pattern.ReturnSemantic useErrno
+        let body = generateBody bindingsModule func.Name paramNames semantic useErrno
 
         formatDocDecls func @
         [
@@ -213,11 +239,9 @@ module WrapperCodeGenerator =
         (wrapperNamespace: string)
         (libraryName: string)
         (bindingsModule: string)
-        (errnoModuleName: string option)
+        (errorHandling: ErrorHandling)
         (model: PlatformABI)
         : string =
-
-        let useErrno = errnoModuleName.IsSome
 
         // Phase 1: Build typedef resolution map (shared with FidelityCodeGenerator)
         let typedefMap = FidelityCodeGenerator.buildTypedefMap declarations
@@ -234,16 +258,16 @@ module WrapperCodeGenerator =
             groups
             |> List.choose (function WFunc f -> Some f | WNone -> None)
             |> List.distinctBy (fun f -> f.Name)
-            |> List.collect (generateWrapperDecls typedefMap model opaqueHandles bindingsModule useErrno)
+            |> List.collect (generateWrapperDecls typedefMap model opaqueHandles bindingsModule errorHandling)
 
         // Phase 4: Build typed FsDecl tree; wrapper module opens the bindings module
         let openDecl = Comment $"open {bindingsModule}"
 
-        // Errno support: open errno module and generate captureError helper
-        let errnoDecls =
-            match errnoModuleName with
-            | Some modName ->
-                let openErrno = Comment $"open {modName}"
+        // Error handling support: generate captureError helper based on strategy
+        let errorDecls =
+            match errorHandling with
+            | UseErrno errnoModuleName ->
+                let openErrno = Comment $"open {errnoModuleName}"
                 let openNativeInterop = Comment "open Microsoft.FSharp.NativeInterop"
                 // captureError helper: captures errno and builds CError with description
                 let captureErrorBody =
@@ -260,9 +284,24 @@ module WrapperCodeGenerator =
                 [ openErrno; openNativeInterop; BlankLine
                   XmlDoc "Capture errno and build CError with description from header comments."
                   captureErrorDecl; BlankLine ]
-            | None -> []
+            | UseEnumError (enumType, _, errorStructName, describeModuleName) ->
+                let openErrorModule = Comment $"open {describeModuleName}"
+                // captureError helper: builds error struct from the return code directly
+                let captureErrorBody =
+                    RecordConstruction [
+                        ("Code", Identifier "code")
+                        ("Description", FunctionCall(errorStructName, "describe", [Identifier "code"]))
+                    ]
+                let captureErrorDecl =
+                    LetBinding("captureError",
+                        [ { Name = "code"; Type = Named enumType } ],
+                        Named errorStructName, captureErrorBody, [])
+                [ openErrorModule; BlankLine
+                  XmlDoc $"Capture {enumType} error with compile-time description from header comments."
+                  captureErrorDecl; BlankLine ]
+            | NoErrors -> []
 
-        let allDecls = openDecl :: errnoDecls @ BlankLine :: functions
+        let allDecls = openDecl :: errorDecls @ BlankLine :: functions
         let moduleDecl = Module(wrapperNamespace, libraryName, allDecls)
 
         // Phase 5: Render to string (the ONLY StringBuilder, in CodeRenderer)

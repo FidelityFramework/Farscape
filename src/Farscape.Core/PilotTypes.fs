@@ -61,6 +61,11 @@ module PilotTypes =
         | Errno
         /// Nonzero return value IS the error code (pthread pattern)
         | ReturnCode
+        /// Typed enum return: one value = success, all others = error codes (HIP/XRT pattern).
+        /// errorType: enum name (e.g. "hipError_t"), successValue: success variant (e.g. "hipSuccess"),
+        /// errorStringFn/errorNameFn: optional runtime fallback functions.
+        | EnumErrorCode of errorType: string * successValue: string
+                         * errorStringFn: string option * errorNameFn: string option
         /// No error convention; function doesn't report errors
         | NoErrorConvention
 

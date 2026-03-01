@@ -30,6 +30,9 @@ let mkEnumSimple name : CppParser.EnumDecl =
 let mkEnumVal name value : CppParser.EnumValue =
     { Name = name; Value = value; Documentation = None }
 
+let mkEnumValWithDoc name value doc : CppParser.EnumValue =
+    { Name = name; Value = value; Documentation = Some doc }
+
 let mkStruct name fields doc : CppParser.StructDecl =
     { Name = name; Fields = fields; Documentation = doc; IsUnion = false }
 

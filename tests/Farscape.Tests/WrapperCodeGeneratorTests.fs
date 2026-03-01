@@ -2,6 +2,7 @@ module Farscape.Tests.WrapperCodeGeneratorTests
 
 open Xunit
 open Farscape.Core
+open Farscape.Core.WrapperTypes
 open TestHelpers
 
 // =============================================================================
@@ -10,7 +11,7 @@ open TestHelpers
 
 let private generateSingle name retType parms attrs =
     let decls = [ mkDecl name retType parms attrs ]
-    WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" None Types.LP64
+    WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" NoErrors Types.LP64
 
 [<Fact>]
 let ``CountOrError wrapper generates Result return and comparison`` () =
@@ -98,7 +99,7 @@ let ``multiple functions are deduplicated by name`` () =
         mkDecl "read" "ssize_t" [("fd", "int"); ("buf", "void *"); ("count", "size_t")] []
         mkDecl "write" "ssize_t" [("fd", "int"); ("buf", "const void *"); ("count", "size_t")] []
     ]
-    let output = WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" None Types.LP64
+    let output = WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" NoErrors Types.LP64
     // Count occurrences of "let read"; should be exactly 1
     let readCount = output.Split("let read") |> Array.length
     Assert.Equal(2, readCount) // split produces N+1 parts for N occurrences
@@ -112,7 +113,7 @@ module ErrnoWrapperTests =
 
     let private generateWithErrno name retType parms attrs =
         let decls = [ mkDecl name retType parms attrs ]
-        WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" (Some "Fidelity.Errno") Types.LP64
+        WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" (UseErrno "Fidelity.Errno") Types.LP64
 
     [<Fact>]
     let ``errno-enabled wrapper uses Result<T, CError> return type`` () =
@@ -180,3 +181,65 @@ module ErrnoWrapperTests =
         // Pure functions don't use Result wrapping — direct delegation
         Assert.Contains("let strlen", output)
         Assert.DoesNotContain("Result<", output.Split("let strlen").[1])
+
+// =============================================================================
+// Enum Error Code Wrapper Generation Tests
+// =============================================================================
+
+module EnumErrorWrapperTests =
+
+    let private generateWithEnumError name retType parms attrs =
+        let decls = [ mkDecl name retType parms attrs ]
+        WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test"
+            (UseEnumError ("hipError_t", "hipSuccess", "HipError", "Fidelity.HIP.HipError")) Types.LP64
+
+    [<Fact>]
+    let ``enum error wrapper generates match expression`` () =
+        let output = generateWithEnumError "hipMalloc" "hipError_t"
+                        [("devPtr", "void **"); ("size", "size_t")]
+                        []
+        Assert.Contains("match result with", output)
+        Assert.Contains("hipError_t.hipSuccess", output)
+
+    [<Fact>]
+    let ``enum error wrapper uses typed error struct in return`` () =
+        let output = generateWithEnumError "hipMalloc" "hipError_t"
+                        [("devPtr", "void **"); ("size", "size_t")]
+                        []
+        Assert.Contains("Result<unit, HipError>", output)
+
+    [<Fact>]
+    let ``enum error wrapper calls captureError on error path`` () =
+        let output = generateWithEnumError "hipMalloc" "hipError_t"
+                        [("devPtr", "void **"); ("size", "size_t")]
+                        []
+        Assert.Contains("captureError", output)
+        Assert.Contains("Ok ()", output)
+
+    [<Fact>]
+    let ``enum error wrapper generates captureError helper`` () =
+        let output = generateWithEnumError "hipMalloc" "hipError_t"
+                        [("devPtr", "void **"); ("size", "size_t")]
+                        []
+        Assert.Contains("let captureError", output)
+        Assert.Contains("Code = code", output)
+        Assert.Contains("HipError.describe", output)
+
+    [<Fact>]
+    let ``enum error does not affect non-matching return type`` () =
+        // A function returning int (not hipError_t) should not get enum error wrapping
+        let output = generateWithEnumError "hipGetDeviceCount" "int"
+                        [("count", "int *")]
+                        []
+        // Should use standard ZeroSuccessOrError pattern, not enum match
+        Assert.DoesNotContain("match result with", output)
+        Assert.DoesNotContain("hipError_t.hipSuccess", output)
+
+    [<Fact>]
+    let ``PureValue wrapper unchanged with enum error enabled`` () =
+        let output = generateWithEnumError "hipDeviceSynchronize" "hipError_t"
+                        []
+                        [{ CppParser.AttributeData.Kind = "PureAttr"; Args = []; StringArg = None }]
+        // Pure functions don't use Result wrapping — check only the function section
+        Assert.Contains("let hipDeviceSynchronize", output)
+        Assert.DoesNotContain("Result<", output.Split("let hipDeviceSynchronize").[1])

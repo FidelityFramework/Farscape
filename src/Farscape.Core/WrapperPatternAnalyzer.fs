@@ -229,7 +229,7 @@ module WrapperPatternAnalyzer =
 
         let needsResultWrap =
             match returnSemantic with
-            | CountOrError | ZeroSuccessOrError | AllocatedPointer | OpaqueHandleReturn -> true
+            | CountOrError | ZeroSuccessOrError | AllocatedPointer | OpaqueHandleReturn | EnumReturnError _ -> true
             | PureValue | NeverReturns | VoidReturn -> false
 
         let needsResourceCleanup =

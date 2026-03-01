@@ -69,7 +69,7 @@ module BindingGenerator =
                     logVerbose "Generating idiomatic wrappers..." options.Verbose
                     let wrapperNamespace = $"{options.Namespace}.Wrappers"
                     let wrapperCode =
-                        WrapperCodeGenerator.generate declarations wrapperNamespace options.LibraryName options.Namespace None options.DataModel
+                        WrapperCodeGenerator.generate declarations wrapperNamespace options.LibraryName options.Namespace WrapperTypes.NoErrors options.DataModel
                     let wrapperPath = Path.Combine(options.OutputDirectory, $"{lastSegment}Wrappers.fs")
                     File.WriteAllText(wrapperPath, wrapperCode)
                     logVerbose $"Wrapper module written to: {wrapperPath}" options.Verbose
@@ -105,15 +105,53 @@ module BindingGenerator =
 
                 Directory.CreateDirectory(project.Output.Directory) |> ignore
 
-                // Determine errno module name from error convention configuration
-                let errnoModuleName =
+                // Determine error handling strategy from convention configuration
+                let errorHandling =
                     match project.ErrorConventions with
-                    | Some spec when spec.Default = PilotTypes.Errno ->
-                        Some $"Fidelity.{project.Library.Name}.Errno"
-                    | _ -> None
+                    | Some spec ->
+                        match spec.Default with
+                        | PilotTypes.Errno ->
+                            WrapperTypes.UseErrno $"Fidelity.{project.Library.Name}.Errno"
+                        | PilotTypes.EnumErrorCode (errorType, successValue, _, _) ->
+                            let structName = EnumErrorModuleGenerator.deriveErrorStructName errorType
+                            WrapperTypes.UseEnumError (errorType, successValue, structName,
+                                                      $"Fidelity.{project.Library.Name}.{structName}")
+                        | _ -> WrapperTypes.NoErrors
+                    | None -> WrapperTypes.NoErrors
+
+                // Generate enum error module if convention is EnumErrorCode
+                let errorModuleFiles =
+                    match errorHandling with
+                    | WrapperTypes.UseEnumError (errorType, _, _, _) ->
+                        let errorEnum =
+                            declarations |> List.tryPick (function
+                                | CppParser.Declaration.Enum e when e.Name = errorType -> Some e
+                                | _ -> None)
+                        match errorEnum with
+                        | Some enumDecl ->
+                            match project.ErrorConventions with
+                            | Some spec ->
+                                match spec.Default with
+                                | PilotTypes.EnumErrorCode (et, sv, esFn, enFn) ->
+                                    let config = EnumErrorModuleGenerator.makeConfig et sv esFn enFn
+                                    let errorNs = $"Fidelity.{project.Library.Name}.{config.ErrorStructName}"
+                                    match EnumErrorModuleGenerator.generate enumDecl config errorNs with
+                                    | Some output ->
+                                        let errorPath = Path.Combine(project.Output.Directory, $"{config.ErrorStructName}.fs")
+                                        File.WriteAllText(errorPath, output)
+                                        logVerbose $"Error module: {errorPath}" verbose
+                                        [errorPath]
+                                    | None -> []
+                                | _ -> []
+                            | None -> []
+                        | None ->
+                            logVerbose $"Warning: error enum '{errorType}' not found in declarations" verbose
+                            []
+                    | _ -> []
 
                 let allFiles =
-                    project.Namespaces |> List.collect (fun ns ->
+                    errorModuleFiles @
+                    (project.Namespaces |> List.collect (fun ns ->
                         let filtered = PilotAnalyzer.filterDeclarationsForNamespace ns declarations
                         logVerbose $"Namespace {ns.Name}: {filtered.Length} declarations" verbose
                         let code = FidelityCodeGenerator.generate filtered ns.Name ns.Library dataModel
@@ -125,13 +163,13 @@ module BindingGenerator =
                         if generateWrappers then
                             let wrapperNamespace = $"{ns.Name}.Wrappers"
                             let wrapperCode =
-                                WrapperCodeGenerator.generate filtered wrapperNamespace ns.Library ns.Name errnoModuleName dataModel
+                                WrapperCodeGenerator.generate filtered wrapperNamespace ns.Library ns.Name errorHandling dataModel
                             let wrapperPath = Path.Combine(project.Output.Directory, $"{lastSegment}Wrappers.fs")
                             File.WriteAllText(wrapperPath, wrapperCode)
                             logVerbose $"Wrapper module: {wrapperPath}" verbose
                             [outputPath; wrapperPath]
                         else
-                            [outputPath])
+                            [outputPath]))
 
                 Ok {
                     OutputFiles = allFiles

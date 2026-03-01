@@ -79,12 +79,29 @@ module WrapperTypes =
         | AllocatedPointer
         /// FILE*/handle pattern: non-null = handle, null = error.
         | OpaqueHandleReturn
+        /// Typed enum return: success value = OK, everything else = error (HIP/XRT pattern).
+        | EnumReturnError of enumType: string * successValue: string * errorStructName: string
         /// Pure value return; no error checking needed (abs, strlen).
         | PureValue
         /// Function never returns (abort, _exit).
         | NeverReturns
         /// void return; no return value to wrap.
         | VoidReturn
+
+    // =========================================================================
+    // Error Handling Strategy
+    // =========================================================================
+
+    /// Error handling strategy for wrapper generation.
+    /// Replaces the previous `errnoModuleName: string option` parameter.
+    type ErrorHandling =
+        /// No error handling; wrappers use basic Result wrapping.
+        | NoErrors
+        /// Errno-based: captures errno via __errno_location and builds CError.
+        | UseErrno of errnoModuleName: string
+        /// Enum error code: matches return value against typed error enum.
+        | UseEnumError of enumType: string * successValue: string
+                        * errorStructName: string * describeModuleName: string
 
     // =========================================================================
     // Complete Wrapper Pattern

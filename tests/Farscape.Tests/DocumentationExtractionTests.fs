@@ -2,6 +2,7 @@ module Farscape.Tests.DocumentationExtractionTests
 
 open Xunit
 open Farscape.Core
+open Farscape.Core.WrapperTypes
 open TestHelpers
 
 // =============================================================================
@@ -79,7 +80,7 @@ let ``formatDocDecls without documentation produces only C signature`` () =
 let ``wrapper with documented function produces description and C signature`` () =
     let decls = [ mkDeclWithDoc "read" "ssize_t" [("fd", "int"); ("buf", "void *"); ("count", "size_t")]
                           (Some "Read NBYTES into BUF from FD.") ]
-    let output = WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" None Types.LP64
+    let output = WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" NoErrors Types.LP64
     Assert.Contains("/// Read NBYTES into BUF from FD.", output)
     Assert.Contains("/// C signature: ssize_t read(int fd, void * buf, size_t count)", output)
 

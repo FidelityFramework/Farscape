@@ -194,6 +194,70 @@ module ErrorConventionTomlTests =
         | Ok project -> Assert.True(project.ErrorConventions.IsNone)
 
     [<Fact>]
+    let ``enum error code convention round-trips through TOML`` () =
+        let project : PilotProject = {
+            Library = { Name = "hip"; Headers = ["/opt/rocm/include/hip/hip_runtime_api.h"]; IncludePaths = []; Defines = [] }
+            Output = { Mode = "fidelity"; Directory = "./out" }
+            Namespaces = []
+            ErrorConventions = Some {
+                Default = EnumErrorCode ("hipError_t", "hipSuccess", Some "hipGetErrorString", Some "hipGetErrorName")
+                Overrides = Map.empty
+            }
+        }
+        let toml = PilotSerializer.toTomlString project
+        Assert.Contains("enum_error_code", toml)
+        Assert.Contains("error_type", toml)
+        Assert.Contains("hipError_t", toml)
+        Assert.Contains("success_value", toml)
+        Assert.Contains("hipSuccess", toml)
+        Assert.Contains("error_string_fn", toml)
+        Assert.Contains("error_name_fn", toml)
+        match Fidelity.Toml.Toml.parse toml with
+        | Error e -> Assert.Fail $"Parse failed: {e}"
+        | Ok doc ->
+            match PilotSerializer.deserialize doc with
+            | Error e -> Assert.Fail $"Deserialize failed: {e}"
+            | Ok roundTripped ->
+                Assert.True(roundTripped.ErrorConventions.IsSome)
+                let spec = roundTripped.ErrorConventions.Value
+                match spec.Default with
+                | EnumErrorCode (et, sv, esf, enf) ->
+                    Assert.Equal("hipError_t", et)
+                    Assert.Equal("hipSuccess", sv)
+                    Assert.Equal(Some "hipGetErrorString", esf)
+                    Assert.Equal(Some "hipGetErrorName", enf)
+                | other -> Assert.Fail $"Expected EnumErrorCode, got {other}"
+
+    [<Fact>]
+    let ``enum error code with only required fields round-trips`` () =
+        let project : PilotProject = {
+            Library = { Name = "xrt"; Headers = ["xrt.h"]; IncludePaths = []; Defines = [] }
+            Output = { Mode = "fidelity"; Directory = "./out" }
+            Namespaces = []
+            ErrorConventions = Some {
+                Default = EnumErrorCode ("xrt_error_code", "XRT_SUCCESS", None, None)
+                Overrides = Map.empty
+            }
+        }
+        let toml = PilotSerializer.toTomlString project
+        // Should NOT contain optional fn fields
+        Assert.DoesNotContain("error_string_fn", toml)
+        Assert.DoesNotContain("error_name_fn", toml)
+        match Fidelity.Toml.Toml.parse toml with
+        | Error e -> Assert.Fail $"Parse failed: {e}"
+        | Ok doc ->
+            match PilotSerializer.deserialize doc with
+            | Error e -> Assert.Fail $"Deserialize failed: {e}"
+            | Ok roundTripped ->
+                match roundTripped.ErrorConventions.Value.Default with
+                | EnumErrorCode (et, sv, esf, enf) ->
+                    Assert.Equal("xrt_error_code", et)
+                    Assert.Equal("XRT_SUCCESS", sv)
+                    Assert.True(esf.IsNone)
+                    Assert.True(enf.IsNone)
+                | other -> Assert.Fail $"Expected EnumErrorCode, got {other}"
+
+    [<Fact>]
     let ``error conventions with no overrides`` () =
         let project : PilotProject = {
             Library = { Name = "libc"; Headers = ["/usr/include/stdio.h"]; IncludePaths = []; Defines = [] }
