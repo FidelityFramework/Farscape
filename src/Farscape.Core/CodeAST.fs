@@ -53,6 +53,13 @@ module CodeAST =
         Type: FsType
     }
 
+    /// A field with explicit byte offset (for StructLayout.Explicit structs)
+    type ExplicitField = {
+        Name: string
+        Type: FsType
+        OffsetBytes: int
+    }
+
     /// F# declaration representation: the core of the typed code AST
     type FsDecl =
         /// Module declaration with namespace, header comment, and child declarations
@@ -76,3 +83,6 @@ module CodeAST =
         | EnumType of name: string * values: (string * int64) list * doc: string option * isFlags: bool
         /// Nested module: module Name = \n    decls (for companion modules)
         | SubModule of name: string * decls: FsDecl list
+        /// ABI-critical struct with explicit layout.
+        /// Rendered with [<StructLayout(LayoutKind.Explicit, Size=N)>] [<Struct>] and per-field [<FieldOffset(N)>].
+        | ExplicitLayoutRecord of name: string * fields: ExplicitField list * sizeBytes: int * doc: string option

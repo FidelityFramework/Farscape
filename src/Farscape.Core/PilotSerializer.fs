@@ -90,6 +90,17 @@ module PilotSerializer =
                 TomlTable.add "overrides" (TomlValue.Table overrideTable) table
         TomlValue.Table table
 
+    let private serializeOptions (opts: GenerationOptions) : TomlValue =
+        let table = TomlTable.empty
+        let table =
+            if opts.AbiCriticalStructs.IsEmpty then table
+            else TomlTable.add "abi_critical_structs" (TomlValue.Array (opts.AbiCriticalStructs |> List.map TomlValue.String)) table
+        let table =
+            if opts.GenerateDescriptors then
+                TomlTable.add "generate_descriptors" (TomlValue.Boolean true) table
+            else table
+        TomlValue.Table table
+
     /// Serialize a complete PilotProject to a TomlDocument.
     let serialize (project: PilotProject) : TomlDocument =
         let table =
@@ -97,8 +108,12 @@ module PilotSerializer =
             |> TomlTable.add "library" (serializeLibrary project.Library)
             |> TomlTable.add "output" (serializeOutput project.Output)
             |> TomlTable.add "namespace" (TomlValue.Array (project.Namespaces |> List.map serializeNamespace))
-        match project.ErrorConventions with
-        | Some spec -> table |> TomlTable.add "error_conventions" (serializeErrorConventions spec)
+        let table =
+            match project.ErrorConventions with
+            | Some spec -> table |> TomlTable.add "error_conventions" (serializeErrorConventions spec)
+            | None -> table
+        match project.Options with
+        | Some opts -> table |> TomlTable.add "options" (serializeOptions opts)
         | None -> table
 
     /// Render a PilotProject to a TOML string.
@@ -233,6 +248,22 @@ module PilotSerializer =
             Some { Default = defaultConv; Overrides = overrides }
         | _ -> None
 
+    let private deserializeOptions (doc: TomlDocument) : GenerationOptions option =
+        match Toml.getValue "options" doc with
+        | None -> None
+        | Some (TomlValue.Table table) ->
+            let abiStructs =
+                match TomlTable.tryFind "abi_critical_structs" table with
+                | Some (TomlValue.Array items) ->
+                    items |> List.choose (function TomlValue.String s -> Some s | _ -> None)
+                | _ -> []
+            let generateDescriptors =
+                match TomlTable.tryFind "generate_descriptors" table with
+                | Some (TomlValue.Boolean b) -> b
+                | _ -> false
+            Some { AbiCriticalStructs = abiStructs; GenerateDescriptors = generateDescriptors }
+        | _ -> None
+
     /// Deserialize a TomlDocument to a PilotProject.
     let deserialize (doc: TomlDocument) : Result<PilotProject, string> =
         match deserializeLibrary doc, deserializeOutput doc, deserializeNamespaces doc with
@@ -240,7 +271,8 @@ module PilotSerializer =
             Ok { Library = lib
                  Output = output
                  Namespaces = namespaces
-                 ErrorConventions = deserializeErrorConventions doc }
+                 ErrorConventions = deserializeErrorConventions doc
+                 Options = deserializeOptions doc }
         | Error e, _, _ | _, Error e, _ | _, _, Error e -> Error e
 
     // =========================================================================

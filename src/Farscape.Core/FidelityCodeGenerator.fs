@@ -181,6 +181,20 @@ module FidelityCodeGenerator =
         let fields = s.Fields |> List.map (fun f -> (f.Name, mapType f.Type))
         [ RecordType(s.Name, fields, s.Documentation, []) ]
 
+    /// Generate FsDecl list for an ABI-critical struct with explicit layout.
+    /// Uses StructLayoutInfo (from clang -fdump-record-layouts-simple) for byte offsets.
+    let private generateExplicitStructDecl
+        (typedefMap: Map<string, string>) (model: PlatformABI) (opaqueHandles: Set<string>)
+        (layoutInfo: CppParser.StructLayoutInfo) (s: CppParser.StructDecl) : FsDecl list =
+        let mapType = mapCTypeToFidelityType typedefMap model opaqueHandles
+        let fields =
+            List.zip s.Fields layoutInfo.FieldOffsetsBits
+            |> List.map (fun (f, offsetBits) ->
+                { CodeAST.ExplicitField.Name = f.Name
+                  Type = mapType f.Type
+                  OffsetBytes = offsetBits / 8 })
+        [ ExplicitLayoutRecord(s.Name, fields, layoutInfo.SizeBits / 8, s.Documentation) ]
+
     /// Generate FsDecl list for a macro constant (numeric values only).
     /// Uses CompilerBuiltin/InternalMacro/UserMacro active patterns for classification
     /// and IntegerLiteral active pattern for numeric parsing.
@@ -217,9 +231,18 @@ module FidelityCodeGenerator =
 
     /// Generation algebra: maps each Declaration variant to a DeclGroup.
     /// This is the SINGLE traversal of declarations for code generation.
-    let private generationAlgebra (typedefMap: Map<string, string>) (model: PlatformABI) (opaqueHandles: Set<string>) : DeclarationAlgebra.DeclarationAlgebra<DeclGroup> = {
+    /// All context (typedef map, ABI model, opaque handles, struct layouts) is captured in the closure.
+    let private generationAlgebra
+        (typedefMap: Map<string, string>) (model: PlatformABI)
+        (opaqueHandles: Set<string>) (structLayouts: Map<string, CppParser.StructLayoutInfo>)
+        : DeclarationAlgebra.DeclarationAlgebra<DeclGroup> = {
         OnEnum = fun e -> if e.Name <> "" then GEnum (generateEnumDecl e) else GNone
-        OnStruct = fun s -> if s.Name <> "" then GStruct (generateStructDecl typedefMap model opaqueHandles s) else GNone
+        OnStruct = fun s ->
+            if s.Name = "" then GNone
+            else
+                match Map.tryFind s.Name structLayouts with
+                | Some layout -> GStruct (generateExplicitStructDecl typedefMap model opaqueHandles layout s)
+                | None -> GStruct (generateStructDecl typedefMap model opaqueHandles s)
         OnFunction = fun f -> GFunc f
         OnMacro = fun m ->
             let decls = generateMacroDeclIfNumeric m
@@ -230,13 +253,15 @@ module FidelityCodeGenerator =
     }
 
     /// Generate a complete Fidelity binding source file from parsed declarations.
-    /// Architecture: Catamorphism → FsDecl tree → CodeRenderer.render
+    /// Architecture: Pre-passes build context → Algebra captures context in closure → Catamorphism → FsDecl tree → Render
     /// PlatformABI determines concrete widths for C int/long in NTU output.
+    /// structLayouts: pre-computed layout data for ABI-critical structs (empty for normal generation).
     let generate
         (declarations: CppParser.Declaration list)
         (namespace': string)
         (libraryName: string)
         (model: PlatformABI)
+        (structLayouts: Map<string, CppParser.StructLayoutInfo>)
         : string =
 
         // Phase 1: Build typedef resolution map (catamorphism + pure recursion)
@@ -247,8 +272,9 @@ module FidelityCodeGenerator =
         let opaqueHandleDecls = generateOpaqueHandleDecls opaqueHandles
 
         // Phase 2: Categorize declarations via catamorphism (ONE pass)
+        // All context (typedef map, model, opaque handles, struct layouts) captured in algebra closure
         let groups =
-            DeclarationAlgebra.cataDeclarations (generationAlgebra typedefMap model opaqueHandles) declarations
+            DeclarationAlgebra.cataDeclarations (generationAlgebra typedefMap model opaqueHandles structLayouts) declarations
 
         // Phase 3: Assemble categories (pure functional fold)
         let enums = groups |> List.collect (function GEnum d -> d | _ -> [])

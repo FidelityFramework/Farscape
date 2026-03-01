@@ -123,6 +123,19 @@ module CodeRenderer =
                 renderDecl sb (indent + 1) d
             sb.AppendLine() |> ignore
 
+        | ExplicitLayoutRecord (name, fields, sizeBytes, doc) ->
+            match doc with
+            | Some d -> sb.AppendLine($"{prefix}/// {d}") |> ignore
+            | None -> ()
+            sb.AppendLine($"{prefix}[<StructLayout(LayoutKind.Explicit, Size = {sizeBytes})>]") |> ignore
+            sb.AppendLine($"{prefix}[<Struct>]") |> ignore
+            sb.AppendLine($"{prefix}type {name} = {{") |> ignore
+            for f in fields do
+                sb.AppendLine($"{prefix}    [<FieldOffset({f.OffsetBytes})>]") |> ignore
+                sb.AppendLine($"{prefix}    {f.Name}: {renderType f.Type}") |> ignore
+            sb.AppendLine($"{prefix}}}") |> ignore
+            sb.AppendLine() |> ignore
+
 
     /// Render a complete FsDecl tree to an F# source string.
     /// This is the single entry point; the ONLY StringBuilder in Farscape.

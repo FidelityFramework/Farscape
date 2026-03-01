@@ -19,6 +19,7 @@
     <Compile Include="WrapperCodeGeneratorTests.fs" />
     <Compile Include="ErrnoModuleGeneratorTests.fs" />
     <Compile Include="EnumErrorModuleGeneratorTests.fs" />
+    <Compile Include="StructLayoutTests.fs" />
     <Compile Include="DocumentationExtractionTests.fs" />
     <Compile Include="OpaqueHandleTests.fs" />
     <Compile Include="Program.fs" />

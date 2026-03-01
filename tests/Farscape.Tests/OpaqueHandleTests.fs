@@ -184,7 +184,7 @@ module IntegrationTests =
                   Documentation = None
                   IsVirtual = false; IsStatic = false; IsInline = false; Attributes = [] }
         ]
-        let output = FidelityCodeGenerator.generate decls "Fidelity.ROCm.Stream" "amdhip64" Types.LP64
+        let output = FidelityCodeGenerator.generate decls "Fidelity.ROCm.Stream" "amdhip64" Types.LP64 Map.empty
         // Should contain the wrapper struct
         Assert.Contains("[<Struct>]", output)
         Assert.Contains("type hipStream_t = {", output)
@@ -197,7 +197,7 @@ module IntegrationTests =
         let decls = [
             CppParser.Declaration.Function (mkFunc "getpid" "int" [])
         ]
-        let output = FidelityCodeGenerator.generate decls "Fidelity.libc.Test" "libc" Types.LP64
+        let output = FidelityCodeGenerator.generate decls "Fidelity.libc.Test" "libc" Types.LP64 Map.empty
         // Should NOT contain opaque handle infrastructure
         Assert.DoesNotContain("[<Struct>]", output)
         Assert.DoesNotContain("module ", output.Split('\n') |> Array.skip 2 |> String.concat "\n")
@@ -215,7 +215,7 @@ module IntegrationTests =
                   Documentation = None
                   IsVirtual = false; IsStatic = false; IsInline = false; Attributes = [] }
         ]
-        let output = FidelityCodeGenerator.generate decls "Fidelity.ROCm" "amdhip64" Types.LP64
+        let output = FidelityCodeGenerator.generate decls "Fidelity.ROCm" "amdhip64" Types.LP64 Map.empty
         Assert.Contains("(stream: hipStream_t)", output)
         Assert.DoesNotContain("(stream: nativeint)", output)
 
@@ -231,7 +231,7 @@ module IntegrationTests =
                   Documentation = None
                   IsVirtual = false; IsStatic = false; IsInline = false; Attributes = [] }
         ]
-        let output = FidelityCodeGenerator.generate decls "Fidelity.ROCm" "amdhip64" Types.LP64
+        let output = FidelityCodeGenerator.generate decls "Fidelity.ROCm" "amdhip64" Types.LP64 Map.empty
         Assert.Contains("type hipStream_t = {", output)
         Assert.Contains("type hipEvent_t = {", output)
         Assert.Contains("(event: hipEvent_t)", output)

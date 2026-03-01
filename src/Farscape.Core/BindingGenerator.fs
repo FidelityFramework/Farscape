@@ -55,7 +55,7 @@ module BindingGenerator =
             Directory.CreateDirectory(options.OutputDirectory) |> ignore
 
             logVerbose "Generating Fidelity Clef source..." options.Verbose
-            let generatedCode = FidelityCodeGenerator.generate declarations options.Namespace options.LibraryName options.DataModel
+            let generatedCode = FidelityCodeGenerator.generate declarations options.Namespace options.LibraryName options.DataModel Map.empty
 
             let lastSegment = options.Namespace.Split('.') |> Array.last
             let outputFileName = $"{lastSegment}.fs"
@@ -119,6 +119,24 @@ module BindingGenerator =
                         | _ -> WrapperTypes.NoErrors
                     | None -> WrapperTypes.NoErrors
 
+                // Extract struct layouts for ABI-critical structs (clang third pass)
+                let abiStructNames =
+                    match project.Options with
+                    | Some opts when not opts.AbiCriticalStructs.IsEmpty -> opts.AbiCriticalStructs
+                    | _ -> []
+
+                let structLayouts =
+                    if abiStructNames.IsEmpty then Map.empty
+                    else
+                        let headerFile = project.Library.Headers |> List.head
+                        match CppParser.extractStructLayouts headerFile project.Library.IncludePaths project.Library.Defines abiStructNames verbose with
+                        | Ok layouts ->
+                            logVerbose $"Extracted layouts for {layouts.Count} ABI-critical struct(s)" verbose
+                            layouts
+                        | Error e ->
+                            logVerbose $"Warning: struct layout extraction failed: {e}" verbose
+                            Map.empty
+
                 // Generate enum error module if convention is EnumErrorCode
                 let errorModuleFiles =
                     match errorHandling with
@@ -149,12 +167,36 @@ module BindingGenerator =
                             []
                     | _ -> []
 
+                // Generate BAREWire descriptors if configured
+                let descriptorFiles =
+                    let generateDescriptors =
+                        match project.Options with
+                        | Some opts -> opts.GenerateDescriptors && not structLayouts.IsEmpty
+                        | None -> false
+                    if generateDescriptors then
+                        let abiStructDecls =
+                            declarations |> List.choose (function
+                                | CppParser.Declaration.Struct s when Map.containsKey s.Name structLayouts ->
+                                    Some (s, structLayouts.[s.Name])
+                                | _ -> None)
+                        if abiStructDecls.IsEmpty then []
+                        else
+                            let typedefMap = FidelityCodeGenerator.buildTypedefMap declarations
+                            let opaqueHandles = FidelityCodeGenerator.detectOpaqueHandles declarations
+                            let descriptorNs = $"Fidelity.{project.Library.Name}.Descriptors"
+                            let descriptorCode = DescriptorGenerator.generate abiStructDecls descriptorNs typedefMap dataModel opaqueHandles
+                            let descriptorPath = Path.Combine(project.Output.Directory, "Descriptors.fs")
+                            File.WriteAllText(descriptorPath, descriptorCode)
+                            logVerbose $"Descriptor module: {descriptorPath}" verbose
+                            [descriptorPath]
+                    else []
+
                 let allFiles =
-                    errorModuleFiles @
+                    errorModuleFiles @ descriptorFiles @
                     (project.Namespaces |> List.collect (fun ns ->
                         let filtered = PilotAnalyzer.filterDeclarationsForNamespace ns declarations
                         logVerbose $"Namespace {ns.Name}: {filtered.Length} declarations" verbose
-                        let code = FidelityCodeGenerator.generate filtered ns.Name ns.Library dataModel
+                        let code = FidelityCodeGenerator.generate filtered ns.Name ns.Library dataModel structLayouts
                         let lastSegment = ns.Name.Split('.') |> Array.last
                         let fileName = $"{lastSegment}.fs"
                         let outputPath = Path.Combine(project.Output.Directory, fileName)

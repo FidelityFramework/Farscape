@@ -218,7 +218,8 @@ module PilotAnalyzer =
             { Mode = outputMode
               Directory = outputDir }
           Namespaces = namespaces @ catchAll
-          ErrorConventions = None }
+          ErrorConventions = None
+          Options = None }
 
     // =========================================================================
     // Declaration Filtering (for scoped generation)

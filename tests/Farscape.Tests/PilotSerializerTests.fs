@@ -28,6 +28,7 @@ let private sampleProject : PilotTypes.PilotProject = {
           Functions = ["pipe"] }
     ]
     ErrorConventions = None
+    Options = None
 }
 
 [<Fact>]
@@ -169,6 +170,7 @@ module ErrorConventionTomlTests =
                 Default = Errno
                 Overrides = Map.ofList [("pthread_create", ReturnCode); ("strtol", NoErrorConvention)]
             }
+            Options = None
         }
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("error_conventions", toml)
@@ -203,6 +205,7 @@ module ErrorConventionTomlTests =
                 Default = EnumErrorCode ("hipError_t", "hipSuccess", Some "hipGetErrorString", Some "hipGetErrorName")
                 Overrides = Map.empty
             }
+            Options = None
         }
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("enum_error_code", toml)
@@ -238,6 +241,7 @@ module ErrorConventionTomlTests =
                 Default = EnumErrorCode ("xrt_error_code", "XRT_SUCCESS", None, None)
                 Overrides = Map.empty
             }
+            Options = None
         }
         let toml = PilotSerializer.toTomlString project
         // Should NOT contain optional fn fields
@@ -264,6 +268,7 @@ module ErrorConventionTomlTests =
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
             ErrorConventions = Some { Default = Errno; Overrides = Map.empty }
+            Options = None
         }
         let toml = PilotSerializer.toTomlString project
         match Fidelity.Toml.Toml.parse toml with

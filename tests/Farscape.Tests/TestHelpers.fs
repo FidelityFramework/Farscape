@@ -40,7 +40,18 @@ let mkStructSimple name : CppParser.StructDecl =
     { Name = name; Fields = []; Documentation = None; IsUnion = false }
 
 let mkField name typ : CppParser.FieldDecl =
-    { Name = name; Type = typ; IsConst = false; IsVolatile = false; IsArray = false; ArraySize = None }
+    { Name = name; Type = typ; IsConst = false; IsVolatile = false; IsArray = false; ArraySize = None
+      IsBitfield = false; BitWidth = None }
+
+let mkBitField name typ width : CppParser.FieldDecl =
+    { Name = name; Type = typ; IsConst = false; IsVolatile = false; IsArray = false; ArraySize = None
+      IsBitfield = true; BitWidth = Some width }
+
+// ─── Layout helpers ───
+
+let mkLayout name sizeBits alignBits fieldOffsets : CppParser.StructLayoutInfo =
+    { Name = name; SizeBits = sizeBits; DataSizeBits = sizeBits
+      AlignmentBits = alignBits; FieldOffsetsBits = fieldOffsets }
 
 // ─── Attribute helpers ───
 

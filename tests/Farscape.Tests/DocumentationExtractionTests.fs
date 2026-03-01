@@ -60,7 +60,7 @@ let ``formatDocDecls with documentation produces description and C signature`` (
                       (Some "Read NBYTES into BUF from FD. Return the number read, -1 for errors or 0 for EOF.")
     let decls = FidelityCodeGenerator.generate
                     [ CppParser.Declaration.Function func ]
-                    "Fidelity.libc.Test" "libc" Types.LP64
+                    "Fidelity.libc.Test" "libc" Types.LP64 Map.empty
     // Should contain the description from the header comment
     Assert.Contains("/// Read NBYTES into BUF from FD.", decls)
     // Should contain the C signature
@@ -71,7 +71,7 @@ let ``formatDocDecls without documentation produces only C signature`` () =
     let func = mkFuncWithDoc "getpid" "int" [] None
     let decls = FidelityCodeGenerator.generate
                     [ CppParser.Declaration.Function func ]
-                    "Fidelity.libc.Test" "libc" Types.LP64
+                    "Fidelity.libc.Test" "libc" Types.LP64 Map.empty
     Assert.Contains("/// C signature: int getpid()", decls)
     // Should NOT have a blank XML doc line (no description to separate from)
     Assert.DoesNotContain("/// \n", decls)
@@ -88,11 +88,11 @@ let ``wrapper with documented function produces description and C signature`` ()
 let ``struct documentation flows to RecordType output`` () =
     let s : CppParser.StructDecl =
         { Name = "Point"; Fields = [
-            { Name = "x"; Type = "int"; IsConst = false; IsVolatile = false; IsArray = false; ArraySize = None }
-            { Name = "y"; Type = "int"; IsConst = false; IsVolatile = false; IsArray = false; ArraySize = None }
+            { Name = "x"; Type = "int"; IsConst = false; IsVolatile = false; IsArray = false; ArraySize = None; IsBitfield = false; BitWidth = None }
+            { Name = "y"; Type = "int"; IsConst = false; IsVolatile = false; IsArray = false; ArraySize = None; IsBitfield = false; BitWidth = None }
           ]; Documentation = Some "A point in 2D space."; IsUnion = false }
     let decls = [ CppParser.Declaration.Struct s ]
-    let output = FidelityCodeGenerator.generate decls "Fidelity.test" "test" Types.LP64
+    let output = FidelityCodeGenerator.generate decls "Fidelity.test" "test" Types.LP64 Map.empty
     Assert.Contains("/// A point in 2D space.", output)
 
 [<Fact>]
@@ -104,7 +104,7 @@ let ``enum documentation flows to EnumType output`` () =
             { Name = "BLUE"; Value = 2L; Documentation = None }
           ]; Documentation = Some "Color values for rendering."; UnderlyingType = None }
     let decls = [ CppParser.Declaration.Enum e ]
-    let output = FidelityCodeGenerator.generate decls "Fidelity.test" "test" Types.LP64
+    let output = FidelityCodeGenerator.generate decls "Fidelity.test" "test" Types.LP64 Map.empty
     Assert.Contains("/// Color values for rendering.", output)
 
 [<Fact>]

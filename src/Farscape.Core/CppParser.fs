@@ -31,6 +31,8 @@ module CppParser =
         IsConst: bool         // __I, const
         IsArray: bool         // Fixed-size array (e.g., RESERVED[4])
         ArraySize: int option // Size if IsArray
+        IsBitfield: bool      // clang JSON "isBitfield"
+        BitWidth: int option  // Bit width if IsBitfield
     }
 
     /// Raw attribute data extracted from clang AST nodes.
@@ -124,6 +126,25 @@ module CppParser =
         Fields: FieldDecl list
         Documentation: string option
         IsAbstract: bool
+    }
+
+    // =========================================================================
+    // Struct Layout Information (from clang -fdump-record-layouts-simple)
+    // =========================================================================
+
+    /// Layout information for a struct, extracted from clang's record layout dump.
+    /// All sizes are in bits as reported by clang; byte conversion happens downstream.
+    type StructLayoutInfo = {
+        /// Struct name (e.g., "drm_mode_create_dumb")
+        Name: string
+        /// Total size in bits
+        SizeBits: int
+        /// Data size in bits (excludes padding at end)
+        DataSizeBits: int
+        /// Required alignment in bits
+        AlignmentBits: int
+        /// Per-field offsets in bits (order matches FieldDecl order)
+        FieldOffsetsBits: int list
     }
 
     // =========================================================================
@@ -300,6 +321,8 @@ module CppParser =
             IsConst = isConst
             IsArray = isArray
             ArraySize = arraySize
+            IsBitfield = false
+            BitWidth = None
         }
 
     // =========================================================================
@@ -372,7 +395,22 @@ module CppParser =
         | Some fieldName ->
             let typeStr = getQualType node
             let fieldInfo = parseFieldType typeStr
-            Some { fieldInfo with Name = fieldName }
+            let isBitfield = getBool node "isBitfield"
+            let bitWidth =
+                if isBitfield then
+                    node.TryGetProperty("inner")
+                    |> Option.bind (fun inner ->
+                        inner.AsArray()
+                        |> Array.tryPick (fun child ->
+                            match getString child "kind" with
+                            | Some "ConstantExpr" | Some "IntegerLiteral" ->
+                                getString child "value" |> Option.bind (fun v ->
+                                    match System.Int32.TryParse(v) with
+                                    | true, n -> Some n
+                                    | _ -> None)
+                            | _ -> None))
+                else None
+            Some { fieldInfo with Name = fieldName; IsBitfield = isBitfield; BitWidth = bitWidth }
 
     /// Process RecordDecl (struct/union) AST node
     let private processRecordDecl (node: JsonValue) : StructDecl option =
@@ -742,6 +780,106 @@ module CppParser =
             with _ -> Map.empty
 
     // =========================================================================
+    // Struct Layout Parser (XParsec, monadic — parses clang -fdump-record-layouts-simple)
+    // =========================================================================
+
+    /// XParsec parsers for clang's -fdump-record-layouts-simple stderr output.
+    ///
+    /// Format (all values in bits):
+    ///   *** Dumping AST Record Layout
+    ///   Type: struct Point
+    ///   Layout: <ASTRecordLayout
+    ///     Size:128
+    ///     DataSize:128
+    ///     Alignment:64
+    ///     FieldOffsets: [0, 32, 64]>
+    type private LayoutParsers<'Input, 'InputSlice
+        when 'Input :> IReadable<char, 'InputSlice> and 'InputSlice :> IReadable<char, 'InputSlice>>() =
+
+        static let pSpaces = skipMany (satisfyL (fun c -> c = ' ' || c = '\t') "space")
+
+        static let pNewline = satisfyL (fun c -> c = '\n' || c = '\r') "newline" >>% ()
+
+        static let pSkipLine =
+            skipMany (satisfyL (fun c -> c <> '\n' && c <> '\r') "non-newline")
+            >>. optional pNewline
+
+        static let pStructName =
+            parser {
+                do! pSpaces
+                do! pstring "Type: " >>% ()
+                do! optional (pstring "struct " >>% ()) >>% ()
+                let! name = many1Chars (satisfyL (fun c -> c <> '\n' && c <> '\r' && c <> ' ') "name char")
+                do! pSkipLine
+                return name
+            }
+
+        static let pIntField label =
+            parser {
+                do! pSpaces
+                do! pstring label >>% ()
+                let! value = pint32
+                do! pSkipLine
+                return value
+            }
+
+        static let pFieldOffsets =
+            parser {
+                do! pSpaces
+                do! pstring "FieldOffsets: [" >>% ()
+                let! offsets, _ = sepBy (pSpaces >>. pint32 .>> pSpaces) (skipChar ',')
+                do! skipChar ']'
+                do! pSkipLine
+                return Seq.toList offsets
+            }
+
+        static let pEmptyFieldOffsets =
+            parser {
+                do! pSpaces
+                do! pstring "FieldOffsets: []" >>% ()
+                do! pSkipLine
+                return []
+            }
+
+        static let pLayoutBlock =
+            parser {
+                let! name = pStructName
+                do! pSkipLine // "Layout: <ASTRecordLayout" line
+                let! size = pIntField "Size:"
+                let! dataSize = pIntField "DataSize:"
+                let! alignment = pIntField "Alignment:"
+                let! offsets = pEmptyFieldOffsets <|> pFieldOffsets
+                do! pSkipLine // closing ">" line
+                return {
+                    Name = name
+                    SizeBits = size
+                    DataSizeBits = dataSize
+                    AlignmentBits = alignment
+                    FieldOffsetsBits = offsets
+                }
+            }
+
+        static member LayoutBlock = pLayoutBlock
+
+    type private LP = LayoutParsers<ReadableString, ReadableStringSlice>
+
+    /// Parse clang's -fdump-record-layouts-simple stderr output into a map of struct layouts.
+    /// Each record layout block is preceded by "*** Dumping AST Record Layout".
+    /// Blocks that fail to parse are silently skipped.
+    let parseRecordLayouts (stderr: string) : Map<string, StructLayoutInfo> =
+        let blocks = stderr.Split("*** Dumping AST Record Layout")
+        blocks
+        |> Array.choose (fun block ->
+            let trimmed = block.TrimStart([| '\n'; '\r' |])
+            if String.IsNullOrWhiteSpace(trimmed) then None
+            else
+                let reader = Reader.ofString trimmed ()
+                match LP.LayoutBlock reader with
+                | Ok result -> Some (result.Parsed.Name, result.Parsed)
+                | Error _ -> None)
+        |> Map.ofArray
+
+    // =========================================================================
     // Clang Invocation
     // =========================================================================
 
@@ -803,6 +941,71 @@ module CppParser =
     let private runClangMacros (options: HeaderParserOptions) : Result<string, string> =
         let args = buildClangArgs options
         runClang args ["-E"; "-dM"; options.HeaderFile] options.Verbose
+
+    /// Run clang with -fdump-record-layouts-simple to extract struct layout info.
+    /// Generates a temporary C file that forces layout computation for the named structs
+    /// by referencing sizeof() for each. Layout data appears on stderr.
+    let extractStructLayouts
+        (headerFile: string) (includePaths: string list) (defines: string list)
+        (structNames: string list) (verbose: bool)
+        : Result<Map<string, StructLayoutInfo>, string> =
+
+        if structNames.IsEmpty then Ok Map.empty
+        else
+
+        let tempDir = Path.Combine(Path.GetTempPath(), "farscape-layout")
+        Directory.CreateDirectory(tempDir) |> ignore
+        let tempFile = Path.Combine(tempDir, "_farscape_layout_probe.c")
+
+        let result =
+            try
+                // Generate a C file that forces layout computation via sizeof()
+                let includeDirective = $"#include \"{headerFile}\""
+                let sizeofRefs =
+                    structNames
+                    |> List.mapi (fun i name -> $"void *_fs_layout_{i} = (void*)sizeof(struct {name});")
+                    |> String.concat "\n"
+                File.WriteAllText(tempFile, $"{includeDirective}\n{sizeofRefs}\n")
+
+                let args = ResizeArray<string>()
+                for ip in includePaths do args.Add($"-I{ip}")
+                for d in defines do args.Add($"-D{d}")
+                for arg in ["-Xclang"; "-fdump-record-layouts-simple"; "-fsyntax-only"; tempFile] do
+                    args.Add(arg)
+
+                let startInfo = ProcessStartInfo()
+                startInfo.FileName <- "clang"
+                startInfo.Arguments <- String.Join(" ", args :> string seq)
+                startInfo.RedirectStandardOutput <- true
+                startInfo.RedirectStandardError <- true
+                startInfo.UseShellExecute <- false
+                startInfo.CreateNoWindow <- true
+
+                if verbose then
+                    printfn "[CppParser] Layout extraction: clang %s" startInfo.Arguments
+
+                use proc = Process.Start(startInfo)
+                proc.StandardOutput.ReadToEnd() |> ignore
+                let stderr = proc.StandardError.ReadToEnd()
+                proc.WaitForExit()
+
+                if verbose then
+                    printfn "[CppParser] Layout stderr: %d bytes, exit code: %d" stderr.Length proc.ExitCode
+
+                // Parse layout data from stderr (clang may return non-zero due to unused variables)
+                let layouts = parseRecordLayouts stderr
+
+                // Filter to only the requested struct names
+                let filtered =
+                    structNames
+                    |> List.choose (fun name -> layouts |> Map.tryFind name |> Option.map (fun l -> (name, l)))
+                    |> Map.ofList
+
+                Ok filtered
+            with ex ->
+                Error $"Failed to extract struct layouts: {ex.Message}"
+        try File.Delete(tempFile) with _ -> ()
+        result
 
     // =========================================================================
     // Include Tree Discovery + Macro Documentation Enrichment

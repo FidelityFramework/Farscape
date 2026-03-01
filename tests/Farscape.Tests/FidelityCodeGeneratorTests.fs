@@ -26,7 +26,7 @@ let ``generate produces valid Fidelity binding for simple function`` () =
     let decls = [
         CppParser.Declaration.Function (mkFunc "getpid" "int" [])
     ]
-    let result = FidelityCodeGenerator.generate decls "Fidelity.libc.Test" "libc" Types.LP64
+    let result = FidelityCodeGenerator.generate decls "Fidelity.libc.Test" "libc" Types.LP64 Map.empty
     Assert.Contains("module Fidelity.libc.Test", result)
     Assert.Contains("let getpid () : int32 =", result)
     Assert.Contains("Unchecked.defaultof<int32>", result)
@@ -36,7 +36,7 @@ let ``generate maps char pointer params to nativeptr<byte>`` () =
     let decls = [
         CppParser.Declaration.Function (mkFunc "strlen" "unsigned long" [("__s", "const char *")])
     ]
-    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
+    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
     Assert.Contains("(s: nativeptr<byte>)", result)
 
 [<Fact>]
@@ -45,7 +45,7 @@ let ``generate maps void pointer params to nativeint`` () =
         CppParser.Declaration.Function (mkFunc "memset" "void *" [("__s", "void *"); ("__c", "int"); ("__n", "size_t")])
         CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
     ]
-    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
+    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
     Assert.Contains("(s: nativeint)", result)
     Assert.Contains(": nativeint =", result)
 
@@ -54,7 +54,7 @@ let ``generate handles function pointer params as nativeint`` () =
     let decls = [
         CppParser.Declaration.Function (mkFunc "atexit" "int" [("__func", "void (*)(void)")])
     ]
-    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
+    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
     Assert.Contains("(func: nativeint)", result)
 
 [<Fact>]
@@ -67,7 +67,7 @@ let ``generate resolves typedef to function pointer as nativeint`` () =
         ])
         CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
     ]
-    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
+    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
     Assert.Contains("(compar: nativeint)", result)
 
 [<Fact>]
@@ -76,7 +76,7 @@ let ``generate does not map wchar_t pointer as nativeptr<byte>`` () =
         CppParser.Declaration.Function (mkFunc "mbtowc" "int" [("__pwc", "wchar_t *"); ("__s", "const char *"); ("__n", "size_t")])
         CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
     ]
-    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
+    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
     // wchar_t * should be nativeint, not nativeptr<byte>
     Assert.Contains("(pwc: nativeint)", result)
 
@@ -90,7 +90,7 @@ let ``generate emits numeric macro constants`` () =
             Name = "EXIT_FAILURE"; Kind = CppParser.SimpleValue "1"; RawValue = "1"; Documentation = None
         }
     ]
-    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
+    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
     Assert.Contains("[<Literal>]", result)
     Assert.Contains("let EXIT_SUCCESS = 0", result)
     Assert.Contains("let EXIT_FAILURE = 1", result)
@@ -101,7 +101,7 @@ let ``generate filters compiler builtin macros`` () =
         CppParser.Declaration.Macro { Name = "__STDC__"; Kind = CppParser.SimpleValue "1"; RawValue = "1"; Documentation = None }
         CppParser.Declaration.Macro { Name = "FOO"; Kind = CppParser.SimpleValue "42"; RawValue = "42"; Documentation = None }
     ]
-    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
+    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
     Assert.DoesNotContain("__STDC__", result)
     Assert.Contains("let FOO = 42", result)
 
@@ -111,7 +111,7 @@ let ``generate deduplicates functions by name`` () =
         CppParser.Declaration.Function (mkFunc "read" "int" [("__fd", "int")])
         CppParser.Declaration.Function (mkFunc "read" "int" [("__fd", "int")])
     ]
-    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
+    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
     let occurrences =
         result.Split("let read ")
         |> Array.length
@@ -123,7 +123,7 @@ let ``generate emits enums`` () =
     let decls = [
         CppParser.Declaration.Enum (mkEnum "Flags" [mkEnumVal "A" 0L; mkEnumVal "B" 1L] (Some "Test flags"))
     ]
-    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
+    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
     Assert.Contains("type Flags =", result)
     Assert.Contains("| A = 0L", result)
     Assert.Contains("| B = 1L", result)
@@ -137,7 +137,7 @@ let ``generate detects bitmask enum and emits Flags attribute`` () =
             [mkEnumVal "Default" 0L; mkEnumVal "Portable" 1L; mkEnumVal "Mapped" 2L; mkEnumVal "WriteCombined" 4L; mkEnumVal "Coherent" 64L]
             (Some "Host allocation flags"))
     ]
-    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
+    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
     Assert.Contains("[<System.Flags>]", result)
     Assert.Contains("type hipHostMallocFlags =", result)
 
@@ -148,7 +148,7 @@ let ``generate does not emit Flags for sequential enum`` () =
             [mkEnumVal "Success" 0L; mkEnumVal "InvalidValue" 1L; mkEnumVal "MemAlloc" 2L; mkEnumVal "InitError" 3L; mkEnumVal "Deinitialized" 4L; mkEnumVal "Disabled" 5L]
             None)
     ]
-    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
+    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
     Assert.DoesNotContain("[<System.Flags>]", result)
     Assert.Contains("type hipError_t =", result)
 
@@ -157,7 +157,7 @@ let ``generate emits struct as record`` () =
     let decls = [
         CppParser.Declaration.Struct (mkStruct "Point" [mkField "x" "int"; mkField "y" "int"] (Some "A point"))
     ]
-    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
+    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
     Assert.Contains("type Point = {", result)
     Assert.Contains("x: int32", result)
     Assert.Contains("y: int32", result)
@@ -168,7 +168,7 @@ let ``generate emits FidelityExtern attribute on function bindings`` () =
         CppParser.Declaration.Function (mkFunc "memcpy" "void *" [("__dest", "void *"); ("__src", "const void *"); ("__n", "size_t")])
         CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
     ]
-    let result = FidelityCodeGenerator.generate decls "Fidelity.libc.Memory" "libc" Types.LP64
+    let result = FidelityCodeGenerator.generate decls "Fidelity.libc.Memory" "libc" Types.LP64 Map.empty
     Assert.Contains("[<FidelityExtern(\"libc\", \"memcpy\")>]", result)
     Assert.Contains("let memcpy", result)
 
@@ -177,5 +177,5 @@ let ``generate emits FidelityExtern with correct library name`` () =
     let decls = [
         CppParser.Declaration.Function (mkFunc "wl_display_connect" "void *" [("__name", "const char *")])
     ]
-    let result = FidelityCodeGenerator.generate decls "Fidelity.wayland.Display" "wayland-client" Types.LP64
+    let result = FidelityCodeGenerator.generate decls "Fidelity.wayland.Display" "wayland-client" Types.LP64 Map.empty
     Assert.Contains("[<FidelityExtern(\"wayland-client\", \"wl_display_connect\")>]", result)
