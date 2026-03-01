@@ -90,6 +90,21 @@ module ActivePatterns =
         | CleanName n -> n
 
     // =========================================================================
+    // Opaque Handle Detection
+    // =========================================================================
+
+    /// Detect whether a typedef represents an opaque handle.
+    /// True when the underlying type is a pointer to a struct not defined in the translation unit.
+    /// Matches the canonical C pattern: typedef struct ihipStream_t* hipStream_t;
+    let isOpaqueHandleTypedef (knownStructNames: Set<string>) (td: CppParser.TypedefInfo) : bool =
+        match CTypeParser.tryParseCType td.UnderlyingType with
+        | Some info when info.PointerDepth > 0 ->
+            let baseType = info.BaseType.Trim()
+            baseType.StartsWith("struct ") &&
+            not (knownStructNames.Contains(baseType.Substring(7).Trim()))
+        | _ -> false
+
+    // =========================================================================
     // Array Type Active Pattern
     // =========================================================================
 

@@ -159,12 +159,13 @@ module WrapperCodeGenerator =
     let private generateWrapperDecls
         (typedefMap: Map<string, string>)
         (model: PlatformABI)
+        (opaqueHandles: Set<string>)
         (bindingsModule: string)
         (useErrno: bool)
         (func: CppParser.FunctionDecl)
         : FsDecl list =
 
-        let mapType = FidelityCodeGenerator.mapCTypeToFidelityType typedefMap model
+        let mapType = FidelityCodeGenerator.mapCTypeToFidelityType typedefMap model opaqueHandles
         let pattern = WrapperPatternAnalyzer.analyze func typedefMap
 
         // Parameter types match the raw stubs exactly
@@ -221,6 +222,9 @@ module WrapperCodeGenerator =
         // Phase 1: Build typedef resolution map (shared with FidelityCodeGenerator)
         let typedefMap = FidelityCodeGenerator.buildTypedefMap declarations
 
+        // Phase 1.5: Detect opaque handle typedefs (shared with FidelityCodeGenerator)
+        let opaqueHandles = FidelityCodeGenerator.detectOpaqueHandles declarations
+
         // Phase 2: Extract functions via catamorphism (ONE pass)
         let groups =
             DeclarationAlgebra.cataDeclarations wrapperAlgebra declarations
@@ -230,7 +234,7 @@ module WrapperCodeGenerator =
             groups
             |> List.choose (function WFunc f -> Some f | WNone -> None)
             |> List.distinctBy (fun f -> f.Name)
-            |> List.collect (generateWrapperDecls typedefMap model bindingsModule useErrno)
+            |> List.collect (generateWrapperDecls typedefMap model opaqueHandles bindingsModule useErrno)
 
         // Phase 4: Build typed FsDecl tree; wrapper module opens the bindings module
         let openDecl = Comment $"open {bindingsModule}"

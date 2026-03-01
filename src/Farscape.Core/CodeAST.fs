@@ -73,3 +73,5 @@ module CodeAST =
         | RecordType of name: string * fields: (string * FsType) list * doc: string option * attributes: string list
         /// type Name = | Case1 = 0L | Case2 = 1L
         | EnumType of name: string * values: (string * int64) list * doc: string option
+        /// Nested module: module Name = \n    decls (for companion modules)
+        | SubModule of name: string * decls: FsDecl list

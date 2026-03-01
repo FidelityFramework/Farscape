@@ -55,6 +55,46 @@ module FidelityCodeGenerator =
         | None -> baseType
 
     // =========================================================================
+    // Opaque Handle Detection (pre-pass over typedefs)
+    // =========================================================================
+
+    /// Detect opaque handle typedefs from the declaration list.
+    /// Returns the set of typedef names that are opaque handles (pointer to undefined struct).
+    let detectOpaqueHandles (declarations: CppParser.Declaration list) : Set<string> =
+        let knownStructNames =
+            DeclarationAlgebra.cataDeclarations DeclarationAlgebra.definedStructNameAlgebra declarations
+            |> List.choose id
+            |> Set.ofList
+        DeclarationAlgebra.cataDeclarations DeclarationAlgebra.typedefAlgebra declarations
+        |> List.choose id
+        |> List.filter (fun (_, underlyingType) ->
+            let td : CppParser.TypedefInfo =
+                { Name = ""; UnderlyingType = underlyingType; Documentation = None }
+            ActivePatterns.isOpaqueHandleTypedef knownStructNames td)
+        |> List.map fst
+        |> Set.ofList
+
+    /// Generate wrapper struct + companion module declarations for opaque handle types.
+    let generateOpaqueHandleDecls (handleNames: Set<string>) : FsDecl list =
+        handleNames
+        |> Set.toList
+        |> List.sort
+        |> List.collect (fun name ->
+            [ XmlDoc "Opaque handle wrapping a native pointer."
+              RecordType(name, [("Handle", Named "nativeint")], None, ["Struct"])
+              SubModule(name, [
+                  LetBinding("zero", [],
+                      Named name,
+                      RecordConstruction [("Handle", Literal "0n")],
+                      [])
+                  LetBinding("isNull", [{ Name = "h"; Type = Named name }],
+                      Named "bool",
+                      Comparison(Identifier "h.Handle", "=", Literal "0n"),
+                      [])
+              ])
+              BlankLine ])
+
+    // =========================================================================
     // Fidelity-Specific Type Mapping (active patterns, zero Regex)
     // =========================================================================
 
@@ -69,9 +109,11 @@ module FidelityCodeGenerator =
     /// Uses ParsedCType active pattern (XParsec-backed) instead of Regex/string munging.
     /// PlatformABI determines concrete widths for C int/long (resolved at generation time).
     /// Used by both FidelityCodeGenerator (Layer 1) and WrapperCodeGenerator (Layer 2).
-    let mapCTypeToFidelityType (typedefMap: Map<string, string>) (model: PlatformABI) (cType: string) : FsType =
+    let mapCTypeToFidelityType (typedefMap: Map<string, string>) (model: PlatformABI) (opaqueHandles: Set<string>) (cType: string) : FsType =
+        // Opaque handle types preserve their wrapper struct name
+        if opaqueHandles.Contains(cType) then Named cType
         // Function pointer types like "void (*)(void)" contain (*); always nativeint
-        if cType.Contains("(*)") then Named "nativeint"
+        elif cType.Contains("(*)") then Named "nativeint"
         else
         match cType with
         | ParsedCType info ->
@@ -113,8 +155,8 @@ module FidelityCodeGenerator =
             [ XmlDoc cSignature ]
 
     /// Generate FsDecl list for a single function binding.
-    let private generateFunctionDecls (typedefMap: Map<string, string>) (model: PlatformABI) (libraryName: string) (func: CppParser.FunctionDecl) : FsDecl list =
-        let mapType = mapCTypeToFidelityType typedefMap model
+    let private generateFunctionDecls (typedefMap: Map<string, string>) (model: PlatformABI) (opaqueHandles: Set<string>) (libraryName: string) (func: CppParser.FunctionDecl) : FsDecl list =
+        let mapType = mapCTypeToFidelityType typedefMap model opaqueHandles
         let returnType = mapType func.ReturnType
         let parameters =
             func.Parameters
@@ -131,8 +173,8 @@ module FidelityCodeGenerator =
         [ EnumType(e.Name, e.Values |> List.map (fun v -> (v.Name, v.Value)), e.Documentation) ]
 
     /// Generate FsDecl list for a struct type (as F# record).
-    let private generateStructDecl (typedefMap: Map<string, string>) (model: PlatformABI) (s: CppParser.StructDecl) : FsDecl list =
-        let mapType = mapCTypeToFidelityType typedefMap model
+    let private generateStructDecl (typedefMap: Map<string, string>) (model: PlatformABI) (opaqueHandles: Set<string>) (s: CppParser.StructDecl) : FsDecl list =
+        let mapType = mapCTypeToFidelityType typedefMap model opaqueHandles
         let fields = s.Fields |> List.map (fun f -> (f.Name, mapType f.Type))
         [ RecordType(s.Name, fields, s.Documentation, []) ]
 
@@ -172,9 +214,9 @@ module FidelityCodeGenerator =
 
     /// Generation algebra: maps each Declaration variant to a DeclGroup.
     /// This is the SINGLE traversal of declarations for code generation.
-    let private generationAlgebra (typedefMap: Map<string, string>) (model: PlatformABI) : DeclarationAlgebra.DeclarationAlgebra<DeclGroup> = {
+    let private generationAlgebra (typedefMap: Map<string, string>) (model: PlatformABI) (opaqueHandles: Set<string>) : DeclarationAlgebra.DeclarationAlgebra<DeclGroup> = {
         OnEnum = fun e -> if e.Name <> "" then GEnum (generateEnumDecl e) else GNone
-        OnStruct = fun s -> if s.Name <> "" then GStruct (generateStructDecl typedefMap model s) else GNone
+        OnStruct = fun s -> if s.Name <> "" then GStruct (generateStructDecl typedefMap model opaqueHandles s) else GNone
         OnFunction = fun f -> GFunc f
         OnMacro = fun m ->
             let decls = generateMacroDeclIfNumeric m
@@ -197,9 +239,13 @@ module FidelityCodeGenerator =
         // Phase 1: Build typedef resolution map (catamorphism + pure recursion)
         let typedefMap = buildTypedefMap declarations
 
+        // Phase 1.5: Detect opaque handle typedefs (pre-pass)
+        let opaqueHandles = detectOpaqueHandles declarations
+        let opaqueHandleDecls = generateOpaqueHandleDecls opaqueHandles
+
         // Phase 2: Categorize declarations via catamorphism (ONE pass)
         let groups =
-            DeclarationAlgebra.cataDeclarations (generationAlgebra typedefMap model) declarations
+            DeclarationAlgebra.cataDeclarations (generationAlgebra typedefMap model opaqueHandles) declarations
 
         // Phase 3: Assemble categories (pure functional fold)
         let enums = groups |> List.collect (function GEnum d -> d | _ -> [])
@@ -208,7 +254,7 @@ module FidelityCodeGenerator =
             groups
             |> List.choose (function GFunc f -> Some f | _ -> None)
             |> List.distinctBy (fun f -> f.Name)
-            |> List.collect (generateFunctionDecls typedefMap model libraryName)
+            |> List.collect (generateFunctionDecls typedefMap model opaqueHandles libraryName)
         let macros = groups |> List.collect (function GMacro d -> d | _ -> [])
 
         // Phase 4: Build typed FsDecl tree
@@ -216,7 +262,7 @@ module FidelityCodeGenerator =
             if macros.IsEmpty then []
             else Comment "// Macro constants" :: macros @ [BlankLine]
 
-        let allDecls = enums @ structs @ functions @ macroSection
+        let allDecls = opaqueHandleDecls @ enums @ structs @ functions @ macroSection
         let moduleDecl = Module(namespace', $"Fidelity binding for {libraryName}", allDecls)
 
         // Phase 5: Render to string (the ONLY StringBuilder, in CodeRenderer)

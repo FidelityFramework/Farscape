@@ -48,10 +48,23 @@ module DeclarationAlgebra =
         OnClass     = fun _ -> None
     }
 
-    /// Extract struct names from declarations.
+    /// Extract struct names from declarations (includes forward declarations).
     /// Non-struct declarations produce None.
     let structNameAlgebra : DeclarationAlgebra<string option> = {
         OnStruct    = fun s -> if s.Name <> "" then Some s.Name else None
+        OnClass     = fun c -> if c.Methods.IsEmpty && c.Name <> "" then Some c.Name else None
+        OnFunction  = fun _ -> None
+        OnEnum      = fun _ -> None
+        OnTypedef   = fun _ -> None
+        OnMacro     = fun _ -> None
+        OnNamespace = fun _ -> None
+    }
+
+    /// Extract names of fully-defined structs (those with fields).
+    /// Forward-declared structs (zero fields) are excluded.
+    /// Used by opaque handle detection to distinguish defined vs incomplete types.
+    let definedStructNameAlgebra : DeclarationAlgebra<string option> = {
+        OnStruct    = fun s -> if s.Name <> "" && not s.Fields.IsEmpty then Some s.Name else None
         OnClass     = fun c -> if c.Methods.IsEmpty && c.Name <> "" then Some c.Name else None
         OnFunction  = fun _ -> None
         OnEnum      = fun _ -> None
