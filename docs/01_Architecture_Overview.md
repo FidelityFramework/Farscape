@@ -256,6 +256,45 @@ module Fidelity.libc.Memory
 
 Key constraint: `CppParser.fs` compiles before `CTypeParser.fs`; the XParsec parsers are in a separate module downstream of the parser types. `Types.fs` provides shared types (`PlatformABI`) used by `TypeMapper.fs` for resolving C type widths.
 
+## Test Architecture
+
+Tests are organized as **module-aligned test files** that mirror the source module structure. Each test file covers one functional area of Farscape, preventing monolithic test files that become difficult to navigate and maintain.
+
+### Principle
+
+Test modules track with source modules 1:1 where coverage exists. Adding a new binding surface (HIP, DRM/GBM, Wayland) means adding a new test file, not growing an existing one. Closely related concerns (e.g., errno wrapper tests alongside general wrapper tests) may share a file as a sub-module, but unrelated test areas stay separate.
+
+### Structure
+
+```
+tests/Farscape.Tests/
+├── TestHelpers.fs                  ← Shared test factories (mkFunc, mkDecl, etc.)
+├── CTypeParserTests.fs             ← XParsec C type string parsers
+├── ActivePatternsTests.fs          ← Active pattern decomposition
+├── DeclarationAlgebraTests.fs      ← Catamorphism over Declaration DU
+├── CodeRendererTests.fs            ← Typed AST → Clef source rendering
+├── FidelityCodeGeneratorTests.fs   ← Layer 1 FidelityExtern generation
+├── PilotAnalyzerTests.fs           ← Prefix analysis and declaration filtering
+├── PilotSerializerTests.fs         ← TOML round-trip (includes ErrorConventionToml)
+├── WrapperPatternAnalyzerTests.fs  ← Attribute mapping and return semantic inference
+├── WrapperCodeGeneratorTests.fs    ← Layer 2 wrapper generation (includes ErrnoWrapper)
+├── ErrnoModuleGeneratorTests.fs    ← Errno infrastructure generation
+├── DocumentationExtractionTests.fs ← Comment/doc extraction (includes RawHeaderComment)
+├── Program.fs                      ← xUnit entry point
+```
+
+### Shared Test Factories
+
+`TestHelpers.fs` provides consolidated construction helpers (`mkFunc`, `mkFuncWithAttrs`, `mkFuncWithDoc`, `mkDecl`, `mkAttr`, etc.) that eliminate duplication across test modules. Variant signatures serve different test needs: basic construction, construction with attributes, construction with documentation.
+
+### Guidelines for New Test Files
+
+- Name the file `{SourceModule}Tests.fs` to match the source module it covers
+- Use `module Farscape.Tests.{ModuleName}` as the top-level module declaration
+- Open `TestHelpers` for shared construction helpers rather than defining local duplicates
+- Closely related sub-concerns use `module SubName =` within the parent file
+- Add the new `<Compile Include="...Tests.fs" />` entry to the `.fsproj` before `Program.fs`
+
 ## Core Infrastructure Under Development
 
 These are not optional future features. They are what closes the Fidelity system loop:

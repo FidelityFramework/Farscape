@@ -7,7 +7,18 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="Tests.fs" />
+    <Compile Include="TestHelpers.fs" />
+    <Compile Include="CTypeParserTests.fs" />
+    <Compile Include="ActivePatternsTests.fs" />
+    <Compile Include="DeclarationAlgebraTests.fs" />
+    <Compile Include="CodeRendererTests.fs" />
+    <Compile Include="FidelityCodeGeneratorTests.fs" />
+    <Compile Include="PilotAnalyzerTests.fs" />
+    <Compile Include="PilotSerializerTests.fs" />
+    <Compile Include="WrapperPatternAnalyzerTests.fs" />
+    <Compile Include="WrapperCodeGeneratorTests.fs" />
+    <Compile Include="ErrnoModuleGeneratorTests.fs" />
+    <Compile Include="DocumentationExtractionTests.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
