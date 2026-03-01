@@ -128,3 +128,64 @@ let ``ArrayType extracts size`` () =
     | ArrayType 4 -> ()
     | ArrayType n -> Assert.Fail $"Expected 4, got {n}"
     | _ -> Assert.Fail "Failed to match ArrayType"
+
+// =========================================================================
+// Bitmask Enum Detection Tests
+// =========================================================================
+
+[<Fact>]
+let ``isBitmaskEnum detects clear power-of-2 pattern`` () =
+    // hipGraphicsRegisterFlags: 0, 1, 2, 4, 8
+    let values = [("None", 0L); ("ReadOnly", 1L); ("WriteDiscard", 2L); ("SurfaceLoadStore", 4L); ("TextureGather", 8L)]
+    Assert.True(isBitmaskEnum values)
+
+[<Fact>]
+let ``isBitmaskEnum detects all-power-of-2 without zero`` () =
+    // hipGraphInstantiateFlags: 1, 2, 4, 8
+    let values = [("A", 1L); ("B", 2L); ("C", 4L); ("D", 8L)]
+    Assert.True(isBitmaskEnum values)
+
+[<Fact>]
+let ``isBitmaskEnum detects large flag enum`` () =
+    // hipGraphDebugDotFlags: 1, 4, 8, 16, 32, 64, 128, 256, 512, 1024
+    let values = [("A",1L);("B",4L);("C",8L);("D",16L);("E",32L);("F",64L);("G",128L);("H",256L);("I",512L);("J",1024L)]
+    Assert.True(isBitmaskEnum values)
+
+[<Fact>]
+let ``isBitmaskEnum rejects sequential error codes`` () =
+    // hipError_t: 0, 1, 2, 3, 4, 5
+    let values = [("Success",0L);("InvalidValue",1L);("MemoryAlloc",2L);("InitError",3L);("Deinitialized",4L);("Disabled",5L)]
+    Assert.False(isBitmaskEnum values)
+
+[<Fact>]
+let ``isBitmaskEnum rejects small sequential enum`` () =
+    // Color: 0, 1, 2 — only 2 non-zero values, below minimum
+    let values = [("Red", 0L); ("Green", 1L); ("Blue", 2L)]
+    Assert.False(isBitmaskEnum values)
+
+[<Fact>]
+let ``isBitmaskEnum rejects mixed sequential with flag bits`` () =
+    // __socket_type: 1,2,3,4,5,6,10,524288,2048 — 56% ratio, below threshold
+    let values = [("STREAM",1L);("DGRAM",2L);("RAW",3L);("RDM",4L);("SEQPACKET",5L);("DCCP",6L);("PACKET",10L);("CLOEXEC",524288L);("NONBLOCK",2048L)]
+    Assert.False(isBitmaskEnum values)
+
+[<Fact>]
+let ``isBitmaskEnum rejects consecutive integer run`` () =
+    // 1,2,3,4 — consecutive despite 75% power-of-2
+    let values = [("A",1L);("B",2L);("C",3L);("D",4L)]
+    Assert.False(isBitmaskEnum values)
+
+[<Fact>]
+let ``isBitmaskEnum rejects empty values`` () =
+    Assert.False(isBitmaskEnum [])
+
+[<Fact>]
+let ``isBitmaskEnum rejects single non-zero value`` () =
+    let values = [("None", 0L); ("Only", 1L)]
+    Assert.False(isBitmaskEnum values)
+
+[<Fact>]
+let ``isBitmaskEnum accepts flags with composite value`` () =
+    // 1,2,4,7 — composite 7=1|2|4, 3 of 4 non-zero are powers of 2 (75%)
+    let values = [("None",0L);("Read",1L);("Write",2L);("Execute",4L);("ReadWrite",7L)]
+    Assert.True(isBitmaskEnum values)

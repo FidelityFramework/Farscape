@@ -56,13 +56,24 @@ let ``render LiteralBinding produces Literal attribute`` () =
 [<Fact>]
 let ``render EnumType produces F# enum`` () =
     let decl = Module("Test.Module", "test",
-        [ EnumType("Color", [("Red", 0L); ("Green", 1L); ("Blue", 2L)], Some "A color enum") ])
+        [ EnumType("Color", [("Red", 0L); ("Green", 1L); ("Blue", 2L)], Some "A color enum", false) ])
     let result = render decl
     Assert.Contains("type Color =", result)
     Assert.Contains("| Red = 0L", result)
     Assert.Contains("| Green = 1L", result)
     Assert.Contains("| Blue = 2L", result)
     Assert.Contains("/// A color enum", result)
+    Assert.DoesNotContain("[<System.Flags>]", result)
+
+[<Fact>]
+let ``render EnumType with Flags emits System.Flags attribute`` () =
+    let decl = Module("Test.Module", "test",
+        [ EnumType("Perms", [("Read", 1L); ("Write", 2L); ("Execute", 4L)], Some "Permission flags", true) ])
+    let result = render decl
+    Assert.Contains("[<System.Flags>]", result)
+    Assert.Contains("type Perms =", result)
+    Assert.Contains("| Read = 1L", result)
+    Assert.Contains("/// Permission flags", result)
 
 [<Fact>]
 let ``render RecordType produces F# record`` () =

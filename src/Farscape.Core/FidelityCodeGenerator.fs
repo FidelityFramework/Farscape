@@ -169,8 +169,11 @@ module FidelityCodeGenerator =
         ]
 
     /// Generate FsDecl list for an enum type.
+    /// Automatically detects bitmask (flags) enums via value pattern analysis.
     let private generateEnumDecl (e: CppParser.EnumDecl) : FsDecl list =
-        [ EnumType(e.Name, e.Values |> List.map (fun v -> (v.Name, v.Value)), e.Documentation) ]
+        let values = e.Values |> List.map (fun v -> (v.Name, v.Value))
+        let isFlags = ActivePatterns.isBitmaskEnum values
+        [ EnumType(e.Name, values, e.Documentation, isFlags) ]
 
     /// Generate FsDecl list for a struct type (as F# record).
     let private generateStructDecl (typedefMap: Map<string, string>) (model: PlatformABI) (opaqueHandles: Set<string>) (s: CppParser.StructDecl) : FsDecl list =

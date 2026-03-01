@@ -127,6 +127,30 @@ let ``generate emits enums`` () =
     Assert.Contains("type Flags =", result)
     Assert.Contains("| A = 0L", result)
     Assert.Contains("| B = 1L", result)
+    // Only 1 non-zero value — not enough for flags detection
+    Assert.DoesNotContain("[<System.Flags>]", result)
+
+[<Fact>]
+let ``generate detects bitmask enum and emits Flags attribute`` () =
+    let decls = [
+        CppParser.Declaration.Enum (mkEnum "hipHostMallocFlags"
+            [mkEnumVal "Default" 0L; mkEnumVal "Portable" 1L; mkEnumVal "Mapped" 2L; mkEnumVal "WriteCombined" 4L; mkEnumVal "Coherent" 64L]
+            (Some "Host allocation flags"))
+    ]
+    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
+    Assert.Contains("[<System.Flags>]", result)
+    Assert.Contains("type hipHostMallocFlags =", result)
+
+[<Fact>]
+let ``generate does not emit Flags for sequential enum`` () =
+    let decls = [
+        CppParser.Declaration.Enum (mkEnum "hipError_t"
+            [mkEnumVal "Success" 0L; mkEnumVal "InvalidValue" 1L; mkEnumVal "MemAlloc" 2L; mkEnumVal "InitError" 3L; mkEnumVal "Deinitialized" 4L; mkEnumVal "Disabled" 5L]
+            None)
+    ]
+    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64
+    Assert.DoesNotContain("[<System.Flags>]", result)
+    Assert.Contains("type hipError_t =", result)
 
 [<Fact>]
 let ``generate emits struct as record`` () =

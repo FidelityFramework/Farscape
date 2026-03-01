@@ -105,6 +105,31 @@ module ActivePatterns =
         | _ -> false
 
     // =========================================================================
+    // Bitmask Enum Detection
+    // =========================================================================
+
+    /// Test whether a 64-bit integer is an exact power of 2.
+    let private isPowerOfTwo (v: int64) : bool =
+        v > 0L && (v &&& (v - 1L)) = 0L
+
+    /// Detect whether enum values represent a bitmask (flags) pattern.
+    /// Three-part test on distinct non-zero values:
+    ///   1. At least 3 non-zero values (fewer gives insufficient signal)
+    ///   2. Values do NOT form a consecutive integer run (1,2,3,4 is sequential, not flags)
+    ///   3. More than 60% are exact powers of 2 (conservative threshold)
+    let isBitmaskEnum (values: (string * int64) list) : bool =
+        let nonZero =
+            values |> List.map snd |> List.distinct |> List.filter (fun v -> v <> 0L) |> List.sort
+        if nonZero.Length < 3 then false
+        else
+            let isConsecutive =
+                (List.last nonZero) - (List.head nonZero) + 1L = int64 nonZero.Length
+            if isConsecutive then false
+            else
+                let p2Count = nonZero |> List.filter isPowerOfTwo |> List.length
+                float p2Count / float nonZero.Length > 0.6
+
+    // =========================================================================
     // Array Type Active Pattern
     // =========================================================================
 

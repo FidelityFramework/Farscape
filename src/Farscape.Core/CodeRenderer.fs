@@ -106,10 +106,12 @@ module CodeRenderer =
             sb.AppendLine($"{prefix}}}") |> ignore
             sb.AppendLine() |> ignore
 
-        | EnumType (name, values, doc) ->
+        | EnumType (name, values, doc, isFlags) ->
             match doc with
             | Some d -> sb.AppendLine($"{prefix}/// {d}") |> ignore
             | None -> ()
+            if isFlags then
+                sb.AppendLine($"{prefix}[<System.Flags>]") |> ignore
             sb.AppendLine($"{prefix}type {name} =") |> ignore
             for (vname, vval) in values do
                 sb.AppendLine($"{prefix}    | {vname} = {vval}L") |> ignore
