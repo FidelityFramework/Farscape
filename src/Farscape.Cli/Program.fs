@@ -414,6 +414,9 @@ let projectGenerateCommand =
             for file in result.OutputFiles do
                 printColorLine $"  {file}" ConsoleColor.Cyan
             printLine ""
+            for advisory in result.Advisories do
+                printColorLine $"Advisory: {advisory}" ConsoleColor.Yellow
+            if not result.Advisories.IsEmpty then printLine ""
             0
 
     command "project" {

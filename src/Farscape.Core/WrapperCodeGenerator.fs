@@ -185,13 +185,19 @@ module WrapperCodeGenerator =
         let mapType = FidelityCodeGenerator.mapCTypeToFidelityType typedefMap model opaqueHandles
         let pattern = WrapperPatternAnalyzer.analyze func typedefMap
 
-        // Override ReturnSemantic when enum error convention matches the return type,
-        // but respect attribute-driven semantics (Pure/Const/NoReturn take precedence)
+        // Override ReturnSemantic based on error convention:
+        // - EnumError: override return type when it matches the enum error type
+        // - NoErrors: all semantics become direct passthrough (no null checks, no Result wrapping)
+        // - Attribute-driven semantics (Pure/Const/NoReturn) always take precedence
         let semantic =
             match errorHandling with
             | UseEnumError (enumType, successValue, errorStructName, _)
                 when func.ReturnType = enumType && not pattern.IsPure && pattern.ReturnSemantic <> NeverReturns ->
                 EnumReturnError (enumType, successValue, errorStructName)
+            | NoErrors ->
+                match pattern.ReturnSemantic with
+                | AllocatedPointer | OpaqueHandleReturn | CountOrError | ZeroSuccessOrError -> PureValue
+                | other -> other
             | _ -> pattern.ReturnSemantic
 
         // Parameter types match the raw stubs exactly

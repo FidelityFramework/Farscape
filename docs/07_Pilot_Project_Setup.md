@@ -46,6 +46,7 @@ transitive_headers = ["driver_types.h"]
 | `defines` | string array | no | Preprocessor `-D` definitions passed to clang. Used for platform-conditional compilation (e.g., `__HIP_PLATFORM_AMD__`). |
 | `xml_protocols` | string array | no | Paths to XML protocol definition files (e.g., Wayland `.xml`). Parsed by `WaylandProtocolParser`, merged with C header declarations. |
 | `transitive_headers` | string array | no | **Filenames** (not paths) of headers transitively included by the primary headers, whose declarations should also be extracted. See [Transitive Headers](#transitive-headers-for-multi-file-sdk-apis) below. |
+| `macro_prefixes` | string array | no | Name prefixes for macro constants to include (e.g., `["WL_", "WAYLAND_"]`). When set, only `#define` constants whose names start with a listed prefix are extracted. When omitted or empty, all user-defined macros pass through, which can pull in constants from system headers like `stdint.h` or `math.h`. Recommended for any library whose headers transitively include system headers with many `#define` constants. |
 
 When multiple `headers` are listed, each is parsed as a separate clang invocation and the resulting declaration lists are merged via `DeclarationAlgebra.mergeDeclarations`, which deduplicates by declaration name and kind.
 
@@ -89,6 +90,26 @@ When `enum_error_code` is configured, Farscape generates:
 - Layer 2 wrappers that return `Result<T, HipError>` instead of raw error codes
 
 For `errno`, Farscape generates a `CError` struct with `captureError` that reads the C errno global. See `docs/05_Wrapper_Generation.md` for the full error handling pipeline.
+
+### Libraries Without Error Conventions
+
+Not all native libraries report errors through a single, uniform mechanism. Some use object-scoped error queries (Wayland's `wl_display_get_error()`), out-parameters, or callback-based notification. These patterns are too varied for automated wrapper generation.
+
+When no `[error_conventions]` section is present, or when `default = "none"` is set, Farscape generates Layer 2 wrappers as **direct passthrough** functions. There is no `Result<T, E>` wrapping, no null-pointer checks, and no error capture logic. The wrapper simply delegates to the Layer 1 extern declaration and returns whatever it returns.
+
+This is intentional. A wrong error convention is worse than no convention, because it silently misinterprets return values. Direct passthrough is always correct, even if incomplete.
+
+When `--wrappers` is enabled and no error convention is defined, the CLI emits an advisory:
+
+```
+Advisory: No [error_conventions] defined for 'wayland-client'. Layer 2 wrappers
+use direct passthrough. If this library reports errors through a query function,
+out-parameter, or other mechanism, add error handling in an Overlay module.
+```
+
+The advisory directs the developer to write error handling in an Overlay module, which is scaffolded once and then developer-owned. Overlay modules can call the library's error query functions, wrap results in `Result<T, E>`, and add domain-specific context that automated generation cannot infer.
+
+For a survey of common error patterns and which ones Farscape handles automatically, see the error convention inventory in `docs/05_Wrapper_Generation.md`.
 
 ### `[options]`: Generation Options
 
@@ -466,3 +487,155 @@ functions = ["hipGetErrorString", "hipGetErrorName",
 ```
 
 This recipe parses 1,525 declarations from `hip_runtime_api.h` and its transitive dependency `driver_types.h`, classifies them across 6 namespaces, and generates 18 `.clef` files totaling approximately 5,500 lines of binding code across Layer 1, Layer 2, types, and the error module.
+
+## Example: Wayland (XML Protocols, Macro Filtering, No Error Convention)
+
+This example demonstrates three features not shown in the HIP recipe: XML protocol parsing, macro prefix filtering, and generation without an error convention.
+
+```toml
+[library]
+name = "wayland-client"
+headers = ["/usr/include/wayland-client-core.h"]
+include_paths = ["/usr/include"]
+transitive_headers = ["wayland-util.h"]
+macro_prefixes = ["WL_", "WAYLAND_"]
+xml_protocols = [
+    "/usr/share/wayland/wayland.xml",
+    "/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml",
+    "/usr/share/wayland-protocols/stable/linux-dmabuf/linux-dmabuf-v1.xml"
+]
+
+[output]
+mode = "fidelity"
+directory = "../Bindings"
+
+[options]
+opaque_handles = true
+
+[[namespace]]
+name = "Fidelity.Wayland.Core"
+description = "Display connection, proxy management, and event dispatch"
+library = "wayland-client"
+prefixes = ["wl_display", "wl_proxy", "wl_event_queue"]
+functions = ["wl_log_set_handler_client"]
+
+[[namespace]]
+name = "Fidelity.Wayland.Protocol"
+description = "Core Wayland protocol interfaces"
+library = "wayland-client"
+xml_interfaces = [
+    "wl_compositor", "wl_surface", "wl_buffer", "wl_registry",
+    "wl_callback", "wl_shm", "wl_shm_pool", "wl_region",
+    "wl_output", "wl_seat", "wl_pointer", "wl_keyboard", "wl_touch",
+    "wl_data_offer", "wl_data_source", "wl_data_device",
+    "wl_data_device_manager", "wl_subcompositor", "wl_subsurface"
+]
+
+[[namespace]]
+name = "Fidelity.Wayland.XdgShell"
+description = "XDG shell window management protocol"
+library = "wayland-client"
+xml_interfaces = [
+    "xdg_wm_base", "xdg_surface", "xdg_toplevel",
+    "xdg_popup", "xdg_positioner"
+]
+
+[[namespace]]
+name = "Fidelity.Wayland.DmaBuf"
+description = "Linux DMA-BUF buffer sharing protocol"
+library = "wayland-client"
+xml_interfaces = [
+    "zwp_linux_dmabuf_v1", "zwp_linux_buffer_params_v1",
+    "zwp_linux_dmabuf_feedback_v1"
+]
+```
+
+Notable differences from HIP:
+
+- **No `[error_conventions]`**: Wayland reports errors through `wl_display_get_error()`, an object-scoped query that does not fit the errno or enum-return patterns. Layer 2 wrappers are generated as direct passthrough, and the CLI emits an advisory directing the developer to add error handling in an Overlay module.
+- **`macro_prefixes`**: Without this filter, `wayland-client-core.h` pulls in hundreds of `#define` constants from system headers (`FP_INFINITE`, `INT8_MIN`, and so on). The `["WL_", "WAYLAND_"]` filter restricts extraction to Wayland-specific constants.
+- **`xml_protocols`**: Three XML protocol files are parsed by `WaylandProtocolParser` and merged with the C header declarations. Protocol namespaces use `xml_interfaces` to select by interface name rather than C function prefix.
+- **`transitive_headers`**: `wayland-util.h` defines core types (`wl_interface`, `wl_argument`, `wl_list`, `wl_array`) that `wayland-client-core.h` references but does not define itself.
+
+## Case Study: Overlay Module for Object-Scoped Errors
+
+When a library reports errors through a mechanism that Farscape cannot automate, the developer writes an Overlay module. This section walks through the Wayland overlay as a concrete example of the pattern.
+
+### The Problem
+
+Wayland's `wl_display_dispatch()`, `wl_display_roundtrip()`, `wl_display_flush()`, and related functions return `-1` on error. The actual error code is not the return value itself. Instead, the caller must make a secondary call to `wl_display_get_error(display)`, which returns the errno stored on the display connection object.
+
+This is structurally equivalent to POSIX errno. The difference is scope: errno is a thread-local global, while Wayland's error state lives on the display object. The secondary lookup is the same pattern, just with an explicit receiver.
+
+Farscape's automated error conventions handle two patterns: global errno (`[error_conventions] default = "errno"`) and enum return codes (`default = "enum_error_code"`). Object-scoped queries do not fit either. The automated wrappers generate direct passthrough, and the CLI advisory tells the developer to handle errors in an Overlay.
+
+### The Overlay
+
+The overlay module lives alongside the generated files:
+
+```
+Bindings/Core/
+├── Types.clef            ← generated (Farscape)
+├── Core.clef             ← generated (Farscape) — Layer 1 externs
+├── CoreWrappers.clef     ← generated (Farscape) — Layer 2 passthrough
+└── CoreOverlay.clef      ← hand-written — Layer 2 error handling
+```
+
+The overlay opens the Layer 1 module and wraps the functions that can fail:
+
+```clef
+module Fidelity.Wayland.Core.Overlay
+
+open Fidelity.Wayland.Core
+
+type WaylandError = {
+    Code: int32
+    Description: string
+}
+
+let private captureError (display: nativeint) : WaylandError =
+    let code = wl_display_get_error display
+    { Code = code; Description = "wayland display error" }
+
+/// Dispatch incoming events, blocking until events are available.
+let dispatch (display: nativeint) : Result<int32, WaylandError> =
+    let result = wl_display_dispatch display
+    if result >= 0l then Ok result
+    else Error (captureError display)
+
+/// Block until all pending requests are processed by the server.
+let roundtrip (display: nativeint) : Result<int32, WaylandError> =
+    let result = wl_display_roundtrip display
+    if result >= 0l then Ok result
+    else Error (captureError display)
+
+/// Flush buffered requests to the server.
+let flush (display: nativeint) : Result<int32, WaylandError> =
+    let result = wl_display_flush display
+    if result >= 0l then Ok result
+    else Error (captureError display)
+```
+
+### Design Decisions
+
+**Overlay calls Layer 1, not Layer 2.** The generated Layer 2 wrappers are direct passthrough under NoErrors, so calling them is equivalent to calling Layer 1. The overlay opens `Fidelity.Wayland.Core` (Layer 1) directly. Application code that needs error handling imports the Overlay module. Code that does not need error handling can use either Layer 1 or the passthrough Layer 2.
+
+**Connect functions return `ValueOption`, not `Result`.** `wl_display_connect` and `wl_display_connect_to_fd` return NULL on failure, but there is no display object to query for an errno. The failure mode is simply "connection failed." `ValueNone` communicates this without inventing an error value.
+
+**captureError is private.** The error query is an implementation detail of the wrapper. Callers work with `Result<T, WaylandError>` and do not need to know that a secondary lookup occurred. This is the same hiding that the errno and enum-error conventions apply in the generated wrappers.
+
+**Description is a placeholder.** The `WaylandError.Description` field currently contains a static string. When `Fidelity.Errno` is available, this can be replaced with `Errno.describe code` to produce human-readable descriptions like "Connection reset by peer" or "Broken pipe." The struct shape does not change.
+
+### When to Write an Overlay
+
+The CLI advisory is the signal. When Farscape generates wrappers without an `[error_conventions]` section, it prints:
+
+```
+Advisory: No [error_conventions] defined for 'wayland-client'. Layer 2 wrappers
+use direct passthrough. If this library reports errors through a query function,
+out-parameter, or other mechanism, add error handling in an Overlay module.
+```
+
+Not every library without error conventions needs an overlay. Some libraries genuinely do not report errors (e.g., `libm` math functions). The advisory is informational, not prescriptive.
+
+Libraries that do need overlays share a common trait: a secondary lookup is required to get the actual error information after an operation fails. Examples beyond Wayland include OpenGL (`glGetError()`), Vulkan instance/device creation (error codes returned from the creation call itself, but validation layer errors come through a callback), and ALSA (`snd_strerror()`). Each of these has a different enough shape that automated generation would produce wrong results.

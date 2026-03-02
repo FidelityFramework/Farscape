@@ -14,26 +14,26 @@ let private generateSingle name retType parms attrs =
     WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" NoErrors Types.LP64
 
 [<Fact>]
-let ``CountOrError wrapper generates Result return and comparison`` () =
+let ``CountOrError wrapper without error convention generates direct passthrough`` () =
     let output = generateSingle "read" "ssize_t"
                     [("fd", "int"); ("buf", "void *"); ("count", "size_t")]
                     []
     Assert.Contains("let read", output)
-    Assert.Contains("Result<", output)
-    Assert.Contains("let result = Platform.Bindings.Test.read", output)
-    Assert.Contains("if result >= 0n then Ok", output)
-    Assert.Contains("else Error", output)
+    Assert.Contains("Platform.Bindings.Test.read", output)
+    // NoErrors: direct passthrough, no Result wrapping
+    Assert.DoesNotContain("Result<", output)
+    Assert.DoesNotContain("if result", output)
 
 [<Fact>]
-let ``AllocatedPointer wrapper generates null check`` () =
+let ``AllocatedPointer wrapper without error convention generates direct passthrough`` () =
     let output = generateSingle "malloc" "void *"
                     [("size", "size_t")]
                     [mkAttr "AllocSizeAttr" [0] None]
     Assert.Contains("let malloc", output)
-    Assert.Contains("Result<", output)
-    Assert.Contains("let result = Platform.Bindings.Test.malloc", output)
-    Assert.Contains("if result <> 0n then Ok", output)
-    Assert.Contains("else Error ()", output)
+    Assert.Contains("Platform.Bindings.Test.malloc", output)
+    // NoErrors: direct passthrough, no null check
+    Assert.DoesNotContain("Result<", output)
+    Assert.DoesNotContain("if result", output)
 
 [<Fact>]
 let ``PureValue wrapper generates direct delegation`` () =
@@ -47,14 +47,15 @@ let ``PureValue wrapper generates direct delegation`` () =
     Assert.DoesNotContain("if result", output)
 
 [<Fact>]
-let ``ZeroSuccessOrError wrapper generates zero check`` () =
+let ``ZeroSuccessOrError wrapper without error convention generates direct passthrough`` () =
     let output = generateSingle "fclose" "int"
                     [("stream", "FILE *")]
                     []
     Assert.Contains("let fclose", output)
-    Assert.Contains("Result<", output)
-    Assert.Contains("let result = Platform.Bindings.Test.fclose", output)
-    Assert.Contains("if result = 0l then Ok ()", output)
+    Assert.Contains("Platform.Bindings.Test.fclose", output)
+    // NoErrors: direct passthrough, no zero check
+    Assert.DoesNotContain("Result<", output)
+    Assert.DoesNotContain("if result", output)
 
 [<Fact>]
 let ``NeverReturns wrapper generates direct delegation with unit return`` () =

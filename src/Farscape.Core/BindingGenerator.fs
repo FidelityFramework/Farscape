@@ -34,6 +34,8 @@ module BindingGenerator =
     type GenerationResult = {
         OutputFiles: string list
         DeclarationCount: int
+        /// Advisory messages for the developer (e.g., missing error conventions)
+        Advisories: string list
     }
 
     /// Generate Clef bindings from a C/C++ header file.
@@ -79,6 +81,7 @@ module BindingGenerator =
             Ok {
                 OutputFiles = outputPath :: wrapperFiles
                 DeclarationCount = declarations.Length
+                Advisories = []
             }
 
     /// Derive the common namespace prefix from project namespace names.
@@ -307,7 +310,14 @@ module BindingGenerator =
 
                 let allFiles = [sharedTypesPath] @ errorModuleFiles @ descriptorFiles @ nsFiles
 
+                let advisories =
+                    match errorHandling, generateWrappers with
+                    | WrapperTypes.NoErrors, true ->
+                        [$"No [error_conventions] defined for '{project.Library.Name}'. Layer 2 wrappers use direct passthrough. If this library reports errors through a query function, out-parameter, or other mechanism, add error handling in an Overlay module."]
+                    | _ -> []
+
                 Ok {
                     OutputFiles = allFiles
                     DeclarationCount = declarations.Length
+                    Advisories = advisories
                 }
