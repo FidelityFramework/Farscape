@@ -244,3 +244,61 @@ module EnumErrorWrapperTests =
         // Pure functions don't use Result wrapping — check only the function section
         Assert.Contains("let hipDeviceSynchronize", output)
         Assert.DoesNotContain("Result<", output.Split("let hipDeviceSynchronize").[1])
+
+// =============================================================================
+// NullWithReason Wrapper Generation Tests
+// =============================================================================
+
+module NullWithReasonWrapperTests =
+
+    let private generateWithNullReason name retType parms attrs =
+        let decls = [ mkDecl name retType parms attrs ]
+        WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test"
+            (UseNullWithReason "stbi_failure_reason") Types.LP64
+
+    [<Fact>]
+    let ``null_with_reason AllocatedPointer uses Result<nativeint, nativeint>`` () =
+        let output = generateWithNullReason "stbi_load" "void *"
+                        [("filename", "const char *"); ("x", "int *"); ("y", "int *"); ("channels", "int *"); ("desired", "int")]
+                        [{ CppParser.AttributeData.Kind = "MallocAttr"; Args = []; StringArg = None }]
+        Assert.Contains("Result<nativeint, nativeint>", output)
+
+    [<Fact>]
+    let ``null_with_reason calls reason function on null`` () =
+        let output = generateWithNullReason "stbi_load" "void *"
+                        [("filename", "const char *"); ("x", "int *"); ("y", "int *"); ("channels", "int *"); ("desired", "int")]
+                        [{ CppParser.AttributeData.Kind = "MallocAttr"; Args = []; StringArg = None }]
+        Assert.Contains("stbi_failure_reason", output)
+        Assert.Contains("Error", output)
+        Assert.Contains("Ok result", output)
+
+    [<Fact>]
+    let ``null_with_reason includes null check`` () =
+        let output = generateWithNullReason "stbi_load" "void *"
+                        [("filename", "const char *"); ("x", "int *"); ("y", "int *"); ("channels", "int *"); ("desired", "int")]
+                        [{ CppParser.AttributeData.Kind = "MallocAttr"; Args = []; StringArg = None }]
+        Assert.Contains("if result <> 0n then", output)
+
+    [<Fact>]
+    let ``null_with_reason does not generate captureError helper`` () =
+        let output = generateWithNullReason "stbi_load" "void *"
+                        [("filename", "const char *"); ("x", "int *"); ("y", "int *"); ("channels", "int *"); ("desired", "int")]
+                        [{ CppParser.AttributeData.Kind = "MallocAttr"; Args = []; StringArg = None }]
+        Assert.DoesNotContain("let captureError", output)
+        Assert.DoesNotContain("__errno_location", output)
+
+    [<Fact>]
+    let ``null_with_reason PureValue unchanged`` () =
+        let output = generateWithNullReason "stbi_is_hdr" "int"
+                        [("filename", "const char *")]
+                        [{ CppParser.AttributeData.Kind = "PureAttr"; Args = []; StringArg = None }]
+        Assert.Contains("let stbi_is_hdr", output)
+        Assert.DoesNotContain("Result<", output.Split("let stbi_is_hdr").[1])
+
+    [<Fact>]
+    let ``null_with_reason VoidReturn unchanged`` () =
+        let output = generateWithNullReason "stbi_image_free" "void"
+                        [("retval_from_stbi_load", "void *")]
+                        []
+        Assert.Contains("let stbi_image_free", output)
+        Assert.DoesNotContain("Result<", output.Split("let stbi_image_free").[1])

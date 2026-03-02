@@ -104,6 +104,9 @@ module WrapperTypes =
         /// Enum error code: matches return value against typed error enum.
         | UseEnumError of enumType: string * successValue: string
                         * errorStructName: string * describeModuleName: string
+        /// Null return with companion reason function (stb_image, SDL pattern).
+        /// On null pointer return, calls the reason function to get an error string pointer.
+        | UseNullWithReason of reasonFunction: string
 
     // =========================================================================
     // Complete Wrapper Pattern

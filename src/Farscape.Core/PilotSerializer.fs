@@ -71,6 +71,7 @@ module PilotSerializer =
         | Errno -> "errno"
         | ReturnCode -> "return_code"
         | EnumErrorCode _ -> "enum_error_code"
+        | NullWithReason _ -> "null_with_reason"
         | NoErrorConvention -> "none"
 
     /// Serialize ErrorConventionSpec to a TOML table value.
@@ -78,7 +79,7 @@ module PilotSerializer =
         let table =
             TomlTable.empty
             |> TomlTable.add "default" (TomlValue.String (serializeConvention spec.Default))
-        // For EnumErrorCode, serialize additional fields at the top level
+        // For EnumErrorCode/NullWithReason, serialize additional fields at the top level
         let table =
             match spec.Default with
             | EnumErrorCode (errorType, successValue, errorStringFn, errorNameFn) ->
@@ -92,6 +93,8 @@ module PilotSerializer =
                 match errorNameFn with
                 | Some fn -> TomlTable.add "error_name_fn" (TomlValue.String fn) t
                 | None -> t
+            | NullWithReason reasonFn ->
+                table |> TomlTable.add "reason_function" (TomlValue.String reasonFn)
             | _ -> table
         let table =
             if spec.Overrides.IsEmpty then table
@@ -239,6 +242,9 @@ module PilotSerializer =
             let errorStringFn = optionalString "error_string_fn" table
             let errorNameFn = optionalString "error_name_fn" table
             EnumErrorCode (errorType, successValue, errorStringFn, errorNameFn)
+        | "null_with_reason" ->
+            let reasonFn = optionalString "reason_function" table |> Option.defaultValue ""
+            NullWithReason reasonFn
         | _ -> NoErrorConvention
 
     /// Deserialize the optional [error_conventions] section.

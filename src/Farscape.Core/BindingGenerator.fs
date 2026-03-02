@@ -177,6 +177,8 @@ module BindingGenerator =
                             let structName = EnumErrorModuleGenerator.deriveErrorStructName errorType
                             WrapperTypes.UseEnumError (errorType, successValue, structName,
                                                       $"{nsPrefix}.{structName}")
+                        | PilotTypes.NullWithReason reasonFn ->
+                            WrapperTypes.UseNullWithReason reasonFn
                         | _ -> WrapperTypes.NoErrors
                     | None -> WrapperTypes.NoErrors
 
@@ -314,6 +316,8 @@ module BindingGenerator =
                     match errorHandling, generateWrappers with
                     | WrapperTypes.NoErrors, true ->
                         [$"No [error_conventions] defined for '{project.Library.Name}'. Layer 2 wrappers use direct passthrough. If this library reports errors through a query function, out-parameter, or other mechanism, add error handling in an Overlay module."]
+                    | WrapperTypes.UseNullWithReason reasonFn, true ->
+                        [$"Using null_with_reason convention for '{project.Library.Name}'. Functions returning pointers will call {reasonFn}() on null and wrap in Result<nativeint, nativeint>."]
                     | _ -> []
 
                 Ok {

@@ -285,3 +285,31 @@ module ErrorConventionTomlTests =
                 Assert.True(rt.ErrorConventions.IsSome)
                 Assert.Equal(Errno, rt.ErrorConventions.Value.Default)
                 Assert.True(rt.ErrorConventions.Value.Overrides.IsEmpty)
+
+    [<Fact>]
+    let ``null_with_reason convention round-trips through TOML`` () =
+        let project : PilotProject = {
+            Library = { Name = "stb_image"; Headers = ["/usr/include/stb/stb_image.h"]; XmlProtocols = []; IncludePaths = []; Defines = []; TransitiveHeaders = []; MacroPrefixes = [] }
+            Output = { Mode = "fidelity"; Directory = "./out" }
+            Namespaces = []
+            ErrorConventions = Some {
+                Default = NullWithReason "stbi_failure_reason"
+                Overrides = Map.empty
+            }
+            Options = None
+        }
+        let toml = PilotSerializer.toTomlString project
+        Assert.Contains("null_with_reason", toml)
+        Assert.Contains("reason_function", toml)
+        Assert.Contains("stbi_failure_reason", toml)
+        match Fidelity.Data.TOML.Toml.parse toml with
+        | Error e -> Assert.Fail $"Parse failed: {e}"
+        | Ok doc ->
+            match PilotSerializer.deserialize doc with
+            | Error e -> Assert.Fail $"Deserialize failed: {e}"
+            | Ok roundTripped ->
+                Assert.True(roundTripped.ErrorConventions.IsSome)
+                match roundTripped.ErrorConventions.Value.Default with
+                | NullWithReason reasonFn ->
+                    Assert.Equal("stbi_failure_reason", reasonFn)
+                | other -> Assert.Fail $"Expected NullWithReason, got {other}"

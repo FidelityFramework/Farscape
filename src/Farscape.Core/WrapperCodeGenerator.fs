@@ -27,19 +27,25 @@ module WrapperCodeGenerator =
     // =========================================================================
 
     /// Compute the wrapper's F# return type from ReturnSemantic and the raw mapped return type.
-    let private wrapperReturnType (semantic: ReturnSemantic) (rawRetType: FsType) (useErrno: bool) : FsType =
+    let private wrapperReturnType (semantic: ReturnSemantic) (rawRetType: FsType) (errorHandling: ErrorHandling) : FsType =
+        let errorType =
+            match errorHandling with
+            | UseErrno _ -> Named "CError"
+            | UseNullWithReason _ -> Named "nativeint"
+            | _ -> Unit
+        let hasErrors = match errorHandling with NoErrors -> false | _ -> true
         match semantic with
         | CountOrError ->
-            if useErrno then Generic2("Result", rawRetType, Named "CError")
+            if hasErrors then Generic2("Result", rawRetType, errorType)
             else Generic("Result", rawRetType)
         | ZeroSuccessOrError ->
-            if useErrno then Generic2("Result", Unit, Named "CError")
+            if hasErrors then Generic2("Result", Unit, errorType)
             else Generic("Result", Unit)
         | IntValueOrError ->
-            if useErrno then Generic2("Result", rawRetType, Named "CError")
+            if hasErrors then Generic2("Result", rawRetType, errorType)
             else Generic("Result", rawRetType)
         | AllocatedPointer | OpaqueHandleReturn ->
-            if useErrno then Generic2("Result", Named "nativeint", Named "CError")
+            if hasErrors then Generic2("Result", Named "nativeint", errorType)
             else Generic("Result", Named "nativeint")
         | EnumReturnError (_, _, errorStructName) ->
             Generic2("Result", Unit, Named errorStructName)
@@ -59,15 +65,20 @@ module WrapperCodeGenerator =
         let args = paramNames |> List.map Identifier
         FunctionCall(bindingsModule, funcName, args)
 
+    /// Build the error expression based on the error handling strategy.
+    let private buildErrorExpr (errorHandling: ErrorHandling) (bindingsModule: string) (fallback: FsExpr) : FsExpr =
+        match errorHandling with
+        | UseErrno _ -> FunctionCall("", "captureError", [Literal "()"])
+        | UseNullWithReason reasonFn -> FunctionCall(bindingsModule, reasonFn, [Literal "()"])
+        | _ -> fallback
+
     /// Generate wrapper body for CountOrError pattern (e.g., read, write).
     /// let result = Bindings.read fd buf count
     /// if result >= 0n then Ok result
-    /// else Error result
-    let private countOrErrorBody (bindingsModule: string) (funcName: string) (paramNames: string list) (useErrno: bool) : FsExpr =
+    /// else Error (captureError ())
+    let private countOrErrorBody (bindingsModule: string) (funcName: string) (paramNames: string list) (errorHandling: ErrorHandling) : FsExpr =
         let rawCall = buildRawCall bindingsModule funcName paramNames
-        let errorExpr =
-            if useErrno then FunctionCall("", "captureError", [Literal "()"])
-            else Identifier "result"
+        let errorExpr = buildErrorExpr errorHandling bindingsModule (Identifier "result")
         LetIn("result", rawCall,
             IfThenElse(
                 Comparison(Identifier "result", ">=", Literal "0n"),
@@ -77,12 +88,10 @@ module WrapperCodeGenerator =
     /// Generate wrapper body for ZeroSuccessOrError pattern (e.g., fclose, fseek).
     /// let result = Bindings.fclose stream
     /// if result = 0l then Ok ()
-    /// else Error result
-    let private zeroSuccessBody (bindingsModule: string) (funcName: string) (paramNames: string list) (useErrno: bool) : FsExpr =
+    /// else Error (captureError ())
+    let private zeroSuccessBody (bindingsModule: string) (funcName: string) (paramNames: string list) (errorHandling: ErrorHandling) : FsExpr =
         let rawCall = buildRawCall bindingsModule funcName paramNames
-        let errorExpr =
-            if useErrno then FunctionCall("", "captureError", [Literal "()"])
-            else Identifier "result"
+        let errorExpr = buildErrorExpr errorHandling bindingsModule (Identifier "result")
         LetIn("result", rawCall,
             IfThenElse(
                 Comparison(Identifier "result", "=", Literal "0l"),
@@ -93,26 +102,22 @@ module WrapperCodeGenerator =
     /// let result = Bindings.open file oflag
     /// if result >= 0l then Ok result
     /// else Error (captureError ())
-    let private intValueOrErrorBody (bindingsModule: string) (funcName: string) (paramNames: string list) (useErrno: bool) : FsExpr =
+    let private intValueOrErrorBody (bindingsModule: string) (funcName: string) (paramNames: string list) (errorHandling: ErrorHandling) : FsExpr =
         let rawCall = buildRawCall bindingsModule funcName paramNames
-        let errorExpr =
-            if useErrno then FunctionCall("", "captureError", [Literal "()"])
-            else Identifier "result"
+        let errorExpr = buildErrorExpr errorHandling bindingsModule (Identifier "result")
         LetIn("result", rawCall,
             IfThenElse(
                 Comparison(Identifier "result", ">=", Literal "0l"),
                 ResultOk(Identifier "result"),
                 ResultError(errorExpr)))
 
-    /// Generate wrapper body for AllocatedPointer pattern (e.g., malloc, calloc).
+    /// Generate wrapper body for AllocatedPointer pattern (e.g., malloc, stbi_load).
     /// let result = Bindings.malloc size
     /// if result <> 0n then Ok result
-    /// else Error ()
-    let private allocatedPointerBody (bindingsModule: string) (funcName: string) (paramNames: string list) (useErrno: bool) : FsExpr =
+    /// else Error (captureReason ())
+    let private allocatedPointerBody (bindingsModule: string) (funcName: string) (paramNames: string list) (errorHandling: ErrorHandling) : FsExpr =
         let rawCall = buildRawCall bindingsModule funcName paramNames
-        let errorExpr =
-            if useErrno then FunctionCall("", "captureError", [Literal "()"])
-            else Literal "()"
+        let errorExpr = buildErrorExpr errorHandling bindingsModule (Literal "()")
         LetIn("result", rawCall,
             IfThenElse(
                 Comparison(Identifier "result", "<>", Literal "0n"),
@@ -121,8 +126,8 @@ module WrapperCodeGenerator =
 
     /// Generate wrapper body for OpaqueHandleReturn pattern (e.g., fopen).
     /// Same structure as AllocatedPointer; null check.
-    let private opaqueHandleBody (bindingsModule: string) (funcName: string) (paramNames: string list) (useErrno: bool) : FsExpr =
-        allocatedPointerBody bindingsModule funcName paramNames useErrno
+    let private opaqueHandleBody (bindingsModule: string) (funcName: string) (paramNames: string list) (errorHandling: ErrorHandling) : FsExpr =
+        allocatedPointerBody bindingsModule funcName paramNames errorHandling
 
     /// Generate wrapper body for EnumReturnError pattern (e.g., HIP hipStreamCreate).
     /// let result = Bindings.hipStreamCreate stream
@@ -157,14 +162,14 @@ module WrapperCodeGenerator =
         (funcName: string)
         (paramNames: string list)
         (semantic: ReturnSemantic)
-        (useErrno: bool)
+        (errorHandling: ErrorHandling)
         : FsExpr =
         match semantic with
-        | CountOrError       -> countOrErrorBody bindingsModule funcName paramNames useErrno
-        | ZeroSuccessOrError -> zeroSuccessBody bindingsModule funcName paramNames useErrno
-        | IntValueOrError    -> intValueOrErrorBody bindingsModule funcName paramNames useErrno
-        | AllocatedPointer   -> allocatedPointerBody bindingsModule funcName paramNames useErrno
-        | OpaqueHandleReturn -> opaqueHandleBody bindingsModule funcName paramNames useErrno
+        | CountOrError       -> countOrErrorBody bindingsModule funcName paramNames errorHandling
+        | ZeroSuccessOrError -> zeroSuccessBody bindingsModule funcName paramNames errorHandling
+        | IntValueOrError    -> intValueOrErrorBody bindingsModule funcName paramNames errorHandling
+        | AllocatedPointer   -> allocatedPointerBody bindingsModule funcName paramNames errorHandling
+        | OpaqueHandleReturn -> opaqueHandleBody bindingsModule funcName paramNames errorHandling
         | EnumReturnError (enumType, successValue, _) ->
             enumReturnErrorBody bindingsModule funcName paramNames enumType successValue
         | PureValue          -> pureValueBody bindingsModule funcName paramNames
@@ -200,13 +205,13 @@ module WrapperCodeGenerator =
         (func: CppParser.FunctionDecl)
         : FsDecl list =
 
-        let useErrno = match errorHandling with UseErrno _ -> true | _ -> false
         let mapType = FidelityCodeGenerator.mapCTypeToFidelityType typedefMap model opaqueHandles
         let pattern = WrapperPatternAnalyzer.analyze func typedefMap
 
         // Override ReturnSemantic based on error convention:
         // - EnumError: override return type when it matches the enum error type
         // - NoErrors: all semantics become direct passthrough (no null checks, no Result wrapping)
+        // - NullWithReason: pointer-returning functions keep their null check semantics
         // - Attribute-driven semantics (Pure/Const/NoReturn) always take precedence
         let semantic =
             match errorHandling with
@@ -226,10 +231,10 @@ module WrapperCodeGenerator =
                 { FsParam.Name = cleanParamName name; Type = mapType cType })
 
         let rawRetType = mapType func.ReturnType
-        let retType = wrapperReturnType semantic rawRetType useErrno
+        let retType = wrapperReturnType semantic rawRetType errorHandling
 
         let paramNames = parameters |> List.map (fun p -> p.Name)
-        let body = generateBody bindingsModule func.Name paramNames semantic useErrno
+        let body = generateBody bindingsModule func.Name paramNames semantic errorHandling
 
         formatDocDecls func @
         [
@@ -325,6 +330,12 @@ module WrapperCodeGenerator =
                 [ openErrorModule; BlankLine
                   XmlDoc $"Capture {enumType} error with compile-time description from header comments."
                   captureErrorDecl; BlankLine ]
+            | UseNullWithReason reasonFn ->
+                // NullWithReason: no helper needed — the reason function is called directly
+                // in the wrapper body via bindingsModule.reasonFn (). The error value is the
+                // raw nativeint pointer to the C string returned by the reason function.
+                [ Comment $"// Error handling: null returns call {reasonFn}() for reason string"
+                  BlankLine ]
             | NoErrors -> []
 
         let allDecls = openDecl :: errorDecls @ BlankLine :: functions

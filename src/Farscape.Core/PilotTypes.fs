@@ -76,6 +76,9 @@ module PilotTypes =
         /// errorStringFn/errorNameFn: optional runtime fallback functions.
         | EnumErrorCode of errorType: string * successValue: string
                          * errorStringFn: string option * errorNameFn: string option
+        /// Null return with companion reason function (stb_image, SDL pattern).
+        /// reasonFunction: name of the function that returns the error string.
+        | NullWithReason of reasonFunction: string
         /// No error convention; function doesn't report errors
         | NoErrorConvention
 
