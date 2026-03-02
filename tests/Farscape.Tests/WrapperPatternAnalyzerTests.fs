@@ -51,48 +51,63 @@ let ``mapAttribute extracts NonNull param indices`` () =
 
 [<Fact>]
 let ``analyzeReturn NoReturn attribute produces NeverReturns`` () =
-    let result = WrapperPatternAnalyzer.analyzeReturn "void" [NoReturn] Map.empty
+    let result = WrapperPatternAnalyzer.analyzeReturn "void" [NoReturn] Map.empty ""
     Assert.Equal(NeverReturns, result)
 
 [<Fact>]
 let ``analyzeReturn AllocSize attribute produces AllocatedPointer`` () =
-    let result = WrapperPatternAnalyzer.analyzeReturn "void *" [AllocSize [0]] Map.empty
+    let result = WrapperPatternAnalyzer.analyzeReturn "void *" [AllocSize [0]] Map.empty ""
     Assert.Equal(AllocatedPointer, result)
 
 [<Fact>]
 let ``analyzeReturn Pure attribute produces PureValue`` () =
-    let result = WrapperPatternAnalyzer.analyzeReturn "int" [Pure] Map.empty
+    let result = WrapperPatternAnalyzer.analyzeReturn "int" [Pure] Map.empty ""
     Assert.Equal(PureValue, result)
 
 [<Fact>]
 let ``analyzeReturn ssize_t return produces CountOrError`` () =
-    let result = WrapperPatternAnalyzer.analyzeReturn "ssize_t" [] Map.empty
+    let result = WrapperPatternAnalyzer.analyzeReturn "ssize_t" [] Map.empty ""
     Assert.Equal(CountOrError, result)
 
 [<Fact>]
 let ``analyzeReturn void return produces VoidReturn`` () =
-    let result = WrapperPatternAnalyzer.analyzeReturn "void" [] Map.empty
+    let result = WrapperPatternAnalyzer.analyzeReturn "void" [] Map.empty ""
     Assert.Equal(VoidReturn, result)
 
 [<Fact>]
 let ``analyzeReturn void pointer produces AllocatedPointer`` () =
-    let result = WrapperPatternAnalyzer.analyzeReturn "void *" [] Map.empty
+    let result = WrapperPatternAnalyzer.analyzeReturn "void *" [] Map.empty ""
     Assert.Equal(AllocatedPointer, result)
 
 [<Fact>]
 let ``analyzeReturn FILE pointer produces OpaqueHandleReturn`` () =
-    let result = WrapperPatternAnalyzer.analyzeReturn "FILE *" [] Map.empty
+    let result = WrapperPatternAnalyzer.analyzeReturn "FILE *" [] Map.empty ""
     Assert.Equal(OpaqueHandleReturn, result)
 
 [<Fact>]
 let ``analyzeReturn int produces ZeroSuccessOrError`` () =
-    let result = WrapperPatternAnalyzer.analyzeReturn "int" [] Map.empty
+    let result = WrapperPatternAnalyzer.analyzeReturn "int" [] Map.empty "close"
     Assert.Equal(ZeroSuccessOrError, result)
+
+[<Fact>]
+let ``analyzeReturn int for fd-returning function produces IntValueOrError`` () =
+    let result = WrapperPatternAnalyzer.analyzeReturn "int" [] Map.empty "open"
+    Assert.Equal(IntValueOrError, result)
+
+[<Fact>]
+let ``analyzeReturn int for socket produces IntValueOrError`` () =
+    let result = WrapperPatternAnalyzer.analyzeReturn "int" [] Map.empty "socket"
+    Assert.Equal(IntValueOrError, result)
+
+[<Fact>]
+let ``analyzeReturn int for fork produces IntValueOrError`` () =
+    let result = WrapperPatternAnalyzer.analyzeReturn "int" [] Map.empty "fork"
+    Assert.Equal(IntValueOrError, result)
 
 [<Fact>]
 let ``analyzeReturn resolves typedef to underlying type`` () =
     let tdMap = Map.ofList [("__ssize_t", "long")]
-    let result = WrapperPatternAnalyzer.analyzeReturn "__ssize_t" [] tdMap
+    let result = WrapperPatternAnalyzer.analyzeReturn "__ssize_t" [] tdMap ""
     Assert.Equal(CountOrError, result)
 
 // ── Parameter Role Tests ──

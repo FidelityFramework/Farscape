@@ -68,12 +68,37 @@ module WrapperPatternAnalyzer =
     // Return Semantic Analysis
     // =========================================================================
 
-    /// Infer ReturnSemantic from the return type string and semantic attributes.
+    /// Functions that return a meaningful int value (fd, pid, count) on success
+    /// and -1 on error. These use the IntValueOrError pattern: result >= 0 is Ok,
+    /// result < 0 is Error, and the success value is preserved in the Result.
+    let private intValueReturningFunctions = Set.ofList [
+        // fd-returning
+        "open"; "openat"; "open64"; "openat64"; "creat"; "creat64"
+        "socket"; "accept"; "accept4"
+        "dup"; "dup2"; "dup3"
+        "shm_open"; "memfd_create"
+        "epoll_create"; "epoll_create1"
+        "signalfd"; "timerfd_create"; "eventfd"; "inotify_init"; "inotify_init1"
+        // pid-returning
+        "fork"; "vfork"
+        // count/value-returning
+        "poll"; "ppoll"; "select"; "pselect"
+        "epoll_wait"; "epoll_pwait"
+        "fcntl"; "ioctl"; "prctl"
+        // id-returning (always succeed, but use same pattern for consistency)
+        "getpid"; "getppid"; "getuid"; "geteuid"; "getgid"; "getegid"
+        "gettid"; "getpgrp"; "getpgid"; "getsid"
+        // drm fd-returning
+        "drmOpen"; "drmOpenControl"; "drmOpenRender"
+    ]
+
+    /// Infer ReturnSemantic from the return type string, function name, and semantic attributes.
     /// Uses the typedef map to resolve type aliases before classification.
     let analyzeReturn
         (returnType: string)
         (attrs: FunctionAttribute list)
         (typedefMap: Map<string, string>)
+        (functionName: string)
         : ReturnSemantic =
 
         // Priority 1: NoReturn attribute
@@ -111,9 +136,12 @@ module WrapperPatternAnalyzer =
                 // Other pointer → opaque handle
                 else
                     OpaqueHandleReturn
-            // Priority 7: int return → check if it's a POSIX error-returning function
+            // Priority 7: int return → distinguish value-returning from zero-success
             elif trimmed = "int" || trimmed = "int32_t" then
-                ZeroSuccessOrError
+                if intValueReturningFunctions.Contains functionName then
+                    IntValueOrError
+                else
+                    ZeroSuccessOrError
             // Default: pure value
             else
                 PureValue
@@ -221,7 +249,7 @@ module WrapperPatternAnalyzer =
         : WrapperPattern =
 
         let attrs = mapAttributes func.Attributes
-        let returnSemantic = analyzeReturn func.ReturnType attrs typedefMap
+        let returnSemantic = analyzeReturn func.ReturnType attrs typedefMap func.Name
         let paramRoles = analyzeParameters func.Parameters attrs typedefMap
 
         let isPure =
@@ -229,7 +257,7 @@ module WrapperPatternAnalyzer =
 
         let needsResultWrap =
             match returnSemantic with
-            | CountOrError | ZeroSuccessOrError | AllocatedPointer | OpaqueHandleReturn | EnumReturnError _ -> true
+            | CountOrError | ZeroSuccessOrError | IntValueOrError | AllocatedPointer | OpaqueHandleReturn | EnumReturnError _ -> true
             | PureValue | NeverReturns | VoidReturn -> false
 
         let needsResourceCleanup =

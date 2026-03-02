@@ -153,7 +153,14 @@ module CTypeParser =
                 return Int64.Parse(hex, Globalization.NumberStyles.HexNumber)
             }
 
-        static let pIntegerLiteral = choice [ pHexInt64; pint64 ] .>> eof
+        static let pOctalInt64 =
+            parser {
+                do! pchar '0' >>% ()
+                let! oct = many1Chars (satisfyL (fun c -> c >= '0' && c <= '7') "octal digit")
+                return Convert.ToInt64(oct, 8)
+            }
+
+        static let pIntegerLiteral = choice [ pHexInt64; pOctalInt64; pint64 ] .>> eof
 
         // -- Array size parser --
 

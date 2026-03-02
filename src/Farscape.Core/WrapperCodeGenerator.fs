@@ -35,6 +35,9 @@ module WrapperCodeGenerator =
         | ZeroSuccessOrError ->
             if useErrno then Generic2("Result", Unit, Named "CError")
             else Generic("Result", Unit)
+        | IntValueOrError ->
+            if useErrno then Generic2("Result", rawRetType, Named "CError")
+            else Generic("Result", rawRetType)
         | AllocatedPointer | OpaqueHandleReturn ->
             if useErrno then Generic2("Result", Named "nativeint", Named "CError")
             else Generic("Result", Named "nativeint")
@@ -84,6 +87,21 @@ module WrapperCodeGenerator =
             IfThenElse(
                 Comparison(Identifier "result", "=", Literal "0l"),
                 ResultOk(Literal "()"),
+                ResultError(errorExpr)))
+
+    /// Generate wrapper body for IntValueOrError pattern (e.g., open, socket, dup, fork).
+    /// let result = Bindings.open file oflag
+    /// if result >= 0l then Ok result
+    /// else Error (captureError ())
+    let private intValueOrErrorBody (bindingsModule: string) (funcName: string) (paramNames: string list) (useErrno: bool) : FsExpr =
+        let rawCall = buildRawCall bindingsModule funcName paramNames
+        let errorExpr =
+            if useErrno then FunctionCall("", "captureError", [Literal "()"])
+            else Identifier "result"
+        LetIn("result", rawCall,
+            IfThenElse(
+                Comparison(Identifier "result", ">=", Literal "0l"),
+                ResultOk(Identifier "result"),
                 ResultError(errorExpr)))
 
     /// Generate wrapper body for AllocatedPointer pattern (e.g., malloc, calloc).
@@ -144,6 +162,7 @@ module WrapperCodeGenerator =
         match semantic with
         | CountOrError       -> countOrErrorBody bindingsModule funcName paramNames useErrno
         | ZeroSuccessOrError -> zeroSuccessBody bindingsModule funcName paramNames useErrno
+        | IntValueOrError    -> intValueOrErrorBody bindingsModule funcName paramNames useErrno
         | AllocatedPointer   -> allocatedPointerBody bindingsModule funcName paramNames useErrno
         | OpaqueHandleReturn -> opaqueHandleBody bindingsModule funcName paramNames useErrno
         | EnumReturnError (enumType, successValue, _) ->

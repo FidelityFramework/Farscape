@@ -75,6 +75,8 @@ module WrapperTypes =
         | CountOrError
         /// int pattern: 0 = success, nonzero = error code.
         | ZeroSuccessOrError
+        /// int pattern: >= 0 is meaningful value (fd, pid, count), -1 is error.
+        | IntValueOrError
         /// void* pattern: non-null = allocated pointer, null = error.
         | AllocatedPointer
         /// FILE*/handle pattern: non-null = handle, null = error.

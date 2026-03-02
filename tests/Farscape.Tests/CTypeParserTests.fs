@@ -43,7 +43,12 @@ let ``pCType strips qualifiers`` (input: string) (expectedBase: string) (expecte
 [<InlineData("0xFF", 255L)>]
 [<InlineData("0x1A", 26L)>]
 [<InlineData("0X10", 16L)>]
-let ``tryParseInteger parses decimal and hex`` (input: string) (expected: int64) =
+[<InlineData("0100", 64L)>]
+[<InlineData("0200", 128L)>]
+[<InlineData("01000", 512L)>]
+[<InlineData("04000", 2048L)>]
+[<InlineData("0755", 493L)>]
+let ``tryParseInteger parses decimal hex and octal`` (input: string) (expected: int64) =
     match CTypeParser.tryParseInteger input with
     | Some n -> Assert.Equal(expected, n)
     | None -> Assert.Fail $"Failed to parse integer: '{input}'"
