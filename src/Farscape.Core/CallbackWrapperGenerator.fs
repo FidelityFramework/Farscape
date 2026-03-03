@@ -15,11 +15,11 @@ open PilotTypes
 /// Both patterns depend on Fidelity.Libc.DynamicLink.dlsym being available.
 module CallbackWrapperGenerator =
 
-    /// Convert a C function name to a PascalCase wrapper name.
-    /// g_signal_connect_data → signalConnectData (drop common prefixes, camelCase)
+    /// Convert a C function name to a camelCase wrapper name.
+    /// g_idle_add → idleAdd, wl_proxy_add_listener → proxyAddListener
     let private toWrapperName (cName: string) : string =
         let parts = cName.Split('_') |> Array.toList
-        // Drop common library prefixes (g_, gtk_, wl_, xdg_, etc.)
+        // Drop common short library prefixes (g_, wl_, xdg_, etc.)
         let meaningful =
             match parts with
             | p :: rest when p.Length <= 3 && rest.Length >= 2 -> rest
@@ -27,16 +27,14 @@ module CallbackWrapperGenerator =
         match meaningful with
         | [] -> cName
         | first :: rest ->
-            let camel = first + (rest |> List.map (fun s ->
+            first + (rest |> List.map (fun s ->
                 if s.Length > 0 then string (System.Char.ToUpper s.[0]) + s.[1..]
                 else "") |> String.concat "")
-            camel
 
     /// Convert a snake_case struct name to a PascalCase builder function name.
     /// wl_pointer_listener → buildPointerListener
     let private toBuilderName (structName: string) : string =
         let parts = structName.Split('_') |> Array.toList
-        // Drop leading library prefix
         let meaningful =
             match parts with
             | p :: rest when p.Length <= 3 && rest.Length >= 2 -> rest
@@ -47,86 +45,127 @@ module CallbackWrapperGenerator =
                 else "") |> String.concat ""
         "build" + pascal
 
+    /// Map a C parameter type to a Clef type for wrapper signatures.
+    /// Simplified version — pointers become nativeint, basic types map directly.
+    let private mapParamType (cType: string) (model: Types.PlatformABI) : FsType =
+        if cType.Contains("(*)") || cType.Contains("(**)") then Named "nativeint"
+        elif cType.Contains("*") then Named "nativeint"
+        elif cType.Contains("void") && not (cType.Contains("*")) then Unit
+        else
+            let trimmed = cType.Replace("const ", "").Replace("unsigned ", "u").Replace("signed ", "").Trim()
+            match trimmed with
+            | "int" | "int32_t" -> Named "int32"
+            | "uint" | "uint32_t" | "guint" -> Named "uint32"
+            | "long" -> Named "int64"
+            | "ulong" | "unsigned long" -> Named "uint64"
+            | "uint64_t" | "gulong" -> Named "uint64"
+            | "int64_t" -> Named "int64"
+            | "char" | "uchar" | "gchar" -> Named "byte"
+            | "short" | "int16_t" -> Named "int16"
+            | "ushort" | "uint16_t" -> Named "uint16"
+            | "float" -> Named "float32"
+            | "double" -> Named "float"
+            | "size_t" -> Named "unativeint"
+            | "ssize_t" -> Named "nativeint"
+            | _ -> Named "nativeint"
+
+    /// Map a C return type to a Clef type for wrapper signatures.
+    let private mapReturnType (cType: string) (model: Types.PlatformABI) : FsType =
+        let trimmed = cType.Trim()
+        if trimmed = "void" then Unit
+        elif trimmed.Contains("*") then Named "nativeint"
+        else mapParamType trimmed model
+
     // =========================================================================
     // Pattern A: Registration Function Wrappers
     // =========================================================================
 
     /// Generate a wrapper for a callback registration function.
-    /// Replaces the function pointer parameter with a string symbol name,
-    /// and the userdata parameter (if any) with 0n.
+    /// Looks up the full function signature from declarations, then:
+    ///   - Replaces callback param with handlerSymbol: string
+    ///   - Removes userdata param (passes 0n)
+    ///   - Resolves symbol via dlsym, calls original L1 function
     let generateRegistrationWrapper
         (reg: CallbackRegistration)
+        (funcDecl: CppParser.FunctionDecl)
         (bindingsModuleName: string)
+        (model: Types.PlatformABI)
         : FsDecl list =
 
         let wrapperName = toWrapperName reg.Function
 
-        // Build parameter list: keep all original params except:
-        //   - callback param → string (symbol name)
-        //   - data param → removed (we pass 0n)
-        // Since we don't have the full function signature here, we generate
-        // a focused wrapper that takes the non-callback params plus a symbol string.
-        // The wrapper calls dlsym to resolve the symbol, then calls the L1 function.
+        // Build wrapper parameters: replace callback with string, remove userdata
+        let wrapperParams =
+            funcDecl.Parameters |> List.choose (fun (name, cType) ->
+                if name = reg.CallbackParam then
+                    Some { Name = "handlerSymbol"; Type = Named "string" }
+                elif reg.DataParam = Some name then
+                    None  // userdata removed — we pass 0n
+                else
+                    Some { Name = name; Type = mapParamType cType model })
 
-        let doc = $"Resolve callback symbol at runtime and register via {reg.Function}."
-        let callbackParamDoc =
+        let returnType = mapReturnType funcDecl.ReturnType model
+
+        // Body: let handler = dlsym 0n handlerSymbol in originalFunc arg1 handler arg2 ...
+        let body =
+            LetIn("handler",
+                FunctionCall("Fidelity.Libc.DynamicLink", "dlsym", [Literal "0n"; Identifier "handlerSymbol"]),
+                FunctionCall(bindingsModuleName, reg.Function,
+                    funcDecl.Parameters |> List.map (fun (name, _) ->
+                        if name = reg.CallbackParam then Identifier "handler"
+                        elif reg.DataParam = Some name then Literal "0n"
+                        else Identifier name)))
+
+        let doc =
             match reg.DataParam with
-            | Some dp -> $"Resolves {{handlerSymbol}} via dlsym(RTLD_DEFAULT). Passes 0n for '{dp}'."
-            | None -> $"Resolves {{handlerSymbol}} via dlsym(RTLD_DEFAULT)."
+            | Some dp -> $"Register callback by symbol name. Resolves via dlsym; passes 0n for {dp}."
+            | None -> $"Register callback by symbol name. Resolves via dlsym."
 
         [ XmlDoc doc
-          XmlDoc callbackParamDoc
-          Comment $"Pattern A wrapper for {reg.Function}"
-          Comment $"  callback_param = \"{reg.CallbackParam}\""
-          Comment (match reg.DataParam with Some dp -> $"  data_param = \"{dp}\"" | None -> "  data_param = (none)")
-          BlankLine ]
+          LetBinding(wrapperName, wrapperParams, returnType, body, []) ]
 
     // =========================================================================
     // Pattern B: Listener Struct Builder
     // =========================================================================
 
     /// Generate a builder function for a listener struct.
-    /// Each function pointer field becomes a string parameter (symbol name).
+    /// Each callback field becomes a string parameter (symbol name).
     /// The builder resolves all symbols via dlsym and returns the populated struct.
     let generateListenerBuilder
         (ls: ListenerStruct)
-        (structDecl: CppParser.StructDecl option)
+        (structDecl: CppParser.StructDecl)
+        (delegateNames: Set<string>)
         : FsDecl list =
 
         let builderName = toBuilderName ls.Name
 
-        match structDecl with
-        | None ->
-            // No struct declaration found — emit a comment placeholder
-            [ Comment $"Listener struct '{ls.Name}' not found in declarations; skipping builder generation." ]
-        | Some s ->
-            let fpFields =
-                s.Fields |> List.filter (fun f ->
-                    f.Type.Contains("(*)") || f.Type.Contains("(**)"))
+        /// A field is a callback if it's a C function pointer or a known delegate type.
+        let isCallbackField (f: CppParser.FieldDecl) =
+            f.Type.Contains("(*)") || f.Type.Contains("(**)") || Set.contains f.Type delegateNames
 
-            if fpFields.IsEmpty then
-                [ Comment $"Listener struct '{ls.Name}' has no function pointer fields; skipping." ]
-            else
-                // Generate: let builderName (field1Sym: string) (field2Sym: string) ... : structName =
-                let params' =
-                    fpFields |> List.map (fun f ->
-                        { Name = f.Name + "Sym"; Type = Named "string" })
-                let resolveAndBuild =
-                    // let resolve sym = Fidelity.Libc.DynamicLink.dlsym 0n sym
-                    // { field1 = resolve field1Sym; field2 = resolve field2Sym; ... }
-                    let fields =
-                        fpFields |> List.map (fun f ->
-                            (f.Name, FunctionCall("Fidelity.Libc.DynamicLink", "dlsym", [Literal "0n"; Identifier (f.Name + "Sym")])))
-                    RecordConstruction fields
+        let callbackFields = structDecl.Fields |> List.filter isCallbackField
 
-                [ XmlDoc $"Build a {ls.Name} by resolving C symbol names via dlsym(RTLD_DEFAULT)."
-                  XmlDoc "Each parameter is a C symbol name that will be resolved at runtime."
-                  LetBinding(
-                    builderName,
-                    params',
-                    Named ls.Name,
-                    resolveAndBuild,
-                    []) ]
+        if callbackFields.IsEmpty then []
+        else
+            let params' =
+                callbackFields |> List.map (fun f ->
+                    { Name = f.Name + "Sym"; Type = Named "string" })
+
+            // Build the struct record with dlsym-resolved fields
+            let fields =
+                structDecl.Fields |> List.map (fun f ->
+                    if isCallbackField f then
+                        (f.Name, FunctionCall("Fidelity.Libc.DynamicLink", "dlsym",
+                            [Literal "0n"; Identifier (f.Name + "Sym")]))
+                    else
+                        // Non-callback field: zero-init
+                        (f.Name, Literal "Unchecked.defaultof<_>"))
+
+            let body = RecordConstruction fields
+
+            [ XmlDoc $"Build a {ls.Name} by resolving C symbol names via dlsym(RTLD_DEFAULT)."
+              XmlDoc "Each parameter is a C symbol name resolved at runtime."
+              LetBinding(builderName, params', Named ls.Name, body, []) ]
 
     // =========================================================================
     // Complete Module Generation
@@ -137,11 +176,26 @@ module CallbackWrapperGenerator =
         (spec: CallbackSpec)
         (declarations: CppParser.Declaration list)
         (bindingsModuleName: string)
+        (model: Types.PlatformABI)
         : FsDecl list =
+
+        // Collect delegate names for listener field type matching
+        let delegateNames =
+            declarations |> List.choose (function
+                | CppParser.Declaration.Delegate d -> Some d.Name
+                | _ -> None)
+            |> Set.ofList
 
         let registrationDecls =
             spec.Registrations |> List.collect (fun reg ->
-                generateRegistrationWrapper reg bindingsModuleName)
+                // Look up the full function declaration
+                let funcDecl =
+                    declarations |> List.tryPick (function
+                        | CppParser.Declaration.Function f when f.Name = reg.Function -> Some f
+                        | _ -> None)
+                match funcDecl with
+                | Some f -> generateRegistrationWrapper reg f bindingsModuleName model
+                | None -> [])
 
         let listenerDecls =
             spec.ListenerStructs |> List.collect (fun ls ->
@@ -149,17 +203,15 @@ module CallbackWrapperGenerator =
                     declarations |> List.tryPick (function
                         | CppParser.Declaration.Struct s when s.Name = ls.Name -> Some s
                         | _ -> None)
-                generateListenerBuilder ls structDecl)
+                match structDecl with
+                | Some s -> generateListenerBuilder ls s delegateNames
+                | None -> [])
 
-        let allDecls =
-            match registrationDecls, listenerDecls with
-            | [], [] -> []
-            | regs, [] -> regs
-            | [], listeners -> listeners
-            | regs, listeners ->
-                regs @ [ BlankLine ] @ listeners
-
-        allDecls
+        match registrationDecls, listenerDecls with
+        | [], [] -> []
+        | regs, [] -> regs
+        | [], listeners -> listeners
+        | regs, listeners -> regs @ [ BlankLine ] @ listeners
 
     /// Generate the complete callback wrappers module as a rendered source string.
     let generate
@@ -167,9 +219,10 @@ module CallbackWrapperGenerator =
         (declarations: CppParser.Declaration list)
         (namespace': string)
         (bindingsModuleName: string)
+        (model: Types.PlatformABI)
         : string option =
 
-        let decls = generateDecls spec declarations bindingsModuleName
+        let decls = generateDecls spec declarations bindingsModuleName model
         if decls.IsEmpty then None
         else
             let moduleDecl = Module(namespace', "Callback wrappers — dlsym-based runtime symbol resolution", decls)

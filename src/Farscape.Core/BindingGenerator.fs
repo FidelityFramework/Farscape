@@ -253,6 +253,40 @@ module BindingGenerator =
                             [descriptorPath]
                     else []
 
+                // ── Callback wrappers ──────────────────────────────────────
+                let callbackFiles =
+                    if generateWrappers then
+                        // Use TOML-specified callbacks if present, otherwise auto-discover
+                        let callbackSpec =
+                            match project.Callbacks with
+                            | Some spec -> spec
+                            | None ->
+                                let rawSpec = PilotAnalyzer.discoverCallbacks declarations
+                                // Filter out transitively-leaked callbacks that don't belong to this library
+                                let claimedFunctions =
+                                    project.Namespaces |> List.collect (fun ns ->
+                                        PilotAnalyzer.filterDeclarationsForNamespace ns declarations
+                                        |> List.choose (function
+                                            | CppParser.Declaration.Function f -> Some f.Name
+                                            | _ -> None))
+                                    |> Set.ofList
+                                { rawSpec with
+                                    Registrations = rawSpec.Registrations |> List.filter (fun r -> claimedFunctions.Contains r.Function) }
+                        if callbackSpec.Registrations.IsEmpty && callbackSpec.ListenerStructs.IsEmpty then
+                            logVerbose "No callback patterns detected" verbose
+                            []
+                        else
+                            let callbackNs = $"{nsPrefix}.Callbacks"
+                            logVerbose $"Callback patterns: {callbackSpec.Registrations.Length} registration(s), {callbackSpec.ListenerStructs.Length} listener struct(s)" verbose
+                            match CallbackWrapperGenerator.generate callbackSpec declarations callbackNs nsPrefix dataModel with
+                            | Some output ->
+                                let callbackPath = Path.Combine(outputDir, "Callbacks.clef")
+                                File.WriteAllText(callbackPath, output)
+                                logVerbose $"Callback module: {callbackPath}" verbose
+                                [callbackPath]
+                            | None -> []
+                    else []
+
                 // ── Namespace subfolders ─────────────────────────────────────
                 let nsFiles =
                     project.Namespaces |> List.collect (fun ns ->
@@ -310,7 +344,7 @@ module BindingGenerator =
 
                         localTypeFiles @ [funcPath] @ wrapperFiles)
 
-                let allFiles = [sharedTypesPath] @ errorModuleFiles @ descriptorFiles @ nsFiles
+                let allFiles = [sharedTypesPath] @ errorModuleFiles @ descriptorFiles @ callbackFiles @ nsFiles
 
                 let advisories =
                     match errorHandling, generateWrappers with

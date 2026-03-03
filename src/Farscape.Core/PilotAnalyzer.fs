@@ -172,12 +172,33 @@ module PilotAnalyzer =
 
     /// Discover callback registration functions and listener structs from declarations.
     let discoverCallbacks (declarations: CppParser.Declaration list) : CallbackSpec =
+        // Collect delegate type names — Wayland XML listener fields use these instead of (*)
+        let delegateNames =
+            declarations |> List.choose (function
+                | CppParser.Declaration.Delegate d -> Some d.Name
+                | _ -> None)
+            |> Set.ofList
+
+        // Collect typedef names that resolve to function pointer types
+        let functionPointerTypedefs =
+            declarations |> List.choose (function
+                | CppParser.Declaration.Typedef { Name = name; UnderlyingType = ut }
+                    when isFunctionPointerType ut -> Some name
+                | _ -> None)
+            |> Set.ofList
+
+        /// Check if a parameter type is a callback (raw function pointer, delegate, or typedef'd fn ptr).
+        let isCallbackType (typeStr: string) =
+            isFunctionPointerType typeStr
+            || Set.contains typeStr delegateNames
+            || Set.contains typeStr functionPointerTypedefs
+
         // Pattern A: Find functions with function pointer + optional userdata parameters
         let registrations =
             declarations |> List.choose (function
                 | CppParser.Declaration.Function f ->
                     let callbackParams =
-                        f.Parameters |> List.filter (fun (_, t) -> isFunctionPointerType t)
+                        f.Parameters |> List.filter (fun (_, t) -> isCallbackType t)
                     let dataParams =
                         f.Parameters |> List.filter (fun (name, t) ->
                             t.Contains("void") && t.Contains("*") && isUserdataName name)
@@ -189,11 +210,11 @@ module PilotAnalyzer =
                     | _ -> None
                 | _ -> None)
 
-        // Pattern B: Find structs where >50% of fields are function pointers
+        // Pattern B: Find structs where >50% of fields are function pointers or delegate types
         let listenerStructs =
             declarations |> List.choose (function
-                | CppParser.Declaration.Struct s when s.Fields.Length >= 2 ->
-                    let fpFields = s.Fields |> List.filter (fun f -> isFunctionPointerType f.Type)
+                | CppParser.Declaration.Struct s when s.Name <> "" && s.Fields.Length >= 2 ->
+                    let fpFields = s.Fields |> List.filter (fun f -> isCallbackType f.Type)
                     let ratio = float fpFields.Length / float s.Fields.Length
                     if ratio > 0.5 then
                         // Try to find companion add_listener/set_*_handler registration function

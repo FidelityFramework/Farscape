@@ -163,6 +163,25 @@ module CallbackDiscovery =
         Assert.Equal(Some "wl_pointer_add_listener", spec.ListenerStructs.[0].RegistrationFunction)
 
     [<Fact>]
+    let ``discovers registration via typedef function pointer`` () =
+        let decls = [
+            CppParser.Declaration.Typedef {
+                Name = "hipStreamCallback_t"
+                UnderlyingType = "void (*)(int, int, void *)"
+                Documentation = None }
+            CppParser.Declaration.Function (
+                mkFunc "hipStreamAddCallback" "int"
+                    [("stream", "void *"); ("callback", "hipStreamCallback_t");
+                     ("userData", "void *"); ("flags", "unsigned int")])
+        ]
+        let spec = PilotAnalyzer.discoverCallbacks decls
+        Assert.Equal(1, spec.Registrations.Length)
+        let reg = spec.Registrations.[0]
+        Assert.Equal("hipStreamAddCallback", reg.Function)
+        Assert.Equal("callback", reg.CallbackParam)
+        Assert.Equal(Some "userData", reg.DataParam)
+
+    [<Fact>]
     let ``empty declarations produce empty CallbackSpec`` () =
         let spec = PilotAnalyzer.discoverCallbacks []
         Assert.Empty(spec.Registrations)
@@ -288,6 +307,7 @@ module CallbackSerializerTests =
 module CallbackWrapperGeneratorTests =
 
     open PilotTypes
+    open Farscape.Core.Types
 
     [<Fact>]
     let ``generates listener struct builder with dlsym calls`` () =
@@ -305,7 +325,7 @@ module CallbackWrapperGeneratorTests =
                     mkField "motion" "void (*)(void *, struct wl_pointer *, uint32_t, wl_fixed_t, wl_fixed_t)"
                 ] None)
         ]
-        match CallbackWrapperGenerator.generate spec decls "Fidelity.Wayland.Callbacks" "Fidelity.Wayland" with
+        match CallbackWrapperGenerator.generate spec decls "Fidelity.Wayland.Callbacks" "Fidelity.Wayland" LP64 with
         | None -> Assert.Fail "Expected some generated output"
         | Some code ->
             Assert.Contains("dlsym", code)
@@ -315,6 +335,33 @@ module CallbackWrapperGeneratorTests =
             Assert.Contains("wl_pointer_listener", code)
 
     [<Fact>]
+    let ``generates listener builder for delegate-typed fields`` () =
+        let spec : CallbackSpec = {
+            Registrations = []
+            ListenerStructs = [
+                { Name = "wl_pointer_listener"; RegistrationFunction = None }
+            ]
+        }
+        let decls = [
+            CppParser.Declaration.Delegate {
+                Name = "WlPointerEnterHandler"; Parameters = [("data", "void *")]; ReturnType = "void"; Documentation = None }
+            CppParser.Declaration.Delegate {
+                Name = "WlPointerLeaveHandler"; Parameters = [("data", "void *")]; ReturnType = "void"; Documentation = None }
+            CppParser.Declaration.Struct (
+                mkStruct "wl_pointer_listener" [
+                    mkField "enter" "WlPointerEnterHandler"
+                    mkField "leave" "WlPointerLeaveHandler"
+                ] None)
+        ]
+        match CallbackWrapperGenerator.generate spec decls "Fidelity.Wayland.Callbacks" "Fidelity.Wayland" LP64 with
+        | None -> Assert.Fail "Expected some generated output"
+        | Some code ->
+            Assert.Contains("dlsym", code)
+            Assert.Contains("enterSym", code)
+            Assert.Contains("leaveSym", code)
+            Assert.Contains("buildPointerListener", code)
+
+    [<Fact>]
     let ``skips listener builder when struct not in declarations`` () =
         let spec : CallbackSpec = {
             Registrations = []
@@ -322,28 +369,65 @@ module CallbackWrapperGeneratorTests =
                 { Name = "missing_listener"; RegistrationFunction = None }
             ]
         }
-        match CallbackWrapperGenerator.generate spec [] "Fidelity.Test.Callbacks" "Fidelity.Test" with
-        | None -> Assert.Fail "Expected some output (comment placeholder)"
-        | Some code ->
-            Assert.Contains("not found", code)
+        // No struct found → no decls generated → None
+        let result = CallbackWrapperGenerator.generate spec [] "Fidelity.Test.Callbacks" "Fidelity.Test" LP64
+        Assert.True(result.IsNone)
 
     [<Fact>]
     let ``empty callback spec produces None`` () =
         let spec : CallbackSpec = { Registrations = []; ListenerStructs = [] }
-        let result = CallbackWrapperGenerator.generate spec [] "Ns" "Mod"
+        let result = CallbackWrapperGenerator.generate spec [] "Ns" "Mod" LP64
         Assert.True(result.IsNone)
 
     [<Fact>]
-    let ``generates registration wrapper comments`` () =
+    let ``generates registration wrapper with real function body`` () =
         let spec : CallbackSpec = {
             Registrations = [
                 { Function = "g_idle_add"; CallbackParam = "function"; DataParam = Some "data" }
             ]
             ListenerStructs = []
         }
-        match CallbackWrapperGenerator.generate spec [] "Fidelity.GTK.Callbacks" "Fidelity.GTK" with
+        let decls = [
+            CppParser.Declaration.Function (
+                mkFunc "g_idle_add" "unsigned int"
+                    [("function", "int (*)(void *)"); ("data", "void *")])
+        ]
+        match CallbackWrapperGenerator.generate spec decls "Fidelity.GTK.Callbacks" "Fidelity.GTK" LP64 with
         | None -> Assert.Fail "Expected some output"
         | Some code ->
+            Assert.Contains("dlsym", code)
+            Assert.Contains("handlerSymbol", code)
+            Assert.Contains("handler", code)
             Assert.Contains("g_idle_add", code)
-            Assert.Contains("callback_param", code)
-            Assert.Contains("data_param", code)
+            Assert.Contains("0n", code)  // userdata = 0n
+
+    [<Fact>]
+    let ``registration wrapper without userdata keeps all other params`` () =
+        let spec : CallbackSpec = {
+            Registrations = [
+                { Function = "signal"; CallbackParam = "handler"; DataParam = None }
+            ]
+            ListenerStructs = []
+        }
+        let decls = [
+            CppParser.Declaration.Function (
+                mkFunc "signal" "void (*)(int)"
+                    [("signum", "int"); ("handler", "void (*)(int)")])
+        ]
+        match CallbackWrapperGenerator.generate spec decls "Fidelity.Libc.Callbacks" "Fidelity.Libc" LP64 with
+        | None -> Assert.Fail "Expected some output"
+        | Some code ->
+            Assert.Contains("signum", code)
+            Assert.Contains("handlerSymbol", code)
+            Assert.Contains("dlsym", code)
+
+    [<Fact>]
+    let ``registration wrapper skipped when function not in declarations`` () =
+        let spec : CallbackSpec = {
+            Registrations = [
+                { Function = "missing_func"; CallbackParam = "cb"; DataParam = None }
+            ]
+            ListenerStructs = []
+        }
+        let result = CallbackWrapperGenerator.generate spec [] "Ns" "Mod" LP64
+        Assert.True(result.IsNone)
