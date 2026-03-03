@@ -34,6 +34,7 @@ let private sampleProject : PilotTypes.PilotProject = {
     ]
     ErrorConventions = None
     Options = None
+    Callbacks = None
 }
 
 [<Fact>]
@@ -176,6 +177,7 @@ module ErrorConventionTomlTests =
                 Overrides = Map.ofList [("pthread_create", ReturnCode); ("strtol", NoErrorConvention)]
             }
             Options = None
+            Callbacks = None
         }
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("error_conventions", toml)
@@ -211,6 +213,7 @@ module ErrorConventionTomlTests =
                 Overrides = Map.empty
             }
             Options = None
+            Callbacks = None
         }
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("enum_error_code", toml)
@@ -247,6 +250,7 @@ module ErrorConventionTomlTests =
                 Overrides = Map.empty
             }
             Options = None
+            Callbacks = None
         }
         let toml = PilotSerializer.toTomlString project
         // Should NOT contain optional fn fields
@@ -274,6 +278,7 @@ module ErrorConventionTomlTests =
             Namespaces = []
             ErrorConventions = Some { Default = Errno; Overrides = Map.empty }
             Options = None
+            Callbacks = None
         }
         let toml = PilotSerializer.toTomlString project
         match Fidelity.Data.TOML.Toml.parse toml with
@@ -297,6 +302,7 @@ module ErrorConventionTomlTests =
                 Overrides = Map.empty
             }
             Options = None
+            Callbacks = None
         }
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("null_with_reason", toml)

@@ -98,6 +98,36 @@ module PilotTypes =
         GenerateDescriptors: bool
     }
 
+    // =========================================================================
+    // Callback Convention Types
+    // =========================================================================
+
+    /// A function that registers a callback (takes function pointer + userdata).
+    type CallbackRegistration = {
+        /// Function name (e.g., "g_signal_connect_data")
+        Function: string
+        /// Parameter name that's the function pointer (e.g., "c_handler")
+        CallbackParam: string
+        /// Companion userdata parameter name (e.g., "data")
+        DataParam: string option
+    }
+
+    /// A struct that is a callback table (all/most fields are function pointers).
+    type ListenerStruct = {
+        /// Struct name (e.g., "wl_pointer_listener")
+        Name: string
+        /// Companion registration function name, if discovered
+        RegistrationFunction: string option
+    }
+
+    /// Callback convention configuration for a library.
+    type CallbackSpec = {
+        /// Functions that register callbacks
+        Registrations: CallbackRegistration list
+        /// Structs that are listener/callback tables
+        ListenerStructs: ListenerStruct list
+    }
+
     /// Complete Pilot project, corresponding to a .pilot.toml file.
     type PilotProject = {
         Library: LibrarySpec
@@ -107,6 +137,8 @@ module PilotTypes =
         ErrorConventions: ErrorConventionSpec option
         /// Generation options (None = defaults)
         Options: ProjectOptions option
+        /// Callback pattern configuration (None = no callback wrappers)
+        Callbacks: CallbackSpec option
     }
 
     // =========================================================================

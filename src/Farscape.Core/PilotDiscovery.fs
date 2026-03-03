@@ -421,7 +421,8 @@ module PilotDiscovery =
               XmlInterfaces = [] }
           ]
           ErrorConventions = None
-          Options = None }
+          Options = None
+          Callbacks = None }
 
     // =========================================================================
     // IO Layer (CLI consumption)

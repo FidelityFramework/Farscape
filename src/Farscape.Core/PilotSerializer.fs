@@ -116,6 +116,40 @@ module PilotSerializer =
             else table
         TomlValue.Table table
 
+    /// Serialize a CallbackSpec to a TOML table value.
+    let private serializeCallbacks (spec: CallbackSpec) : TomlValue =
+        let table = TomlTable.empty
+        let table =
+            if spec.Registrations.IsEmpty then table
+            else
+                let regs =
+                    spec.Registrations |> List.map (fun reg ->
+                        let t =
+                            TomlTable.empty
+                            |> TomlTable.add "function" (TomlValue.String reg.Function)
+                            |> TomlTable.add "callback_param" (TomlValue.String reg.CallbackParam)
+                        let t =
+                            match reg.DataParam with
+                            | Some dp -> TomlTable.add "data_param" (TomlValue.String dp) t
+                            | None -> t
+                        TomlValue.Table t)
+                TomlTable.add "registrations" (TomlValue.Array regs) table
+        let table =
+            if spec.ListenerStructs.IsEmpty then table
+            else
+                let structs =
+                    spec.ListenerStructs |> List.map (fun ls ->
+                        let t =
+                            TomlTable.empty
+                            |> TomlTable.add "name" (TomlValue.String ls.Name)
+                        let t =
+                            match ls.RegistrationFunction with
+                            | Some rf -> TomlTable.add "registration_function" (TomlValue.String rf) t
+                            | None -> t
+                        TomlValue.Table t)
+                TomlTable.add "listener_structs" (TomlValue.Array structs) table
+        TomlValue.Table table
+
     /// Serialize a complete PilotProject to a TomlDocument.
     let serialize (project: PilotProject) : TomlDocument =
         let table =
@@ -127,8 +161,12 @@ module PilotSerializer =
             match project.ErrorConventions with
             | Some spec -> table |> TomlTable.add "error_conventions" (serializeErrorConventions spec)
             | None -> table
-        match project.Options with
-        | Some opts -> table |> TomlTable.add "options" (serializeOptions opts)
+        let table =
+            match project.Options with
+            | Some opts -> table |> TomlTable.add "options" (serializeOptions opts)
+            | None -> table
+        match project.Callbacks with
+        | Some spec -> table |> TomlTable.add "callbacks" (serializeCallbacks spec)
         | None -> table
 
     /// Render a PilotProject to a TOML string.
@@ -286,6 +324,40 @@ module PilotSerializer =
             Some { AbiCriticalStructs = abiStructs; GenerateDescriptors = generateDescriptors }
         | _ -> None
 
+    /// Deserialize the optional [callbacks] section.
+    let private deserializeCallbacks (doc: TomlDocument) : CallbackSpec option =
+        match Toml.getValue "callbacks" doc with
+        | None -> None
+        | Some (TomlValue.Table table) ->
+            let registrations =
+                match TomlTable.tryFind "registrations" table with
+                | Some (TomlValue.Array items) ->
+                    items |> List.choose (fun item ->
+                        match item with
+                        | TomlValue.Table t ->
+                            match TomlTable.tryFind "function" t, TomlTable.tryFind "callback_param" t with
+                            | Some (TomlValue.String fn), Some (TomlValue.String cb) ->
+                                let dp = optionalString "data_param" t
+                                Some { Function = fn; CallbackParam = cb; DataParam = dp }
+                            | _ -> None
+                        | _ -> None)
+                | _ -> []
+            let listenerStructs =
+                match TomlTable.tryFind "listener_structs" table with
+                | Some (TomlValue.Array items) ->
+                    items |> List.choose (fun item ->
+                        match item with
+                        | TomlValue.Table t ->
+                            match TomlTable.tryFind "name" t with
+                            | Some (TomlValue.String name) ->
+                                let regFn = optionalString "registration_function" t
+                                Some { Name = name; RegistrationFunction = regFn }
+                            | _ -> None
+                        | _ -> None)
+                | _ -> []
+            Some { Registrations = registrations; ListenerStructs = listenerStructs }
+        | _ -> None
+
     /// Deserialize a TomlDocument to a PilotProject.
     let deserialize (doc: TomlDocument) : Result<PilotProject, string> =
         match deserializeLibrary doc, deserializeOutput doc, deserializeNamespaces doc with
@@ -294,7 +366,8 @@ module PilotSerializer =
                  Output = output
                  Namespaces = namespaces
                  ErrorConventions = deserializeErrorConventions doc
-                 Options = deserializeOptions doc }
+                 Options = deserializeOptions doc
+                 Callbacks = deserializeCallbacks doc }
         | Error e, _, _ | _, Error e, _ | _, _, Error e -> Error e
 
     // =========================================================================

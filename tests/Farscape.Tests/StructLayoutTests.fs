@@ -206,6 +206,7 @@ generate_descriptors = true
             Namespaces = []
             ErrorConventions = None
             Options = Some { AbiCriticalStructs = ["drm_mode_create_dumb"]; GenerateDescriptors = true }
+            Callbacks = None
         }
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("abi_critical_structs", toml)

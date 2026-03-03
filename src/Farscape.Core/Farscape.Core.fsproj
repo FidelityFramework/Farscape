@@ -28,6 +28,7 @@
     <Compile Include="WrapperCodeGenerator.fs" />
     <Compile Include="ErrnoModuleGenerator.fs" />
     <Compile Include="EnumErrorModuleGenerator.fs" />
+    <Compile Include="CallbackWrapperGenerator.fs" />
     <Compile Include="DescriptorGenerator.fs" />
     <Compile Include="BindingGenerator.fs" />
   </ItemGroup>

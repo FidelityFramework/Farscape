@@ -150,6 +150,17 @@ module WrapperPatternAnalyzer =
     // Parameter Role Analysis
     // =========================================================================
 
+    /// Check if a type string represents a function pointer (callback).
+    let private isFunctionPointer (typeStr: string) : bool =
+        typeStr.Contains("(*)") || typeStr.Contains("(**)")
+
+    /// Check if a parameter name matches common userdata/context naming patterns.
+    let private isUserdataName (name: string) : bool =
+        let lower = name.ToLowerInvariant().TrimStart('_')
+        lower = "data" || lower = "user_data" || lower = "userdata"
+        || lower = "user" || lower = "ctx" || lower = "context"
+        || lower = "arg" || lower = "closure_data"
+
     /// Check if a type string represents a const pointer (input buffer).
     let private isConstPointer (typeStr: string) : bool =
         typeStr.Contains("const") && typeStr.Contains("*")
@@ -206,37 +217,62 @@ module WrapperPatternAnalyzer =
         let formatInfo =
             attrs |> List.tryPick (function Format (_, fmtIdx, _) -> Some fmtIdx | _ -> None)
 
-        params'
-        |> List.mapi (fun idx (name, typeStr) ->
-            let role =
-                // Check FormatAttr first
-                match formatInfo with
-                | Some fmtIdx when idx = fmtIdx -> FormatString
-                | _ ->
-                    match name with
-                    | FdName ->
-                        // File descriptor parameter
-                        FileDescriptor
+        // First pass: classify each parameter
+        let firstPass =
+            params'
+            |> List.mapi (fun idx (name, typeStr) ->
+                let role =
+                    // Check FormatAttr first
+                    match formatInfo with
+                    | Some fmtIdx when idx = fmtIdx -> FormatString
                     | _ ->
-                        // Check type for pointer patterns
-                        if typeStr.Contains("FILE") && typeStr.Contains("*") then
-                            OpaqueHandle
-                        elif isConstPointer typeStr then
-                            let lengthParam = findAdjacentLength idx params' typedefMap
-                            InputBuffer lengthParam
-                        elif isMutablePointer typeStr then
-                            let lengthParam = findAdjacentLength idx params' typedefMap
-                            OutputBuffer lengthParam
-                        elif isSizeType typeStr typedefMap then
-                            match name with
-                            | CountName ->
-                                match findAdjacentBuffer idx params' with
-                                | Some bufParam -> BufferLength bufParam
-                                | None -> InputValue
-                            | _ -> InputValue
+                        // Function pointer parameters (callbacks) before general pointer checks
+                        if isFunctionPointer typeStr then
+                            CallbackParam
                         else
-                            InputValue
-            (name, role))
+                        match name with
+                        | FdName ->
+                            // File descriptor parameter
+                            FileDescriptor
+                        | _ ->
+                            // Check type for pointer patterns
+                            if typeStr.Contains("FILE") && typeStr.Contains("*") then
+                                OpaqueHandle
+                            elif isConstPointer typeStr then
+                                let lengthParam = findAdjacentLength idx params' typedefMap
+                                InputBuffer lengthParam
+                            elif isMutablePointer typeStr then
+                                let lengthParam = findAdjacentLength idx params' typedefMap
+                                OutputBuffer lengthParam
+                            elif isSizeType typeStr typedefMap then
+                                match name with
+                                | CountName ->
+                                    match findAdjacentBuffer idx params' with
+                                    | Some bufParam -> BufferLength bufParam
+                                    | None -> InputValue
+                                | _ -> InputValue
+                            else
+                                InputValue
+                (name, role))
+
+        // Second pass: detect userdata companions for callback parameters
+        let hasCallback = firstPass |> List.exists (fun (_, role) -> role = CallbackParam)
+        if hasCallback then
+            let callbackName =
+                firstPass |> List.tryPick (fun (name, role) ->
+                    if role = CallbackParam then Some name else None)
+            firstPass |> List.map (fun (name, role) ->
+                match role with
+                | InputValue when isUserdataName name ->
+                    (name, UserDataParam (callbackName |> Option.defaultValue ""))
+                | InputBuffer None when isUserdataName name ->
+                    (name, UserDataParam (callbackName |> Option.defaultValue ""))
+                | OutputBuffer None when isUserdataName name ->
+                    // void* userdata looks like a mutable pointer; reclassify
+                    (name, UserDataParam (callbackName |> Option.defaultValue ""))
+                | _ -> (name, role))
+        else
+            firstPass
 
     // =========================================================================
     // Complete Pattern Analysis

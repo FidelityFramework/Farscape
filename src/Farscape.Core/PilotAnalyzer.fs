@@ -156,6 +156,61 @@ module PilotAnalyzer =
         groups, ungrouped
 
     // =========================================================================
+    // Callback Pattern Discovery
+    // =========================================================================
+
+    /// Check if a C type string represents a function pointer.
+    let private isFunctionPointerType (typeStr: string) : bool =
+        typeStr.Contains("(*)") || typeStr.Contains("(**)")
+
+    /// Check if a parameter name matches common userdata/context naming patterns.
+    let private isUserdataName (name: string) : bool =
+        let lower = name.ToLowerInvariant().TrimStart('_')
+        lower = "data" || lower = "user_data" || lower = "userdata"
+        || lower = "user" || lower = "ctx" || lower = "context"
+        || lower = "arg" || lower = "closure_data"
+
+    /// Discover callback registration functions and listener structs from declarations.
+    let discoverCallbacks (declarations: CppParser.Declaration list) : CallbackSpec =
+        // Pattern A: Find functions with function pointer + optional userdata parameters
+        let registrations =
+            declarations |> List.choose (function
+                | CppParser.Declaration.Function f ->
+                    let callbackParams =
+                        f.Parameters |> List.filter (fun (_, t) -> isFunctionPointerType t)
+                    let dataParams =
+                        f.Parameters |> List.filter (fun (name, t) ->
+                            t.Contains("void") && t.Contains("*") && isUserdataName name)
+                    match callbackParams, dataParams with
+                    | [(cbName, _)], [(dataName, _)] ->
+                        Some { Function = f.Name; CallbackParam = cbName; DataParam = Some dataName }
+                    | [(cbName, _)], [] ->
+                        Some { Function = f.Name; CallbackParam = cbName; DataParam = None }
+                    | _ -> None
+                | _ -> None)
+
+        // Pattern B: Find structs where >50% of fields are function pointers
+        let listenerStructs =
+            declarations |> List.choose (function
+                | CppParser.Declaration.Struct s when s.Fields.Length >= 2 ->
+                    let fpFields = s.Fields |> List.filter (fun f -> isFunctionPointerType f.Type)
+                    let ratio = float fpFields.Length / float s.Fields.Length
+                    if ratio > 0.5 then
+                        // Try to find companion add_listener/set_*_handler registration function
+                        let regFn =
+                            declarations |> List.tryPick (function
+                                | CppParser.Declaration.Function f
+                                    when (f.Name.EndsWith("_add_listener") || f.Name.Contains("_set_"))
+                                      && f.Parameters |> List.exists (fun (_, t) ->
+                                            t.Contains(s.Name)) -> Some f.Name
+                                | _ -> None)
+                        Some { Name = s.Name; RegistrationFunction = regFn }
+                    else None
+                | _ -> None)
+
+        { Registrations = registrations; ListenerStructs = listenerStructs }
+
+    // =========================================================================
     // Public API
     // =========================================================================
 
@@ -225,7 +280,8 @@ module PilotAnalyzer =
               Directory = outputDir }
           Namespaces = namespaces @ catchAll
           ErrorConventions = None
-          Options = None }
+          Options = None
+          Callbacks = None }
 
     // =========================================================================
     // Declaration Filtering (for scoped generation)

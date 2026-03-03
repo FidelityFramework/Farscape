@@ -64,6 +64,10 @@ module WrapperTypes =
         | BufferLength of bufferParam: string
         /// Nullable input (pointer without NonNull attribute).
         | NullableInput
+        /// Function pointer parameter (callback handler).
+        | CallbackParam
+        /// Companion void* userdata parameter for a callback.
+        | UserDataParam of callbackParam: string
 
     // =========================================================================
     // Return Value Semantics
