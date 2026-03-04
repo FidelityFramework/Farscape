@@ -526,30 +526,42 @@ module CppParser =
         // All accepted filenames: primary target + any transitive headers
         let acceptedFiles = targetFile :: transitiveHeaders
 
+        // Track which file #included the current file (for umbrella header detection)
+        let mutable currentIncludedFrom: string option = None
+
         /// Update file tracking from a node's location.
-        /// Always prefer the direct "file" field (actual source location)
-        /// over "includedFrom" (which points to the includer).
+        /// Clang's JSON AST uses "loc.file" to indicate a change in source file.
+        /// When "file" is absent, the node is in the same file as the previous node.
+        /// "includedFrom" tells which file #includes the current file — used to detect
+        /// umbrella headers where the target header just #includes sub-headers.
         let updateFileTracking (node: JsonValue) =
             match getObject node "loc" with
             | Some loc ->
                 match getString loc "file" with
                 | Some f -> currentFile <- Some f
-                | None ->
-                    match getObject loc "includedFrom" with
-                    | Some incl ->
-                        match getString incl "file" with
-                        | Some f -> currentFile <- Some f
-                        | None -> ()
+                | None -> ()
+                // Always track includedFrom when present
+                match getObject loc "includedFrom" with
+                | Some incl ->
+                    match getString incl "file" with
+                    | Some f -> currentIncludedFrom <- Some f
                     | None -> ()
+                | None -> ()
             | None -> ()
 
         /// Check if current node is from any accepted target file.
+        /// Matches if: (a) currentFile matches a target, OR
+        /// (b) currentFile's includedFrom matches a target (umbrella header pattern).
         let isFromTargetFile (node: JsonValue) =
+            let matchesAny (f: string) =
+                acceptedFiles |> List.exists (fun tf -> f.EndsWith(tf) || f = tf)
             match currentFile with
-            | Some f ->
-                acceptedFiles |> List.exists (fun tf ->
-                    f.EndsWith(tf) || f = tf)
-            | None -> false
+            | Some f when matchesAny f -> true
+            | _ ->
+                // Umbrella header: current file is included FROM the target
+                match currentIncludedFrom with
+                | Some incl -> matchesAny incl
+                | None -> false
 
         /// Process a single node
         let rec processNode (node: JsonValue) =

@@ -1,0 +1,128 @@
+[library]
+header = "/usr/include/stdlib.h"
+name = "libc"
+
+[output]
+directory = "./libc"
+mode = "fidelity"
+
+[[namespace]]
+description = "Functions with prefix 'ato'"
+library = "libc"
+name = "Fidelity.Libc.Conversion"
+prefixes = ["ato"]
+
+[[namespace]]
+description = "Functions with prefix 'str'"
+library = "libc"
+name = "Fidelity.Libc.String"
+prefixes = ["str"]
+
+[[namespace]]
+description = "Functions with prefix 'set'"
+library = "libc"
+name = "Fidelity.Libc.Buffering"
+prefixes = ["set"]
+
+[[namespace]]
+description = "Functions with prefix 'arc4random'"
+library = "libc"
+name = "Fidelity.Libc.Arc4random"
+prefixes = ["arc4random"]
+
+[[namespace]]
+description = "Functions with prefix 'realloc'"
+functions = ["malloc", "calloc", "realloc"]
+library = "libc"
+name = "Fidelity.Libc.Alloc"
+prefixes = ["realloc"]
+
+[[namespace]]
+description = "Functions matching: get*, put*"
+library = "libc"
+name = "Fidelity.Libc.IO"
+prefixes = ["get", "put"]
+
+[[namespace]]
+description = "Ungrouped functions"
+functions = [
+    "__ctype_get_mb_cur_max",
+    "l64a",
+    "a64l",
+    "random",
+    "srandom",
+    "initstate",
+    "random_r",
+    "srandom_r",
+    "initstate_r",
+    "setstate_r",
+    "rand",
+    "srand",
+    "rand_r",
+    "drand48",
+    "erand48",
+    "lrand48",
+    "nrand48",
+    "mrand48",
+    "jrand48",
+    "srand48",
+    "seed48",
+    "lcong48",
+    "drand48_r",
+    "erand48_r",
+    "lrand48_r",
+    "nrand48_r",
+    "mrand48_r",
+    "jrand48_r",
+    "srand48_r",
+    "seed48_r",
+    "lcong48_r",
+    "arc4random",
+    "free",
+    "alloca",
+    "valloc",
+    "posix_memalign",
+    "aligned_alloc",
+    "abort",
+    "atexit",
+    "at_quick_exit",
+    "on_exit",
+    "exit",
+    "quick_exit",
+    "_Exit",
+    "unsetenv",
+    "clearenv",
+    "mktemp",
+    "mkstemp",
+    "mkstemps",
+    "mkdtemp",
+    "system",
+    "realpath",
+    "bsearch",
+    "qsort",
+    "abs",
+    "labs",
+    "llabs",
+    "div",
+    "ldiv",
+    "lldiv",
+    "ecvt",
+    "fcvt",
+    "gcvt",
+    "qecvt",
+    "qfcvt",
+    "qgcvt",
+    "ecvt_r",
+    "fcvt_r",
+    "qecvt_r",
+    "qfcvt_r",
+    "mblen",
+    "mbtowc",
+    "wctomb",
+    "mbstowcs",
+    "wcstombs",
+    "rpmatch",
+]
+library = "libc"
+name = "Fidelity.Libc.Core"
+prefixes = []

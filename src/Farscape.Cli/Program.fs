@@ -171,10 +171,11 @@ let pilotAnalyzeCommand =
     let includes =  Input.option<string[]> "--include-paths" |> alias "-i" |> desc "Additional include paths" |> def [||]
     let defines =   Input.option<string[]> "--defines"       |> alias "-d" |> desc "Preprocessor definitions" |> def [||]
     let pkgConfig = Input.option<string[]> "--pkg-config"    |> alias "-p" |> desc "pkg-config package names (auto-resolves include paths and defines)" |> def [||]
+    let transHdrs = Input.option<string[]> "--transitive-headers" |> alias "-t" |> desc "Filenames of transitively-included headers to also extract declarations from" |> def [||]
     let output =    Input.option<string> "--output"          |> alias "-o" |> desc "Output directory (default: ./<library>)" |> def ""
     let verbose =   Input.option<bool> "--verbose"           |> alias "-v" |> desc "Verbose output" |> def false
 
-    let action (headers: string[], library, includes: string[], defines: string[], pkgConfig: string[], output, verbose) =
+    let action (headers: string[], library, includes: string[], defines: string[], pkgConfig: string[], transitiveHeaders: string[], output, verbose) =
         showHeader ()
         printHeader "Pilot: Analyzing header for namespace subdivisions"
         printLine ""
@@ -214,13 +215,14 @@ let pilotAnalyzeCommand =
         let definesList = (defines |> Array.toList) @ pkgDefines |> List.distinct
 
         // Parse all headers and merge declarations
+        let transitiveList = transitiveHeaders |> Array.toList
         let mutable allDeclarations = []
         let mutable parseError = None
         for headerPath in headers do
             match parseError with
             | Some _ -> ()
             | None ->
-                match CppParser.parseWithDefines headerPath includePaths definesList verbose with
+                match CppParser.parseWithTransitiveHeaders headerPath includePaths definesList transitiveList [] verbose with
                 | Error e -> parseError <- Some (headerPath, e)
                 | Ok decls -> allDeclarations <- allDeclarations @ decls
 
@@ -252,7 +254,7 @@ let pilotAnalyzeCommand =
 
         let headerFiles = headers |> Array.toList
         let project =
-            PilotAnalyzer.toPilotProject library headerFiles includePaths definesList (pkgConfig |> Array.toList) "fidelity" outputDir result
+            PilotAnalyzer.toPilotProject library headerFiles includePaths definesList (pkgConfig |> Array.toList) transitiveList "fidelity" outputDir result
 
         let tomlPath = Path.Combine(outputDir, $"{library}.pilot.toml")
 
@@ -271,7 +273,7 @@ let pilotAnalyzeCommand =
 
     command "analyze" {
         description "Analyze a header file and generate a .pilot.toml project file"
-        inputs (header, library, includes, defines, pkgConfig, output, verbose)
+        inputs (header, library, includes, defines, pkgConfig, transHdrs, output, verbose)
         setAction action
     }
 
