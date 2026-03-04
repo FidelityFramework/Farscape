@@ -166,7 +166,7 @@ let resolvePkgConfig (pkgName: string) (verbose: bool) : Result<string list * st
         Error $"Failed to run pkg-config: {ex.Message}"
 
 let pilotAnalyzeCommand =
-    let header =    Input.option<FileInfo> "--header"        |> desc "Path to C/C++ header file" |> required |> validateFileExists
+    let header =    Input.option<string[]> "--header"         |> desc "Path to C/C++ header file(s)" |> required
     let library =   Input.option<string> "--library"         |> alias "-l" |> desc "Library name (e.g., libc)" |> required
     let includes =  Input.option<string[]> "--include-paths" |> alias "-i" |> desc "Additional include paths" |> def [||]
     let defines =   Input.option<string[]> "--defines"       |> alias "-d" |> desc "Preprocessor definitions" |> def [||]
@@ -174,7 +174,7 @@ let pilotAnalyzeCommand =
     let output =    Input.option<string> "--output"          |> alias "-o" |> desc "Output directory (default: ./<library>)" |> def ""
     let verbose =   Input.option<bool> "--verbose"           |> alias "-v" |> desc "Verbose output" |> def false
 
-    let action (header: FileInfo, library, includes: string[], defines: string[], pkgConfig: string[], output, verbose) =
+    let action (headers: string[], library, includes: string[], defines: string[], pkgConfig: string[], output, verbose) =
         showHeader ()
         printHeader "Pilot: Analyzing header for namespace subdivisions"
         printLine ""
@@ -183,6 +183,14 @@ let pilotAnalyzeCommand =
             if String.IsNullOrEmpty output then $"./{library}"
             else output
         Directory.CreateDirectory(outputDir) |> ignore
+
+        // Validate header files exist
+        let missingHeaders = headers |> Array.filter (fun h -> not (File.Exists h))
+        if missingHeaders.Length > 0 then
+            for h in missingHeaders do
+                showError $"Header file not found: {h}"
+            1
+        else
 
         // Resolve pkg-config flags and merge with explicit CLI flags
         let mutable pkgIncludes = []
@@ -205,47 +213,61 @@ let pilotAnalyzeCommand =
         let includePaths = (includes |> Array.toList) @ pkgIncludes |> List.distinct
         let definesList = (defines |> Array.toList) @ pkgDefines |> List.distinct
 
-        match CppParser.parseWithDefines header.FullName includePaths definesList verbose with
-        | Error e ->
-            showError $"Failed to parse header: {e}"
+        // Parse all headers and merge declarations
+        let mutable allDeclarations = []
+        let mutable parseError = None
+        for headerPath in headers do
+            match parseError with
+            | Some _ -> ()
+            | None ->
+                match CppParser.parseWithDefines headerPath includePaths definesList verbose with
+                | Error e -> parseError <- Some (headerPath, e)
+                | Ok decls -> allDeclarations <- allDeclarations @ decls
+
+        match parseError with
+        | Some (path, e) ->
+            showError $"Failed to parse header '{path}': {e}"
             1
-        | Ok declarations ->
-            let result = PilotAnalyzer.analyze declarations
+        | None ->
 
-            printColorLine $"Parsed {declarations.Length} declarations, {result.TotalFunctions} functions" ConsoleColor.White
-            printLine ""
+        let declarations = allDeclarations
+        let result = PilotAnalyzer.analyze declarations
 
-            printColorLine "Prefix Groups:" ConsoleColor.Yellow
-            for g in result.Groups do
-                let patterns = g.Prefixes |> List.map (fun p -> p + "*") |> String.concat ", "
-                printLine $"  {g.SuggestedName} ({patterns}): {g.FunctionNames.Length} functions"
-                if verbose then
-                    for fn in g.FunctionNames do
-                        printLine $"    - {fn}"
+        printColorLine $"Parsed {declarations.Length} declarations, {result.TotalFunctions} functions" ConsoleColor.White
+        printLine ""
 
-            printLine ""
-            printColorLine $"Ungrouped: {result.Ungrouped.Length} functions" ConsoleColor.Yellow
+        printColorLine "Prefix Groups:" ConsoleColor.Yellow
+        for g in result.Groups do
+            let patterns = g.Prefixes |> List.map (fun p -> p + "*") |> String.concat ", "
+            printLine $"  {g.SuggestedName} ({patterns}): {g.FunctionNames.Length} functions"
             if verbose then
-                for fn in result.Ungrouped do
+                for fn in g.FunctionNames do
                     printLine $"    - {fn}"
 
-            let project =
-                PilotAnalyzer.toPilotProject library header.FullName includePaths definesList (pkgConfig |> Array.toList) "fidelity" outputDir result
+        printLine ""
+        printColorLine $"Ungrouped: {result.Ungrouped.Length} functions" ConsoleColor.Yellow
+        if verbose then
+            for fn in result.Ungrouped do
+                printLine $"    - {fn}"
 
-            let tomlPath = Path.Combine(outputDir, $"{library}.pilot.toml")
+        let headerFiles = headers |> Array.toList
+        let project =
+            PilotAnalyzer.toPilotProject library headerFiles includePaths definesList (pkgConfig |> Array.toList) "fidelity" outputDir result
 
-            match PilotSerializer.saveToFile tomlPath project with
-            | Error e ->
-                showError $"Failed to write project file: {e}"
-                1
-            | Ok () ->
-                printLine ""
-                printColorLine $"Output directory: {Path.GetFullPath(outputDir)}" ConsoleColor.Green
-                printColorLine $"  Project file: {tomlPath}" ConsoleColor.Cyan
-                printLine ""
-                printLine "Next steps:"
-                printLine $"  farscape project --project {tomlPath}"
-                0
+        let tomlPath = Path.Combine(outputDir, $"{library}.pilot.toml")
+
+        match PilotSerializer.saveToFile tomlPath project with
+        | Error e ->
+            showError $"Failed to write project file: {e}"
+            1
+        | Ok () ->
+            printLine ""
+            printColorLine $"Output directory: {Path.GetFullPath(outputDir)}" ConsoleColor.Green
+            printColorLine $"  Project file: {tomlPath}" ConsoleColor.Cyan
+            printLine ""
+            printLine "Next steps:"
+            printLine $"  farscape project --project {tomlPath}"
+            0
 
     command "analyze" {
         description "Analyze a header file and generate a .pilot.toml project file"

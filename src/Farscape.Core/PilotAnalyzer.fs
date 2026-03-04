@@ -335,7 +335,7 @@ module PilotAnalyzer =
     /// Ungrouped functions are collected into a catch-all "Core" namespace.
     let toPilotProject
         (libraryName: string)
-        (headerFile: string)
+        (headerFiles: string list)
         (includePaths: string list)
         (defines: string list)
         (pkgConfig: string list)
@@ -379,7 +379,7 @@ module PilotAnalyzer =
                     XmlInterfaces = [] } ]
         { Library =
             { Name = libraryName
-              Headers = [headerFile]
+              Headers = headerFiles
               XmlProtocols = []
               IncludePaths = includePaths
               Defines = defines
