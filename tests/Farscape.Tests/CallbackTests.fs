@@ -131,6 +131,20 @@ module CallbackDiscovery =
         Assert.Equal("wl_pointer_listener", spec.ListenerStructs.[0].Name)
 
     [<Fact>]
+    let ``discovers single-field listener struct`` () =
+        // xdg_wm_base_listener, xdg_surface_listener, wl_callback_listener etc.
+        // have exactly one callback field — they must still be detected
+        let decls = [
+            CppParser.Declaration.Struct (
+                mkStruct "xdg_surface_listener" [
+                    mkField "configure" "void (*)(void *, struct xdg_surface *, uint32_t)"
+                ] None)
+        ]
+        let spec = PilotAnalyzer.discoverCallbacks decls
+        Assert.Equal(1, spec.ListenerStructs.Length)
+        Assert.Equal("xdg_surface_listener", spec.ListenerStructs.[0].Name)
+
+    [<Fact>]
     let ``does not classify struct with few function pointers as listener`` () =
         let decls = [
             CppParser.Declaration.Struct (

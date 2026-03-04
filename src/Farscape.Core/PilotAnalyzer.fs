@@ -281,7 +281,7 @@ module PilotAnalyzer =
         // Pattern B: Find structs where >50% of fields are function pointers or delegate types
         let listenerStructs =
             declarations |> List.choose (function
-                | CppParser.Declaration.Struct s when s.Name <> "" && s.Fields.Length >= 2 ->
+                | CppParser.Declaration.Struct s when s.Name <> "" && s.Fields.Length >= 1 ->
                     let fpFields = s.Fields |> List.filter (fun f -> isCallbackType f.Type)
                     let ratio = float fpFields.Length / float s.Fields.Length
                     if ratio > 0.5 then
