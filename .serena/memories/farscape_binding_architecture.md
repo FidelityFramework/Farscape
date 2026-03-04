@@ -75,7 +75,7 @@ Farscape generates Clef source libraries that must be **verified error-free** vi
 
 **Feedback loop**: Verification failures → fix TypeMapper/WrapperCodeGenerator → regenerate → re-verify. Each fix addresses a class of C API patterns, maturing the generator over time.
 
-**fidproj hierarchy**: Farscape generates ONE fidproj per pilot TOML invocation. Library authors compose parent fidproj files at whatever level makes sense. This is standard software library ecosystem practice.
+****fidproj resolution**: Dependencies point at **fidproj files, not directories**. Farscape generates one fidproj per pilot TOML invocation. Library authors compose parent fidproj files. Each fidproj is independently addressable. Directory-based discovery rejected — directories contain non-library artifacts (pilot TOMLs, Layer 3 overlays, regeneration hooks).
 
 ## Source-Based Linking (Fidelity Model)
 

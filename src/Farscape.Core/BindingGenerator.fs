@@ -129,7 +129,23 @@ module BindingGenerator =
         sb.AppendLine("word_size = 64") |> ignore
         sb.AppendLine() |> ignore
         sb.AppendLine("[dependencies]") |> ignore
-        sb.AppendLine("Fidelity.Platform = { path = \"../../../Fidelity.Platform/CPU/Linux/x86_64\" }") |> ignore
+        // If Fidelity.Platform.fidproj exists in the same directory (e.g., sub-libraries within
+        // Fidelity.Platform), reference it directly. Otherwise, compute relative path to the
+        // sibling repo following the standard layout: <repo>/CPU/Linux/x86_64/
+        let platformFidprojLocal = Path.Combine(fidprojDir, "Fidelity.Platform.fidproj")
+        let platformDepPath =
+            if File.Exists(platformFidprojLocal) then
+                "Fidelity.Platform.fidproj"
+            else
+                // Standard sibling repo layout: go up to repos root, then into Fidelity.Platform
+                let reposDir = Path.GetFullPath(Path.Combine(fidprojDir, "../../../../"))
+                let targetFidproj = Path.Combine(reposDir, "Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Platform.fidproj")
+                if File.Exists(targetFidproj) then
+                    Path.GetRelativePath(fidprojDir, targetFidproj).Replace('\\', '/')
+                else
+                    // Absolute path as last resort
+                    Path.GetFullPath(targetFidproj).Replace('\\', '/')
+        sb.AppendLine($"Fidelity.Platform = {{ path = \"{platformDepPath}\" }}") |> ignore
 
         let content = sb.ToString()
         let fidprojName = $"{packageName}.fidproj"

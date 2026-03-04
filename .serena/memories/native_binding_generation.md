@@ -75,13 +75,21 @@ These are separate artifacts with completely different purposes.
 
 Generated libraries must pass CCS type-checking with zero errors before they are trusted. The `farscape verify` command runs CCS against a library's fidproj, reporting diagnostics at true severity (bypassing CCS's reachability-based demotion). Verification failures are bugs in the generation pipeline, fixed systematically. See `library_verification_clefpak` memory.
 
-## fidproj Generation (Mar 2026)
+## fidproj Generation and Resolution (Mar 2026)
 
 Farscape generates **one fidproj per pilot TOML invocation**. The fidproj name is derived from the namespace prefix in the pilot TOML:
 - Single-namespace: full name (e.g., `Fidelity.Image.Stb` → `Fidelity.Image.Stb.fidproj`)
 - Multi-namespace: common prefix (e.g., `Fidelity.libc.*` → `Fidelity.libc.fidproj`)
 
-Library authors compose parent fidproj files at whatever hierarchical level makes sense. Farscape does not generate parent/consolidated fidproj files.
+**Dependencies point at fidproj FILES, not directories.** This is explicit and deterministic. Directory-based discovery rejected because directories contain non-library artifacts (pilot TOMLs, Layer 3 overlays, regeneration hooks).
+
+```toml
+[dependencies]
+platform = { path = "../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Platform.fidproj" }
+libc = { path = "../Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Libc.fidproj" }
+```
+
+Library authors compose parent fidproj files. Each fidproj is independently addressable.
 
 ## Current Focus
 
