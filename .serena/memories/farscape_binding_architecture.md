@@ -62,28 +62,36 @@ These are not optional future features. They are what makes Farscape part of Fid
 2. **BAREWire memory/type layout capture**: Reading header AST for precise struct layout, access constraints, memory regions. Core to memory safety guarantees.
 3. **CMSIS qualifier mapping**: `__I` → ReadOnly, `__O` → WriteOnly, `__IO` → ReadWrite. Hardware-enforced access constraints.
 
+## Library Verification Pipeline (Mar 2026)
+
+Farscape generates Clef source libraries that must be **verified error-free** via CCS before they are trusted in the Fidelity ecosystem. Two goals:
+
+1. **Correctness gate**: CCS type-checks all sources with zero errors. Type mismatches are bugs in the generation pipeline, not the C headers.
+2. **clefpak prerequisite**: Verified libraries become candidates for `clefpak` (signed, compressed source artifact for package management).
+
+**The reachability trap**: CCS demotes diagnostics on unreachable nodes from Error→Info. A library with type errors appears clean as a dependency until application code `open`s its modules. Library verification must bypass this demotion.
+
+**Command**: `farscape verify --fidproj <path>` — invokes CCS against library sources, reports diagnostics at true severity.
+
+**Feedback loop**: Verification failures → fix TypeMapper/WrapperCodeGenerator → regenerate → re-verify. Each fix addresses a class of C API patterns, maturing the generator over time.
+
+**fidproj hierarchy**: Farscape generates ONE fidproj per pilot TOML invocation. Library authors compose parent fidproj files at whatever level makes sense. This is standard software library ecosystem practice.
+
+## Source-Based Linking (Fidelity Model)
+
+No binary assemblies. Libraries are source packages:
+- Composer's SourceResolver walks dependency fidproj files recursively
+- `open` statements determine reachability within the PSG
+- CCS type-checks all reachable source together in shared type environment
+- "Compiling" a library = verification, not artifact production (until clefpak)
+
 ## Roadmap
 
-- **Static binding**: LLVM LTO cross-language inlining for statically bound libraries (current focus: libc dynamic binding)
+- **Library verification**: `farscape verify` command with CCS integration
+- **clefpak**: Signed, compressed source artifact for package management
+- **Static binding**: LLVM LTO cross-language inlining for statically bound libraries
 - **C++ support**: Plugify ABI intelligence for virtual tables, templates, RAII, exception boundaries
-- **Interactive mode**: Dynamic FFI for development, static binding for release builds (naming TBD)
-
-## Type System (Feb 2026)
-
-Single type dictionary (P/Invoke support removed):
-- **TypeMapper.fs** (NTU): PlatformABI-parameterized. `long` → `int64` (LP64) / `int32` (LLP64/ILP32). `char*` → `nativeptr<byte>`. Used by Fidelity + Layer 2.
-- `PlatformABI` type: LP64 | LLP64 | ILP32 | IP16
-
-## CCS Type System (Width-as-Dimension, Feb 2026)
-- `int` → `NTUint (Resolved Register)` (platform word), `size_t` → `NTUsize`
-- `int32` → `NTUint (Fixed 32)`, `int64` → `NTUint (Fixed 64)` (width-fixed)
-- `nativeint` → `NTUint (Resolved Pointer)` (pointer-sized)
-- Width is a first-class dimension: `NTUWidth = Fixed of bits | Resolved of WidthDimension`
-- `PlatformContext.Dimensions: Map<WidthDimension, int>` resolves `Resolved` widths
-- `NTUother` eliminated — no escape hatch
-- Strings are UTF-8 fat pointers (ptr + len), not .NET UTF-16
-- Option/Result are stack-allocated tagged structs
-- Memory regions (Stack, Arena, Peripheral) tracked at type level
+- **Atelier evolution**: Farscape folds into Composer's **Transpose** (typed dynamic binding) and **Transcribe** (full algorithmic port) features, accessible through Atelier IDE
 
 ## Farscape's Role in the Dimensional Architecture (Feb 2026)
 
@@ -96,11 +104,6 @@ rethinking. But the solution lives in the NTU and Fidelity.Platform, not in Fars
 time, emitting Fixed-width NTU types. C `int` on LP64 → `int32` (Fixed 32). C `long` on LP64
 → `int64` (Fixed 64). Only genuinely platform-abstract types (`size_t → unativeint`,
 `intptr_t → nativeint`) use Resolved dimensions.
-
-**The bigger picture**: The NTU is evolving into a multi-dimensional type substrate where width
-is the first axis, with memory space, access pattern, alignment, and tensor shape as future
-axes. This supports multi-stack targeting (CPU/GPU/FPGA/NPU) with BAREWire reconciliation
-between graph sections. Full design in NTU dimensional architecture spec.
 
 **What this means for Farscape**: No changes needed beyond PlatformABI-aware Fidelity output.
 New NTU dimensions come from Fidelity.Platform, not from binding generators. Farscape binds

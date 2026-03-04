@@ -82,3 +82,7 @@ Layer 2 wrappers are implemented and working:
 |------|----------|--------|
 | `fidelity` | `--output-mode fidelity` | Clef / Fidelity pipeline (FidelityExtern) |
 | `fidelity-wrappers` | `--output-mode fidelity-wrappers` | Clef with Layer 2 wrappers |
+
+## Library Verification
+
+Generated output must pass `farscape verify` (CCS type-check with all modules reachable) before it can be packaged as clefpak. See `library_verification_clefpak` memory for the full pipeline.

@@ -71,15 +71,29 @@ These are separate artifacts with completely different purposes.
 - Compile the vendor library itself (pre-compiled by vendor)
 - Use P/Invoke (Farscape is Fidelity-only, no .NET interop)
 
+## Library Verification (Mar 2026)
+
+Generated libraries must pass CCS type-checking with zero errors before they are trusted. The `farscape verify` command runs CCS against a library's fidproj, reporting diagnostics at true severity (bypassing CCS's reachability-based demotion). Verification failures are bugs in the generation pipeline, fixed systematically. See `library_verification_clefpak` memory.
+
+## fidproj Generation (Mar 2026)
+
+Farscape generates **one fidproj per pilot TOML invocation**. The fidproj name is derived from the namespace prefix in the pilot TOML:
+- Single-namespace: full name (e.g., `Fidelity.Image.Stb` → `Fidelity.Image.Stb.fidproj`)
+- Multi-namespace: common prefix (e.g., `Fidelity.libc.*` → `Fidelity.libc.fidproj`)
+
+Library authors compose parent fidproj files at whatever hierarchical level makes sense. Farscape does not generate parent/consolidated fidproj files.
+
 ## Current Focus
 
-Libc dynamic binding: generating FidelityExtern binding declarations for standard library headers (unistd.h, string.h, stdlib.h).
+Library verification pipeline and WrenHello compilation with Farscape-generated binding libraries.
 
 ## Roadmap
 
+- **Library verification**: `farscape verify` with CCS integration
+- **clefpak**: Signed source artifacts for package management
 - **Static binding**: LLVM LTO for statically bound libraries
 - **C++ support**: Plugify ABI intelligence
-- **Interactive mode**: Dynamic FFI for dev, static for release (naming TBD)
+- **Atelier evolution**: Farscape → Composer's Transpose (typed dynamic binding) and Transcribe (algorithmic port)
 
 ## Relationship to Other Projects
 

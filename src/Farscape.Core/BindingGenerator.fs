@@ -69,10 +69,10 @@ module BindingGenerator =
             let wrapperFiles =
                 if options.GenerateWrappers then
                     logVerbose "Generating idiomatic wrappers..." options.Verbose
-                    let wrapperNamespace = $"{options.Namespace}.Wrappers"
+                    let wrapperNamespace = $"{options.Namespace}.Api"
                     let wrapperCode =
                         WrapperCodeGenerator.generate declarations wrapperNamespace options.LibraryName options.Namespace WrapperTypes.NoErrors options.DataModel None
-                    let wrapperPath = Path.Combine(options.OutputDirectory, $"{lastSegment}Wrappers.clef")
+                    let wrapperPath = Path.Combine(options.OutputDirectory, $"{lastSegment}Api.clef")
                     File.WriteAllText(wrapperPath, wrapperCode)
                     logVerbose $"Wrapper module written to: {wrapperPath}" options.Verbose
                     [wrapperPath]
@@ -84,15 +84,81 @@ module BindingGenerator =
                 Advisories = []
             }
 
+    /// Generate a canonical .fidproj file for the binding library.
+    /// Fully automatic — derives everything from what Farscape already knows.
+    let private generateFidproj
+        (project: PilotProject)
+        (nsPrefix: string)
+        (outputDir: string)
+        (allFiles: string list)
+        (verbose: bool) : string option =
+        let packageName = nsPrefix
+        // fidproj sits two levels up from the output directory
+        // (output is e.g. .../CPU/Linux/x86_64/Bindings/Gtk3, fidproj goes at .../CPU/Linux/x86_64/)
+        let fidprojDir = Path.GetDirectoryName(Path.GetDirectoryName(outputDir))
+        let relativeSources =
+            allFiles
+            |> List.map (fun f ->
+                let fullPath = Path.GetFullPath f
+                let basePath = Path.GetFullPath fidprojDir
+                if fullPath.StartsWith(basePath + "/") || fullPath.StartsWith(basePath + string Path.DirectorySeparatorChar) then
+                    fullPath.Substring(basePath.Length + 1)
+                elif fullPath.StartsWith(basePath) then
+                    fullPath.Substring(basePath.Length).TrimStart(Path.DirectorySeparatorChar, '/')
+                else fullPath)
+
+        let sb = System.Text.StringBuilder()
+        sb.AppendLine("[package]") |> ignore
+        sb.AppendLine($"name = \"{packageName}\"") |> ignore
+        sb.AppendLine("version = \"0.1.0\"") |> ignore
+        sb.AppendLine($"description = \"Generated bindings for {project.Library.Name}.\"") |> ignore
+        sb.AppendLine() |> ignore
+        sb.AppendLine("[compilation]") |> ignore
+        sb.AppendLine("target = \"cpu\"") |> ignore
+        sb.AppendLine() |> ignore
+        sb.AppendLine("[build]") |> ignore
+        sb.AppendLine("sources = [") |> ignore
+        for src in relativeSources do
+            sb.AppendLine($"    \"{src}\",") |> ignore
+        sb.AppendLine("]") |> ignore
+        sb.AppendLine() |> ignore
+        sb.AppendLine("[platform]") |> ignore
+        sb.AppendLine("runtime_model = \"libc\"") |> ignore
+        sb.AppendLine("os = \"linux\"") |> ignore
+        sb.AppendLine("arch = \"x86_64\"") |> ignore
+        sb.AppendLine("word_size = 64") |> ignore
+        sb.AppendLine() |> ignore
+        sb.AppendLine("[dependencies]") |> ignore
+        sb.AppendLine("Fidelity.Platform = { path = \"../../../Fidelity.Platform/CPU/Linux/x86_64\" }") |> ignore
+
+        let content = sb.ToString()
+        let fidprojName = $"{packageName}.fidproj"
+        let fidprojPath = Path.Combine(fidprojDir, fidprojName)
+        File.WriteAllText(fidprojPath, content)
+        logVerbose $"Generated fidproj: {fidprojPath}" verbose
+        Some fidprojPath
+
     /// Derive the common namespace prefix from project namespace names.
     /// e.g., ["Fidelity.ROCm.Device"; "Fidelity.ROCm.Memory"] → "Fidelity.ROCm"
+    /// Single-namespace with ≤2 segments (e.g., "Fidelity.GBM") → use the full name.
     let private deriveNamespacePrefix (project: PilotProject) : string =
         match project.Namespaces with
         | [] -> $"Fidelity.{project.Library.Name}"
-        | first :: _ ->
+        | [single] -> single.Name
+        | first :: rest ->
+            // Find common prefix across all namespaces
+            let allNames = first.Name :: (rest |> List.map (fun ns -> ns.Name))
             let segments = first.Name.Split('.')
-            if segments.Length >= 2 then
-                segments.[..segments.Length-2] |> String.concat "."
+            let commonLength =
+                segments
+                |> Array.indexed
+                |> Array.takeWhile (fun (i, seg) ->
+                    allNames |> List.forall (fun name ->
+                        let parts = name.Split('.')
+                        i < parts.Length && parts.[i] = seg))
+                |> Array.length
+            if commonLength >= 1 then
+                segments.[..commonLength-1] |> String.concat "."
             else first.Name
 
     /// Generate scoped Fidelity bindings from a .pilot.toml project file.
@@ -341,18 +407,21 @@ module BindingGenerator =
                         let wrapperFiles =
                             if generateWrappers then
                                 let allNsDecls = PilotAnalyzer.filterDeclarationsForNamespace ns declarations
-                                let wrapperNamespace = $"{ns.Name}.Wrappers"
+                                let wrapperNamespace = $"{ns.Name}.Api"
                                 let wrapperCode =
                                     WrapperCodeGenerator.generate allNsDecls wrapperNamespace ns.Library ns.Name errorHandling dataModel project.Nonnull
-                                let wrapperPath = Path.Combine(nsDir, $"{lastSegment}Wrappers.clef")
+                                let wrapperPath = Path.Combine(nsDir, $"{lastSegment}Api.clef")
                                 File.WriteAllText(wrapperPath, wrapperCode)
-                                logVerbose $"  {lastSegment}/{lastSegment}Wrappers.clef" verbose
+                                logVerbose $"  {lastSegment}/{lastSegment}Api.clef" verbose
                                 [wrapperPath]
                             else []
 
                         localTypeFiles @ [funcPath] @ wrapperFiles)
 
                 let allFiles = [sharedTypesPath] @ errorModuleFiles @ descriptorFiles @ callbackFiles @ nsFiles
+
+                // Generate canonical fidproj for the binding library
+                let fidprojFile = generateFidproj project nsPrefix outputDir allFiles verbose
 
                 let advisories =
                     match errorHandling, generateWrappers with
@@ -362,8 +431,13 @@ module BindingGenerator =
                         [$"Using null_with_reason convention for '{project.Library.Name}'. Functions returning pointers will call {reasonFn}() on null and wrap in Result<nativeint, nativeint>."]
                     | _ -> []
 
+                let allOutputFiles =
+                    match fidprojFile with
+                    | Some fp -> allFiles @ [fp]
+                    | None -> allFiles
+
                 Ok {
-                    OutputFiles = allFiles
+                    OutputFiles = allOutputFiles
                     DeclarationCount = declarations.Length
                     Advisories = advisories
                 }

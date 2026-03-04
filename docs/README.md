@@ -15,6 +15,10 @@ There is no P/Invoke in the Fidelity framework. Farscape generates `[<FidelityEx
 3. [CCS Integration](./03_fsnative_Integration.md): How Farscape output feeds the CCS compilation pipeline
 4. [XParsec Architecture](./04_XParsec_Architecture.md): Parser combinators, active patterns, catamorphisms, typed code AST
 5. [Wrapper Generation](./05_Wrapper_Generation.md): Layer 2 idiomatic Clef wrapper generation
+6. [libc Library Standardization](./06_libc_Library_Standardization.md): libc binding conventions
+7. [Pilot Project Setup](./07_Pilot_Project_Setup.md): Pilot TOML project system
+8. [Nullable Pointer Architecture](./08_Nullable_Pointer_Architecture.md): NullWithReason error convention
+9. [Library Verification](./09_Library_Verification.md): CCS-based verification pipeline, clefpak prerequisites, fidproj hierarchy
 
 ## Position in the Fidelity Closed-Loop Pipeline
 
@@ -77,21 +81,30 @@ BAREWire provides hardware descriptor types (`PeripheralDescriptor`, `FieldDescr
 - Typedef chain resolution, macro constant extraction
 - Pilot namespace analysis and TOML project files
 - Errno module generation (CError struct, describe jump table, captureError helper)
-- 194 unit tests covering all architectural patterns
+- Opaque handle type detection and wrapper generation
+- Bitmask enum detection with `[<System.Flags>]`
+- EnumErrorCode convention with pattern-matched error descriptions
+- Struct layout with explicit offsets from clang layout extraction
+- NullWithReason error convention (stb_image, SDL patterns)
+- Callback binding infrastructure (registration + listener patterns)
+- Auto-generated fidproj library manifests
+- 389+ unit tests across 14+ test files
 
 ## Roadmap
 
-- `[<FidelityExtern>]` attribute generation
+- `[<FidelityExtern>]` attribute generation (core infrastructure)
+- `farscape verify` — CCS-based library verification pipeline
 - BAREWire peripheral descriptor generation from header AST
 - CMSIS qualifier extraction (`__I`, `__O`, `__IO` → `AccessKind`)
+- `clefpak` packaging integration (verified source artifacts)
 - Static binding support (LLVM LTO cross-language inlining)
 - C++ support via Plugify ABI intelligence
-- Migration path toward Atelier Transcribe/Transpose feature
+- Evolution toward Composer **Transpose** (typed dynamic binding) and **Transcribe** (algorithmic port) features in Atelier IDE
 
 ## Related Documentation
 
 | Document | Location |
 |----------|----------|
 | BAREWire Hardware Descriptors | `~/repos/BAREWire/docs/08 Hardware Descriptors.md` |
-| CCS Architecture | `~/repos/fsnative/` (Serena project: CCS) |
-| Composer Memory Interlock | `~/repos/Firefly/docs/Memory_Interlock_Requirements.md` |
+| CCS Architecture | `~/repos/Composer/docs/CCS_Architecture.md` |
+| Composer Architecture | `~/repos/Composer/docs/Architecture_Canonical.md` |

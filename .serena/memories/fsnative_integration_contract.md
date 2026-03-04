@@ -133,6 +133,12 @@ Alex works ONLY with MLIR. It receives binding metadata via MLIR attributes emit
 
 Alex does NOT work with Clef source directly. It transforms MLIR based on binding strategy configuration.
 
+## Library Verification
+
+Farscape-generated libraries must be **verified error-free** via CCS before consumption. CCS's reachability analysis demotes unreachable diagnostics from Error→Info, masking type errors in dependencies until application code `open`s them. The `farscape verify` command invokes CCS with all modules treated as reachable, catching type errors at library build time rather than application build time.
+
+See `library_verification_clefpak` memory for full verification and clefpak architecture.
+
 ## Canonical Reference
 
-See `~/repos/Composer/docs/Quotation_Based_Memory_Architecture.md` for the complete integration architecture.
+See `~/repos/Composer/docs/CCS_Architecture.md` for the CCS type system and PSG architecture.

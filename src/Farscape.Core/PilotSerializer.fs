@@ -184,15 +184,17 @@ module PilotSerializer =
             match project.Callbacks with
             | Some spec -> table |> TomlTable.add "callbacks" (serializeCallbacks spec)
             | None -> table
-        match project.Nonnull with
-        | Some spec ->
-            let annotationsTable =
-                match TomlTable.tryFind "annotations" table with
-                | Some (TomlValue.Table existing) -> existing
-                | _ -> TomlTable.empty
-            let annotationsTable = TomlTable.add "nonnull" (serializeNonnull spec) annotationsTable
-            table |> TomlTable.add "annotations" (TomlValue.Table annotationsTable)
-        | None -> table
+        let table =
+            match project.Nonnull with
+            | Some spec ->
+                let annotationsTable =
+                    match TomlTable.tryFind "annotations" table with
+                    | Some (TomlValue.Table existing) -> existing
+                    | _ -> TomlTable.empty
+                let annotationsTable = TomlTable.add "nonnull" (serializeNonnull spec) annotationsTable
+                table |> TomlTable.add "annotations" (TomlValue.Table annotationsTable)
+            | None -> table
+        table
 
     /// Render a PilotProject to a TOML string.
     let toTomlString (project: PilotProject) : string =
