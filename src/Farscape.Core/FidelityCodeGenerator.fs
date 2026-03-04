@@ -2,6 +2,7 @@ namespace Farscape.Core
 
 open CodeAST
 open ActivePatterns
+open PilotTypes
 open Types
 
 /// Generates F# source in the Platform.Bindings pattern for Fidelity/Firefly consumption.
@@ -154,17 +155,61 @@ module FidelityCodeGenerator =
         | None ->
             [ XmlDoc cSignature ]
 
+    /// Wrap an FsType in Option<> for nullable pointer parameters.
+    let wrapOption (ty: FsType) : FsType = Generic("Option", ty)
+
+    /// Check if a C type string represents a data pointer (not a function pointer).
+    /// Function pointers contain "(*)" and are excluded — they map to nativeint
+    /// and have different nullability semantics (use Option<FnPtr<'F>> instead).
+    let isCDataPointer (cType: string) : bool =
+        cType.Contains("*") && not (cType.Contains("(*)") || cType.Contains("(**)"))
+
     /// Generate FsDecl list for a single function binding.
-    let private generateFunctionDecls (typedefMap: Map<string, string>) (model: PlatformABI) (opaqueHandles: Set<string>) (libraryName: string) (func: CppParser.FunctionDecl) : FsDecl list =
+    /// Pointer parameters are nullable (Option<>) by default unless proven non-null via:
+    /// 1. Clang NonNullAttr — parameter indices explicitly marked non-null
+    /// 2. Pilot TOML [annotations.nonnull] — developer-asserted non-null
+    let private generateFunctionDecls (typedefMap: Map<string, string>) (model: PlatformABI) (opaqueHandles: Set<string>) (libraryName: string) (nonnullAnnotations: NonnullAnnotations option) (func: CppParser.FunctionDecl) : FsDecl list =
         let mapType = mapCTypeToFidelityType typedefMap model opaqueHandles
-        let returnType = mapType func.ReturnType
+
+        // Collect proven-nonnull parameter indices from clang attributes
+        let clangNonnull =
+            func.Attributes
+            |> List.collect (fun a -> if a.Kind = "NonNullAttr" then a.Args else [])
+            |> Set.ofList
+        // Collect proven-nonnull parameter indices from pilot TOML
+        let tomlNonnull =
+            nonnullAnnotations
+            |> Option.bind (fun a -> Map.tryFind func.Name a.Parameters)
+            |> Option.defaultValue []
+            |> Set.ofList
+        let nonnullIndices = Set.union clangNonnull tomlNonnull
+
+        // Map parameters with nullability awareness
         let parameters =
             func.Parameters
-            |> List.map (fun (name, cType) ->
-                { FsParam.Name = cleanParamName name; Type = mapType cType })
+            |> List.mapi (fun idx (name, cType) ->
+                let fsType = mapType cType
+                let isNullable = isCDataPointer cType && not (nonnullIndices.Contains idx)
+                let finalType = if isNullable then wrapOption fsType else fsType
+                { FsParam.Name = cleanParamName name; Type = finalType })
+
+        // Return type: nullable unless proven nonnull
+        let returnIsPointer = isCDataPointer func.ReturnType
+        let returnNonnull =
+            nonnullAnnotations
+            |> Option.map (fun a -> a.Returns.Contains func.Name)
+            |> Option.defaultValue false
+        let hasReturnsNonnullAttr =
+            func.Attributes |> List.exists (fun a -> a.Kind = "ReturnsNonNullAttr")
+        let returnType = mapType func.ReturnType
+        let finalReturnType =
+            if returnIsPointer && not returnNonnull && not hasReturnsNonnullAttr
+            then wrapOption returnType
+            else returnType
+
         formatDocDecls func @
         [
-            LetBinding(func.Name, parameters, returnType, DefaultOf returnType,
+            LetBinding(func.Name, parameters, finalReturnType, DefaultOf finalReturnType,
                       [$"FidelityExtern(\"{libraryName}\", \"{func.Name}\")"])
         ]
 
@@ -270,6 +315,8 @@ module FidelityCodeGenerator =
         OpaqueHandles: Set<string>
         DataModel: PlatformABI
         StructLayouts: Map<string, CppParser.StructLayoutInfo>
+        /// Nonnull annotations from pilot TOML (None = all pointers nullable by default)
+        NonnullAnnotations: NonnullAnnotations option
     }
 
     /// Build a GenerationContext from the full, unfiltered declaration list.
@@ -281,7 +328,8 @@ module FidelityCodeGenerator =
         { TypedefMap = buildTypedefMap declarations
           OpaqueHandles = detectOpaqueHandles declarations
           DataModel = model
-          StructLayouts = structLayouts }
+          StructLayouts = structLayouts
+          NonnullAnnotations = None }
 
     /// Generate a Clef module with explicit control over what gets emitted.
     /// Uses the full GenerationContext for type resolution, but only declares
@@ -311,7 +359,7 @@ module FidelityCodeGenerator =
             groups
             |> List.choose (function GFunc f -> Some f | _ -> None)
             |> List.distinctBy (fun f -> f.Name)
-            |> List.collect (generateFunctionDecls ctx.TypedefMap ctx.DataModel ctx.OpaqueHandles libraryName)
+            |> List.collect (generateFunctionDecls ctx.TypedefMap ctx.DataModel ctx.OpaqueHandles libraryName ctx.NonnullAnnotations)
         let macros = groups |> List.collect (function GMacro d -> d | _ -> [])
 
         let macroSection =

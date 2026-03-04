@@ -202,11 +202,27 @@ module WrapperCodeGenerator =
         (opaqueHandles: Set<string>)
         (bindingsModule: string)
         (errorHandling: ErrorHandling)
+        (nonnullAnnotations: PilotTypes.NonnullAnnotations option)
         (func: CppParser.FunctionDecl)
         : FsDecl list =
 
         let mapType = FidelityCodeGenerator.mapCTypeToFidelityType typedefMap model opaqueHandles
         let pattern = WrapperPatternAnalyzer.analyze func typedefMap
+
+        // Collect proven-nonnull parameter indices (same logic as FidelityCodeGenerator)
+        let clangNonnull =
+            func.Attributes
+            |> List.collect (fun a ->
+                match a.Kind with
+                | "NonNullAttr" -> a.Args
+                | _ -> [])
+            |> Set.ofList
+        let tomlNonnull =
+            nonnullAnnotations
+            |> Option.bind (fun a -> Map.tryFind func.Name a.Parameters)
+            |> Option.defaultValue []
+            |> Set.ofList
+        let nonnullIndices = Set.union clangNonnull tomlNonnull
 
         // Override ReturnSemantic based on error convention:
         // - EnumError: override return type when it matches the enum error type
@@ -224,13 +240,28 @@ module WrapperCodeGenerator =
                 | other -> other
             | _ -> pattern.ReturnSemantic
 
-        // Parameter types match the raw stubs exactly
+        // Parameter types match Layer 1 declarations (nullable-by-default for pointers)
         let parameters =
             func.Parameters
-            |> List.map (fun (name, cType) ->
-                { FsParam.Name = cleanParamName name; Type = mapType cType })
+            |> List.mapi (fun idx (name, cType) ->
+                let fsType = mapType cType
+                let isPointer = FidelityCodeGenerator.isCDataPointer cType
+                let isNullable = isPointer && not (nonnullIndices.Contains idx)
+                let finalType = if isNullable then FidelityCodeGenerator.wrapOption fsType else fsType
+                { FsParam.Name = cleanParamName name; Type = finalType })
 
-        let rawRetType = mapType func.ReturnType
+        let rawRetType =
+            let baseType = mapType func.ReturnType
+            let returnIsPointer = FidelityCodeGenerator.isCDataPointer func.ReturnType
+            let returnNonnull =
+                nonnullAnnotations
+                |> Option.map (fun a -> a.Returns.Contains func.Name)
+                |> Option.defaultValue false
+            let hasReturnsNonnullAttr =
+                func.Attributes |> List.exists (fun a -> a.Kind = "ReturnsNonNullAttr")
+            if returnIsPointer && not returnNonnull && not hasReturnsNonnullAttr
+            then FidelityCodeGenerator.wrapOption baseType
+            else baseType
         let retType = wrapperReturnType semantic rawRetType errorHandling
 
         let paramNames = parameters |> List.map (fun p -> p.Name)
@@ -272,6 +303,7 @@ module WrapperCodeGenerator =
         (bindingsModule: string)
         (errorHandling: ErrorHandling)
         (model: PlatformABI)
+        (nonnullAnnotations: PilotTypes.NonnullAnnotations option)
         : string =
 
         // Phase 1: Build typedef resolution map (shared with FidelityCodeGenerator)
@@ -289,7 +321,7 @@ module WrapperCodeGenerator =
             groups
             |> List.choose (function WFunc f -> Some f | WNone -> None)
             |> List.distinctBy (fun f -> f.Name)
-            |> List.collect (generateWrapperDecls typedefMap model opaqueHandles bindingsModule errorHandling)
+            |> List.collect (generateWrapperDecls typedefMap model opaqueHandles bindingsModule errorHandling nonnullAnnotations)
 
         // Phase 4: Build typed FsDecl tree; wrapper module opens the bindings module
         let openDecl = Comment $"open {bindingsModule}"

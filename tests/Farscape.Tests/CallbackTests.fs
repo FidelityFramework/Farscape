@@ -210,6 +210,7 @@ module CallbackSerializerTests =
                 ]
                 ListenerStructs = []
             }
+            Nonnull = None
         }
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("callbacks", toml)
@@ -246,6 +247,7 @@ module CallbackSerializerTests =
                     { Name = "xdg_toplevel_listener"; RegistrationFunction = None }
                 ]
             }
+            Nonnull = None
         }
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("listener_structs", toml)
@@ -288,6 +290,7 @@ module CallbackSerializerTests =
                     { Name = "wl_pointer_listener"; RegistrationFunction = Some "wl_pointer_add_listener" }
                 ]
             }
+            Nonnull = None
         }
         let toml = PilotSerializer.toTomlString project
         match Fidelity.Data.TOML.Toml.parse toml with

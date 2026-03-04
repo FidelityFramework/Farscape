@@ -150,6 +150,21 @@ module PilotSerializer =
                 TomlTable.add "listener_structs" (TomlValue.Array structs) table
         TomlValue.Table table
 
+    /// Serialize NonnullAnnotations to a TOML table value.
+    let private serializeNonnull (spec: NonnullAnnotations) : TomlValue =
+        let table = TomlTable.empty
+        // Serialize per-function parameter indices
+        let table =
+            spec.Parameters
+            |> Map.fold (fun t funcName indices ->
+                TomlTable.add funcName (TomlValue.Array (indices |> List.map (fun i -> TomlValue.Integer (int64 i)))) t
+            ) table
+        // Serialize nonnull_returns as a string array
+        let table =
+            if spec.Returns.IsEmpty then table
+            else TomlTable.add "nonnull_returns" (TomlValue.Array (spec.Returns |> Set.toList |> List.map TomlValue.String)) table
+        TomlValue.Table table
+
     /// Serialize a complete PilotProject to a TomlDocument.
     let serialize (project: PilotProject) : TomlDocument =
         let table =
@@ -165,8 +180,18 @@ module PilotSerializer =
             match project.Options with
             | Some opts -> table |> TomlTable.add "options" (serializeOptions opts)
             | None -> table
-        match project.Callbacks with
-        | Some spec -> table |> TomlTable.add "callbacks" (serializeCallbacks spec)
+        let table =
+            match project.Callbacks with
+            | Some spec -> table |> TomlTable.add "callbacks" (serializeCallbacks spec)
+            | None -> table
+        match project.Nonnull with
+        | Some spec ->
+            let annotationsTable =
+                match TomlTable.tryFind "annotations" table with
+                | Some (TomlValue.Table existing) -> existing
+                | _ -> TomlTable.empty
+            let annotationsTable = TomlTable.add "nonnull" (serializeNonnull spec) annotationsTable
+            table |> TomlTable.add "annotations" (TomlValue.Table annotationsTable)
         | None -> table
 
     /// Render a PilotProject to a TOML string.
@@ -358,6 +383,60 @@ module PilotSerializer =
             Some { Registrations = registrations; ListenerStructs = listenerStructs }
         | _ -> None
 
+    /// Deserialize the optional [annotations.nonnull] section.
+    let private deserializeNonnull (doc: TomlDocument) : NonnullAnnotations option =
+        match Toml.getValue "annotations.nonnull" doc with
+        | None ->
+            // Try nested table access: [annotations] → nonnull
+            match Toml.getTable "annotations" doc with
+            | None -> None
+            | Some annotationsTable ->
+                match TomlTable.tryFind "nonnull" annotationsTable with
+                | Some (TomlValue.Table table) ->
+                    let parameters =
+                        table
+                        |> Map.toSeq
+                        |> Seq.choose (fun (k, v) ->
+                            if k = "nonnull_returns" then None
+                            else
+                                match v with
+                                | TomlValue.Array items ->
+                                    let indices = items |> List.choose (function
+                                        | TomlValue.Integer i -> Some (int i)
+                                        | _ -> None)
+                                    Some (k, indices)
+                                | _ -> None)
+                        |> Map.ofSeq
+                    let returns =
+                        match TomlTable.tryFind "nonnull_returns" table with
+                        | Some (TomlValue.Array items) ->
+                            items |> List.choose (function TomlValue.String s -> Some s | _ -> None) |> Set.ofList
+                        | _ -> Set.empty
+                    Some { Parameters = parameters; Returns = returns }
+                | _ -> None
+        | Some (TomlValue.Table table) ->
+            let parameters =
+                table
+                |> Map.toSeq
+                |> Seq.choose (fun (k, v) ->
+                    if k = "nonnull_returns" then None
+                    else
+                        match v with
+                        | TomlValue.Array items ->
+                            let indices = items |> List.choose (function
+                                | TomlValue.Integer i -> Some (int i)
+                                | _ -> None)
+                            Some (k, indices)
+                        | _ -> None)
+                |> Map.ofSeq
+            let returns =
+                match TomlTable.tryFind "nonnull_returns" table with
+                | Some (TomlValue.Array items) ->
+                    items |> List.choose (function TomlValue.String s -> Some s | _ -> None) |> Set.ofList
+                | _ -> Set.empty
+            Some { Parameters = parameters; Returns = returns }
+        | _ -> None
+
     /// Deserialize a TomlDocument to a PilotProject.
     let deserialize (doc: TomlDocument) : Result<PilotProject, string> =
         match deserializeLibrary doc, deserializeOutput doc, deserializeNamespaces doc with
@@ -367,7 +446,8 @@ module PilotSerializer =
                  Namespaces = namespaces
                  ErrorConventions = deserializeErrorConventions doc
                  Options = deserializeOptions doc
-                 Callbacks = deserializeCallbacks doc }
+                 Callbacks = deserializeCallbacks doc
+                 Nonnull = deserializeNonnull doc }
         | Error e, _, _ | _, Error e, _ | _, _, Error e -> Error e
 
     // =========================================================================

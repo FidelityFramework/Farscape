@@ -99,6 +99,21 @@ module PilotTypes =
     }
 
     // =========================================================================
+    // Nonnull Annotations
+    // =========================================================================
+
+    /// Annotations for pointer parameters/returns proven non-null by developer knowledge.
+    /// Used to override the default nullable policy: unannotated C pointers are nullable
+    /// (Option<nativeptr<byte>> / Option<nativeint>), and NonNullAttr or these annotations
+    /// prove non-null (nativeptr<byte> / nativeint).
+    type NonnullAnnotations = {
+        /// Function name → list of 0-based parameter indices that are proven non-null
+        Parameters: Map<string, int list>
+        /// Function names whose return value is proven non-null
+        Returns: Set<string>
+    }
+
+    // =========================================================================
     // Callback Convention Types
     // =========================================================================
 
@@ -139,6 +154,8 @@ module PilotTypes =
         Options: ProjectOptions option
         /// Callback pattern configuration (None = no callback wrappers)
         Callbacks: CallbackSpec option
+        /// Nonnull annotations (None = all pointers are nullable by default)
+        Nonnull: NonnullAnnotations option
     }
 
     // =========================================================================

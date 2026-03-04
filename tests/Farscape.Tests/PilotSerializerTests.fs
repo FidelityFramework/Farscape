@@ -35,6 +35,7 @@ let private sampleProject : PilotTypes.PilotProject = {
     ErrorConventions = None
     Options = None
     Callbacks = None
+    Nonnull = None
 }
 
 [<Fact>]
@@ -178,6 +179,7 @@ module ErrorConventionTomlTests =
             }
             Options = None
             Callbacks = None
+            Nonnull = None
         }
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("error_conventions", toml)
@@ -214,6 +216,7 @@ module ErrorConventionTomlTests =
             }
             Options = None
             Callbacks = None
+            Nonnull = None
         }
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("enum_error_code", toml)
@@ -251,6 +254,7 @@ module ErrorConventionTomlTests =
             }
             Options = None
             Callbacks = None
+            Nonnull = None
         }
         let toml = PilotSerializer.toTomlString project
         // Should NOT contain optional fn fields
@@ -279,6 +283,7 @@ module ErrorConventionTomlTests =
             ErrorConventions = Some { Default = Errno; Overrides = Map.empty }
             Options = None
             Callbacks = None
+            Nonnull = None
         }
         let toml = PilotSerializer.toTomlString project
         match Fidelity.Data.TOML.Toml.parse toml with
@@ -303,6 +308,7 @@ module ErrorConventionTomlTests =
             }
             Options = None
             Callbacks = None
+            Nonnull = None
         }
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("null_with_reason", toml)
@@ -319,3 +325,41 @@ module ErrorConventionTomlTests =
                 | NullWithReason reasonFn ->
                     Assert.Equal("stbi_failure_reason", reasonFn)
                 | other -> Assert.Fail $"Expected NullWithReason, got {other}"
+
+// ─── Nonnull Annotations Tests ──────────────────────────────────────
+
+[<Fact>]
+let ``nonnull annotations round-trip through TOML`` () =
+    let project = { sampleProject with
+                        Nonnull = Some {
+                            Parameters = Map.ofList [("render", [0; 2]); ("init", [0])]
+                            Returns = Set.ofList ["create_ctx"]
+                        } }
+    let toml = PilotSerializer.toTomlString project
+    Assert.Contains("annotations.nonnull", toml)
+    Assert.Contains("nonnull_returns", toml)
+    Assert.Contains("create_ctx", toml)
+    match Fidelity.Data.TOML.Toml.parse toml with
+    | Error e -> Assert.Fail $"Parse failed: {e}"
+    | Ok doc ->
+        match PilotSerializer.deserialize doc with
+        | Error e -> Assert.Fail $"Deserialize failed: {e}"
+        | Ok roundTripped ->
+            Assert.True(roundTripped.Nonnull.IsSome)
+            let nonnull = roundTripped.Nonnull.Value
+            Assert.Equal<int list>([0; 2], nonnull.Parameters.["render"])
+            Assert.Equal<int list>([0], nonnull.Parameters.["init"])
+            Assert.True(nonnull.Returns.Contains "create_ctx")
+
+[<Fact>]
+let ``absent nonnull section deserializes as None`` () =
+    let project = { sampleProject with Nonnull = None }
+    let toml = PilotSerializer.toTomlString project
+    Assert.DoesNotContain("annotations.nonnull", toml)
+    match Fidelity.Data.TOML.Toml.parse toml with
+    | Error e -> Assert.Fail $"Parse failed: {e}"
+    | Ok doc ->
+        match PilotSerializer.deserialize doc with
+        | Error e -> Assert.Fail $"Deserialize failed: {e}"
+        | Ok roundTripped ->
+            Assert.True(roundTripped.Nonnull.IsNone)

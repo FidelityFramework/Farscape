@@ -302,7 +302,8 @@ module PilotAnalyzer =
           Namespaces = namespaces @ catchAll
           ErrorConventions = None
           Options = None
-          Callbacks = None }
+          Callbacks = None
+          Nonnull = None }
 
     // =========================================================================
     // Declaration Filtering (for scoped generation)

@@ -32,22 +32,22 @@ let ``generate produces valid Fidelity binding for simple function`` () =
     Assert.Contains("Unchecked.defaultof<int32>", result)
 
 [<Fact>]
-let ``generate maps char pointer params to nativeptr<byte>`` () =
+let ``generate maps char pointer params to Option<nativeptr<byte>> (nullable by default)`` () =
     let decls = [
         CppParser.Declaration.Function (mkFunc "strlen" "unsigned long" [("__s", "const char *")])
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
-    Assert.Contains("(s: nativeptr<byte>)", result)
+    Assert.Contains("(s: Option<nativeptr<byte>>)", result)
 
 [<Fact>]
-let ``generate maps void pointer params to nativeint`` () =
+let ``generate maps void pointer params to Option<nativeint> (nullable by default)`` () =
     let decls = [
         CppParser.Declaration.Function (mkFunc "memset" "void *" [("__s", "void *"); ("__c", "int"); ("__n", "size_t")])
         CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
-    Assert.Contains("(s: nativeint)", result)
-    Assert.Contains(": nativeint =", result)
+    Assert.Contains("(s: Option<nativeint>)", result)
+    Assert.Contains(": Option<nativeint> =", result)
 
 [<Fact>]
 let ``generate handles function pointer params as nativeint`` () =
@@ -77,8 +77,8 @@ let ``generate does not map wchar_t pointer as nativeptr<byte>`` () =
         CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
-    // wchar_t * should be nativeint, not nativeptr<byte>
-    Assert.Contains("(pwc: nativeint)", result)
+    // wchar_t * should be Option<nativeint>, not nativeptr<byte>
+    Assert.Contains("(pwc: Option<nativeint>)", result)
 
 [<Fact>]
 let ``generate emits numeric macro constants`` () =
@@ -179,3 +179,92 @@ let ``generate emits FidelityExtern with correct library name`` () =
     ]
     let result = FidelityCodeGenerator.generate decls "Fidelity.wayland.Display" "wayland-client" Types.LP64 Map.empty
     Assert.Contains("[<FidelityExtern(\"wayland-client\", \"wl_display_connect\")>]", result)
+
+// ─── Nullable Pointer Architecture Tests ────────────────────────────
+
+[<Fact>]
+let ``pointer param without NonNullAttr emits as Option`` () =
+    let decls = [
+        CppParser.Declaration.Function (mkFunc "read" "ssize_t" [("fd", "int"); ("buf", "void *"); ("count", "size_t")])
+    ]
+    let result = FidelityCodeGenerator.generate decls "Test" "libc" Types.LP64 Map.empty
+    Assert.Contains("(buf: Option<nativeint>)", result)
+
+[<Fact>]
+let ``pointer param WITH NonNullAttr emits without Option`` () =
+    let func = mkFuncWithAttrs "write" "ssize_t"
+                [("fd", "int"); ("buf", "const void *"); ("count", "size_t")]
+                [mkAttr "NonNullAttr" [1] None]
+    let decls = [ CppParser.Declaration.Function func ]
+    let result = FidelityCodeGenerator.generate decls "Test" "libc" Types.LP64 Map.empty
+    // param index 1 (buf) is non-null via clang attr
+    Assert.Contains("(buf: nativeint)", result)
+
+[<Fact>]
+let ``mixed nullable and nonnull params in same function`` () =
+    let func = mkFuncWithAttrs "memcpy" "void *"
+                [("dest", "void *"); ("src", "const void *"); ("n", "size_t")]
+                [mkAttr "NonNullAttr" [0; 1] None]
+    let decls = [ CppParser.Declaration.Function func ]
+    let result = FidelityCodeGenerator.generate decls "Test" "libc" Types.LP64 Map.empty
+    // dest (idx 0) and src (idx 1) are nonnull
+    Assert.Contains("(dest: nativeint)", result)
+    Assert.Contains("(src: nativeint)", result)
+
+[<Fact>]
+let ``pointer return type emits as Option by default`` () =
+    let decls = [
+        CppParser.Declaration.Function (mkFunc "malloc" "void *" [("size", "size_t")])
+    ]
+    let result = FidelityCodeGenerator.generate decls "Test" "libc" Types.LP64 Map.empty
+    Assert.Contains(": Option<nativeint> =", result)
+
+[<Fact>]
+let ``const char pointer param emits as Option of nativeptr`` () =
+    let decls = [
+        CppParser.Declaration.Function (mkFunc "puts" "int" [("s", "const char *")])
+    ]
+    let result = FidelityCodeGenerator.generate decls "Test" "libc" Types.LP64 Map.empty
+    Assert.Contains("(s: Option<nativeptr<byte>>)", result)
+
+[<Fact>]
+let ``function pointer param does NOT get Option wrapping`` () =
+    let decls = [
+        CppParser.Declaration.Function (mkFunc "signal" "void (*)(int)" [("sig", "int"); ("handler", "void (*)(int)")])
+    ]
+    let result = FidelityCodeGenerator.generate decls "Test" "libc" Types.LP64 Map.empty
+    // function pointer → nativeint, NOT Option<nativeint>
+    Assert.Contains("(handler: nativeint)", result)
+
+[<Fact>]
+let ``TOML nonnull annotations override nullable default`` () =
+    let func = mkFunc "render" "int" [("ctx", "void *"); ("buf", "void *"); ("size", "size_t")]
+    let decls = [ CppParser.Declaration.Function func ]
+    let nonnull : PilotTypes.NonnullAnnotations option = Some { Parameters = Map.ofList [("render", [0])]; Returns = Set.empty }
+    let ctx : FidelityCodeGenerator.GenerationContext =
+        { TypedefMap = FidelityCodeGenerator.buildTypedefMap decls
+          OpaqueHandles = FidelityCodeGenerator.detectOpaqueHandles decls
+          DataModel = Types.LP64
+          StructLayouts = Map.empty
+          NonnullAnnotations = nonnull }
+    let result = FidelityCodeGenerator.generateModule ctx Set.empty decls "Test" "lib" "test" []
+    // ctx (idx 0) is nonnull via TOML
+    Assert.Contains("(ctx: nativeint)", result)
+    // buf (idx 1) is still nullable
+    Assert.Contains("(buf: Option<nativeint>)", result)
+
+[<Fact>]
+let ``TOML nonnull_returns prevents Option on return type`` () =
+    let func = mkFunc "create_thing" "void *" [("size", "size_t")]
+    let decls = [ CppParser.Declaration.Function func ]
+    let nonnull : PilotTypes.NonnullAnnotations option = Some { Parameters = Map.empty; Returns = Set.ofList ["create_thing"] }
+    let ctx : FidelityCodeGenerator.GenerationContext =
+        { TypedefMap = FidelityCodeGenerator.buildTypedefMap decls
+          OpaqueHandles = FidelityCodeGenerator.detectOpaqueHandles decls
+          DataModel = Types.LP64
+          StructLayouts = Map.empty
+          NonnullAnnotations = nonnull }
+    let result = FidelityCodeGenerator.generateModule ctx Set.empty decls "Test" "lib" "test" []
+    // Return is nonnull via TOML
+    Assert.Contains(": nativeint =", result)
+    Assert.DoesNotContain("Option<nativeint> =", result)

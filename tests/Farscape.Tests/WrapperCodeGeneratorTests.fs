@@ -11,7 +11,7 @@ open TestHelpers
 
 let private generateSingle name retType parms attrs =
     let decls = [ mkDecl name retType parms attrs ]
-    WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" NoErrors Types.LP64
+    WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" NoErrors Types.LP64 None
 
 [<Fact>]
 let ``CountOrError wrapper without error convention generates direct passthrough`` () =
@@ -100,7 +100,7 @@ let ``multiple functions are deduplicated by name`` () =
         mkDecl "read" "ssize_t" [("fd", "int"); ("buf", "void *"); ("count", "size_t")] []
         mkDecl "write" "ssize_t" [("fd", "int"); ("buf", "const void *"); ("count", "size_t")] []
     ]
-    let output = WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" NoErrors Types.LP64
+    let output = WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" NoErrors Types.LP64 None
     // Count occurrences of "let read"; should be exactly 1
     let readCount = output.Split("let read") |> Array.length
     Assert.Equal(2, readCount) // split produces N+1 parts for N occurrences
@@ -114,7 +114,7 @@ module ErrnoWrapperTests =
 
     let private generateWithErrno name retType parms attrs =
         let decls = [ mkDecl name retType parms attrs ]
-        WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" (UseErrno "Fidelity.Errno") Types.LP64
+        WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" (UseErrno "Fidelity.Errno") Types.LP64 None
 
     [<Fact>]
     let ``errno-enabled wrapper uses Result<T, CError> return type`` () =
@@ -192,7 +192,7 @@ module EnumErrorWrapperTests =
     let private generateWithEnumError name retType parms attrs =
         let decls = [ mkDecl name retType parms attrs ]
         WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test"
-            (UseEnumError ("hipError_t", "hipSuccess", "HipError", "Fidelity.HIP.HipError")) Types.LP64
+            (UseEnumError ("hipError_t", "hipSuccess", "HipError", "Fidelity.HIP.HipError")) Types.LP64 None
 
     [<Fact>]
     let ``enum error wrapper generates match expression`` () =
@@ -254,7 +254,7 @@ module NullWithReasonWrapperTests =
     let private generateWithNullReason name retType parms attrs =
         let decls = [ mkDecl name retType parms attrs ]
         WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test"
-            (UseNullWithReason "stbi_failure_reason") Types.LP64
+            (UseNullWithReason "stbi_failure_reason") Types.LP64 None
 
     [<Fact>]
     let ``null_with_reason AllocatedPointer uses Result<nativeint, nativeint>`` () =

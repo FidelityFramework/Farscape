@@ -71,7 +71,7 @@ module BindingGenerator =
                     logVerbose "Generating idiomatic wrappers..." options.Verbose
                     let wrapperNamespace = $"{options.Namespace}.Wrappers"
                     let wrapperCode =
-                        WrapperCodeGenerator.generate declarations wrapperNamespace options.LibraryName options.Namespace WrapperTypes.NoErrors options.DataModel
+                        WrapperCodeGenerator.generate declarations wrapperNamespace options.LibraryName options.Namespace WrapperTypes.NoErrors options.DataModel None
                     let wrapperPath = Path.Combine(options.OutputDirectory, $"{lastSegment}Wrappers.clef")
                     File.WriteAllText(wrapperPath, wrapperCode)
                     logVerbose $"Wrapper module written to: {wrapperPath}" options.Verbose
@@ -161,7 +161,9 @@ module BindingGenerator =
                             logVerbose $"Warning: struct layout extraction failed: {e}" verbose
                             Map.empty
 
-                let ctx = FidelityCodeGenerator.buildGenerationContext declarations dataModel structLayouts
+                let ctx =
+                    let baseCtx = FidelityCodeGenerator.buildGenerationContext declarations dataModel structLayouts
+                    { baseCtx with NonnullAnnotations = project.Nonnull }
 
                 // Derive common namespace prefix for the project
                 let nsPrefix = deriveNamespacePrefix project
@@ -335,7 +337,7 @@ module BindingGenerator =
                                 let allNsDecls = PilotAnalyzer.filterDeclarationsForNamespace ns declarations
                                 let wrapperNamespace = $"{ns.Name}.Wrappers"
                                 let wrapperCode =
-                                    WrapperCodeGenerator.generate allNsDecls wrapperNamespace ns.Library ns.Name errorHandling dataModel
+                                    WrapperCodeGenerator.generate allNsDecls wrapperNamespace ns.Library ns.Name errorHandling dataModel project.Nonnull
                                 let wrapperPath = Path.Combine(nsDir, $"{lastSegment}Wrappers.clef")
                                 File.WriteAllText(wrapperPath, wrapperCode)
                                 logVerbose $"  {lastSegment}/{lastSegment}Wrappers.clef" verbose
