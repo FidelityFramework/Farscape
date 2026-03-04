@@ -52,6 +52,7 @@ module TypeMapper =
             // Primitive types — int/long widths determined by platform ABI
             "void", "unit"
             "bool", "bool"
+            "_Bool", "bool"
             "char", "byte"
             "signed char", "sbyte"
             "unsigned char", "byte"
