@@ -28,7 +28,6 @@ include_paths = [
 ]
 name = "webkit2gtk"
 pkg_config = ["webkit2gtk-4.1"]
-transitive_headers = ["WebKitSettings.h"]
 
 [output]
 directory = "./webkit2gtk"
@@ -39,6 +38,18 @@ description = "Functions with prefix 'webkit_application'"
 library = "webkit2gtk"
 name = "Fidelity.Webkit2gtk.Application"
 prefixes = ["webkit_application"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_credential'"
+library = "webkit2gtk"
+name = "Fidelity.Webkit2gtk.Credential"
+prefixes = ["webkit_credential"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_security'"
+library = "webkit2gtk"
+name = "Fidelity.Webkit2gtk.Security"
+prefixes = ["webkit_security"]
 
 [[namespace]]
 description = "Functions with prefix 'webkit_authentication'"
@@ -75,6 +86,12 @@ description = "Functions with prefix 'webkit_cookie'"
 library = "webkit2gtk"
 name = "Fidelity.Webkit2gtk.Cookie"
 prefixes = ["webkit_cookie"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_uri'"
+library = "webkit2gtk"
+name = "Fidelity.Webkit2gtk.Uri"
+prefixes = ["webkit_uri"]
 
 [[namespace]]
 description = "Functions with prefix 'webkit_download'"
@@ -179,6 +196,12 @@ name = "Fidelity.Webkit2gtk.Permission"
 prefixes = ["webkit_permission"]
 
 [[namespace]]
+description = "Functions with prefix 'webkit_script'"
+library = "webkit2gtk"
+name = "Fidelity.Webkit2gtk.Script"
+prefixes = ["webkit_script"]
+
+[[namespace]]
 description = "Functions with prefix 'webkit_media'"
 library = "webkit2gtk"
 name = "Fidelity.Webkit2gtk.Media"
@@ -245,6 +268,18 @@ name = "Fidelity.Webkit2gtk.Settings"
 prefixes = ["webkit_settings"]
 
 [[namespace]]
+description = "Functions with prefix 'webkit_itp'"
+library = "webkit2gtk"
+name = "Fidelity.Webkit2gtk.Itp"
+prefixes = ["webkit_itp"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_window'"
+library = "webkit2gtk"
+name = "Fidelity.Webkit2gtk.Window"
+prefixes = ["webkit_window"]
+
+[[namespace]]
 description = "Functions with prefix 'webkit_response'"
 library = "webkit2gtk"
 name = "Fidelity.Webkit2gtk.Response"
@@ -285,3 +320,58 @@ description = "Functions with prefix 'glib_queueautoptr'"
 library = "webkit2gtk"
 name = "Fidelity.Webkit2gtk.Queueautoptr"
 prefixes = ["glib_queueautoptr"]
+
+[[namespace]]
+description = "Functions with prefix 'jsc_value'"
+library = "webkit2gtk"
+name = "Fidelity.Webkit2gtk.Value"
+prefixes = ["jsc_value"]
+
+[[namespace]]
+description = "Functions with prefix 'jsc_class'"
+library = "webkit2gtk"
+name = "Fidelity.Webkit2gtk.Class"
+prefixes = ["jsc_class"]
+
+[[namespace]]
+description = "Functions with prefix 'jsc_exception'"
+library = "webkit2gtk"
+name = "Fidelity.Webkit2gtk.Exception"
+prefixes = ["jsc_exception"]
+
+[[namespace]]
+description = "Functions with prefix 'jsc_virtual'"
+library = "webkit2gtk"
+name = "Fidelity.Webkit2gtk.Virtual"
+prefixes = ["jsc_virtual"]
+
+[[namespace]]
+description = "Functions with prefix 'jsc_context'"
+library = "webkit2gtk"
+name = "Fidelity.Webkit2gtk.Context"
+prefixes = ["jsc_context"]
+
+[[namespace]]
+description = "Functions with prefix 'jsc_options'"
+library = "webkit2gtk"
+name = "Fidelity.Webkit2gtk.Options"
+prefixes = ["jsc_options"]
+
+[[namespace]]
+description = "Functions with prefix 'jsc_get'"
+library = "webkit2gtk"
+name = "Fidelity.Webkit2gtk.IO"
+prefixes = ["jsc_get"]
+
+[[namespace]]
+description = "Functions with prefix 'jsc_weak'"
+library = "webkit2gtk"
+name = "Fidelity.Webkit2gtk.Weak"
+prefixes = ["jsc_weak"]
+
+[[namespace]]
+description = "Ungrouped functions"
+functions = ["JSEvaluateScript", "JSCheckScriptSyntax", "JSGarbageCollect"]
+library = "webkit2gtk"
+name = "Fidelity.Webkit2gtk.Core"
+prefixes = []

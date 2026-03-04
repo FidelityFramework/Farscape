@@ -108,7 +108,13 @@ module BindingGenerator =
             let headerResults =
                 project.Library.Headers |> List.map (fun headerPath ->
                     logVerbose $"Parsing header: {headerPath}" verbose
-                    CppParser.parseWithTransitiveHeaders headerPath project.Library.IncludePaths project.Library.Defines project.Library.TransitiveHeaders project.Library.MacroPrefixes verbose)
+                    let includeRoot =
+                        let fullPath = Path.GetFullPath headerPath
+                        project.Library.IncludePaths
+                        |> List.tryFind (fun ip ->
+                            let fullIp = Path.GetFullPath ip
+                            fullPath.StartsWith fullIp)
+                    CppParser.parseWithIncludeRoot headerPath project.Library.IncludePaths project.Library.Defines includeRoot project.Library.MacroPrefixes verbose)
 
             let headerErrors = headerResults |> List.choose (function Error e -> Some e | _ -> None)
             if not headerErrors.IsEmpty then

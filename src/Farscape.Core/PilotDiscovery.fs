@@ -408,7 +408,6 @@ module PilotDiscovery =
             XmlProtocols = xmlProtocols
             IncludePaths = result.SuggestedIncludePaths
             Defines = []
-            TransitiveHeaders = []
             MacroPrefixes = []
             PkgConfig = []
           }

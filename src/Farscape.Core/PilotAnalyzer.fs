@@ -339,7 +339,6 @@ module PilotAnalyzer =
         (includePaths: string list)
         (defines: string list)
         (pkgConfig: string list)
-        (transitiveHeaders: string list)
         (outputMode: string)
         (outputDir: string)
         (result: AnalysisResult) : PilotProject =
@@ -384,7 +383,6 @@ module PilotAnalyzer =
               XmlProtocols = []
               IncludePaths = includePaths
               Defines = defines
-              TransitiveHeaders = transitiveHeaders
               MacroPrefixes = []
               PkgConfig = pkgConfig }
           Output =

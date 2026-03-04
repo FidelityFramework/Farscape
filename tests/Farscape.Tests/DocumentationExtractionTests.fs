@@ -33,8 +33,7 @@ module RawHeaderCommentTests =
             Defines = []
             Verbose = false
             IncludeMacros = true
-            MacroPrefixes = ["E"]
-            TransitiveHeaders = []
+            MacroPrefixes = ["E"]; IncludeRoot = None
         }
         match CppParser.parseHeaderFull options with
         | Error err -> Assert.Fail $"Parse failed: {err}"
@@ -130,8 +129,7 @@ extern int close(int fd);
             Defines = []
             Verbose = false
             IncludeMacros = false
-            MacroPrefixes = []
-            TransitiveHeaders = []
+            MacroPrefixes = []; IncludeRoot = None
         }
         match CppParser.parseHeader options with
         | Error err -> Assert.Fail $"Parse failed: {err}"
@@ -171,8 +169,7 @@ struct Point {
             Defines = []
             Verbose = false
             IncludeMacros = false
-            MacroPrefixes = []
-            TransitiveHeaders = []
+            MacroPrefixes = []; IncludeRoot = None
         }
         match CppParser.parseHeader options with
         | Error err -> Assert.Fail $"Parse failed: {err}"
@@ -207,8 +204,7 @@ enum Color {
             Defines = []
             Verbose = false
             IncludeMacros = false
-            MacroPrefixes = []
-            TransitiveHeaders = []
+            MacroPrefixes = []; IncludeRoot = None
         }
         match CppParser.parseHeader options with
         | Error err -> Assert.Fail $"Parse failed: {err}"
@@ -243,8 +239,7 @@ extern int multi_line_example(int x);
             Defines = []
             Verbose = false
             IncludeMacros = false
-            MacroPrefixes = []
-            TransitiveHeaders = []
+            MacroPrefixes = []; IncludeRoot = None
         }
         match CppParser.parseHeader options with
         | Error err -> Assert.Fail $"Parse failed: {err}"

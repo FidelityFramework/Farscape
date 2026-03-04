@@ -79,7 +79,6 @@ functions = [
     "lcong48_r",
     "arc4random",
     "free",
-    "alloca",
     "valloc",
     "posix_memalign",
     "aligned_alloc",

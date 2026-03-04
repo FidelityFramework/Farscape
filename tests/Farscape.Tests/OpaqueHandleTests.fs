@@ -258,8 +258,7 @@ module LiveHipTests =
                 Defines = ["__HIP_PLATFORM_AMD__"]
                 Verbose = false
                 IncludeMacros = false
-                MacroPrefixes = []
-                TransitiveHeaders = []
+                MacroPrefixes = []; IncludeRoot = None
             }
             match CppParser.parseHeader options with
             | Error err -> Assert.Fail $"Parse failed: {err}"

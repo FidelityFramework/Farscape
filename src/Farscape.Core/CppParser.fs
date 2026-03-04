@@ -175,9 +175,10 @@ module CppParser =
         IncludeMacros: bool
         /// Filter to only include macros matching these prefixes (empty = all)
         MacroPrefixes: string list
-        /// Filenames of transitively-included headers whose declarations should also be extracted.
-        /// e.g. ["driver_types.h"] when the primary header #includes them.
-        TransitiveHeaders: string list
+        /// Root directory for library boundary scoping.
+        /// When set, only declarations from files under this path are extracted.
+        /// Derived automatically from pkg-config include paths.
+        IncludeRoot: string option
     }
 
     /// Create default parser options for a header file
@@ -188,7 +189,7 @@ module CppParser =
         Verbose = false
         IncludeMacros = true
         MacroPrefixes = []
-        TransitiveHeaders = []
+        IncludeRoot = None
     }
 
     // =========================================================================
@@ -512,56 +513,45 @@ module CppParser =
                 Documentation = None
             }
 
-    /// Walk AST tree and extract declarations from the target file
-    /// Uses mutable state to track file across sibling nodes (clang only emits file once per file change)
+    /// Walk AST tree and extract declarations from the target file.
+    /// Uses mutable state to track file across sibling nodes (clang only emits file once per file change).
+    /// Library boundary is determined by includeRoot (from pkg-config) or filename matching (fallback).
     let private walkAst
         (root: JsonValue)
         (targetFile: string)
-        (transitiveHeaders: string list)
+        (includeRoot: string option)
         (verbose: bool)
         : Declaration list =
 
         let results = ResizeArray<Declaration>()
         let mutable currentFile: string option = None
-        // All accepted filenames: primary target + any transitive headers
-        let acceptedFiles = targetFile :: transitiveHeaders
 
-        // Track which file #included the current file (for umbrella header detection)
-        let mutable currentIncludedFrom: string option = None
+        if verbose then
+            match includeRoot with
+            | Some root -> printfn "[CppParser] Include root scoping: %s" root
+            | None -> printfn "[CppParser] No include root — using filename matching for: %s" targetFile
 
         /// Update file tracking from a node's location.
         /// Clang's JSON AST uses "loc.file" to indicate a change in source file.
         /// When "file" is absent, the node is in the same file as the previous node.
-        /// "includedFrom" tells which file #includes the current file — used to detect
-        /// umbrella headers where the target header just #includes sub-headers.
         let updateFileTracking (node: JsonValue) =
             match getObject node "loc" with
             | Some loc ->
                 match getString loc "file" with
                 | Some f -> currentFile <- Some f
                 | None -> ()
-                // Always track includedFrom when present
-                match getObject loc "includedFrom" with
-                | Some incl ->
-                    match getString incl "file" with
-                    | Some f -> currentIncludedFrom <- Some f
-                    | None -> ()
-                | None -> ()
             | None -> ()
 
-        /// Check if current node is from any accepted target file.
-        /// Matches if: (a) currentFile matches a target, OR
-        /// (b) currentFile's includedFrom matches a target (umbrella header pattern).
+        /// Check if current node belongs to this library.
+        /// With includeRoot: any file under that directory tree belongs to the library.
+        /// Without: fall back to matching the target filename (for simple single-file headers).
         let isFromTargetFile (node: JsonValue) =
-            let matchesAny (f: string) =
-                acceptedFiles |> List.exists (fun tf -> f.EndsWith(tf) || f = tf)
             match currentFile with
-            | Some f when matchesAny f -> true
-            | _ ->
-                // Umbrella header: current file is included FROM the target
-                match currentIncludedFrom with
-                | Some incl -> matchesAny incl
-                | None -> false
+            | Some f ->
+                match includeRoot with
+                | Some root -> f.StartsWith root
+                | None -> f.EndsWith targetFile || f = targetFile
+            | None -> false
 
         /// Process a single node
         let rec processNode (node: JsonValue) =
@@ -1123,7 +1113,7 @@ module CppParser =
                     let root = JsonValue.Parse(jsonOutput)
                     let targetFile = Path.GetFileName(options.HeaderFile)
 
-                    let declarations = walkAst root targetFile options.TransitiveHeaders options.Verbose
+                    let declarations = walkAst root targetFile options.IncludeRoot options.Verbose
 
                     if options.Verbose then
                         printfn "[CppParser] Extracted %d AST declarations" (List.length declarations)
@@ -1188,7 +1178,7 @@ module CppParser =
             Verbose = verbose
             IncludeMacros = true
             MacroPrefixes = []
-            TransitiveHeaders = []
+            IncludeRoot = None
         }
         parseHeader options
 
@@ -1206,16 +1196,16 @@ module CppParser =
             Verbose = verbose
             IncludeMacros = true
             MacroPrefixes = []
-            TransitiveHeaders = []
+            IncludeRoot = None
         }
         parseHeader options
 
-    /// Parse with defines and transitive headers for SDK multi-file APIs
-    let parseWithTransitiveHeaders
+    /// Parse with include root scoping for library boundary detection
+    let parseWithIncludeRoot
         (headerFile: string)
         (includePaths: string list)
         (defines: string list)
-        (transitiveHeaders: string list)
+        (includeRoot: string option)
         (macroPrefixes: string list)
         (verbose: bool) : Result<Declaration list, string> =
 
@@ -1226,7 +1216,7 @@ module CppParser =
             Verbose = verbose
             IncludeMacros = true
             MacroPrefixes = macroPrefixes
-            TransitiveHeaders = transitiveHeaders
+            IncludeRoot = includeRoot
         }
         parseHeader options
 
@@ -1244,6 +1234,6 @@ module CppParser =
             Verbose = verbose
             IncludeMacros = true
             MacroPrefixes = []
-            TransitiveHeaders = []
+            IncludeRoot = None
         }
         parseHeaderFull options

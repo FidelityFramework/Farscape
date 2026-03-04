@@ -104,8 +104,7 @@ let ``generate with live errno.h produces complete module`` () =
         Defines = []
         Verbose = false
         IncludeMacros = true
-        MacroPrefixes = ["E"]
-        TransitiveHeaders = []
+        MacroPrefixes = ["E"]; IncludeRoot = None
     }
     match CppParser.parseHeaderFull options with
     | Error err -> Assert.Fail $"Parse failed: {err}"

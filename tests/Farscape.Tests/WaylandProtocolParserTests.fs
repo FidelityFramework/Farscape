@@ -371,7 +371,6 @@ let ``PilotSerializer round-trips xml_protocols`` () =
             XmlProtocols = ["wayland.xml"; "xdg-shell.xml"]
             IncludePaths = []
             Defines = []
-            TransitiveHeaders = []
             MacroPrefixes = []
             PkgConfig = []
         }
@@ -399,7 +398,6 @@ let ``PilotSerializer round-trips xml_interfaces`` () =
             XmlProtocols = []
             IncludePaths = []
             Defines = []
-            TransitiveHeaders = []
             MacroPrefixes = []
             PkgConfig = []
         }

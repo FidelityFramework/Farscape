@@ -39,9 +39,6 @@ module PilotTypes =
         IncludePaths: string list
         /// Preprocessor defines
         Defines: string list
-        /// Filenames of transitively-included headers whose types should also be extracted.
-        /// e.g. ["driver_types.h"] when parsing hip_runtime_api.h which #includes it.
-        TransitiveHeaders: string list
         /// Macro name prefixes to include (e.g. ["WL_"; "WAYLAND_"]).
         /// When empty, all user macros pass through (which can pull in system header noise).
         MacroPrefixes: string list
