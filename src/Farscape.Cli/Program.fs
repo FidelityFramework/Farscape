@@ -140,15 +140,41 @@ let generateCommand =
         setAction action
     }
 
-let pilotAnalyzeCommand =
-    let header =   Input.option<FileInfo> "--header"        |> desc "Path to C/C++ header file" |> required |> validateFileExists
-    let library =  Input.option<string> "--library"         |> alias "-l" |> desc "Library name (e.g., libc)" |> required
-    let includes = Input.option<string[]> "--include-paths" |> alias "-i" |> desc "Additional include paths" |> def [||]
-    let defines =  Input.option<string[]> "--defines"       |> alias "-d" |> desc "Preprocessor definitions" |> def [||]
-    let output =   Input.option<string> "--output"          |> alias "-o" |> desc "Output directory (default: ./<library>)" |> def ""
-    let verbose =  Input.option<bool> "--verbose"           |> alias "-v" |> desc "Verbose output" |> def false
+/// Resolve include paths and defines from pkg-config.
+/// Returns (includePaths, defines) extracted from `pkg-config --cflags <name>`.
+let resolvePkgConfig (pkgName: string) (verbose: bool) : Result<string list * string list, string> =
+    try
+        let psi = System.Diagnostics.ProcessStartInfo("pkg-config", $"--cflags {pkgName}")
+        psi.RedirectStandardOutput <- true
+        psi.RedirectStandardError <- true
+        psi.UseShellExecute <- false
+        let proc = System.Diagnostics.Process.Start(psi)
+        let output = proc.StandardOutput.ReadToEnd().Trim()
+        let stderr = proc.StandardError.ReadToEnd().Trim()
+        proc.WaitForExit()
+        if proc.ExitCode <> 0 then
+            Error $"pkg-config failed for '{pkgName}': {stderr}"
+        else
+            if verbose then
+                printLine $"pkg-config --cflags {pkgName}:"
+                printLine $"  {output}"
+            let tokens = output.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            let includes = tokens |> Array.filter (fun t -> t.StartsWith("-I")) |> Array.map (fun t -> t.Substring(2)) |> Array.toList
+            let defines = tokens |> Array.filter (fun t -> t.StartsWith("-D")) |> Array.map (fun t -> t.Substring(2)) |> Array.toList
+            Ok (includes, defines)
+    with ex ->
+        Error $"Failed to run pkg-config: {ex.Message}"
 
-    let action (header: FileInfo, library, includes: string[], defines: string[], output, verbose) =
+let pilotAnalyzeCommand =
+    let header =    Input.option<FileInfo> "--header"        |> desc "Path to C/C++ header file" |> required |> validateFileExists
+    let library =   Input.option<string> "--library"         |> alias "-l" |> desc "Library name (e.g., libc)" |> required
+    let includes =  Input.option<string[]> "--include-paths" |> alias "-i" |> desc "Additional include paths" |> def [||]
+    let defines =   Input.option<string[]> "--defines"       |> alias "-d" |> desc "Preprocessor definitions" |> def [||]
+    let pkgConfig = Input.option<string[]> "--pkg-config"    |> alias "-p" |> desc "pkg-config package names (auto-resolves include paths and defines)" |> def [||]
+    let output =    Input.option<string> "--output"          |> alias "-o" |> desc "Output directory (default: ./<library>)" |> def ""
+    let verbose =   Input.option<bool> "--verbose"           |> alias "-v" |> desc "Verbose output" |> def false
+
+    let action (header: FileInfo, library, includes: string[], defines: string[], pkgConfig: string[], output, verbose) =
         showHeader ()
         printHeader "Pilot: Analyzing header for namespace subdivisions"
         printLine ""
@@ -158,8 +184,26 @@ let pilotAnalyzeCommand =
             else output
         Directory.CreateDirectory(outputDir) |> ignore
 
-        let includePaths = includes |> Array.toList
-        let definesList = defines |> Array.toList
+        // Resolve pkg-config flags and merge with explicit CLI flags
+        let mutable pkgIncludes = []
+        let mutable pkgDefines = []
+        let mutable pkgError = None
+        for pkg in pkgConfig do
+            match resolvePkgConfig pkg verbose with
+            | Ok (incl, defs) ->
+                pkgIncludes <- pkgIncludes @ incl
+                pkgDefines <- pkgDefines @ defs
+            | Error e ->
+                pkgError <- Some e
+
+        match pkgError with
+        | Some e ->
+            showError e
+            1
+        | None ->
+
+        let includePaths = (includes |> Array.toList) @ pkgIncludes |> List.distinct
+        let definesList = (defines |> Array.toList) @ pkgDefines |> List.distinct
 
         match CppParser.parseWithDefines header.FullName includePaths definesList verbose with
         | Error e ->
@@ -186,7 +230,7 @@ let pilotAnalyzeCommand =
                     printLine $"    - {fn}"
 
             let project =
-                PilotAnalyzer.toPilotProject library header.FullName includePaths definesList "fidelity" outputDir result
+                PilotAnalyzer.toPilotProject library header.FullName includePaths definesList (pkgConfig |> Array.toList) "fidelity" outputDir result
 
             let tomlPath = Path.Combine(outputDir, $"{library}.pilot.toml")
 
@@ -205,7 +249,7 @@ let pilotAnalyzeCommand =
 
     command "analyze" {
         description "Analyze a header file and generate a .pilot.toml project file"
-        inputs (header, library, includes, defines, output, verbose)
+        inputs (header, library, includes, defines, pkgConfig, output, verbose)
         setAction action
     }
 
@@ -229,6 +273,7 @@ let pilotInitCommand =
                 Defines = []
                 TransitiveHeaders = []
                 MacroPrefixes = []
+                PkgConfig = []
             }
             Output = { Mode = "fidelity"; Directory = outputDir }
             Namespaces = [

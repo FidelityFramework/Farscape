@@ -118,6 +118,71 @@ module PilotAnalyzer =
     /// Minimum number of functions sharing a pattern to form a group.
     let private minGroupSize = 2
 
+    /// Groups larger than this threshold are split by sub-prefix.
+    /// This keeps namespaces granular for compile-time reachability:
+    /// when Clef `open`s a namespace, only those declarations enter the PSG.
+    let private subPrefixThreshold = 30
+
+    /// Extract the sub-prefix segment from a function name given its parent prefix.
+    /// e.g. extractSubPrefix "gtk" "gtk_window_set_title" = Some "window"
+    let private extractSubPrefix (parentPrefix: string) (funcName: string) : string option =
+        let stripped =
+            if funcName.StartsWith(parentPrefix + "_") then
+                funcName.Substring(parentPrefix.Length + 1)
+            elif funcName.StartsWith(parentPrefix) then
+                funcName.Substring(parentPrefix.Length)
+            else
+                funcName
+        match stripped.IndexOf('_') with
+        | idx when idx > 0 -> Some (stripped.Substring(0, idx))
+        | _ -> None
+
+    /// Split a large prefix group into sub-groups by the next underscore-delimited segment.
+    /// Groups below the threshold pass through unchanged.
+    let private splitLargeGroup (group: PrefixGroup) : PrefixGroup list =
+        if group.FunctionNames.Length < subPrefixThreshold then
+            [group]
+        else
+            // Use the first (usually only) prefix as the parent
+            let parentPrefix =
+                match group.Prefixes with
+                | p :: _ -> p
+                | [] -> ""
+            // Group functions by their sub-prefix segment
+            let subGrouped =
+                group.FunctionNames
+                |> List.map (fun fn -> fn, extractSubPrefix parentPrefix fn)
+                |> List.groupBy snd
+                |> List.map (fun (subSeg, pairs) -> subSeg, pairs |> List.map fst)
+            // Build sub-groups for segments with enough functions
+            let subGroups =
+                subGrouped
+                |> List.choose (fun (subSeg, fns) ->
+                    match subSeg with
+                    | Some seg when fns.Length >= minGroupSize ->
+                        let subPrefix = parentPrefix + "_" + seg
+                        Some { Prefixes = [subPrefix]
+                               FunctionNames = fns
+                               SuggestedName = suggestNamespaceName seg }
+                    | _ -> None)
+            // Collect remainder (functions that didn't fit any sub-group)
+            let subGroupedNames =
+                subGroups |> List.collect (fun g -> g.FunctionNames) |> Set.ofList
+            let remainder =
+                group.FunctionNames |> List.filter (fun fn -> not (Set.contains fn subGroupedNames))
+            if remainder.IsEmpty then
+                subGroups
+            else
+                let remainderGroup =
+                    { Prefixes = group.Prefixes
+                      FunctionNames = remainder
+                      SuggestedName = group.SuggestedName + "Core" }
+                subGroups @ [remainderGroup]
+
+    /// Split all large groups into sub-groups.
+    let private splitLargeGroups (groups: PrefixGroup list) : PrefixGroup list =
+        groups |> List.collect splitLargeGroup
+
     /// Cluster function names by extracted prefix, merge groups that map
     /// to the same suggested namespace name, then apply minGroupSize.
     let clusterByPrefix (names: string list) : PrefixGroup list * string list =
@@ -141,17 +206,20 @@ module PilotAnalyzer =
                 allPrefixes, allFunctions, suggestedName)
             |> List.filter (fun (_, fns, _) -> fns.Length >= minGroupSize)
 
-        let groupedNames =
-            merged |> List.collect (fun (_, fns, _) -> fns) |> Set.ofList
-
-        let ungrouped =
-            names |> List.filter (fun n -> not (Set.contains n groupedNames))
-
-        let groups =
+        // Build initial groups, then split large ones by sub-prefix
+        let initialGroups =
             merged |> List.map (fun (prefixes, fns, suggestedName) ->
                 { Prefixes = prefixes
                   FunctionNames = fns
                   SuggestedName = suggestedName })
+
+        let groups = splitLargeGroups initialGroups
+
+        let groupedNames =
+            groups |> List.collect (fun g -> g.FunctionNames) |> Set.ofList
+
+        let ungrouped =
+            names |> List.filter (fun n -> not (Set.contains n groupedNames))
 
         groups, ungrouped
 
@@ -244,6 +312,25 @@ module PilotAnalyzer =
           Ungrouped = ungrouped
           TotalFunctions = names.Length }
 
+    /// Convert a library name to a PascalCase namespace root segment.
+    /// e.g. "gtk-3" → "Gtk3", "webkit2gtk-4.1" → "Webkit2gtk", "libc" → "Libc"
+    let toNamespaceRoot (libraryName: string) : string =
+        // Split on delimiters, filter out dotted version segments (e.g. "4.1", "2.0")
+        // but keep simple numbers (e.g. "3" in "gtk-3") as they distinguish major versions
+        let isDottedVersion (s: string) =
+            s.Contains('.') && s |> Seq.forall (fun c -> System.Char.IsDigit c || c = '.')
+        let segments =
+            libraryName.Split([|'-'; '_'|], System.StringSplitOptions.RemoveEmptyEntries)
+            |> Array.filter (fun s -> not (isDottedVersion s))
+        if segments.Length = 0 then libraryName
+        else
+            segments
+            |> Array.map (fun s ->
+                if s.Length > 0 then
+                    string (System.Char.ToUpperInvariant(s[0])) + s.Substring(1)
+                else s)
+            |> String.concat ""
+
     /// Convert an AnalysisResult to a PilotProject with default settings.
     /// Ungrouped functions are collected into a catch-all "Core" namespace.
     let toPilotProject
@@ -251,9 +338,11 @@ module PilotAnalyzer =
         (headerFile: string)
         (includePaths: string list)
         (defines: string list)
+        (pkgConfig: string list)
         (outputMode: string)
         (outputDir: string)
         (result: AnalysisResult) : PilotProject =
+        let nsRoot = toNamespaceRoot libraryName
         let namespaces =
             result.Groups |> List.map (fun g ->
                 // Functions not covered by any prefix go into explicit functions list
@@ -272,7 +361,7 @@ module PilotAnalyzer =
                         let matching = ps |> List.map (fun p -> p + "*") |> String.concat ", "
                         sprintf "Functions matching: %s" matching
                     | _ -> sprintf "%s functions" g.SuggestedName
-                { Name = $"Fidelity.{libraryName}.{g.SuggestedName}"
+                { Name = $"Fidelity.{nsRoot}.{g.SuggestedName}"
                   Description = description
                   Library = libraryName
                   Prefixes = effectivePrefixes
@@ -282,7 +371,7 @@ module PilotAnalyzer =
         let catchAll =
             if result.Ungrouped.IsEmpty then []
             else
-                [ { Name = $"Fidelity.{libraryName}.Core"
+                [ { Name = $"Fidelity.{nsRoot}.Core"
                     Description = "Ungrouped functions"
                     Library = libraryName
                     Prefixes = []
@@ -295,7 +384,8 @@ module PilotAnalyzer =
               IncludePaths = includePaths
               Defines = defines
               TransitiveHeaders = []
-              MacroPrefixes = [] }
+              MacroPrefixes = []
+              PkgConfig = pkgConfig }
           Output =
             { Mode = outputMode
               Directory = outputDir }

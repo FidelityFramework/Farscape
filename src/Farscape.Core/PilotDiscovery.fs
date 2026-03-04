@@ -410,6 +410,7 @@ module PilotDiscovery =
             Defines = []
             TransitiveHeaders = []
             MacroPrefixes = []
+            PkgConfig = []
           }
           Output = { Mode = outputMode; Directory = outputDir }
           Namespaces = [

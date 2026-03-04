@@ -40,6 +40,9 @@ module PilotSerializer =
         let table =
             if lib.MacroPrefixes.IsEmpty then table
             else TomlTable.add "macro_prefixes" (TomlValue.Array (lib.MacroPrefixes |> List.map TomlValue.String)) table
+        let table =
+            if lib.PkgConfig.IsEmpty then table
+            else TomlTable.add "pkg_config" (TomlValue.Array (lib.PkgConfig |> List.map TomlValue.String)) table
         TomlValue.Table table
 
     /// Convert an OutputSpec to a TomlTable.
@@ -242,7 +245,8 @@ module PilotSerializer =
                      IncludePaths = optionalStringArray "include_paths" table
                      Defines = optionalStringArray "defines" table
                      TransitiveHeaders = optionalStringArray "transitive_headers" table
-                     MacroPrefixes = optionalStringArray "macro_prefixes" table }
+                     MacroPrefixes = optionalStringArray "macro_prefixes" table
+                     PkgConfig = optionalStringArray "pkg_config" table }
             | Error e, _ | _, Error e -> Error e
 
     /// Parse an OutputSpec from the [output] table.

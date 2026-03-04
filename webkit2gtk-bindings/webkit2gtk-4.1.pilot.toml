@@ -1,0 +1,280 @@
+[library]
+header = "/usr/include/webkitgtk-4.1/webkit2/webkit2.h"
+include_paths = [
+    "/usr/include/webkitgtk-4.1",
+    "/usr/include/gtk-3.0",
+    "/usr/include/pango-1.0",
+    "/usr/include/cloudproviders",
+    "/usr/include/cairo",
+    "/usr/include/gdk-pixbuf-2.0",
+    "/usr/include/glycin-2",
+    "/usr/include/at-spi2-atk/2.0",
+    "/usr/include/at-spi-2.0",
+    "/usr/include/atk-1.0",
+    "/usr/include/dbus-1.0",
+    "/usr/lib/dbus-1.0/include",
+    "/usr/include/fribidi",
+    "/usr/include/pixman-1",
+    "/usr/include/harfbuzz",
+    "/usr/include/freetype2",
+    "/usr/include/libpng16",
+    "/usr/include/gio-unix-2.0",
+    "/usr/include/libsoup-3.0",
+    "/usr/include/libmount",
+    "/usr/include/blkid",
+    "/usr/include/glib-2.0",
+    "/usr/lib/glib-2.0/include",
+    "/usr/include/sysprof-6",
+]
+name = "webkit2gtk-4.1"
+pkg_config = ["webkit2gtk-4.1", "gtk+-3.0"]
+
+[output]
+directory = "./webkit2gtk-bindings"
+mode = "fidelity"
+
+[[namespace]]
+description = "Functions with prefix 'webkit_application'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Application"
+prefixes = ["webkit_application"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_authentication'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Authentication"
+prefixes = ["webkit_authentication"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_automation'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Automation"
+prefixes = ["webkit_automation"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_back'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Back"
+prefixes = ["webkit_back"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_color'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Color"
+prefixes = ["webkit_color"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_context'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Context"
+prefixes = ["webkit_context"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_cookie'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Cookie"
+prefixes = ["webkit_cookie"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_download'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Download"
+prefixes = ["webkit_download"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_editor'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Editor"
+prefixes = ["webkit_editor"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_network'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Network"
+prefixes = ["webkit_network"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_policy'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Policy"
+prefixes = ["webkit_policy"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_plugin'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Plugin"
+prefixes = ["webkit_plugin"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_print'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Print"
+prefixes = ["webkit_print"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_javascript'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Javascript"
+prefixes = ["webkit_javascript"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_snapshot'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Snapshot"
+prefixes = ["webkit_snapshot"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_web'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Web"
+prefixes = ["webkit_web"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_user'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.User"
+prefixes = ["webkit_user"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_favicon'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Favicon"
+prefixes = ["webkit_favicon"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_feature'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Feature"
+prefixes = ["webkit_feature"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_find'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Find"
+prefixes = ["webkit_find"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_hit'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Hit"
+prefixes = ["webkit_hit"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_input'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Input"
+prefixes = ["webkit_input"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_navigation'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Navigation"
+prefixes = ["webkit_navigation"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_permission'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Permission"
+prefixes = ["webkit_permission"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_media'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Media"
+prefixes = ["webkit_media"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_website'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Website"
+prefixes = ["webkit_website"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_file'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.File"
+prefixes = ["webkit_file"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_form'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Form"
+prefixes = ["webkit_form"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_geolocation'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Geolocation"
+prefixes = ["webkit_geolocation"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_install'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Install"
+prefixes = ["webkit_install"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_memory'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Memory"
+prefixes = ["webkit_memory"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_mime'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Mime"
+prefixes = ["webkit_mime"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_notification'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Notification"
+prefixes = ["webkit_notification"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_option'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Option"
+prefixes = ["webkit_option"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_response'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Response"
+prefixes = ["webkit_response"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit_get'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.IO"
+prefixes = ["webkit_get"]
+
+[[namespace]]
+description = "Functions with prefix 'webkit'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.WebkitCore"
+prefixes = ["webkit"]
+
+[[namespace]]
+description = "Functions with prefix 'glib_autoptr'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Autoptr"
+prefixes = ["glib_autoptr"]
+
+[[namespace]]
+description = "Functions with prefix 'glib_listautoptr'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Listautoptr"
+prefixes = ["glib_listautoptr"]
+
+[[namespace]]
+description = "Functions with prefix 'glib_slistautoptr'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Slistautoptr"
+prefixes = ["glib_slistautoptr"]
+
+[[namespace]]
+description = "Functions with prefix 'glib_queueautoptr'"
+library = "webkit2gtk-4.1"
+name = "Fidelity.Webkit2gtk.Queueautoptr"
+prefixes = ["glib_queueautoptr"]

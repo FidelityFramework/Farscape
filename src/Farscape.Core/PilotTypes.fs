@@ -45,6 +45,9 @@ module PilotTypes =
         /// Macro name prefixes to include (e.g. ["WL_"; "WAYLAND_"]).
         /// When empty, all user macros pass through (which can pull in system header noise).
         MacroPrefixes: string list
+        /// pkg-config package names used to resolve include paths and defines.
+        /// Stored for reproducibility (e.g. ["gtk+-3.0"] or ["webkit2gtk-4.1"; "gtk+-3.0"]).
+        PkgConfig: string list
     }
     with
         /// Backward-compat: returns the single header (or first if multiple).
