@@ -62,7 +62,10 @@ module WrapperCodeGenerator =
 
     /// Build the FunctionCall expression that delegates to the raw binding.
     let private buildRawCall (bindingsModule: string) (funcName: string) (paramNames: string list) : FsExpr =
-        let args = paramNames |> List.map Identifier
+        let args =
+            match paramNames with
+            | [] -> [ Literal "()" ]
+            | _ -> paramNames |> List.map Identifier
         FunctionCall(bindingsModule, funcName, args)
 
     /// Build the error expression based on the error handling strategy.
@@ -85,29 +88,35 @@ module WrapperCodeGenerator =
                 ResultOk(Identifier "result"),
                 ResultError(errorExpr)))
 
+    /// Select the zero literal matching the C return type's NTU mapping.
+    /// C `int` → NTU `int` → literal `0`; C `int32_t` → NTU `int32` → literal `0l`.
+    let private zeroLiteralForReturnType (cReturnType: string) =
+        let trimmed = cReturnType.Replace("const ", "").Trim()
+        match trimmed with
+        | "int32_t" | "__int32_t" -> "0l"
+        | _ -> "0"
+
     /// Generate wrapper body for ZeroSuccessOrError pattern (e.g., fclose, fseek).
-    /// let result = Bindings.fclose stream
-    /// if result = 0l then Ok ()
-    /// else Error (captureError ())
-    let private zeroSuccessBody (bindingsModule: string) (funcName: string) (paramNames: string list) (errorHandling: ErrorHandling) : FsExpr =
+    /// if result = 0 then Ok ()  (or 0l for int32_t-returning functions)
+    let private zeroSuccessBody (bindingsModule: string) (funcName: string) (paramNames: string list) (errorHandling: ErrorHandling) (cReturnType: string) : FsExpr =
         let rawCall = buildRawCall bindingsModule funcName paramNames
-        let errorExpr = buildErrorExpr errorHandling bindingsModule (Identifier "result")
+        let errorExpr = buildErrorExpr errorHandling bindingsModule (Literal "()")
+        let zero = zeroLiteralForReturnType cReturnType
         LetIn("result", rawCall,
             IfThenElse(
-                Comparison(Identifier "result", "=", Literal "0l"),
+                Comparison(Identifier "result", "=", Literal zero),
                 ResultOk(Literal "()"),
                 ResultError(errorExpr)))
 
     /// Generate wrapper body for IntValueOrError pattern (e.g., open, socket, dup, fork).
-    /// let result = Bindings.open file oflag
-    /// if result >= 0l then Ok result
-    /// else Error (captureError ())
-    let private intValueOrErrorBody (bindingsModule: string) (funcName: string) (paramNames: string list) (errorHandling: ErrorHandling) : FsExpr =
+    /// if result >= 0 then Ok result  (or 0l for int32_t-returning functions)
+    let private intValueOrErrorBody (bindingsModule: string) (funcName: string) (paramNames: string list) (errorHandling: ErrorHandling) (cReturnType: string) : FsExpr =
         let rawCall = buildRawCall bindingsModule funcName paramNames
         let errorExpr = buildErrorExpr errorHandling bindingsModule (Identifier "result")
+        let zero = zeroLiteralForReturnType cReturnType
         LetIn("result", rawCall,
             IfThenElse(
-                Comparison(Identifier "result", ">=", Literal "0l"),
+                Comparison(Identifier "result", ">=", Literal zero),
                 ResultOk(Identifier "result"),
                 ResultError(errorExpr)))
 
@@ -163,11 +172,12 @@ module WrapperCodeGenerator =
         (paramNames: string list)
         (semantic: ReturnSemantic)
         (errorHandling: ErrorHandling)
+        (cReturnType: string)
         : FsExpr =
         match semantic with
         | CountOrError       -> countOrErrorBody bindingsModule funcName paramNames errorHandling
-        | ZeroSuccessOrError -> zeroSuccessBody bindingsModule funcName paramNames errorHandling
-        | IntValueOrError    -> intValueOrErrorBody bindingsModule funcName paramNames errorHandling
+        | ZeroSuccessOrError -> zeroSuccessBody bindingsModule funcName paramNames errorHandling cReturnType
+        | IntValueOrError    -> intValueOrErrorBody bindingsModule funcName paramNames errorHandling cReturnType
         | AllocatedPointer   -> allocatedPointerBody bindingsModule funcName paramNames errorHandling
         | OpaqueHandleReturn -> opaqueHandleBody bindingsModule funcName paramNames errorHandling
         | EnumReturnError (enumType, successValue, _) ->
@@ -265,7 +275,7 @@ module WrapperCodeGenerator =
         let retType = wrapperReturnType semantic rawRetType errorHandling
 
         let paramNames = parameters |> List.map (fun p -> p.Name)
-        let body = generateBody bindingsModule func.Name paramNames semantic errorHandling
+        let body = generateBody bindingsModule func.Name paramNames semantic errorHandling func.ReturnType
 
         formatDocDecls func @
         [

@@ -51,8 +51,10 @@ module CallbackWrapperGenerator =
         else
             let trimmed = cType.Replace("const ", "").Replace("unsigned ", "u").Replace("signed ", "").Trim()
             match trimmed with
-            | "int" | "int32_t" -> Named "int32"
-            | "uint" | "uint32_t" | "guint" -> Named "uint32"
+            | "int" -> Named "int"          // NTU register-width dimensional
+            | "int32_t" -> Named "int32"
+            | "uint" -> Named "uint"        // NTU register-width dimensional
+            | "uint32_t" | "guint" -> Named "uint32"
             | "long" -> Named "int64"
             | "ulong" | "unsigned long" -> Named "uint64"
             | "uint64_t" | "gulong" -> Named "uint64"

@@ -323,7 +323,8 @@ module BindingGenerator =
                                 | PilotTypes.EnumErrorCode (et, sv, esFn, enFn) ->
                                     let config = EnumErrorModuleGenerator.makeConfig et sv esFn enFn
                                     let errorNs = $"{nsPrefix}.{config.ErrorStructName}"
-                                    match EnumErrorModuleGenerator.generate enumDecl config errorNs with
+                                    let typesModule = $"{nsPrefix}.Types"
+                                    match EnumErrorModuleGenerator.generate enumDecl config errorNs [typesModule] with
                                     | Some output ->
                                         let errorPath = Path.Combine(outputDir, $"{config.ErrorStructName}.clef")
                                         File.WriteAllText(errorPath, output)

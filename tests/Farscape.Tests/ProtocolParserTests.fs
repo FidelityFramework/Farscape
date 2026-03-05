@@ -456,3 +456,54 @@ let ``render DelegateType with documentation`` () =
     let output = CodeRenderer.render decl
     Assert.Contains("/// A test handler delegate", output)
     Assert.Contains("type TestHandler =", output)
+
+// =============================================================================
+// Request Code Generation Tests
+// =============================================================================
+
+let private marshalConfig : ProtocolParser.MarshalConfig = {
+    MarshalFunction = "wl_proxy_marshal_array_flags"
+    MarshalModule = "Fidelity.Wayland.Core"
+    VersionFunction = "wl_proxy_get_version"
+    InterfaceResolution = "dlsym"
+    DestroyFlag = 1u
+}
+
+let private requestWithArgs = """<?xml version="1.0"?>
+<protocol name="test">
+  <interface name="wl_surface" version="6">
+    <request name="attach">
+      <arg name="buffer" type="object" interface="wl_buffer" allow-null="true"/>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </request>
+    <request name="destroy" type="destructor"/>
+  </interface>
+</protocol>"""
+
+[<Fact>]
+let ``request with args unwraps malloc Option`` () =
+    match ProtocolParser.parseProtocolXml requestWithArgs with
+    | Ok proto ->
+        let iface = proto.Interfaces.[0]
+        let decls = ProtocolParser.interfaceRequestDecls iface marshalConfig
+        let output = decls |> List.map CodeRenderer.render |> String.concat "\n"
+        // malloc returns Option<nativeint> — must be unwrapped via match
+        Assert.Contains("match malloc", output)
+        Assert.Contains("| Some v -> v", output)
+        Assert.Contains("| None -> 0n", output)
+        // Must NOT use raw malloc result directly as nativeint
+        Assert.DoesNotContain("let argsRaw = malloc", output)
+    | Error e -> failwith e
+
+[<Fact>]
+let ``destructor request does not use malloc`` () =
+    match ProtocolParser.parseProtocolXml requestWithArgs with
+    | Ok proto ->
+        let iface = proto.Interfaces.[0]
+        let decls = ProtocolParser.interfaceRequestDecls iface marshalConfig
+        let output = decls |> List.map CodeRenderer.render |> String.concat "\n"
+        let destroySection = output.Split("let wl_surface_destroy").[1].Split("let wl_surface_").[0]
+        // Destructor with no args should not use malloc
+        Assert.DoesNotContain("malloc", destroySection)
+    | Error e -> failwith e

@@ -21,10 +21,6 @@ module TypeMapper =
         ArrayLength: int option
     }
 
-    let private intWidth = function
-        | LP64 | LLP64 | ILP32 -> 32
-        | IP16 -> 16
-
     let private longWidth = function
         | LP64 -> 64
         | LLP64 | ILP32 | IP16 -> 32
@@ -44,12 +40,12 @@ module TypeMapper =
         | _ -> "uint32"
 
     let private makeTypeMap (model: PlatformABI) =
-        let intType = fsharpIntType (intWidth model)
-        let uintType = fsharpUintType (intWidth model)
         let longType = fsharpIntType (longWidth model)
         let ulongType = fsharpUintType (longWidth model)
         dict [
-            // Primitive types — int/long widths determined by platform ABI
+            // Primitive types — int/uint use NTU dimensional types (register-width),
+            // resolved late by platform context in the DTS pipeline.
+            // long/unsigned long still need ABI resolution (no NTU long type exists).
             "void", "unit"
             "bool", "bool"
             "_Bool", "bool"
@@ -58,8 +54,8 @@ module TypeMapper =
             "unsigned char", "byte"
             "short", "int16"
             "unsigned short", "uint16"
-            "int", intType
-            "unsigned int", uintType
+            "int", "int"                // NTU register-width dimensional — NOT int32
+            "unsigned int", "uint"      // NTU register-width dimensional — NOT uint32
             "long", longType
             "long int", longType
             "unsigned long", ulongType

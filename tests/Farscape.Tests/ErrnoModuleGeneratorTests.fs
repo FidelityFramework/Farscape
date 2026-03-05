@@ -21,11 +21,11 @@ let ``MatchExpr renders match expression with cases`` () =
 
 [<Fact>]
 let ``RecordType with Struct attribute renders correctly`` () =
-    let decl = RecordType("CError", [("Code", Named "int32"); ("Description", Named "string")], Some "Error type", ["Struct"])
+    let decl = RecordType("CError", [("Code", Named "int"); ("Description", Named "string")], Some "Error type", ["Struct"])
     let rendered = CodeRenderer.render (Module("Test", "test", [decl]))
     Assert.Contains("[<Struct>]", rendered)
     Assert.Contains("type CError = {", rendered)
-    Assert.Contains("Code: int32", rendered)
+    Assert.Contains("Code: int", rendered)
     Assert.Contains("Description: string", rendered)
 
 [<Fact>]
@@ -86,12 +86,12 @@ let ``generate renders complete errno module from macros`` () =
     let output = result.Value
     Assert.Contains("[<Struct>]", output)
     Assert.Contains("type CError = {", output)
-    Assert.Contains("Code: int32", output)
+    Assert.Contains("Code: int", output)
     Assert.Contains("[<Literal>]", output)
     Assert.Contains("let EPERM = 1", output)
     Assert.Contains("let ENOENT = 2", output)
     Assert.Contains("/// Operation not permitted", output)
-    Assert.Contains("let describe (code: int32) : string =", output)
+    Assert.Contains("let describe (code: int) : string =", output)
     Assert.Contains("| EPERM -> \"Operation not permitted\"", output)
     Assert.Contains("| ENOENT -> \"No such file or directory\"", output)
     Assert.Contains("| _ -> \"Unknown error\"", output)
@@ -115,7 +115,7 @@ let ``generate with live errno.h produces complete module`` () =
         // Verify structural elements
         Assert.Contains("[<Struct>]", rendered)
         Assert.Contains("type CError = {", rendered)
-        Assert.Contains("let describe (code: int32) : string =", rendered)
+        Assert.Contains("let describe (code: int) : string =", rendered)
         // Verify specific constants with descriptions
         Assert.Contains("let EPERM = 1", rendered)
         Assert.Contains("| EPERM -> \"Operation not permitted\"", rendered)

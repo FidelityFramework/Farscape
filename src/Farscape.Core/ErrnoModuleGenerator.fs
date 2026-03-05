@@ -35,12 +35,13 @@ module ErrnoModuleGenerator =
         |> List.sortBy (fun c -> c.Value)
         |> List.distinctBy (fun c -> c.Name)
 
-    /// Generate [<Struct>] type CError = { Code: int32; Description: string }
+    /// Generate [<Struct>] type CError = { Code: int; Description: string }
+    /// Code is NTU `int` (register-width dimensional) — errno is C `int`.
     let generateCErrorType () : FsDecl list =
         [
             RecordType(
                 "CError",
-                [ ("Code", Named "int32"); ("Description", Named "string") ],
+                [ ("Code", Named "int"); ("Description", Named "string") ],
                 Some "Stack-allocated FFI error — carries errno code and human-readable description.",
                 [ "Struct" ])
         ]
@@ -80,7 +81,7 @@ module ErrnoModuleGenerator =
             let describeFunc =
                 LetBinding(
                     "describe",
-                    [ { Name = "code"; Type = Named "int32" } ],
+                    [ { Name = "code"; Type = Named "int" } ],
                     Named "string",
                     describeBody,
                     [])

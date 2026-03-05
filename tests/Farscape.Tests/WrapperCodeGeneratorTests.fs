@@ -302,3 +302,56 @@ module NullWithReasonWrapperTests =
                         []
         Assert.Contains("let stbi_image_free", output)
         Assert.DoesNotContain("Result<", output.Split("let stbi_image_free").[1])
+
+// =============================================================================
+// Regression: zero-argument functions must emit () in raw call
+// =============================================================================
+
+[<Fact>]
+let ``zero-arg function wrapper emits unit argument in raw call`` () =
+    let output = generateSingle "resvg_options_create" "void *" [] []
+    Assert.Contains("Platform.Bindings.Test.resvg_options_create ()", output)
+
+// =============================================================================
+// Regression: ZeroSuccessOrError with errno must use Error (captureError ()) not Error result
+// =============================================================================
+
+let private generateWithErrno name retType parms attrs =
+    let decls = [ mkDecl name retType parms attrs ]
+    WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" (UseErrno "Platform.Bindings.Test.Errno") Types.LP64 None
+
+[<Fact>]
+let ``ZeroSuccessOrError with errno generates Error captureError not Error result`` () =
+    let output = generateWithErrno "fclose" "int"
+                    [("stream", "FILE *")]
+                    []
+    // Should use captureError in the error branch, not bare result
+    Assert.Contains("Error (captureError ())", output)
+    Assert.DoesNotContain("Error result", output)
+
+// ─── NTU DTS Zero Literal Tests ─────────────────────────────────────
+// Wrappers must use `0` (NTU int), not `0l` (int32), for zero comparisons.
+
+[<Fact>]
+let ``ZeroSuccessOrError uses NTU int literal 0, not int32 literal 0l`` () =
+    let output = generateWithErrno "fclose" "int"
+                    [("stream", "FILE *")]
+                    []
+    Assert.Contains("= 0 then", output)
+    Assert.DoesNotContain("0l", output)
+
+[<Fact>]
+let ``IntValueOrError uses NTU int literal 0, not int32 literal 0l`` () =
+    let output = generateWithErrno "open" "int"
+                    [("path", "const char *"); ("oflag", "int")]
+                    []
+    Assert.Contains(">= 0 then", output)
+    Assert.DoesNotContain("0l", output)
+
+[<Fact>]
+let ``int32_t returning function uses int32 literal 0l for zero comparison`` () =
+    let output = generateWithErrno "resvg_parse" "int32_t"
+                    [("data", "const char *")]
+                    []
+    Assert.Contains("= 0l then", output)
+    Assert.DoesNotContain("= 0 then", output)

@@ -118,10 +118,12 @@ module EnumErrorModuleGenerator =
         (enumDecl: CppParser.EnumDecl)
         (config: EnumErrorConfig)
         (namespace': string)
+        (openModules: string list)
         : string option =
 
         if enumDecl.Values.IsEmpty then None
         else
-            let decls = generateDecls config enumDecl.Values
+            let opens = openModules |> List.map OpenModule
+            let decls = opens @ generateDecls config enumDecl.Values
             let moduleDecl = Module(namespace', $"Error infrastructure for {config.ErrorType}", decls)
             Some (CodeRenderer.render moduleDecl)

@@ -443,9 +443,14 @@ module ProtocolParser =
                         (i, writeExpr))
 
                 // Build the sequential expression: alloc, write args, marshal, free
-                let allocExpr =
+                // L1 malloc returns Option<nativeint> — unwrap for internal use
+                let mallocCall =
                     FunctionCall("", "malloc",
                         [ TypeConversion("unativeint", Literal allocSize) ])
+                let allocExpr =
+                    MatchExpr(mallocCall,
+                        [ ("Some v", Identifier "v")
+                          ("None", Literal "0n") ])
                 let castExpr =
                     FunctionCall("NativePtr", "ofNativeInt",
                         [ Identifier "argsRaw" ])

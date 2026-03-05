@@ -28,8 +28,8 @@ let ``generate produces valid Fidelity binding for simple function`` () =
     ]
     let result = FidelityCodeGenerator.generate decls "Fidelity.libc.Test" "libc" Types.LP64 Map.empty
     Assert.Contains("module Fidelity.libc.Test", result)
-    Assert.Contains("let getpid () : int32 =", result)
-    Assert.Contains("Unchecked.defaultof<int32>", result)
+    Assert.Contains("let getpid () : int =", result)
+    Assert.Contains("Unchecked.defaultof<int>", result)
 
 [<Fact>]
 let ``generate maps char pointer params to Option<nativeptr<byte>> (nullable by default)`` () =
@@ -159,8 +159,8 @@ let ``generate emits struct as record`` () =
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
     Assert.Contains("type Point = {", result)
-    Assert.Contains("x: int32", result)
-    Assert.Contains("y: int32", result)
+    Assert.Contains("x: int", result)
+    Assert.Contains("y: int", result)
 
 [<Fact>]
 let ``generate emits FidelityExtern attribute on function bindings`` () =
@@ -268,3 +268,55 @@ let ``TOML nonnull_returns prevents Option on return type`` () =
     // Return is nonnull via TOML
     Assert.Contains(": nativeint =", result)
     Assert.DoesNotContain("Option<nativeint> =", result)
+
+// ─── NTU Dimensional Type System (DTS) Tests ────────────────────────────
+// These tests ensure Farscape emits NTU dimensional types (int, uint) for
+// platform-width C types, NOT fixed-width types (int32, uint32).
+// The DTS defers width resolution to the platform context in the pipeline.
+
+[<Fact>]
+let ``C int maps to NTU int (dimensional), not int32 (fixed-width)`` () =
+    let decls = [
+        CppParser.Declaration.Function (mkFunc "getpriority" "int" [("which", "int"); ("who", "int")])
+    ]
+    let result = FidelityCodeGenerator.generate decls "Test" "libc" Types.LP64 Map.empty
+    Assert.Contains(": int =", result)
+    Assert.DoesNotContain("int32", result)
+
+[<Fact>]
+let ``C unsigned int maps to NTU uint (dimensional), not uint32 (fixed-width)`` () =
+    let decls = [
+        CppParser.Declaration.Function (mkFunc "alarm" "unsigned int" [("seconds", "unsigned int")])
+    ]
+    let result = FidelityCodeGenerator.generate decls "Test" "libc" Types.LP64 Map.empty
+    Assert.Contains(": uint =", result)
+    Assert.Contains("(seconds: uint)", result)
+    Assert.DoesNotContain("uint32", result)
+
+[<Fact>]
+let ``C int32_t stays int32 (genuinely fixed-width)`` () =
+    let decls = [
+        CppParser.Declaration.Function (mkFunc "resvg_parse" "int32_t" [("data", "const char *")])
+    ]
+    let result = FidelityCodeGenerator.generate decls "Test" "resvg" Types.LP64 Map.empty
+    Assert.Contains(": int32 =", result)
+
+[<Fact>]
+let ``C int dimensional type is consistent across all platform ABIs`` () =
+    for abi in [ Types.LP64; Types.LLP64; Types.ILP32; Types.IP16 ] do
+        let decls = [
+            CppParser.Declaration.Function (mkFunc "close" "int" [("fd", "int")])
+        ]
+        let result = FidelityCodeGenerator.generate decls "Test" "libc" abi Map.empty
+        Assert.Contains(": int =", result)
+        Assert.DoesNotContain("int32", result)
+        Assert.DoesNotContain("int16", result)
+
+[<Fact>]
+let ``struct fields with C int use NTU int`` () =
+    let decls = [
+        CppParser.Declaration.Struct (mkStruct "Rect" [mkField "x" "int"; mkField "y" "int"; mkField "w" "int"; mkField "h" "int"] None)
+    ]
+    let result = FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty
+    Assert.Contains("x: int", result)
+    Assert.DoesNotContain("int32", result)
