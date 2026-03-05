@@ -153,8 +153,10 @@ module CallbackWrapperGenerator =
                     { Name = f.Name; Type = Named "nativeint" })
 
             let fields =
-                structDecl.Fields |> List.map (fun f ->
-                    let fieldName = cleanParamName f.Name
+                structDecl.Fields |> List.mapi (fun i f ->
+                    let fieldName =
+                        if i = 0 then $"{ls.Name}.{cleanParamName f.Name}"
+                        else cleanParamName f.Name
                     if isCallbackField delegateNames f then
                         (fieldName, Identifier (cleanParamName f.Name))
                     else

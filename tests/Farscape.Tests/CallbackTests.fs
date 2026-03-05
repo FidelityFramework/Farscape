@@ -542,6 +542,25 @@ module L2DirectBuilderTests =
             Assert.Contains("NativeDefault.zeroed ()", code)
 
     [<Fact>]
+    let ``L2 builder type-qualifies first field for CCS disambiguation`` () =
+        let spec = listenerSpec "wl_registry_listener"
+        let decls = [
+            CppParser.Declaration.Struct (
+                mkStruct "wl_registry_listener" [
+                    mkField "global" "void (*)(void *, struct wl_registry *, uint32_t, const char *, uint32_t)"
+                    mkField "global_remove" "void (*)(void *, struct wl_registry *, uint32_t)"
+                ] None)
+        ]
+        match CallbackWrapperGenerator.generateL2 spec decls "Fidelity.Wayland.Callbacks" [] with
+        | None -> Assert.Fail "Expected L2 output"
+        | Some code ->
+            // First field should be type-qualified: wl_registry_listener.``global``
+            Assert.Contains("wl_registry_listener.``global``", code)
+            // Second field should NOT be type-qualified
+            Assert.DoesNotContain("wl_registry_listener.global_remove", code)
+            Assert.Contains("global_remove", code)
+
+    [<Fact>]
     let ``L2 builder returns empty for struct with no callback fields`` () =
         let spec = listenerSpec "plain_struct"
         let decls = [
