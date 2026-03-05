@@ -19,12 +19,12 @@
     <Compile Include="PilotAnalyzer.fs" />
     <Compile Include="PilotDiscovery.fs" />
     <Compile Include="PilotSerializer.fs" />
-    <Compile Include="WaylandProtocolParser.fs" />
     <Compile Include="WrapperTypes.fs" />
     <Compile Include="WrapperPatternAnalyzer.fs" />
     <Compile Include="CodeAST.fs" />
     <Compile Include="CodeRenderer.fs" />
     <Compile Include="FidelityCodeGenerator.fs" />
+    <Compile Include="ProtocolParser.fs" />
     <Compile Include="WrapperCodeGenerator.fs" />
     <Compile Include="ErrnoModuleGenerator.fs" />
     <Compile Include="EnumErrorModuleGenerator.fs" />

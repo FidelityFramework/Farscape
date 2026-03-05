@@ -392,7 +392,8 @@ module PilotAnalyzer =
           ErrorConventions = None
           Options = None
           Callbacks = None
-          Nonnull = None }
+          Nonnull = None
+          ProtocolConfig = None }
 
     // =========================================================================
     // Declaration Filtering (for scoped generation)

@@ -36,6 +36,7 @@ let private sampleProject : PilotTypes.PilotProject = {
     Options = None
     Callbacks = None
     Nonnull = None
+    ProtocolConfig = None
 }
 
 [<Fact>]
@@ -180,6 +181,7 @@ module ErrorConventionTomlTests =
             Options = None
             Callbacks = None
             Nonnull = None
+            ProtocolConfig = None
         }
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("error_conventions", toml)
@@ -217,6 +219,7 @@ module ErrorConventionTomlTests =
             Options = None
             Callbacks = None
             Nonnull = None
+            ProtocolConfig = None
         }
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("enum_error_code", toml)
@@ -255,6 +258,7 @@ module ErrorConventionTomlTests =
             Options = None
             Callbacks = None
             Nonnull = None
+            ProtocolConfig = None
         }
         let toml = PilotSerializer.toTomlString project
         // Should NOT contain optional fn fields
@@ -284,6 +288,7 @@ module ErrorConventionTomlTests =
             Options = None
             Callbacks = None
             Nonnull = None
+            ProtocolConfig = None
         }
         let toml = PilotSerializer.toTomlString project
         match Fidelity.Data.TOML.Toml.parse toml with
@@ -309,6 +314,7 @@ module ErrorConventionTomlTests =
             Options = None
             Callbacks = None
             Nonnull = None
+            ProtocolConfig = None
         }
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("null_with_reason", toml)
@@ -363,3 +369,45 @@ let ``absent nonnull section deserializes as None`` () =
         | Error e -> Assert.Fail $"Deserialize failed: {e}"
         | Ok roundTripped ->
             Assert.True(roundTripped.Nonnull.IsNone)
+
+// ─── Protocol Config Tests ─────────────────────────────────────────
+
+[<Fact>]
+let ``protocol config round-trips through TOML`` () =
+    let project = { sampleProject with
+                        ProtocolConfig = Some {
+                            MarshalFunction = "wl_proxy_marshal_array_flags"
+                            MarshalModule = "Fidelity.Wayland.Core"
+                            VersionFunction = "wl_proxy_get_version"
+                            InterfaceResolution = "dlsym"
+                            DestroyFlag = 1u
+                        } }
+    let toml = PilotSerializer.toTomlString project
+    Assert.Contains("marshal_function", toml)
+    Assert.Contains("wl_proxy_marshal_array_flags", toml)
+    match Fidelity.Data.TOML.Toml.parse toml with
+    | Error e -> Assert.Fail $"Parse failed: {e}"
+    | Ok doc ->
+        match PilotSerializer.deserialize doc with
+        | Error e -> Assert.Fail $"Deserialize failed: {e}"
+        | Ok roundTripped ->
+            Assert.True(roundTripped.ProtocolConfig.IsSome)
+            let cfg = roundTripped.ProtocolConfig.Value
+            Assert.Equal("wl_proxy_marshal_array_flags", cfg.MarshalFunction)
+            Assert.Equal("Fidelity.Wayland.Core", cfg.MarshalModule)
+            Assert.Equal("wl_proxy_get_version", cfg.VersionFunction)
+            Assert.Equal("dlsym", cfg.InterfaceResolution)
+            Assert.Equal(1u, cfg.DestroyFlag)
+
+[<Fact>]
+let ``absent protocol section deserializes as None`` () =
+    let project = { sampleProject with ProtocolConfig = None }
+    let toml = PilotSerializer.toTomlString project
+    Assert.DoesNotContain("protocol", toml)
+    match Fidelity.Data.TOML.Toml.parse toml with
+    | Error e -> Assert.Fail $"Parse failed: {e}"
+    | Ok doc ->
+        match PilotSerializer.deserialize doc with
+        | Error e -> Assert.Fail $"Deserialize failed: {e}"
+        | Ok roundTripped ->
+            Assert.True(roundTripped.ProtocolConfig.IsNone)

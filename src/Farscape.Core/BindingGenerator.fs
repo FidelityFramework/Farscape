@@ -203,12 +203,12 @@ module BindingGenerator =
                 let msg = String.concat "; " headerErrors
                 Error $"Failed to parse headers: {msg}"
 
-            // Parse XML protocol files (Wayland, etc.)
+            // Parse XML protocol files (protocol-defined APIs with marshal dispatch)
             else
             let xmlResults =
                 project.Library.XmlProtocols |> List.map (fun xmlPath ->
                     logVerbose $"Parsing XML protocol: {xmlPath}" verbose
-                    WaylandProtocolParser.parseFile xmlPath)
+                    ProtocolParser.parseFile xmlPath)
 
             let xmlErrors = xmlResults |> List.choose (function Error e -> Some e | _ -> None)
             if not xmlErrors.IsEmpty then
@@ -217,11 +217,28 @@ module BindingGenerator =
             else
 
                 let headerDeclLists = headerResults |> List.choose (function Ok d -> Some d | _ -> None)
-                let xmlDeclLists = xmlResults |> List.choose (function Ok d -> Some d | _ -> None)
-                let allDeclLists = headerDeclLists @ xmlDeclLists
+                let xmlProtocols = xmlResults |> List.choose (function Ok p -> Some p | _ -> None)
+
+                // Split XML protocol output: type declarations flow through FidelityCodeGenerator,
+                // request implementations are FsDecl with marshal call bodies (injected later)
+                let marshalConfig =
+                    match project.ProtocolConfig with
+                    | Some cfg -> cfg
+                    | None ->
+                        // Default: Wayland-style marshal dispatch
+                        ({ MarshalFunction = "wl_proxy_marshal_array_flags"
+                           MarshalModule = "Fidelity.Wayland.Core"
+                           VersionFunction = "wl_proxy_get_version"
+                           InterfaceResolution = "dlsym"
+                           DestroyFlag = 1u } : PilotTypes.ProtocolConfig)
+
+                let xmlTypeDecls = xmlProtocols |> List.map ProtocolParser.toTypeDeclarations
+                let xmlRequestDecls = xmlProtocols |> List.collect (fun p -> ProtocolParser.toRequestDecls p marshalConfig)
+
+                let allDeclLists = headerDeclLists @ xmlTypeDecls
                 let declarations = DeclarationAlgebra.mergeDeclarations allDeclLists
                 let sourceCount = project.Library.Headers.Length + project.Library.XmlProtocols.Length
-                logVerbose $"Merged {declarations.Length} declarations from {sourceCount} source(s)" verbose
+                logVerbose $"Merged {declarations.Length} declarations from {sourceCount} source(s) ({xmlRequestDecls.Length} protocol request implementations)" verbose
 
                 // Resolve output directory relative to the project file location
                 let projectDir = Path.GetDirectoryName(Path.GetFullPath(projectPath))
@@ -406,8 +423,15 @@ module BindingGenerator =
 
                         // ── Functions .clef ──────────────────────────────────
                         let funcOpenModules =
-                            if localTypeNames.IsEmpty then [sharedTypesNs]
-                            else [sharedTypesNs; localTypesNs]
+                            let baseModules =
+                                if localTypeNames.IsEmpty then [sharedTypesNs]
+                                else [sharedTypesNs; localTypesNs]
+                            // Add marshal module if this namespace uses protocol requests
+                            match project.ProtocolConfig with
+                            | Some cfg when not ns.XmlInterfaces.IsEmpty ->
+                                if List.contains cfg.MarshalModule baseModules then baseModules
+                                else baseModules @ [cfg.MarshalModule]
+                            | _ -> baseModules
                         let funcDecls =
                             PilotAnalyzer.filterDeclarationsWithTypes ns Set.empty declarations
                         let funcCount =
@@ -415,9 +439,29 @@ module BindingGenerator =
                         let funcCode =
                             FidelityCodeGenerator.generateModule ctx Set.empty funcDecls
                                 ns.Name ns.Library $"{lastSegment} function declarations" funcOpenModules
+
+                        // Append protocol request implementations for this namespace's XML interfaces
+                        let nsRequestDecls =
+                            if ns.XmlInterfaces.IsEmpty then []
+                            else
+                                xmlRequestDecls |> List.filter (fun decl ->
+                                    match decl with
+                                    | CodeAST.LetBinding(name, _, _, _, _) ->
+                                        ns.XmlInterfaces |> List.exists (fun iface ->
+                                            name.StartsWith(iface + "_"))
+                                    | _ -> false)
+                        let funcCode =
+                            if nsRequestDecls.IsEmpty then funcCode
+                            else
+                                let requestCode =
+                                    nsRequestDecls
+                                    |> List.map CodeRenderer.render
+                                    |> String.concat "\n"
+                                funcCode + "\n    // ── Protocol request implementations ──\n\n" + requestCode
+
                         let funcPath = Path.Combine(nsDir, $"{lastSegment}.clef")
                         File.WriteAllText(funcPath, funcCode)
-                        logVerbose $"  {lastSegment}/{lastSegment}.clef ({funcCount} functions)" verbose
+                        logVerbose $"  {lastSegment}/{lastSegment}.clef ({funcCount} functions, {nsRequestDecls.Length} protocol requests)" verbose
 
                         // ── Wrappers (optional) ─────────────────────────────
                         let wrapperFiles =

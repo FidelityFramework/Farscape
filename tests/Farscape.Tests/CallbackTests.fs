@@ -225,6 +225,7 @@ module CallbackSerializerTests =
                 ListenerStructs = []
             }
             Nonnull = None
+            ProtocolConfig = None
         }
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("callbacks", toml)
@@ -262,6 +263,7 @@ module CallbackSerializerTests =
                 ]
             }
             Nonnull = None
+            ProtocolConfig = None
         }
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("listener_structs", toml)
@@ -305,6 +307,7 @@ module CallbackSerializerTests =
                 ]
             }
             Nonnull = None
+            ProtocolConfig = None
         }
         let toml = PilotSerializer.toTomlString project
         match Fidelity.Data.TOML.Toml.parse toml with
@@ -376,7 +379,7 @@ module CallbackWrapperGeneratorTests =
             Assert.Contains("dlsym", code)
             Assert.Contains("enterSym", code)
             Assert.Contains("leaveSym", code)
-            Assert.Contains("buildPointerListener", code)
+            Assert.Contains("buildWlPointerListener", code)
 
     [<Fact>]
     let ``skips listener builder when struct not in declarations`` () =

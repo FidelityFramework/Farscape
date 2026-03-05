@@ -20,7 +20,7 @@
     <Compile Include="ErrnoModuleGeneratorTests.fs" />
     <Compile Include="EnumErrorModuleGeneratorTests.fs" />
     <Compile Include="StructLayoutTests.fs" />
-    <Compile Include="WaylandProtocolParserTests.fs" />
+    <Compile Include="ProtocolParserTests.fs" />
     <Compile Include="DocumentationExtractionTests.fs" />
     <Compile Include="OpaqueHandleTests.fs" />
     <Compile Include="PilotDiscoveryTests.fs" />

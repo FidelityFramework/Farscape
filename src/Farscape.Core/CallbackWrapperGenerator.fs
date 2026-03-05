@@ -32,15 +32,12 @@ module CallbackWrapperGenerator =
                 else "") |> String.concat "")
 
     /// Convert a snake_case struct name to a PascalCase builder function name.
-    /// wl_pointer_listener → buildPointerListener
+    /// wl_pointer_listener → buildWlPointerListener
+    /// xdg_surface_listener → buildXdgSurfaceListener
     let private toBuilderName (structName: string) : string =
         let parts = structName.Split('_') |> Array.toList
-        let meaningful =
-            match parts with
-            | p :: rest when p.Length <= 3 && rest.Length >= 2 -> rest
-            | _ -> parts
         let pascal =
-            meaningful |> List.map (fun s ->
+            parts |> List.map (fun s ->
                 if s.Length > 0 then string (System.Char.ToUpper s.[0]) + s.[1..]
                 else "") |> String.concat ""
         "build" + pascal

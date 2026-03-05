@@ -318,6 +318,7 @@ let pilotInitCommand =
             Options = None
             Callbacks = None
             Nonnull = None
+            ProtocolConfig = None
         }
 
         let tomlPath = Path.Combine(outputDir, $"{library}.pilot.toml")

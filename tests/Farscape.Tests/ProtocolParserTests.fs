@@ -1,4 +1,4 @@
-module Farscape.Tests.WaylandProtocolParserTests
+module Farscape.Tests.ProtocolParserTests
 
 open Xunit
 open Farscape.Core
@@ -43,19 +43,19 @@ let private simpleProtocol = """<?xml version="1.0" encoding="UTF-8"?>
 
 [<Fact>]
 let ``parseProtocolXml parses protocol name`` () =
-    match WaylandProtocolParser.parseProtocolXml simpleProtocol with
+    match ProtocolParser.parseProtocolXml simpleProtocol with
     | Ok proto -> Assert.Equal("wayland", proto.Name)
     | Error e -> failwith e
 
 [<Fact>]
 let ``parseProtocolXml parses multiple interfaces`` () =
-    match WaylandProtocolParser.parseProtocolXml simpleProtocol with
+    match ProtocolParser.parseProtocolXml simpleProtocol with
     | Ok proto -> Assert.Equal(2, proto.Interfaces.Length)
     | Error e -> failwith e
 
 [<Fact>]
 let ``parseProtocolXml parses interface name and version`` () =
-    match WaylandProtocolParser.parseProtocolXml simpleProtocol with
+    match ProtocolParser.parseProtocolXml simpleProtocol with
     | Ok proto ->
         let display = proto.Interfaces.[0]
         Assert.Equal("wl_display", display.Name)
@@ -64,34 +64,34 @@ let ``parseProtocolXml parses interface name and version`` () =
 
 [<Fact>]
 let ``parseProtocolXml parses requests with new_id args`` () =
-    match WaylandProtocolParser.parseProtocolXml simpleProtocol with
+    match ProtocolParser.parseProtocolXml simpleProtocol with
     | Ok proto ->
         let display = proto.Interfaces.[0]
         Assert.Equal(2, display.Requests.Length)
         let sync = display.Requests.[0]
         Assert.Equal("sync", sync.Name)
         Assert.Equal(1, sync.Args.Length)
-        Assert.Equal(WaylandProtocolParser.NewId, sync.Args.[0].Type)
+        Assert.Equal(ProtocolParser.NewId, sync.Args.[0].Type)
         Assert.Equal(Some "wl_callback", sync.Args.[0].Interface)
     | Error e -> failwith e
 
 [<Fact>]
 let ``parseProtocolXml parses events with typed args`` () =
-    match WaylandProtocolParser.parseProtocolXml simpleProtocol with
+    match ProtocolParser.parseProtocolXml simpleProtocol with
     | Ok proto ->
         let display = proto.Interfaces.[0]
         Assert.Equal(2, display.Events.Length)
         let errorEvt = display.Events.[0]
         Assert.Equal("error", errorEvt.Name)
         Assert.Equal(3, errorEvt.Args.Length)
-        Assert.Equal(WaylandProtocolParser.Object, errorEvt.Args.[0].Type)
-        Assert.Equal(WaylandProtocolParser.Uint, errorEvt.Args.[1].Type)
-        Assert.Equal(WaylandProtocolParser.String, errorEvt.Args.[2].Type)
+        Assert.Equal(ProtocolParser.Object, errorEvt.Args.[0].Type)
+        Assert.Equal(ProtocolParser.Uint, errorEvt.Args.[1].Type)
+        Assert.Equal(ProtocolParser.String, errorEvt.Args.[2].Type)
     | Error e -> failwith e
 
 [<Fact>]
 let ``parseProtocolXml parses enum entries`` () =
-    match WaylandProtocolParser.parseProtocolXml simpleProtocol with
+    match ProtocolParser.parseProtocolXml simpleProtocol with
     | Ok proto ->
         let display = proto.Interfaces.[0]
         Assert.Equal(1, display.Enums.Length)
@@ -105,7 +105,7 @@ let ``parseProtocolXml parses enum entries`` () =
 
 [<Fact>]
 let ``parseProtocolXml extracts description summary`` () =
-    match WaylandProtocolParser.parseProtocolXml simpleProtocol with
+    match ProtocolParser.parseProtocolXml simpleProtocol with
     | Ok proto ->
         Assert.Equal(Some "core global object", proto.Interfaces.[0].Documentation)
         Assert.Equal(Some "asynchronous roundtrip", proto.Interfaces.[0].Requests.[0].Documentation)
@@ -115,14 +115,14 @@ let ``parseProtocolXml extracts description summary`` () =
 [<Fact>]
 let ``parseProtocolXml rejects non-protocol root`` () =
     let bad = """<?xml version="1.0"?><notprotocol/>"""
-    match WaylandProtocolParser.parseProtocolXml bad with
+    match ProtocolParser.parseProtocolXml bad with
     | Error e -> Assert.Contains("Root element must be <protocol>", e)
     | Ok _ -> failwith "Should have failed"
 
 [<Fact>]
 let ``parseProtocolXml returns error on malformed XML`` () =
     let bad = """<protocol><unclosed"""
-    match WaylandProtocolParser.parseProtocolXml bad with
+    match ProtocolParser.parseProtocolXml bad with
     | Error _ -> () // expected
     | Ok _ -> failwith "Should have failed"
 
@@ -143,7 +143,7 @@ let private bitfieldProtocol = """<?xml version="1.0"?>
 
 [<Fact>]
 let ``parseProtocolXml parses bitfield enum`` () =
-    match WaylandProtocolParser.parseProtocolXml bitfieldProtocol with
+    match ProtocolParser.parseProtocolXml bitfieldProtocol with
     | Ok proto ->
         let iface = proto.Interfaces.[0]
         Assert.True(iface.Enums.[0].IsBitfield)
@@ -155,9 +155,9 @@ let ``parseProtocolXml parses bitfield enum`` () =
 
 [<Fact>]
 let ``toDeclarations produces typedef for interface handle`` () =
-    match WaylandProtocolParser.parseProtocolXml simpleProtocol with
+    match ProtocolParser.parseProtocolXml simpleProtocol with
     | Ok proto ->
-        let decls = WaylandProtocolParser.toDeclarations proto
+        let decls = ProtocolParser.toDeclarations proto
         let typedefs =
             decls |> List.choose (function
                 | CppParser.Declaration.Typedef t -> Some t
@@ -171,9 +171,9 @@ let ``toDeclarations produces typedef for interface handle`` () =
 
 [<Fact>]
 let ``toDeclarations produces delegate for each event`` () =
-    match WaylandProtocolParser.parseProtocolXml simpleProtocol with
+    match ProtocolParser.parseProtocolXml simpleProtocol with
     | Ok proto ->
-        let decls = WaylandProtocolParser.toDeclarations proto
+        let decls = ProtocolParser.toDeclarations proto
         let delegates =
             decls |> List.choose (function
                 | CppParser.Declaration.Delegate d -> Some d
@@ -187,9 +187,9 @@ let ``toDeclarations produces delegate for each event`` () =
 
 [<Fact>]
 let ``toDeclarations delegate has data and self parameters`` () =
-    match WaylandProtocolParser.parseProtocolXml simpleProtocol with
+    match ProtocolParser.parseProtocolXml simpleProtocol with
     | Ok proto ->
-        let decls = WaylandProtocolParser.toDeclarations proto
+        let decls = ProtocolParser.toDeclarations proto
         let errorDelegate =
             decls |> List.pick (function
                 | CppParser.Declaration.Delegate d when d.Name = "WlDisplayErrorHandler" -> Some d
@@ -203,9 +203,9 @@ let ``toDeclarations delegate has data and self parameters`` () =
 
 [<Fact>]
 let ``toDeclarations produces listener struct with delegate fields`` () =
-    match WaylandProtocolParser.parseProtocolXml simpleProtocol with
+    match ProtocolParser.parseProtocolXml simpleProtocol with
     | Ok proto ->
-        let decls = WaylandProtocolParser.toDeclarations proto
+        let decls = ProtocolParser.toDeclarations proto
         let listeners =
             decls |> List.choose (function
                 | CppParser.Declaration.Struct s when s.Name.EndsWith("_listener") -> Some s
@@ -222,9 +222,9 @@ let ``toDeclarations produces listener struct with delegate fields`` () =
 
 [<Fact>]
 let ``toDeclarations produces enum with values`` () =
-    match WaylandProtocolParser.parseProtocolXml simpleProtocol with
+    match ProtocolParser.parseProtocolXml simpleProtocol with
     | Ok proto ->
-        let decls = WaylandProtocolParser.toDeclarations proto
+        let decls = ProtocolParser.toDeclarations proto
         let enums =
             decls |> List.choose (function
                 | CppParser.Declaration.Enum e -> Some e
@@ -240,9 +240,9 @@ let ``toDeclarations produces enum with values`` () =
 
 [<Fact>]
 let ``toDeclarations produces request functions with typed parameters`` () =
-    match WaylandProtocolParser.parseProtocolXml simpleProtocol with
+    match ProtocolParser.parseProtocolXml simpleProtocol with
     | Ok proto ->
-        let decls = WaylandProtocolParser.toDeclarations proto
+        let decls = ProtocolParser.toDeclarations proto
         let funcs =
             decls |> List.choose (function
                 | CppParser.Declaration.Function f -> Some f
@@ -268,9 +268,9 @@ let ``toDeclarations request without new_id returns void`` () =
     </request>
   </interface>
 </protocol>"""
-    match WaylandProtocolParser.parseProtocolXml xml with
+    match ProtocolParser.parseProtocolXml xml with
     | Ok proto ->
-        let decls = WaylandProtocolParser.toDeclarations proto
+        let decls = ProtocolParser.toDeclarations proto
         let attach =
             decls |> List.pick (function
                 | CppParser.Declaration.Function f when f.Name = "wl_surface_attach" -> Some f
@@ -295,9 +295,9 @@ let ``toDeclarations hex enum values are parsed correctly`` () =
     </enum>
   </interface>
 </protocol>"""
-    match WaylandProtocolParser.parseProtocolXml xml with
+    match ProtocolParser.parseProtocolXml xml with
     | Ok proto ->
-        let decls = WaylandProtocolParser.toDeclarations proto
+        let decls = ProtocolParser.toDeclarations proto
         let formatEnum =
             decls |> List.pick (function
                 | CppParser.Declaration.Enum e when e.Name = "wl_shm_format" -> Some e
@@ -309,9 +309,9 @@ let ``toDeclarations hex enum values are parsed correctly`` () =
 
 [<Fact>]
 let ``interfaceToDeclarations produces declarations in correct order`` () =
-    match WaylandProtocolParser.parseProtocolXml simpleProtocol with
+    match ProtocolParser.parseProtocolXml simpleProtocol with
     | Ok proto ->
-        let displayDecls = WaylandProtocolParser.interfaceToDeclarations proto.Interfaces.[0]
+        let displayDecls = ProtocolParser.interfaceToDeclarations proto.Interfaces.[0]
         // Order: typedef, enums, delegates, listener struct, request functions
         match displayDecls.[0] with
         | CppParser.Declaration.Typedef _ -> ()
@@ -335,9 +335,9 @@ let ``interface with no events produces no listener struct`` () =
     <request name="destroy" type="destructor"/>
   </interface>
 </protocol>"""
-    match WaylandProtocolParser.parseProtocolXml xml with
+    match ProtocolParser.parseProtocolXml xml with
     | Ok proto ->
-        let decls = WaylandProtocolParser.toDeclarations proto
+        let decls = ProtocolParser.toDeclarations proto
         let structs =
             decls |> List.choose (function
                 | CppParser.Declaration.Struct _ -> Some true
@@ -353,7 +353,7 @@ let ``destructor request is parsed with IsDestructor attribute`` () =
     <request name="destroy" type="destructor"/>
   </interface>
 </protocol>"""
-    match WaylandProtocolParser.parseProtocolXml xml with
+    match ProtocolParser.parseProtocolXml xml with
     | Ok proto ->
         Assert.True(proto.Interfaces.[0].Requests.[0].IsDestructor)
     | Error e -> failwith e
@@ -380,6 +380,7 @@ let ``PilotSerializer round-trips xml_protocols`` () =
         Options = None
         Callbacks = None
         Nonnull = None
+        ProtocolConfig = None
     }
     let toml = PilotSerializer.toTomlString project
     Assert.Contains("xml_protocols", toml)
@@ -414,6 +415,7 @@ let ``PilotSerializer round-trips xml_interfaces`` () =
         Options = None
         Callbacks = None
         Nonnull = None
+        ProtocolConfig = None
     }
     let toml = PilotSerializer.toTomlString project
     Assert.Contains("xml_interfaces", toml)

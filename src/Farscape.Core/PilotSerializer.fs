@@ -165,6 +165,15 @@ module PilotSerializer =
             else TomlTable.add "nonnull_returns" (TomlValue.Array (spec.Returns |> Set.toList |> List.map TomlValue.String)) table
         TomlValue.Table table
 
+    let serializeProtocolConfig (config: ProtocolConfig) : TomlValue =
+        TomlTable.empty
+        |> TomlTable.add "marshal_function" (TomlValue.String config.MarshalFunction)
+        |> TomlTable.add "marshal_module" (TomlValue.String config.MarshalModule)
+        |> TomlTable.add "version_function" (TomlValue.String config.VersionFunction)
+        |> TomlTable.add "interface_resolution" (TomlValue.String config.InterfaceResolution)
+        |> TomlTable.add "destroy_flag" (TomlValue.Integer (int64 config.DestroyFlag))
+        |> TomlValue.Table
+
     /// Serialize a complete PilotProject to a TomlDocument.
     let serialize (project: PilotProject) : TomlDocument =
         let table =
@@ -193,6 +202,10 @@ module PilotSerializer =
                     | _ -> TomlTable.empty
                 let annotationsTable = TomlTable.add "nonnull" (serializeNonnull spec) annotationsTable
                 table |> TomlTable.add "annotations" (TomlValue.Table annotationsTable)
+            | None -> table
+        let table =
+            match project.ProtocolConfig with
+            | Some config -> table |> TomlTable.add "protocol" (serializeProtocolConfig config)
             | None -> table
         table
 
@@ -439,6 +452,31 @@ module PilotSerializer =
             Some { Parameters = parameters; Returns = returns }
         | _ -> None
 
+    let deserializeProtocolConfig (doc: TomlDocument) : ProtocolConfig option =
+        match Toml.getTable "protocol" doc with
+        | None -> None
+        | Some table ->
+            match TomlTable.tryFind "marshal_function" table,
+                  TomlTable.tryFind "marshal_module" table,
+                  TomlTable.tryFind "version_function" table with
+            | Some (TomlValue.String marshalFn),
+              Some (TomlValue.String marshalMod),
+              Some (TomlValue.String versionFn) ->
+                let interfaceRes =
+                    match TomlTable.tryFind "interface_resolution" table with
+                    | Some (TomlValue.String s) -> s
+                    | _ -> "dlsym"
+                let destroyFlag =
+                    match TomlTable.tryFind "destroy_flag" table with
+                    | Some (TomlValue.Integer i) -> uint32 i
+                    | _ -> 1u
+                Some { MarshalFunction = marshalFn
+                       MarshalModule = marshalMod
+                       VersionFunction = versionFn
+                       InterfaceResolution = interfaceRes
+                       DestroyFlag = destroyFlag }
+            | _ -> None
+
     /// Deserialize a TomlDocument to a PilotProject.
     let deserialize (doc: TomlDocument) : Result<PilotProject, string> =
         match deserializeLibrary doc, deserializeOutput doc, deserializeNamespaces doc with
@@ -449,7 +487,8 @@ module PilotSerializer =
                  ErrorConventions = deserializeErrorConventions doc
                  Options = deserializeOptions doc
                  Callbacks = deserializeCallbacks doc
-                 Nonnull = deserializeNonnull doc }
+                 Nonnull = deserializeNonnull doc
+                 ProtocolConfig = deserializeProtocolConfig doc }
         | Error e, _, _ | _, Error e, _ | _, _, Error e -> Error e
 
     // =========================================================================

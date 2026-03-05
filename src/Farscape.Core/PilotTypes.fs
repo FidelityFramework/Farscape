@@ -143,6 +143,21 @@ module PilotTypes =
         ListenerStructs: ListenerStruct list
     }
 
+    /// Configuration for protocol-defined APIs that dispatch through a core marshal function.
+    /// Comes from the pilot TOML [protocol] section.
+    type ProtocolConfig = {
+        /// Core marshal function name (e.g. "wl_proxy_marshal_array_flags")
+        MarshalFunction: string
+        /// Module containing the marshal function (e.g. "Fidelity.Wayland.Core")
+        MarshalModule: string
+        /// Core version query function (e.g. "wl_proxy_get_version")
+        VersionFunction: string
+        /// How to resolve interface globals — "dlsym" uses Fidelity.Libc.DynamicLink.dlsym
+        InterfaceResolution: string
+        /// Flag value for destructor requests (e.g. 1u for WL_MARSHAL_FLAG_DESTROY)
+        DestroyFlag: uint32
+    }
+
     /// Complete Pilot project, corresponding to a .pilot.toml file.
     type PilotProject = {
         Library: LibrarySpec
@@ -156,6 +171,8 @@ module PilotTypes =
         Callbacks: CallbackSpec option
         /// Nonnull annotations (None = all pointers are nullable by default)
         Nonnull: NonnullAnnotations option
+        /// Protocol dispatch configuration (None = no XML protocol request generation)
+        ProtocolConfig: ProtocolConfig option
     }
 
     // =========================================================================
