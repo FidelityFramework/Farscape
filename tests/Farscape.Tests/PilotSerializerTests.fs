@@ -37,6 +37,7 @@ let private sampleProject : PilotTypes.PilotProject = {
     Callbacks = None
     Nonnull = None
     ProtocolConfig = None
+    Layer3 = None
 }
 
 [<Fact>]
@@ -182,6 +183,7 @@ module ErrorConventionTomlTests =
             Callbacks = None
             Nonnull = None
             ProtocolConfig = None
+            Layer3 = None
         }
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("error_conventions", toml)
@@ -220,6 +222,7 @@ module ErrorConventionTomlTests =
             Callbacks = None
             Nonnull = None
             ProtocolConfig = None
+            Layer3 = None
         }
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("enum_error_code", toml)
@@ -259,6 +262,7 @@ module ErrorConventionTomlTests =
             Callbacks = None
             Nonnull = None
             ProtocolConfig = None
+            Layer3 = None
         }
         let toml = PilotSerializer.toTomlString project
         // Should NOT contain optional fn fields
@@ -289,6 +293,7 @@ module ErrorConventionTomlTests =
             Callbacks = None
             Nonnull = None
             ProtocolConfig = None
+            Layer3 = None
         }
         let toml = PilotSerializer.toTomlString project
         match Fidelity.Data.TOML.Toml.parse toml with
@@ -315,6 +320,7 @@ module ErrorConventionTomlTests =
             Callbacks = None
             Nonnull = None
             ProtocolConfig = None
+            Layer3 = None
         }
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("null_with_reason", toml)

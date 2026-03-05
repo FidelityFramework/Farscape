@@ -117,6 +117,7 @@ module BindingGenerator =
         sb.AppendLine("target = \"cpu\"") |> ignore
         sb.AppendLine() |> ignore
         sb.AppendLine("[build]") |> ignore
+        sb.AppendLine("output_kind = \"library\"") |> ignore
         sb.AppendLine("sources = [") |> ignore
         for src in relativeSources do
             sb.AppendLine($"    \"{src}\",") |> ignore
@@ -360,16 +361,14 @@ module BindingGenerator =
                             [descriptorPath]
                     else []
 
-                // ── Callback wrappers ──────────────────────────────────────
-                let callbackFiles =
+                // ── Callback spec (resolved here, used by Layer 3) ─────────
+                let callbackSpec =
                     if generateWrappers then
-                        // Use TOML-specified callbacks if present, otherwise auto-discover
-                        let callbackSpec =
+                        let spec =
                             match project.Callbacks with
                             | Some spec -> spec
                             | None ->
                                 let rawSpec = PilotAnalyzer.discoverCallbacks declarations
-                                // Filter out transitively-leaked callbacks that don't belong to this library
                                 let claimedFunctions =
                                     project.Namespaces |> List.collect (fun ns ->
                                         PilotAnalyzer.filterDeclarationsForNamespace ns declarations
@@ -379,20 +378,13 @@ module BindingGenerator =
                                     |> Set.ofList
                                 { rawSpec with
                                     Registrations = rawSpec.Registrations |> List.filter (fun r -> claimedFunctions.Contains r.Function) }
-                        if callbackSpec.Registrations.IsEmpty && callbackSpec.ListenerStructs.IsEmpty then
+                        if spec.Registrations.IsEmpty && spec.ListenerStructs.IsEmpty then
                             logVerbose "No callback patterns detected" verbose
-                            []
+                            None
                         else
-                            let callbackNs = $"{nsPrefix}.Callbacks"
-                            logVerbose $"Callback patterns: {callbackSpec.Registrations.Length} registration(s), {callbackSpec.ListenerStructs.Length} listener struct(s)" verbose
-                            match CallbackWrapperGenerator.generate callbackSpec declarations callbackNs nsPrefix dataModel with
-                            | Some output ->
-                                let callbackPath = Path.Combine(outputDir, "Callbacks.clef")
-                                File.WriteAllText(callbackPath, output)
-                                logVerbose $"Callback module: {callbackPath}" verbose
-                                [callbackPath]
-                            | None -> []
-                    else []
+                            logVerbose $"Callback patterns: {spec.Registrations.Length} registration(s), {spec.ListenerStructs.Length} listener struct(s)" verbose
+                            Some spec
+                    else None
 
                 // ── Namespace subfolders ─────────────────────────────────────
                 let nsFiles =
@@ -423,15 +415,8 @@ module BindingGenerator =
 
                         // ── Functions .clef ──────────────────────────────────
                         let funcOpenModules =
-                            let baseModules =
-                                if localTypeNames.IsEmpty then [sharedTypesNs]
-                                else [sharedTypesNs; localTypesNs]
-                            // Add marshal module if this namespace uses protocol requests
-                            match project.ProtocolConfig with
-                            | Some cfg when not ns.XmlInterfaces.IsEmpty ->
-                                if List.contains cfg.MarshalModule baseModules then baseModules
-                                else baseModules @ [cfg.MarshalModule]
-                            | _ -> baseModules
+                            if localTypeNames.IsEmpty then [sharedTypesNs]
+                            else [sharedTypesNs; localTypesNs]
                         let funcDecls =
                             PilotAnalyzer.filterDeclarationsWithTypes ns Set.empty declarations
                         let funcCount =
@@ -440,28 +425,9 @@ module BindingGenerator =
                             FidelityCodeGenerator.generateModule ctx Set.empty funcDecls
                                 ns.Name ns.Library $"{lastSegment} function declarations" funcOpenModules
 
-                        // Append protocol request implementations for this namespace's XML interfaces
-                        let nsRequestDecls =
-                            if ns.XmlInterfaces.IsEmpty then []
-                            else
-                                xmlRequestDecls |> List.filter (fun decl ->
-                                    match decl with
-                                    | CodeAST.LetBinding(name, _, _, _, _) ->
-                                        ns.XmlInterfaces |> List.exists (fun iface ->
-                                            name.StartsWith(iface + "_"))
-                                    | _ -> false)
-                        let funcCode =
-                            if nsRequestDecls.IsEmpty then funcCode
-                            else
-                                let requestCode =
-                                    nsRequestDecls
-                                    |> List.map CodeRenderer.render
-                                    |> String.concat "\n"
-                                funcCode + "\n    // ── Protocol request implementations ──\n\n" + requestCode
-
                         let funcPath = Path.Combine(nsDir, $"{lastSegment}.clef")
                         File.WriteAllText(funcPath, funcCode)
-                        logVerbose $"  {lastSegment}/{lastSegment}.clef ({funcCount} functions, {nsRequestDecls.Length} protocol requests)" verbose
+                        logVerbose $"  {lastSegment}/{lastSegment}.clef ({funcCount} functions)" verbose
 
                         // ── Wrappers (optional) ─────────────────────────────
                         let wrapperFiles =
@@ -478,10 +444,221 @@ module BindingGenerator =
 
                         localTypeFiles @ [funcPath] @ wrapperFiles)
 
-                let allFiles = [sharedTypesPath] @ errorModuleFiles @ descriptorFiles @ callbackFiles @ nsFiles
+                let allFiles = [sharedTypesPath] @ errorModuleFiles @ descriptorFiles @ nsFiles
 
                 // Generate canonical fidproj for the binding library
                 let fidprojFile = generateFidproj project nsPrefix outputDir allFiles verbose
+
+                // ── Layer 3 Bridge package ─────────────────────────────────
+                let unpairedConstructors =
+                    let allInterfaces = xmlProtocols |> List.collect (fun p -> p.Interfaces)
+                    let withDestroy =
+                        allInterfaces
+                        |> List.filter (fun i -> i.Requests |> List.exists (fun r -> r.IsDestructor))
+                        |> List.map (fun i -> i.Name) |> Set.ofList
+                    let constructed =
+                        allInterfaces |> List.collect (fun i ->
+                            i.Requests |> List.collect (fun r ->
+                                r.Args |> List.choose (fun a ->
+                                    if a.Type = ProtocolParser.NewId then a.Interface else None)))
+                        |> List.distinct
+                    constructed |> List.filter (fun n -> not (Set.contains n withDestroy))
+
+                let layer3Req = PilotAnalyzer.analyzeLayer3Requirements project callbackSpec unpairedConstructors
+
+                let layer3Files =
+                    match layer3Req with
+                    | None -> []
+                    | Some req ->
+                        let bridgeName = $"{nsPrefix}.Bridge"
+                        let libLastSegment = nsPrefix.Split('.') |> Array.last
+                        let bridgeDir = Path.Combine(Path.GetDirectoryName(outputDir), $"{libLastSegment}Bridge")
+                        Directory.CreateDirectory(bridgeDir) |> ignore
+
+                        let fidprojDir = Path.GetDirectoryName(Path.GetDirectoryName(outputDir))
+
+                        // Build function-to-namespace resolver for callbacks
+                        let functionToNs =
+                            project.Namespaces |> List.collect (fun ns ->
+                                PilotAnalyzer.filterDeclarationsForNamespace ns declarations
+                                |> List.choose (function
+                                    | CppParser.Declaration.Function f -> Some (f.Name, ns.Name)
+                                    | _ -> None))
+                            |> Map.ofList
+                        let resolveModule funcName =
+                            functionToNs |> Map.tryFind funcName |> Option.defaultValue nsPrefix
+
+                        // Protocol dispatch files — one per namespace with XML interfaces
+                        let dispatchFiles =
+                            if req.HasProtocolDispatch then
+                                project.Namespaces |> List.collect (fun ns ->
+                                    if ns.XmlInterfaces.IsEmpty then []
+                                    else
+                                        let nsRequestDecls =
+                                            xmlRequestDecls |> List.filter (fun decl ->
+                                                match decl with
+                                                | CodeAST.LetBinding(name, _, _, _, _) ->
+                                                    ns.XmlInterfaces |> List.exists (fun iface ->
+                                                        name.StartsWith(iface + "_"))
+                                                | _ -> false)
+                                        if nsRequestDecls.IsEmpty then []
+                                        else
+                                            let lastSeg = ns.Name.Split('.') |> Array.last
+                                            let dispatchNs = $"{bridgeName}.{lastSeg}"
+                                            let openModules =
+                                                [ $"{nsPrefix}.Types"
+                                                  "Fidelity.Libc.DynamicLink"
+                                                  "Fidelity.Libc.Memory"
+                                                  "Microsoft.FSharp.NativeInterop"
+                                                  match project.ProtocolConfig with
+                                                  | Some cfg -> cfg.MarshalModule
+                                                  | None -> () ]
+                                            let moduleDecl =
+                                                CodeAST.Module(dispatchNs,
+                                                    $"{lastSeg} protocol dispatch — Layer 3 bridge",
+                                                    [ for m in openModules -> CodeAST.OpenModule m ]
+                                                    @ [CodeAST.BlankLine]
+                                                    @ nsRequestDecls)
+                                            let code = CodeRenderer.render moduleDecl
+                                            let dispatchPath = Path.Combine(bridgeDir, $"{lastSeg}Dispatch.clef")
+                                            File.WriteAllText(dispatchPath, code)
+                                            logVerbose $"  Layer 3: {lastSeg}Dispatch.clef ({nsRequestDecls.Length} protocol requests)" verbose
+                                            [dispatchPath])
+                            else []
+
+                        // Callback wrappers file
+                        let callbackFiles =
+                            match req.HasCallbackWrappers, callbackSpec with
+                            | true, Some spec ->
+                                let callbackNs = $"{bridgeName}.Callbacks"
+                                // Open types module + Libc.DynamicLink (dlsym) + all bindings modules used by registrations
+                                let registrationModules =
+                                    spec.Registrations
+                                    |> List.map (fun reg -> resolveModule reg.Function)
+                                    |> List.distinct
+                                let callbackOpens =
+                                    [$"{nsPrefix}.Types"; "Fidelity.Libc.DynamicLink"] @ registrationModules
+                                    |> List.distinct
+                                match CallbackWrapperGenerator.generate spec declarations callbackNs dataModel callbackOpens with
+                                | Some output ->
+                                    let callbackPath = Path.Combine(bridgeDir, "Callbacks.clef")
+                                    File.WriteAllText(callbackPath, output)
+                                    logVerbose $"  Layer 3: Callbacks.clef" verbose
+                                    [callbackPath]
+                                | None -> []
+                            | _ -> []
+
+                        let bridgeFiles = dispatchFiles @ callbackFiles
+
+                        // Generate Bridge fidproj
+                        if not bridgeFiles.IsEmpty then
+                            let relativeSources =
+                                bridgeFiles |> List.map (fun f ->
+                                    let fullPath = Path.GetFullPath f
+                                    let basePath = Path.GetFullPath fidprojDir
+                                    if fullPath.StartsWith(basePath + "/") || fullPath.StartsWith(basePath + string Path.DirectorySeparatorChar) then
+                                        fullPath.Substring(basePath.Length + 1)
+                                    else fullPath)
+
+                            let sb = System.Text.StringBuilder()
+                            sb.AppendLine("[package]") |> ignore
+                            sb.AppendLine($"name = \"{bridgeName}\"") |> ignore
+                            sb.AppendLine("version = \"0.1.0\"") |> ignore
+                            sb.AppendLine($"description = \"Layer 3 bridge for {project.Library.Name} — protocol dispatch and callback wrappers.\"") |> ignore
+                            sb.AppendLine() |> ignore
+                            sb.AppendLine("[compilation]") |> ignore
+                            sb.AppendLine("target = \"cpu\"") |> ignore
+                            sb.AppendLine() |> ignore
+                            sb.AppendLine("[build]") |> ignore
+                            sb.AppendLine("output_kind = \"library\"") |> ignore
+                            sb.AppendLine("sources = [") |> ignore
+                            for src in relativeSources do
+                                sb.AppendLine($"    \"{src}\",") |> ignore
+                            sb.AppendLine("]") |> ignore
+                            sb.AppendLine() |> ignore
+                            sb.AppendLine("[platform]") |> ignore
+                            sb.AppendLine("runtime_model = \"libc\"") |> ignore
+                            sb.AppendLine("os = \"linux\"") |> ignore
+                            sb.AppendLine("arch = \"x86_64\"") |> ignore
+                            sb.AppendLine("word_size = 64") |> ignore
+                            sb.AppendLine() |> ignore
+                            sb.AppendLine("[dependencies]") |> ignore
+
+                            // Resolve dependency paths
+                            let resolveDep name =
+                                let local = Path.Combine(fidprojDir, $"{name}.fidproj")
+                                if File.Exists(local) then $"{name}.fidproj"
+                                else
+                                    let reposDir = Path.GetFullPath(Path.Combine(fidprojDir, "../../../../"))
+                                    let target = Path.Combine(reposDir, $"Fidelity.Platform/CPU/Linux/x86_64/{name}.fidproj")
+                                    if File.Exists(target) then Path.GetRelativePath(fidprojDir, target).Replace('\\', '/')
+                                    else Path.GetFullPath(target).Replace('\\', '/')
+
+                            let platformDep = resolveDep "Fidelity.Platform"
+                            let libDep = resolveDep nsPrefix
+                            sb.AppendLine($"Fidelity.Platform = {{ path = \"{platformDep}\" }}") |> ignore
+                            sb.AppendLine($"{nsPrefix} = {{ path = \"{libDep}\" }}") |> ignore
+                            if req.Dependencies |> List.exists (function LibcDynamicLink | LibcMemory -> true) && nsPrefix <> "Fidelity.Libc" then
+                                let libcDep = resolveDep "Fidelity.Libc"
+                                sb.AppendLine($"Fidelity.Libc = {{ path = \"{libcDep}\" }}") |> ignore
+
+                            let bridgeFidprojPath = Path.Combine(fidprojDir, $"{bridgeName}.fidproj")
+                            File.WriteAllText(bridgeFidprojPath, sb.ToString())
+                            logVerbose $"Generated Layer 3 fidproj: {bridgeFidprojPath}" verbose
+
+                            // Generate LAYER3-REPORT.md
+                            let report = System.Text.StringBuilder()
+                            report.AppendLine($"# Layer 3 Bridge Report: {bridgeName}") |> ignore
+                            report.AppendLine() |> ignore
+                            report.AppendLine("## Generated") |> ignore
+                            report.AppendLine() |> ignore
+                            if req.HasProtocolDispatch then
+                                let totalRequests = xmlRequestDecls.Length
+                                let destructorCount =
+                                    xmlProtocols |> List.sumBy (fun p ->
+                                        p.Interfaces |> List.sumBy (fun i ->
+                                            i.Requests |> List.filter (fun r -> r.IsDestructor) |> List.length))
+                                let constructorCount =
+                                    xmlProtocols |> List.sumBy (fun p ->
+                                        p.Interfaces |> List.sumBy (fun i ->
+                                            i.Requests |> List.filter (fun r ->
+                                                r.Args |> List.exists (fun a -> a.Type = ProtocolParser.NewId)) |> List.length))
+                                let voidCount = totalRequests - destructorCount - constructorCount
+                                report.AppendLine($"### Protocol Dispatch ({totalRequests} requests)") |> ignore
+                                report.AppendLine($"- Constructors: {constructorCount}") |> ignore
+                                report.AppendLine($"- Destructors: {destructorCount}") |> ignore
+                                report.AppendLine($"- Void requests: {voidCount}") |> ignore
+                                report.AppendLine() |> ignore
+                            if req.HasCallbackWrappers then
+                                match callbackSpec with
+                                | Some spec ->
+                                    report.AppendLine("### Callback Wrappers") |> ignore
+                                    report.AppendLine($"- Registration wrappers: {spec.Registrations.Length}") |> ignore
+                                    report.AppendLine($"- Listener struct builders: {spec.ListenerStructs.Length}") |> ignore
+                                    report.AppendLine() |> ignore
+                                | None -> ()
+                            if not req.UnpairedConstructors.IsEmpty then
+                                report.AppendLine("## Unmapped — Developer Review Required") |> ignore
+                                report.AppendLine() |> ignore
+                                report.AppendLine("### Unpaired Constructors") |> ignore
+                                report.AppendLine("These interfaces have constructors but no explicit destroy request.") |> ignore
+                                report.AppendLine("The developer must determine lifecycle management:") |> ignore
+                                for name in req.UnpairedConstructors do
+                                    report.AppendLine($"- `{name}`") |> ignore
+                                report.AppendLine() |> ignore
+                            report.AppendLine("## Notes") |> ignore
+                            if req.Dependencies |> List.contains LibcMemory then
+                                report.AppendLine("- Protocol dispatch uses Fidelity.Libc.Memory for argument arrays (malloc/free)") |> ignore
+                            if req.Dependencies |> List.contains LibcDynamicLink then
+                                report.AppendLine("- Interface globals resolved via Fidelity.Libc.DynamicLink.dlsym") |> ignore
+                            report.AppendLine("- NativeInterop.NativePtr used for argument array writes") |> ignore
+
+                            let reportPath = Path.Combine(fidprojDir, "LAYER3-REPORT.md")
+                            File.WriteAllText(reportPath, report.ToString())
+                            logVerbose $"Layer 3 report: {reportPath}" verbose
+
+                            bridgeFiles @ [bridgeFidprojPath; reportPath]
+                        else []
 
                 let advisories =
                     match errorHandling, generateWrappers with
@@ -492,9 +669,11 @@ module BindingGenerator =
                     | _ -> []
 
                 let allOutputFiles =
-                    match fidprojFile with
-                    | Some fp -> allFiles @ [fp]
-                    | None -> allFiles
+                    let baseFiles =
+                        match fidprojFile with
+                        | Some fp -> allFiles @ [fp]
+                        | None -> allFiles
+                    baseFiles @ layer3Files
 
                 Ok {
                     OutputFiles = allOutputFiles

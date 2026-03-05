@@ -488,7 +488,8 @@ module PilotSerializer =
                  Options = deserializeOptions doc
                  Callbacks = deserializeCallbacks doc
                  Nonnull = deserializeNonnull doc
-                 ProtocolConfig = deserializeProtocolConfig doc }
+                 ProtocolConfig = deserializeProtocolConfig doc
+                 Layer3 = None }
         | Error e, _, _ | _, Error e, _ | _, _, Error e -> Error e
 
     // =========================================================================

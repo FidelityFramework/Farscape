@@ -158,6 +158,31 @@ module PilotTypes =
         DestroyFlag: uint32
     }
 
+    // =========================================================================
+    // Layer 3 Bridge Requirements
+    // =========================================================================
+
+    /// External dependencies required by Layer 3 bridge code.
+    type Layer3Dependency =
+        /// dlsym for interface resolution + callback binding
+        | LibcDynamicLink
+        /// malloc/free for protocol argument arrays
+        | LibcMemory
+
+    /// Layer 3 requirement analysis result — determines whether a Bridge package is needed.
+    type Layer3Requirement = {
+        /// External dependencies the bridge code needs
+        Dependencies: Layer3Dependency list
+        /// Protocol dispatch implementations needed
+        HasProtocolDispatch: bool
+        /// Callback wrappers (dlsym-based) needed
+        HasCallbackWrappers: bool
+        /// Interfaces with constructors but no paired destructor — developer must review
+        UnpairedConstructors: string list
+        /// Patterns the generator couldn't handle — developer must implement by hand
+        UnmappedPatterns: string list
+    }
+
     /// Complete Pilot project, corresponding to a .pilot.toml file.
     type PilotProject = {
         Library: LibrarySpec
@@ -173,6 +198,9 @@ module PilotTypes =
         Nonnull: NonnullAnnotations option
         /// Protocol dispatch configuration (None = no XML protocol request generation)
         ProtocolConfig: ProtocolConfig option
+        /// Layer 3 bridge requirements (None = no bridge package needed).
+        /// Computed by PilotAnalyzer.analyzeLayer3Requirements, not serialized.
+        Layer3: Layer3Requirement option
     }
 
     // =========================================================================

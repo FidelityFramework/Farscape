@@ -85,7 +85,6 @@ module CallbackWrapperGenerator =
     let generateRegistrationWrapper
         (reg: CallbackRegistration)
         (funcDecl: CppParser.FunctionDecl)
-        (bindingsModuleName: string)
         (model: Types.PlatformABI)
         : FsDecl list =
 
@@ -106,8 +105,8 @@ module CallbackWrapperGenerator =
         // Body: let handler = dlsym 0n handlerSymbol in originalFunc arg1 handler arg2 ...
         let body =
             LetIn("handler",
-                FunctionCall("Fidelity.Libc.DynamicLink", "dlsym", [Literal "0n"; Identifier "handlerSymbol"]),
-                FunctionCall(bindingsModuleName, reg.Function,
+                FunctionCall("", "dlsym", [Literal "0n"; Identifier "handlerSymbol"]),
+                FunctionCall("", reg.Function,
                     funcDecl.Parameters |> List.map (fun (name, _) ->
                         if name = reg.CallbackParam then Identifier "handler"
                         elif reg.DataParam = Some name then Literal "0n"
@@ -152,7 +151,7 @@ module CallbackWrapperGenerator =
             let fields =
                 structDecl.Fields |> List.map (fun f ->
                     if isCallbackField f then
-                        (f.Name, FunctionCall("Fidelity.Libc.DynamicLink", "dlsym",
+                        (f.Name, FunctionCall("", "dlsym",
                             [Literal "0n"; Identifier (f.Name + "Sym")]))
                     else
                         // Non-callback field: zero-init
@@ -172,7 +171,6 @@ module CallbackWrapperGenerator =
     let generateDecls
         (spec: CallbackSpec)
         (declarations: CppParser.Declaration list)
-        (bindingsModuleName: string)
         (model: Types.PlatformABI)
         : FsDecl list =
 
@@ -191,7 +189,7 @@ module CallbackWrapperGenerator =
                         | CppParser.Declaration.Function f when f.Name = reg.Function -> Some f
                         | _ -> None)
                 match funcDecl with
-                | Some f -> generateRegistrationWrapper reg f bindingsModuleName model
+                | Some f -> generateRegistrationWrapper reg f model
                 | None -> [])
 
         let listenerDecls =
@@ -215,12 +213,13 @@ module CallbackWrapperGenerator =
         (spec: CallbackSpec)
         (declarations: CppParser.Declaration list)
         (namespace': string)
-        (bindingsModuleName: string)
         (model: Types.PlatformABI)
+        (openModules: string list)
         : string option =
 
-        let decls = generateDecls spec declarations bindingsModuleName model
+        let decls = generateDecls spec declarations model
         if decls.IsEmpty then None
         else
-            let moduleDecl = Module(namespace', "Callback wrappers — dlsym-based runtime symbol resolution", decls)
+            let opens = openModules |> List.map OpenModule
+            let moduleDecl = Module(namespace', "Callback wrappers — dlsym-based runtime symbol resolution", opens @ decls)
             Some (CodeRenderer.render moduleDecl)

@@ -393,7 +393,8 @@ module PilotAnalyzer =
           Options = None
           Callbacks = None
           Nonnull = None
-          ProtocolConfig = None }
+          ProtocolConfig = None
+          Layer3 = None }
 
     // =========================================================================
     // Declaration Filtering (for scoped generation)
@@ -568,3 +569,40 @@ module PilotAnalyzer =
                 match declarationName decl with
                 | Some name -> Set.contains name typeNames
                 | None -> false)
+
+    // =========================================================================
+    // Layer 3 Bridge Requirement Analysis
+    // =========================================================================
+
+    /// Analyze whether a project needs a Layer 3 Bridge package.
+    /// Examines protocol config and callbacks to determine cross-library dependencies.
+    /// The unpairedConstructors parameter is computed by the caller from parsed protocol data
+    /// (PilotAnalyzer cannot reference ProtocolParser due to fsproj ordering).
+    let analyzeLayer3Requirements
+        (project: PilotProject)
+        (resolvedCallbackSpec: CallbackSpec option)
+        (unpairedConstructors: string list)
+        : Layer3Requirement option =
+
+        let hasProtocol = project.ProtocolConfig.IsSome
+        let hasCallbacks =
+            match resolvedCallbackSpec with
+            | Some spec -> not spec.Registrations.IsEmpty || not spec.ListenerStructs.IsEmpty
+            | None -> false
+
+        if not hasProtocol && not hasCallbacks then None
+        else
+            let deps =
+                [ if hasProtocol then
+                    yield LibcDynamicLink
+                    yield LibcMemory
+                  if hasCallbacks then
+                    yield LibcDynamicLink ]
+                |> List.distinct
+            Some {
+                Dependencies = deps
+                HasProtocolDispatch = hasProtocol
+                HasCallbackWrappers = hasCallbacks
+                UnpairedConstructors = unpairedConstructors
+                UnmappedPatterns = []
+            }

@@ -381,6 +381,7 @@ let ``PilotSerializer round-trips xml_protocols`` () =
         Callbacks = None
         Nonnull = None
         ProtocolConfig = None
+        Layer3 = None
     }
     let toml = PilotSerializer.toTomlString project
     Assert.Contains("xml_protocols", toml)
@@ -416,6 +417,7 @@ let ``PilotSerializer round-trips xml_interfaces`` () =
         Callbacks = None
         Nonnull = None
         ProtocolConfig = None
+        Layer3 = None
     }
     let toml = PilotSerializer.toTomlString project
     Assert.Contains("xml_interfaces", toml)

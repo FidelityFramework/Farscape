@@ -424,7 +424,8 @@ module PilotDiscovery =
           Options = None
           Callbacks = None
           Nonnull = None
-          ProtocolConfig = None }
+          ProtocolConfig = None
+          Layer3 = None }
 
     // =========================================================================
     // IO Layer (CLI consumption)

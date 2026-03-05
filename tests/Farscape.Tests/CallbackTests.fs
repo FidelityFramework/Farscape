@@ -226,6 +226,7 @@ module CallbackSerializerTests =
             }
             Nonnull = None
             ProtocolConfig = None
+            Layer3 = None
         }
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("callbacks", toml)
@@ -264,6 +265,7 @@ module CallbackSerializerTests =
             }
             Nonnull = None
             ProtocolConfig = None
+            Layer3 = None
         }
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("listener_structs", toml)
@@ -308,6 +310,7 @@ module CallbackSerializerTests =
             }
             Nonnull = None
             ProtocolConfig = None
+            Layer3 = None
         }
         let toml = PilotSerializer.toTomlString project
         match Fidelity.Data.TOML.Toml.parse toml with
@@ -345,7 +348,7 @@ module CallbackWrapperGeneratorTests =
                     mkField "motion" "void (*)(void *, struct wl_pointer *, uint32_t, wl_fixed_t, wl_fixed_t)"
                 ] None)
         ]
-        match CallbackWrapperGenerator.generate spec decls "Fidelity.Wayland.Callbacks" "Fidelity.Wayland" LP64 with
+        match CallbackWrapperGenerator.generate spec decls "Fidelity.Wayland.Callbacks" LP64 [] with
         | None -> Assert.Fail "Expected some generated output"
         | Some code ->
             Assert.Contains("dlsym", code)
@@ -373,7 +376,7 @@ module CallbackWrapperGeneratorTests =
                     mkField "leave" "WlPointerLeaveHandler"
                 ] None)
         ]
-        match CallbackWrapperGenerator.generate spec decls "Fidelity.Wayland.Callbacks" "Fidelity.Wayland" LP64 with
+        match CallbackWrapperGenerator.generate spec decls "Fidelity.Wayland.Callbacks" LP64 [] with
         | None -> Assert.Fail "Expected some generated output"
         | Some code ->
             Assert.Contains("dlsym", code)
@@ -390,13 +393,13 @@ module CallbackWrapperGeneratorTests =
             ]
         }
         // No struct found → no decls generated → None
-        let result = CallbackWrapperGenerator.generate spec [] "Fidelity.Test.Callbacks" "Fidelity.Test" LP64
+        let result = CallbackWrapperGenerator.generate spec [] "Fidelity.Test.Callbacks" LP64 []
         Assert.True(result.IsNone)
 
     [<Fact>]
     let ``empty callback spec produces None`` () =
         let spec : CallbackSpec = { Registrations = []; ListenerStructs = [] }
-        let result = CallbackWrapperGenerator.generate spec [] "Ns" "Mod" LP64
+        let result = CallbackWrapperGenerator.generate spec [] "Ns" LP64 []
         Assert.True(result.IsNone)
 
     [<Fact>]
@@ -412,7 +415,7 @@ module CallbackWrapperGeneratorTests =
                 mkFunc "g_idle_add" "unsigned int"
                     [("function", "int (*)(void *)"); ("data", "void *")])
         ]
-        match CallbackWrapperGenerator.generate spec decls "Fidelity.GTK.Callbacks" "Fidelity.GTK" LP64 with
+        match CallbackWrapperGenerator.generate spec decls "Fidelity.GTK.Callbacks" LP64 [] with
         | None -> Assert.Fail "Expected some output"
         | Some code ->
             Assert.Contains("dlsym", code)
@@ -434,7 +437,7 @@ module CallbackWrapperGeneratorTests =
                 mkFunc "signal" "void (*)(int)"
                     [("signum", "int"); ("handler", "void (*)(int)")])
         ]
-        match CallbackWrapperGenerator.generate spec decls "Fidelity.Libc.Callbacks" "Fidelity.Libc" LP64 with
+        match CallbackWrapperGenerator.generate spec decls "Fidelity.Libc.Callbacks" LP64 [] with
         | None -> Assert.Fail "Expected some output"
         | Some code ->
             Assert.Contains("signum", code)
@@ -449,5 +452,5 @@ module CallbackWrapperGeneratorTests =
             ]
             ListenerStructs = []
         }
-        let result = CallbackWrapperGenerator.generate spec [] "Ns" "Mod" LP64
+        let result = CallbackWrapperGenerator.generate spec [] "Ns" LP64 []
         Assert.True(result.IsNone)

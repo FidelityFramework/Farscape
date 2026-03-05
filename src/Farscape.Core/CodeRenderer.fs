@@ -24,7 +24,7 @@ module CodeRenderer =
     let rec renderExpr (indent: string) = function
         | DefaultOf ty -> $"Unchecked.defaultof<{renderType ty}>"
         | FunctionCall (mod', name, args) ->
-            let argStr = args |> List.map (renderExpr indent) |> String.concat " "
+            let argStr = args |> List.map (renderArg indent) |> String.concat " "
             if mod' = "" then $"{name} {argStr}"
             else $"{mod'}.{name} {argStr}"
         | Identifier name -> name
@@ -56,6 +56,12 @@ module CodeRenderer =
                 |> List.map (fun (pattern, body) -> $"\n{indent}| {pattern} -> {renderExpr indent body}")
                 |> String.concat ""
             $"match {renderExpr indent scrutinee} with{caseStr}"
+
+    /// Render an expression as a function argument, parenthesizing compound expressions.
+    and renderArg (indent: string) (expr: FsExpr) =
+        match expr with
+        | Identifier _ | Literal _ -> renderExpr indent expr
+        | _ -> $"({renderExpr indent expr})"
 
     /// Render a single FsDecl node to the StringBuilder at the given indentation level
     let rec private renderDecl (sb: StringBuilder) (indent: int) (decl: FsDecl) =

@@ -308,11 +308,11 @@ module ProtocolParser =
         | Int -> Named "int32"
         | Uint -> Named "uint32"
         | Fixed -> Named "int32"  // wl_fixed_t is int32
-        | String -> Generic("Option", Generic("nativeptr", Named "byte"))
-        | Object -> Generic("Option", Named "nativeint")
-        | NewId -> Generic("Option", Named "nativeint")
+        | String -> Named "nativeint"  // string pointer, passed as nativeint in arg array
+        | Object -> Named "nativeint"  // proxy handle
+        | NewId -> Named "nativeint"
         | Fd -> Named "int32"
-        | Array -> Generic("Option", Named "nativeint")
+        | Array -> Named "nativeint"  // wl_array pointer
 
     /// Convert a protocol arg value to nativeint for the argument array.
     let private argToNativeint (arg: ProtocolArg) : FsExpr =
@@ -361,10 +361,10 @@ module ProtocolParser =
 
         // Build the body
         let flags =
-            if request.IsDestructor then Literal $"{config.DestroyFlag}u"
-            else Literal "0u"
+            if request.IsDestructor then TypeConversion("uint32", Literal $"{config.DestroyFlag}")
+            else TypeConversion("uint32", Literal "0")
 
-        let opcodeExpr = Literal $"{opcode}u"
+        let opcodeExpr = TypeConversion("uint32", Literal $"{opcode}")
 
         // Interface pointer: resolve via dlsym for typed new_id, or use caller-provided for untyped
         let interfaceExpr =
@@ -372,7 +372,7 @@ module ProtocolParser =
                 match newIdArg with
                 | Some a ->
                     let targetIface = a.Interface |> Option.defaultValue iface.Name
-                    FunctionCall("Fidelity.Libc.DynamicLink", "dlsym", [Literal "0n"; Literal $"\"{targetIface}_interface\""])
+                    FunctionCall("", "dlsym", [Literal "0n"; Literal $"\"{targetIface}_interface\""])
                 | None -> Literal "0n"
             elif isUntypedNewId then
                 Identifier "``interface``"
@@ -384,7 +384,7 @@ module ProtocolParser =
             if isUntypedNewId then
                 Identifier "version"
             else
-                FunctionCall(config.MarshalModule, config.VersionFunction, [FunctionCall("", "Some", [Identifier "self"])])
+                FunctionCall("", config.VersionFunction, [FunctionCall("", "Some", [Identifier "self"])])
 
         // For requests with no args (besides self and new_id), pass None for args array
         // For requests with args, we need to construct the argument array
@@ -394,7 +394,7 @@ module ProtocolParser =
             if marshalArgs.IsEmpty && not isUntypedNewId then
                 // Simple case: no argument array needed
                 let marshalCall =
-                    FunctionCall(config.MarshalModule, config.MarshalFunction,
+                    FunctionCall("", config.MarshalFunction,
                         [ FunctionCall("", "Some", [Identifier "self"])
                           opcodeExpr
                           FunctionCall("", "Some", [interfaceExpr])
@@ -416,7 +416,7 @@ module ProtocolParser =
                 // This requires constructing an argument array with the bind-specific args
                 // For now, generate with the regular args + interface name + version + NULL sentinel
                 let marshalCall =
-                    FunctionCall(config.MarshalModule, config.MarshalFunction,
+                    FunctionCall("", config.MarshalFunction,
                         [ FunctionCall("", "Some", [Identifier "self"])
                           opcodeExpr
                           FunctionCall("", "Some", [Identifier "``interface``"])
@@ -438,21 +438,21 @@ module ProtocolParser =
                         let offset = i * 8
                         // NativePtr.set on the buffer cast to nativeptr<nativeint>
                         let writeExpr =
-                            FunctionCall("NativeInterop.NativePtr", "set",
+                            FunctionCall("NativePtr", "set",
                                 [ Identifier "argsPtr"; Literal $"{i}"; argToNativeint arg ])
                         (i, writeExpr))
 
                 // Build the sequential expression: alloc, write args, marshal, free
                 let allocExpr =
-                    FunctionCall("Fidelity.Libc.Memory", "malloc",
+                    FunctionCall("", "malloc",
                         [ TypeConversion("unativeint", Literal allocSize) ])
                 let castExpr =
-                    FunctionCall("NativeInterop.NativePtr", "ofNativeInt",
+                    FunctionCall("NativePtr", "ofNativeInt",
                         [ Identifier "argsRaw" ])
 
                 // Chain: let argsRaw = malloc(...) in let argsPtr = cast in write0; write1; ... marshal; free
                 let marshalCall =
-                    FunctionCall(config.MarshalModule, config.MarshalFunction,
+                    FunctionCall("", config.MarshalFunction,
                         [ FunctionCall("", "Some", [Identifier "self"])
                           opcodeExpr
                           FunctionCall("", "Some", [interfaceExpr])
@@ -461,7 +461,7 @@ module ProtocolParser =
                           FunctionCall("", "Some", [Identifier "argsRaw"]) ])
 
                 let freeCall =
-                    FunctionCall("Fidelity.Libc.Memory", "free",
+                    FunctionCall("", "free",
                         [ FunctionCall("", "Some", [Identifier "argsRaw"]) ])
 
                 // Build nested let expressions for arg writes, then marshal + free
