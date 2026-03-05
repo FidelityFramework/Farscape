@@ -32,22 +32,22 @@ let ``generate produces valid Fidelity binding for simple function`` () =
     Assert.Contains("NativeDefault.zeroed ()", result)
 
 [<Fact>]
-let ``generate maps char pointer params to Option<nativeptr<byte>> (nullable by default)`` () =
+let ``generate maps char pointer params to option<nativeptr<byte>> (nullable by default)`` () =
     let decls = [
         CppParser.Declaration.Function (mkFunc "strlen" "unsigned long" [("__s", "const char *")])
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
-    Assert.Contains("(s: Option<nativeptr<byte>>)", result)
+    Assert.Contains("(s: option<nativeptr<byte>>)", result)
 
 [<Fact>]
-let ``generate maps void pointer params to Option<nativeint> (nullable by default)`` () =
+let ``generate maps void pointer params to option<nativeint> (nullable by default)`` () =
     let decls = [
         CppParser.Declaration.Function (mkFunc "memset" "void *" [("__s", "void *"); ("__c", "int"); ("__n", "size_t")])
         CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
-    Assert.Contains("(s: Option<nativeint>)", result)
-    Assert.Contains(": Option<nativeint> =", result)
+    Assert.Contains("(s: option<nativeint>)", result)
+    Assert.Contains(": option<nativeint> =", result)
 
 [<Fact>]
 let ``generate handles function pointer params as nativeint`` () =
@@ -77,8 +77,8 @@ let ``generate does not map wchar_t pointer as nativeptr<byte>`` () =
         CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
-    // wchar_t * should be Option<nativeint>, not nativeptr<byte>
-    Assert.Contains("(pwc: Option<nativeint>)", result)
+    // wchar_t * should be option<nativeint>, not nativeptr<byte>
+    Assert.Contains("(pwc: option<nativeint>)", result)
 
 [<Fact>]
 let ``generate emits numeric macro constants`` () =
@@ -207,12 +207,12 @@ let ``generate emits FidelityExtern with correct library name`` () =
 // ─── Nullable Pointer Architecture Tests ────────────────────────────
 
 [<Fact>]
-let ``pointer param without NonNullAttr emits as Option`` () =
+let ``pointer param without NonNullAttr emits as option`` () =
     let decls = [
         CppParser.Declaration.Function (mkFunc "read" "ssize_t" [("fd", "int"); ("buf", "void *"); ("count", "size_t")])
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "libc" Types.LP64 Map.empty
-    Assert.Contains("(buf: Option<nativeint>)", result)
+    Assert.Contains("(buf: option<nativeint>)", result)
 
 [<Fact>]
 let ``pointer param WITH NonNullAttr emits without Option`` () =
@@ -236,20 +236,20 @@ let ``mixed nullable and nonnull params in same function`` () =
     Assert.Contains("(src: nativeint)", result)
 
 [<Fact>]
-let ``pointer return type emits as Option by default`` () =
+let ``pointer return type emits as option by default`` () =
     let decls = [
         CppParser.Declaration.Function (mkFunc "malloc" "void *" [("size", "size_t")])
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "libc" Types.LP64 Map.empty
-    Assert.Contains(": Option<nativeint> =", result)
+    Assert.Contains(": option<nativeint> =", result)
 
 [<Fact>]
-let ``const char pointer param emits as Option of nativeptr`` () =
+let ``const char pointer param emits as option of nativeptr`` () =
     let decls = [
         CppParser.Declaration.Function (mkFunc "puts" "int" [("s", "const char *")])
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "libc" Types.LP64 Map.empty
-    Assert.Contains("(s: Option<nativeptr<byte>>)", result)
+    Assert.Contains("(s: option<nativeptr<byte>>)", result)
 
 [<Fact>]
 let ``function pointer param does NOT get Option wrapping`` () =
@@ -257,7 +257,7 @@ let ``function pointer param does NOT get Option wrapping`` () =
         CppParser.Declaration.Function (mkFunc "signal" "void (*)(int)" [("sig", "int"); ("handler", "void (*)(int)")])
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "libc" Types.LP64 Map.empty
-    // function pointer → nativeint, NOT Option<nativeint>
+    // function pointer → nativeint, NOT option<nativeint>
     Assert.Contains("(handler: nativeint)", result)
 
 [<Fact>]
@@ -276,7 +276,7 @@ let ``TOML nonnull annotations override nullable default`` () =
     // ctx (idx 0) is nonnull via TOML
     Assert.Contains("(ctx: nativeint)", result)
     // buf (idx 1) is still nullable
-    Assert.Contains("(buf: Option<nativeint>)", result)
+    Assert.Contains("(buf: option<nativeint>)", result)
 
 [<Fact>]
 let ``TOML nonnull_returns prevents Option on return type`` () =
@@ -293,7 +293,7 @@ let ``TOML nonnull_returns prevents Option on return type`` () =
     let result = FidelityCodeGenerator.generateModule ctx Set.empty decls "Test" "lib" "test" []
     // Return is nonnull via TOML
     Assert.Contains(": nativeint =", result)
-    Assert.DoesNotContain("Option<nativeint> =", result)
+    Assert.DoesNotContain("option<nativeint> =", result)
 
 // ─── NTU Dimensional Type System (DTS) Tests ────────────────────────────
 // These tests ensure Farscape emits NTU dimensional types (int, uint) for

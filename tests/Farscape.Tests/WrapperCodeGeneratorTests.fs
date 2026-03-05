@@ -291,7 +291,8 @@ module NullWithReasonWrapperTests =
         let output = generateWithNullReason "stbi_load" "void *"
                         [("filename", "const char *"); ("x", "int *"); ("y", "int *"); ("channels", "int *"); ("desired", "int")]
                         [{ CppParser.AttributeData.Kind = "MallocAttr"; Args = []; StringArg = None }]
-        Assert.Contains("if result <> 0n then", output)
+        Assert.Contains("| Some result ->", output)
+        Assert.Contains("| None ->", output)
 
     [<Fact>]
     let ``null_with_reason does not generate captureError helper`` () =

@@ -121,17 +121,16 @@ module WrapperCodeGenerator =
                 ResultError(errorExpr)))
 
     /// Generate wrapper body for AllocatedPointer pattern (e.g., malloc, stbi_load).
-    /// let result = Bindings.malloc size
-    /// if result <> 0n then Ok result
-    /// else Error (captureReason ())
+    /// L1 returns option<nativeint>; match to unwrap:
+    /// match Bindings.malloc size with
+    /// | Some result -> Ok result
+    /// | None -> Error (captureReason ())
     let private allocatedPointerBody (bindingsModule: string) (funcName: string) (paramNames: string list) (errorHandling: ErrorHandling) : FsExpr =
         let rawCall = buildRawCall bindingsModule funcName paramNames
         let errorExpr = buildErrorExpr errorHandling bindingsModule (Literal "()")
-        LetIn("result", rawCall,
-            IfThenElse(
-                Comparison(Identifier "result", "<>", Literal "0n"),
-                ResultOk(Identifier "result"),
-                ResultError(errorExpr)))
+        MatchExpr(rawCall,
+            [("Some result", ResultOk(Identifier "result"))
+             ("None", ResultError(errorExpr))])
 
     /// Generate wrapper body for OpaqueHandleReturn pattern (e.g., fopen).
     /// Same structure as AllocatedPointer; null check.

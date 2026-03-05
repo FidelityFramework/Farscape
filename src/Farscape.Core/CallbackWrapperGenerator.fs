@@ -105,11 +105,17 @@ module CallbackWrapperGenerator =
 
         let returnType = mapReturnType funcDecl.ReturnType model
 
-        // Body: let handler = Fidelity.Libc.DynamicLink.dlsym 0n handlerSymbol in originalFunc arg1 handler arg2 ...
+        // Body: let handler = match dlsym (Some 0n) (Some handlerSymbol.Pointer) with Some v -> v | None -> 0n
+        //       in originalFunc arg1 handler arg2 ...
         // Fully qualified to avoid L2 wrapper shadowing (L2 dlsym returns Result<nativeint, CError>)
+        let dlsymCall =
+            MatchExpr(
+                FunctionCall("Fidelity.Libc.DynamicLink", "dlsym",
+                    [FunctionCall("", "Some", [Literal "0n"])
+                     FunctionCall("", "Some", [Identifier "handlerSymbol.Pointer"])]),
+                [("Some v", Identifier "v"); ("None", Literal "0n")])
         let body =
-            LetIn("handler",
-                FunctionCall("Fidelity.Libc.DynamicLink", "dlsym", [Literal "0n"; Identifier "handlerSymbol"]),
+            LetIn("handler", dlsymCall,
                 FunctionCall("", reg.Function,
                     funcDecl.Parameters |> List.map (fun (name, _) ->
                         if name = reg.CallbackParam then Identifier "handler"
@@ -187,13 +193,27 @@ module CallbackWrapperGenerator =
                 callbackFields |> List.map (fun f ->
                     { Name = f.Name + "Sym"; Type = Named "string" })
 
-            // Resolve each symbol via dlsym, then call the L2 direct builder
-            let dlsymArgs =
-                callbackFields |> List.map (fun f ->
-                    FunctionCall("Fidelity.Libc.DynamicLink", "dlsym",
-                        [Literal "0n"; Identifier (f.Name + "Sym")]))
+            // Resolve each symbol via dlsym, binding each result to a local before calling L2 builder.
+            // dlsym returns option<nativeint>; unwrap via match (None → 0n).
+            let resolvedNames =
+                callbackFields |> List.map (fun f -> f.Name + "Ptr")
 
-            let body = FunctionCall(l2CallbackModule, builderName, dlsymArgs)
+            let builderCall =
+                FunctionCall(l2CallbackModule, builderName,
+                    resolvedNames |> List.map Identifier)
+
+            // Chain LetIn bindings: let globalPtr = match dlsym ... | ... in let global_removePtr = ... in builderCall
+            let body =
+                List.foldBack2 (fun (f: CppParser.FieldDecl) resolvedName acc ->
+                    let symParam = f.Name + "Sym"
+                    let dlsymExpr =
+                        MatchExpr(
+                            FunctionCall("Fidelity.Libc.DynamicLink", "dlsym",
+                                [FunctionCall("", "Some", [Literal "0n"])
+                                 FunctionCall("", "Some", [Identifier $"{symParam}.Pointer"])]),
+                            [("Some v", Identifier "v"); ("None", Literal "0n")])
+                    LetIn(resolvedName, dlsymExpr, acc))
+                    callbackFields resolvedNames builderCall
 
             [ XmlDoc $"Build a {ls.Name} by resolving C symbol names via dlsym(RTLD_DEFAULT)."
               XmlDoc "Each parameter is a C symbol name resolved at runtime."

@@ -159,8 +159,8 @@ module FidelityCodeGenerator =
         | None ->
             [ XmlDoc cSignature ]
 
-    /// Wrap an FsType in Option<> for nullable pointer parameters.
-    let wrapOption (ty: FsType) : FsType = Generic("Option", ty)
+    /// Wrap an FsType in option<> for nullable pointer parameters.
+    let wrapOption (ty: FsType) : FsType = Generic("option", ty)
 
     /// Check if a C type string represents a data pointer (not a function pointer).
     /// Function pointers contain "(*)" and are excluded — they map to nativeint
