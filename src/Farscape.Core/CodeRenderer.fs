@@ -128,7 +128,7 @@ module CodeRenderer =
                 sb.AppendLine($"{prefix}[<System.Flags>]") |> ignore
             sb.AppendLine($"{prefix}type {name} =") |> ignore
             for (vname, vval) in values do
-                sb.AppendLine($"{prefix}    | {vname} = {vval}L") |> ignore
+                sb.AppendLine($"{prefix}    | {cleanParamName vname} = {vval}L") |> ignore
             sb.AppendLine() |> ignore
 
         | SubModule (name, decls) ->

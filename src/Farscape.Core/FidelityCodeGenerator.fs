@@ -288,6 +288,7 @@ module FidelityCodeGenerator =
         OnEnum = fun e -> if e.Name <> "" then GEnum (generateEnumDecl e) else GNone
         OnStruct = fun s ->
             if s.Name = "" then GNone
+            elif s.Fields.IsEmpty then GNone  // Fieldless structs are opaque — no record type (empty records are invalid syntax)
             else
                 match Map.tryFind s.Name structLayouts with
                 | Some layout -> GStruct (generateExplicitStructDecl typedefMap model opaqueHandles delegateNames layout s)

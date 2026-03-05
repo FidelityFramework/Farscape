@@ -83,11 +83,13 @@ module ActivePatterns =
         else CleanName stripped
 
     /// Clean a C parameter name for use in F#.
-    /// Strips leading underscores and backtick-quotes F# keywords.
+    /// Strips leading underscores, backtick-quotes F# keywords, and prefixes leading digits.
     let cleanParamName (name: string) : string =
         match name with
         | FSharpKeyword kw -> $"``{kw}``"
-        | CleanName n -> n
+        | CleanName n ->
+            if n.Length > 0 && System.Char.IsDigit(n.[0]) then $"_{n}"
+            else n
 
     // =========================================================================
     // Opaque Handle Detection

@@ -154,10 +154,11 @@ module CallbackWrapperGenerator =
 
             let fields =
                 structDecl.Fields |> List.map (fun f ->
+                    let fieldName = cleanParamName f.Name
                     if isCallbackField delegateNames f then
-                        (f.Name, Identifier (cleanParamName f.Name))
+                        (fieldName, Identifier (cleanParamName f.Name))
                     else
-                        (f.Name, Literal "NativeDefault.zeroed ()"))
+                        (fieldName, Literal "NativeDefault.zeroed ()"))
 
             let body = RecordConstruction fields
 

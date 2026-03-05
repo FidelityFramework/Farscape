@@ -153,6 +153,30 @@ let ``generate does not emit Flags for sequential enum`` () =
     Assert.Contains("type hipError_t =", result)
 
 [<Fact>]
+let ``enum case names that are F# keywords are backtick-escaped`` () =
+    let decls = [
+        CppParser.Declaration.Enum (mkEnum "wl_shell_surface_fullscreen_method"
+            [mkEnumVal "default" 0L; mkEnumVal "scale" 1L; mkEnumVal "driver" 2L; mkEnumVal "fill" 3L]
+            None)
+    ]
+    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
+    Assert.Contains("| ``default`` = 0L", result)
+    Assert.Contains("| scale = 1L", result)
+
+[<Fact>]
+let ``enum case names starting with digit get underscore prefix`` () =
+    let decls = [
+        CppParser.Declaration.Enum (mkEnum "wl_output_transform"
+            [mkEnumVal "normal" 0L; mkEnumVal "90" 1L; mkEnumVal "180" 2L; mkEnumVal "270" 3L]
+            None)
+    ]
+    let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
+    Assert.Contains("| normal = 0L", result)
+    Assert.Contains("| _90 = 1L", result)
+    Assert.Contains("| _180 = 2L", result)
+    Assert.Contains("| _270 = 3L", result)
+
+[<Fact>]
 let ``generate emits struct as record`` () =
     let decls = [
         CppParser.Declaration.Struct (mkStruct "Point" [mkField "x" "int"; mkField "y" "int"] (Some "A point"))
@@ -332,3 +356,17 @@ let ``struct fields with C int use NTU int`` () =
     let result = FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty
     Assert.Contains("x: int", result)
     Assert.DoesNotContain("int32", result)
+
+[<Fact>]
+let ``fieldless struct emits no record type (opaque, handled via typedef path)`` () =
+    let decls = [
+        CppParser.Declaration.Struct (mkStruct "wl_proxy" [] None)
+        CppParser.Declaration.Struct (mkStruct "wl_object" [] None)
+        CppParser.Declaration.Struct (mkStruct "Point" [mkField "x" "int"; mkField "y" "int"] None)
+    ]
+    let result = FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty
+    // Fieldless structs should be suppressed — they are opaque types
+    Assert.DoesNotContain("type wl_proxy", result)
+    Assert.DoesNotContain("type wl_object", result)
+    // Structs with fields should still be emitted
+    Assert.Contains("type Point = {", result)
