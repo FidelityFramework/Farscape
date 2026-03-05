@@ -2,6 +2,7 @@ namespace Farscape.Core
 
 open System.Text
 open CodeAST
+open ActivePatterns
 
 /// Renders FsDecl AST nodes to F# source code strings.
 ///
@@ -17,12 +18,12 @@ module CodeRenderer =
         | Unit -> "unit"
 
     /// Render an FsParam to "(name: type)" form
-    let renderParam (p: FsParam) = $"({p.Name}: {renderType p.Type})"
+    let renderParam (p: FsParam) = $"({cleanParamName p.Name}: {renderType p.Type})"
 
     /// Render an FsExpr to its F# string representation.
     /// The indent parameter is the continuation indent for multi-line expressions.
     let rec renderExpr (indent: string) = function
-        | DefaultOf ty -> $"Unchecked.defaultof<{renderType ty}>"
+        | NativeZeroed -> "NativeDefault.zeroed ()"
         | FunctionCall (mod', name, args) ->
             let argStr = args |> List.map (renderArg indent) |> String.concat " "
             if mod' = "" then $"{name} {argStr}"
@@ -43,11 +44,18 @@ module CodeRenderer =
             | Identifier _ | Literal _ -> $"Error {renderExpr indent expr}"
             | _ -> $"Error ({renderExpr indent expr})"
         | LetIn (name, binding, body) ->
-            $"let {name} = {renderExpr indent binding}\n{indent}{renderExpr indent body}"
+            match binding with
+            | MatchExpr _ ->
+                // Put match on new line with extra indent so CCS doesn't confuse
+                // match arms with subsequent let bindings
+                let innerIndent = indent + "    "
+                $"let {name} =\n{innerIndent}{renderExpr innerIndent binding}\n{indent}{renderExpr indent body}"
+            | _ ->
+                $"let {name} = {renderExpr indent binding}\n{indent}{renderExpr indent body}"
         | RecordConstruction fields ->
             let fieldStr =
                 fields
-                |> List.map (fun (name, expr) -> $"{name} = {renderExpr indent expr}")
+                |> List.map (fun (name, expr) -> $"{cleanParamName name} = {renderExpr indent expr}")
                 |> String.concat "; "
             $"{{ {fieldStr} }}"
         | MatchExpr (scrutinee, cases) ->
@@ -108,7 +116,7 @@ module CodeRenderer =
                 sb.AppendLine($"{prefix}[<{attr}>]") |> ignore
             sb.AppendLine($"{prefix}type {name} = {{") |> ignore
             for (fname, ftype) in fields do
-                sb.AppendLine($"{prefix}    {fname}: {renderType ftype}") |> ignore
+                sb.AppendLine($"{prefix}    {cleanParamName fname}: {renderType ftype}") |> ignore
             sb.AppendLine($"{prefix}}}") |> ignore
             sb.AppendLine() |> ignore
 

@@ -60,33 +60,49 @@ let ``generateCErrorType produces Struct-attributed record`` () =
     | _ -> Assert.Fail "Expected RecordType"
 
 [<Fact>]
-let ``generateErrnoDecls produces Literal constants and describe function`` () =
+let ``generateErrnoDecls wraps constants and describe in Errno SubModule`` () =
     let constants = [
         { Name = "EPERM"; Value = 1L; Description = Some "Operation not permitted" }
         { Name = "ENOENT"; Value = 2L; Description = Some "No such file or directory" }
     ]
     let decls = generateErrnoDecls constants
-    // Should have XmlDoc + LiteralBinding for each constant, then BlankLine + 2 XmlDocs + describe LetBinding
-    let literals = decls |> List.choose (function LiteralBinding (n, v) -> Some (n, v) | _ -> None)
-    Assert.Equal(2, literals.Length)
-    Assert.Equal(("EPERM", "1"), literals.[0])
-    Assert.Equal(("ENOENT", "2"), literals.[1])
-    // Should have a describe LetBinding
-    let letBindings = decls |> List.choose (function LetBinding (n, _, _, _, _) -> Some n | _ -> None)
-    Assert.Contains("describe", letBindings)
+    Assert.Equal(1, decls.Length)
+    match decls.[0] with
+    | SubModule (name, innerDecls) ->
+        Assert.Equal("Errno", name)
+        let literals = innerDecls |> List.choose (function LiteralBinding (n, v) -> Some (n, v) | _ -> None)
+        Assert.Equal(2, literals.Length)
+        Assert.Equal(("EPERM", "1"), literals.[0])
+        Assert.Equal(("ENOENT", "2"), literals.[1])
+        let letBindings = innerDecls |> List.choose (function LetBinding (n, _, _, _, _) -> Some n | _ -> None)
+        Assert.Contains("describe", letBindings)
+    | _ -> Assert.Fail "Expected SubModule"
 
 [<Fact>]
-let ``generate renders complete errno module from macros`` () =
+let ``generateErrnoLocationExtern produces FidelityExtern binding`` () =
+    let decls = generateErrnoLocationExtern "c"
+    let bindings = decls |> List.choose (function LetBinding (n, _, _, _, attrs) -> Some (n, attrs) | _ -> None)
+    Assert.Equal(1, bindings.Length)
+    let (name, attrs) = bindings.[0]
+    Assert.Equal("__errno_location", name)
+    Assert.Contains("FidelityExtern(\"c\", \"__errno_location\")", attrs)
+
+[<Fact>]
+let ``generate renders complete errno module with extern and SubModule`` () =
     let macros : CppParser.MacroDecl list = [
         { Name = "EPERM"; Kind = CppParser.SimpleValue "1"; RawValue = "1"; Documentation = Some "Operation not permitted" }
         { Name = "ENOENT"; Kind = CppParser.SimpleValue "2"; RawValue = "2"; Documentation = Some "No such file or directory" }
     ]
-    let result = ErrnoModuleGenerator.generate macros "Fidelity.Errno" "libc"
-    Assert.True(result.IsSome)
-    let output = result.Value
+    let output = ErrnoModuleGenerator.generate macros "Fidelity.Errno" "c"
     Assert.Contains("[<Struct>]", output)
     Assert.Contains("type CError = {", output)
     Assert.Contains("Code: int", output)
+    // __errno_location extern
+    Assert.Contains("[<FidelityExtern(\"c\", \"__errno_location\")>]", output)
+    Assert.Contains("let __errno_location () : nativeint =", output)
+    Assert.Contains("NativeDefault.zeroed ()", output)
+    // Errno submodule with constants and describe
+    Assert.Contains("module Errno =", output)
     Assert.Contains("[<Literal>]", output)
     Assert.Contains("let EPERM = 1", output)
     Assert.Contains("let ENOENT = 2", output)
@@ -94,6 +110,17 @@ let ``generate renders complete errno module from macros`` () =
     Assert.Contains("let describe (code: int) : string =", output)
     Assert.Contains("| EPERM -> \"Operation not permitted\"", output)
     Assert.Contains("| ENOENT -> \"No such file or directory\"", output)
+    Assert.Contains("| _ -> \"Unknown error\"", output)
+
+[<Fact>]
+let ``generate with empty macros still produces CError and __errno_location`` () =
+    let output = ErrnoModuleGenerator.generate [] "Fidelity.Libc.Errno" "c"
+    Assert.Contains("[<Struct>]", output)
+    Assert.Contains("type CError = {", output)
+    Assert.Contains("[<FidelityExtern(\"c\", \"__errno_location\")>]", output)
+    Assert.Contains("let __errno_location () : nativeint =", output)
+    Assert.Contains("module Errno =", output)
+    Assert.Contains("let describe (code: int) : string =", output)
     Assert.Contains("| _ -> \"Unknown error\"", output)
 
 [<Fact>]
@@ -109,12 +136,13 @@ let ``generate with live errno.h produces complete module`` () =
     match CppParser.parseHeaderFull options with
     | Error err -> Assert.Fail $"Parse failed: {err}"
     | Ok result ->
-        let output = ErrnoModuleGenerator.generate result.Macros "Fidelity.Errno" "errno"
-        Assert.True(output.IsSome, "Should generate errno module")
-        let rendered = output.Value
+        let rendered = ErrnoModuleGenerator.generate result.Macros "Fidelity.Errno" "c"
         // Verify structural elements
         Assert.Contains("[<Struct>]", rendered)
         Assert.Contains("type CError = {", rendered)
+        Assert.Contains("[<FidelityExtern(\"c\", \"__errno_location\")>]", rendered)
+        Assert.Contains("let __errno_location () : nativeint =", rendered)
+        Assert.Contains("module Errno =", rendered)
         Assert.Contains("let describe (code: int) : string =", rendered)
         // Verify specific constants with descriptions
         Assert.Contains("let EPERM = 1", rendered)

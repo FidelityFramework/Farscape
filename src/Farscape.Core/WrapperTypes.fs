@@ -86,7 +86,7 @@ module WrapperTypes =
         /// FILE*/handle pattern: non-null = handle, null = error.
         | OpaqueHandleReturn
         /// Typed enum return: success value = OK, everything else = error (HIP/XRT pattern).
-        | EnumReturnError of enumType: string * successValue: string * errorStructName: string
+        | EnumReturnError of enumType: string * successIntValue: int64 * errorStructName: string
         /// Pure value return; no error checking needed (abs, strlen).
         | PureValue
         /// Function never returns (abort, _exit).
@@ -106,7 +106,7 @@ module WrapperTypes =
         /// Errno-based: captures errno via __errno_location and builds CError.
         | UseErrno of errnoModuleName: string
         /// Enum error code: matches return value against typed error enum.
-        | UseEnumError of enumType: string * successValue: string
+        | UseEnumError of enumType: string * successIntValue: int64
                         * errorStructName: string * describeModuleName: string
         /// Null return with companion reason function (stb_image, SDL pattern).
         /// On null pointer return, calls the reason function to get an error string pointer.

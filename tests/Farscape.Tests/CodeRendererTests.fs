@@ -24,12 +24,12 @@ let ``render LetBinding produces correct F# function`` () =
             LetBinding("myFunc",
                 [{ Name = "x"; Type = Named "int32" }; { Name = "y"; Type = Named "int32" }],
                 Named "int32",
-                DefaultOf (Named "int32"),
+                NativeZeroed,
                 [])
         ])
     let result = render decl
     Assert.Contains("let myFunc (x: int32) (y: int32) : int32 =", result)
-    Assert.Contains("Unchecked.defaultof<int32>", result)
+    Assert.Contains("NativeDefault.zeroed ()", result)
 
 [<Fact>]
 let ``render LetBinding with nativeptr param`` () =
@@ -39,7 +39,7 @@ let ``render LetBinding with nativeptr param`` () =
                 [{ Name = "dest"; Type = Generic("nativeptr", Named "byte") }
                  { Name = "src"; Type = Generic("nativeptr", Named "byte") }],
                 Generic("nativeptr", Named "byte"),
-                DefaultOf (Generic("nativeptr", Named "byte")),
+                NativeZeroed,
                 [])
         ])
     let result = render decl
@@ -103,7 +103,7 @@ let ``render XmlDoc produces triple-slash comment`` () =
 [<Fact>]
 let ``render zero-param function uses unit`` () =
     let decl = Module("Test", "test",
-        [ LetBinding("abort", [], Unit, DefaultOf Unit, []) ])
+        [ LetBinding("abort", [], Unit, NativeZeroed, []) ])
     let result = render decl
     Assert.Contains("let abort () : unit =", result)
 
@@ -115,7 +115,7 @@ let ``render LetBinding with attributes produces attribute lines`` () =
              { Name = "src"; Type = Named "nativeint" }
              { Name = "n"; Type = Named "nativeint" }],
             Named "nativeint",
-            DefaultOf (Named "nativeint"),
+            NativeZeroed,
             ["FidelityExtern(\"libc\", \"memcpy\")"]) ])
     let result = render decl
     Assert.Contains("[<FidelityExtern(\"libc\", \"memcpy\")>]", result)

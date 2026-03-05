@@ -50,18 +50,21 @@ module EnumErrorModuleGenerator =
           ErrorStringFn = errorStringFn
           ErrorNameFn = errorNameFn }
 
-    /// Generate [<Struct>] type {ErrorStructName} = { Code: {ErrorType}; Description: string }
+    /// Generate [<Struct>] type {ErrorStructName} = { ErrorCode: {ErrorType}; ErrorMessage: string }
+    /// Field names are intentionally distinct from CError (Code/Description) to avoid
+    /// record construction ambiguity when both error types are in scope.
     let generateErrorType (config: EnumErrorConfig) : FsDecl list =
         [
             RecordType(
                 config.ErrorStructName,
-                [ ("Code", Named config.ErrorType); ("Description", Named "string") ],
+                [ ("ErrorCode", Named config.ErrorType); ("ErrorMessage", Named "string") ],
                 Some $"Stack-allocated {config.ErrorType} error — carries error code and human-readable description.",
                 [ "Struct" ])
         ]
 
-    /// Generate the describe function body as a MatchExpr over enum variants.
-    /// match code with | enumType.variant -> "doc comment" | _ -> "Unknown error"
+    /// Generate the describe function body as a MatchExpr over enum integer values.
+    /// match code with | 0 -> "Success" | 1 -> "InvalidValue" | _ -> "Unknown error"
+    /// Uses integer literal patterns because CCS does not yet register enum value bindings.
     let private generateDescribeBody (config: EnumErrorConfig) (values: CppParser.EnumValue list) : FsExpr =
         let cases =
             values
@@ -70,7 +73,7 @@ module EnumErrorModuleGenerator =
                     match v.Documentation with
                     | Some d -> d
                     | None -> v.Name
-                ($"{config.ErrorType}.{v.Name}", Literal $"\"{description}\""))
+                ($"{v.Value}L", Literal $"\"{description}\""))
         let defaultCase = ("_", Literal $"\"Unknown {config.ErrorType} error\"")
         MatchExpr(Identifier "code", cases @ [ defaultCase ])
 
@@ -86,8 +89,8 @@ module EnumErrorModuleGenerator =
                 [])
         let captureBody =
             RecordConstruction [
-                ("Code", Identifier "code")
-                ("Description", FunctionCall("", "describe", [Identifier "code"]))
+                ("ErrorCode", Identifier "code")
+                ("ErrorMessage", FunctionCall("", "describe", [Identifier "code"]))
             ]
         let captureFunc =
             LetBinding(

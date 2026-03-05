@@ -43,7 +43,7 @@ module DescriptorGenerator =
         (opaqueHandles: Set<string>)
         : string =
 
-        let mapType = FidelityCodeGenerator.mapCTypeToFidelityType typedefMap model opaqueHandles
+        let mapType = FidelityCodeGenerator.mapCTypeToFidelityType typedefMap model opaqueHandles Set.empty
 
         let sb = System.Text.StringBuilder()
         sb.AppendLine($"module {namespace'}") |> ignore

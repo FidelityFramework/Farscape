@@ -372,7 +372,7 @@ module ProtocolParser =
                 match newIdArg with
                 | Some a ->
                     let targetIface = a.Interface |> Option.defaultValue iface.Name
-                    FunctionCall("", "dlsym", [Literal "0n"; Literal $"\"{targetIface}_interface\""])
+                    FunctionCall("Fidelity.Libc.DynamicLink", "dlsym", [Literal "0n"; Literal $"\"{targetIface}_interface\""])
                 | None -> Literal "0n"
             elif isUntypedNewId then
                 Identifier "``interface``"

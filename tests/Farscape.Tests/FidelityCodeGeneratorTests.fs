@@ -29,7 +29,7 @@ let ``generate produces valid Fidelity binding for simple function`` () =
     let result = FidelityCodeGenerator.generate decls "Fidelity.libc.Test" "libc" Types.LP64 Map.empty
     Assert.Contains("module Fidelity.libc.Test", result)
     Assert.Contains("let getpid () : int =", result)
-    Assert.Contains("Unchecked.defaultof<int>", result)
+    Assert.Contains("NativeDefault.zeroed ()", result)
 
 [<Fact>]
 let ``generate maps char pointer params to Option<nativeptr<byte>> (nullable by default)`` () =
@@ -244,6 +244,7 @@ let ``TOML nonnull annotations override nullable default`` () =
     let ctx : FidelityCodeGenerator.GenerationContext =
         { TypedefMap = FidelityCodeGenerator.buildTypedefMap decls
           OpaqueHandles = FidelityCodeGenerator.detectOpaqueHandles decls
+          DelegateNames = Set.empty
           DataModel = Types.LP64
           StructLayouts = Map.empty
           NonnullAnnotations = nonnull }
@@ -261,6 +262,7 @@ let ``TOML nonnull_returns prevents Option on return type`` () =
     let ctx : FidelityCodeGenerator.GenerationContext =
         { TypedefMap = FidelityCodeGenerator.buildTypedefMap decls
           OpaqueHandles = FidelityCodeGenerator.detectOpaqueHandles decls
+          DelegateNames = Set.empty
           DataModel = Types.LP64
           StructLayouts = Map.empty
           NonnullAnnotations = nonnull }
@@ -311,6 +313,16 @@ let ``C int dimensional type is consistent across all platform ABIs`` () =
         Assert.Contains(": int =", result)
         Assert.DoesNotContain("int32", result)
         Assert.DoesNotContain("int16", result)
+
+[<Fact>]
+let ``delegate-typed struct fields map to nativeint`` () =
+    let decls = [
+        CppParser.Declaration.Delegate { Name = "wl_display_error_func_t"; Parameters = [("data", "void *"); ("code", "int")]; ReturnType = "void"; Documentation = None }
+        CppParser.Declaration.Struct (mkStruct "wl_listener" [mkField "notify" "wl_display_error_func_t"] None)
+    ]
+    let result = FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty
+    Assert.Contains("notify: nativeint", result)
+    Assert.DoesNotContain("delegate of", result)
 
 [<Fact>]
 let ``struct fields with C int use NTU int`` () =

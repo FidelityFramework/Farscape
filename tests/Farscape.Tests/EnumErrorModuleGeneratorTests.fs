@@ -46,18 +46,18 @@ let ``generates error struct with Struct attribute`` () =
     let text = output.Value
     Assert.Contains("[<Struct>]", text)
     Assert.Contains("type HipError = {", text)
-    Assert.Contains("Code: hipError_t", text)
-    Assert.Contains("Description: string", text)
+    Assert.Contains("ErrorCode: hipError_t", text)
+    Assert.Contains("ErrorMessage: string", text)
 
 [<Fact>]
-let ``generates describe function with enum-qualified patterns`` () =
+let ``generates describe function with integer literal patterns`` () =
     let config = makeHipConfig ()
     let output = EnumErrorModuleGenerator.generate { Name = "hipError_t"; Values = hipValues; Documentation = None; UnderlyingType = None } config "Fidelity.HIP.Errors" ["Fidelity.HIP.Types"]
     let text = output.Value
     Assert.Contains("let describe (code: hipError_t) : string =", text)
-    Assert.Contains("| hipError_t.hipSuccess ->", text)
+    Assert.Contains("| 0L ->", text)
     Assert.Contains("\"Successful completion\"", text)
-    Assert.Contains("| hipError_t.hipErrorInvalidValue ->", text)
+    Assert.Contains("| 1L ->", text)
     Assert.Contains("\"Invalid Value\"", text)
 
 [<Fact>]
@@ -66,7 +66,7 @@ let ``describe falls back to variant name when no doc comment`` () =
     let output = EnumErrorModuleGenerator.generate { Name = "hipError_t"; Values = hipValues; Documentation = None; UnderlyingType = None } config "Fidelity.HIP.Errors" ["Fidelity.HIP.Types"]
     let text = output.Value
     // hipErrorUnknown has no doc comment, should use the variant name
-    Assert.Contains("| hipError_t.hipErrorUnknown ->", text)
+    Assert.Contains("| 999L ->", text)
     Assert.Contains("\"hipErrorUnknown\"", text)
 
 [<Fact>]
@@ -83,8 +83,8 @@ let ``generates capture function building error record`` () =
     let output = EnumErrorModuleGenerator.generate { Name = "hipError_t"; Values = hipValues; Documentation = None; UnderlyingType = None } config "Fidelity.HIP.Errors" ["Fidelity.HIP.Types"]
     let text = output.Value
     Assert.Contains("let capture (code: hipError_t) : HipError =", text)
-    Assert.Contains("Code = code", text)
-    Assert.Contains("Description = describe code", text)
+    Assert.Contains("ErrorCode = code", text)
+    Assert.Contains("ErrorMessage = describe code", text)
 
 [<Fact>]
 let ``generate returns None for empty enum`` () =

@@ -18,20 +18,20 @@ Every piece carries intent forward. `[<FidelityExtern>]` carries library name + 
 
 ### Layer 1: Platform.Bindings (core infrastructure)
 Raw extern binding declarations with `[<FidelityExtern>]` attributes:
-```fsharp
+```clef
 [<FidelityExtern("libc", "write")>]
-let write (fd: int32) (buf: nativeint) (count: nativeint) : int64 =
-    Unchecked.defaultof<int64>
+let write (fd: int) (buf: nativeint) (count: nativeint) : int64 =
+    NativeDefault.zeroed ()
 ```
 
-The `Unchecked.defaultof<T>` body is a compiler-recognized placeholder. CCS type-checks the declaration. Baker recognizes the pattern. Alex emits platform-specific MLIR. The `[<FidelityExtern>]` attribute tells the pipeline which library and symbol this binding targets.
+The `NativeDefault.zeroed()` body is a CCS intrinsic (`unit → 'T`, polymorphic zero init). `Unchecked.defaultof<T>` is BCL and rejected by CCS. CCS type-checks the declaration. Baker recognizes the pattern. Alex emits platform-specific MLIR. The `[<FidelityExtern>]` attribute tells the pipeline which library and symbol this binding targets.
 
 **Current state**: Declarations generate without `[<FidelityExtern>]` attribute. Alex infers from naming conventions. Adding the attribute is core infrastructure work that closes the loop.
 
 ### Layer 2: Idiomatic Clef Wrappers (implemented)
 Safe functional APIs that call Layer 1:
 - C error codes → `Result<T, CError>` with errno capture + description from header comments
-- `CError` is `[<Struct>]` (stack-allocated): Code (int32) + Description (rodata string pointer)
+- `CError` is `[<Struct>]` (stack-allocated): Code (int, NTU register-width) + Description (rodata string pointer)
 - `Errno.describe` function compiles to jump table over rodata strings — O(1), zero allocation
 - Return semantic classification (7 patterns driven by 12 clang attribute types)
 - Error convention configurable via Pilot TOML `[error_conventions]` (errno vs return_code)
@@ -101,9 +101,9 @@ Farscape exposed the C `int`/`long` width problem that catalyzed the broader NTU
 rethinking. But the solution lives in the NTU and Fidelity.Platform, not in Farscape.
 
 **For Fidelity output**: Farscape uses PlatformABI to resolve C-specific widths at generation
-time, emitting Fixed-width NTU types. C `int` on LP64 → `int32` (Fixed 32). C `long` on LP64
-→ `int64` (Fixed 64). Only genuinely platform-abstract types (`size_t → unativeint`,
-`intptr_t → nativeint`) use Resolved dimensions.
+time, emitting Fixed-width NTU types. C `int` → NTU `int` (register-width dimensional, NOT int32). C `unsigned int` → NTU `uint` (NOT uint32). C `long` on LP64 → `int64` (Fixed 64). Only genuinely fixed-width C types (`int32_t`, `uint16_t`) map to fixed NTU types. Platform-abstract types (`size_t → unativeint`, `intptr_t → nativeint`) use Resolved dimensions.
+
+**Callback struct fields use `FnPtr<'F>`** — Clef-native typed function pointer. NOT CLR delegates (not in Clef's type algebra), NOT raw nativeint (loses callback signature). Callback builders use `FnPtr.fromSymbol` for runtime symbol resolution.
 
 **What this means for Farscape**: No changes needed beyond PlatformABI-aware Fidelity output.
 New NTU dimensions come from Fidelity.Platform, not from binding generators. Farscape binds

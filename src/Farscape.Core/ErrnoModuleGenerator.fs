@@ -71,40 +71,61 @@ module ErrnoModuleGenerator =
         let defaultCase = ("_", Literal "\"Unknown error\"")
         MatchExpr(Identifier "code", cases @ [ defaultCase ])
 
-    /// Generate the complete Errno module: constants + describe function.
-    /// Returns FsDecl list to be included in the output module.
+    /// Generate the Errno submodule: constants + describe function.
+    /// Wrapped in SubModule("Errno", ...) so `Errno.describe` resolves after opening the parent module.
     let generateErrnoDecls (constants: ErrnoConstant list) : FsDecl list =
-        if constants.IsEmpty then []
-        else
-            let literals = generateLiteralConstants constants
-            let describeBody = generateDescribeBody constants
-            let describeFunc =
-                LetBinding(
-                    "describe",
-                    [ { Name = "code"; Type = Named "int" } ],
-                    Named "string",
-                    describeBody,
-                    [])
+        let literals = generateLiteralConstants constants
+        let describeBody = generateDescribeBody constants
+        let describeFunc =
+            LetBinding(
+                "describe",
+                [ { Name = "code"; Type = Named "int" } ],
+                Named "string",
+                describeBody,
+                [])
+        let captureBody =
+            RecordConstruction [
+                ("Code", Identifier "code")
+                ("Description", FunctionCall("", "describe", [Identifier "code"]))
+            ]
+        let captureFunc =
+            LetBinding(
+                "capture",
+                [ { Name = "code"; Type = Named "int" } ],
+                Named "CError",
+                captureBody,
+                [])
+        let innerDecls =
             literals
             @ [ BlankLine
                 XmlDoc "Errno code to description string. Generated from header comments."
                 XmlDoc "Compiles to a jump table with string pointers into rodata. Zero allocation."
-                describeFunc ]
+                describeFunc
+                BlankLine
+                XmlDoc "Capture errno code with compile-time description."
+                captureFunc ]
+        [ SubModule("Errno", innerDecls) ]
 
-    /// Generate the complete errno infrastructure as a rendered F# source string.
-    /// Produces: CError type + Errno module with constants and describe function.
+    /// Generate the __errno_location FidelityExtern declaration.
+    /// int *__errno_location(void) — returns pointer to thread-local errno.
+    let generateErrnoLocationExtern (cLibraryName: string) : FsDecl list =
+        [ XmlDoc "Returns pointer to thread-local errno value."
+          LetBinding("__errno_location", [], Named "nativeint", NativeZeroed,
+                     [$"FidelityExtern(\"{cLibraryName}\", \"__errno_location\")"]) ]
+
+    /// Generate the complete errno infrastructure as a rendered source string.
+    /// Produces: CError type + __errno_location extern + Errno submodule (constants + describe).
+    /// Always generates output — CError and __errno_location are needed even without errno constants.
     let generate
         (macros: CppParser.MacroDecl list)
         (namespace': string)
-        (libraryName: string)
-        : string option =
+        (cLibraryName: string)
+        : string =
 
         let constants = filterErrnoMacros macros
-
-        if constants.IsEmpty then None
-        else
-            let errorTypeDecls = generateCErrorType ()
-            let errnoDecls = generateErrnoDecls constants
-            let allDecls = errorTypeDecls @ [ BlankLine ] @ errnoDecls
-            let moduleDecl = Module(namespace', libraryName, allDecls)
-            Some (CodeRenderer.render moduleDecl)
+        let errorTypeDecls = generateCErrorType ()
+        let externDecl = generateErrnoLocationExtern cLibraryName
+        let errnoDecls = generateErrnoDecls constants
+        let allDecls = errorTypeDecls @ [ BlankLine ] @ externDecl @ [ BlankLine ] @ errnoDecls
+        let moduleDecl = Module(namespace', $"Errno infrastructure for {cLibraryName}", allDecls)
+        CodeRenderer.render moduleDecl

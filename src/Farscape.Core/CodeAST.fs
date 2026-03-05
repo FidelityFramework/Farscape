@@ -20,8 +20,8 @@ module CodeAST =
 
     /// F# expression representation
     type FsExpr =
-        /// Unchecked.defaultof<T>, the standard Platform.Bindings body
-        | DefaultOf of FsType
+        /// NativeDefault.zeroed() — CCS intrinsic placeholder for FidelityExtern bodies
+        | NativeZeroed
         /// Function call: Module.func arg1 arg2 (module' = "" for unqualified)
         | FunctionCall of module': string * name: string * args: FsExpr list
         /// Variable reference

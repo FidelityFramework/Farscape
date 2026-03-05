@@ -11,7 +11,7 @@ open Types
 ///   module Platform.Bindings.{Library}.{Category}
 ///   [<FidelityExtern("library", "symbol")>]
 ///   let functionName (param1: type1) (param2: type2) : returnType =
-///       Unchecked.defaultof<returnType>
+///       NativeDefault.zeroed ()
 ///
 /// [<FidelityExtern>] carries library name + symbol through the PSG so Alex can emit
 /// MLIR with fidelity.binding_strategy and fidelity.library_name attributes.
@@ -110,9 +110,13 @@ module FidelityCodeGenerator =
     /// Uses ParsedCType active pattern (XParsec-backed) instead of Regex/string munging.
     /// PlatformABI determines concrete widths for C int/long (resolved at generation time).
     /// Used by both FidelityCodeGenerator (Layer 1) and WrapperCodeGenerator (Layer 2).
-    let mapCTypeToFidelityType (typedefMap: Map<string, string>) (model: PlatformABI) (opaqueHandles: Set<string>) (cType: string) : FsType =
+    let mapCTypeToFidelityType (typedefMap: Map<string, string>) (model: PlatformABI) (opaqueHandles: Set<string>) (delegateNames: Set<string>) (cType: string) : FsType =
         // Opaque handle types preserve their wrapper struct name
         if opaqueHandles.Contains(cType) then Named cType
+        // Delegate types (callback function pointers) → nativeint at ABI level.
+        // CCS doesn't have CLR delegates; these are raw function pointers.
+        // Type safety is provided by Layer 2 callback builders using FnPtr.fromSymbol.
+        elif delegateNames.Contains(cType) then Named "nativeint"
         // Function pointer types: "void (*)(void)" or "void (**)(void)"; always nativeint
         elif cType.Contains("(*)") || cType.Contains("(**)") then Named "nativeint"
         else
@@ -169,7 +173,7 @@ module FidelityCodeGenerator =
     /// 1. Clang NonNullAttr — parameter indices explicitly marked non-null
     /// 2. Pilot TOML [annotations.nonnull] — developer-asserted non-null
     let private generateFunctionDecls (typedefMap: Map<string, string>) (model: PlatformABI) (opaqueHandles: Set<string>) (libraryName: string) (nonnullAnnotations: NonnullAnnotations option) (func: CppParser.FunctionDecl) : FsDecl list =
-        let mapType = mapCTypeToFidelityType typedefMap model opaqueHandles
+        let mapType = mapCTypeToFidelityType typedefMap model opaqueHandles Set.empty
 
         // Collect proven-nonnull parameter indices from clang attributes
         let clangNonnull =
@@ -209,7 +213,7 @@ module FidelityCodeGenerator =
 
         formatDocDecls func @
         [
-            LetBinding(func.Name, parameters, finalReturnType, DefaultOf finalReturnType,
+            LetBinding(func.Name, parameters, finalReturnType, NativeZeroed,
                       [$"FidelityExtern(\"{libraryName}\", \"{func.Name}\")"])
         ]
 
@@ -221,17 +225,17 @@ module FidelityCodeGenerator =
         [ EnumType(e.Name, values, e.Documentation, isFlags) ]
 
     /// Generate FsDecl list for a struct type (as F# record).
-    let private generateStructDecl (typedefMap: Map<string, string>) (model: PlatformABI) (opaqueHandles: Set<string>) (s: CppParser.StructDecl) : FsDecl list =
-        let mapType = mapCTypeToFidelityType typedefMap model opaqueHandles
+    let private generateStructDecl (typedefMap: Map<string, string>) (model: PlatformABI) (opaqueHandles: Set<string>) (delegateNames: Set<string>) (s: CppParser.StructDecl) : FsDecl list =
+        let mapType = mapCTypeToFidelityType typedefMap model opaqueHandles delegateNames
         let fields = s.Fields |> List.map (fun f -> (f.Name, mapType f.Type))
         [ RecordType(s.Name, fields, s.Documentation, []) ]
 
     /// Generate FsDecl list for an ABI-critical struct with explicit layout.
     /// Uses StructLayoutInfo (from clang -fdump-record-layouts-simple) for byte offsets.
     let private generateExplicitStructDecl
-        (typedefMap: Map<string, string>) (model: PlatformABI) (opaqueHandles: Set<string>)
+        (typedefMap: Map<string, string>) (model: PlatformABI) (opaqueHandles: Set<string>) (delegateNames: Set<string>)
         (layoutInfo: CppParser.StructLayoutInfo) (s: CppParser.StructDecl) : FsDecl list =
-        let mapType = mapCTypeToFidelityType typedefMap model opaqueHandles
+        let mapType = mapCTypeToFidelityType typedefMap model opaqueHandles delegateNames
         let fields =
             List.zip s.Fields layoutInfo.FieldOffsetsBits
             |> List.map (fun (f, offsetBits) ->
@@ -272,7 +276,6 @@ module FidelityCodeGenerator =
         | GStruct of FsDecl list
         | GFunc of CppParser.FunctionDecl
         | GMacro of FsDecl list
-        | GDelegate of FsDecl list
         | GNone
 
     /// Generation algebra: maps each Declaration variant to a DeclGroup.
@@ -280,15 +283,15 @@ module FidelityCodeGenerator =
     /// All context (typedef map, ABI model, opaque handles, struct layouts) is captured in the closure.
     let private generationAlgebra
         (typedefMap: Map<string, string>) (model: PlatformABI)
-        (opaqueHandles: Set<string>) (structLayouts: Map<string, CppParser.StructLayoutInfo>)
+        (opaqueHandles: Set<string>) (delegateNames: Set<string>) (structLayouts: Map<string, CppParser.StructLayoutInfo>)
         : DeclarationAlgebra.DeclarationAlgebra<DeclGroup> = {
         OnEnum = fun e -> if e.Name <> "" then GEnum (generateEnumDecl e) else GNone
         OnStruct = fun s ->
             if s.Name = "" then GNone
             else
                 match Map.tryFind s.Name structLayouts with
-                | Some layout -> GStruct (generateExplicitStructDecl typedefMap model opaqueHandles layout s)
-                | None -> GStruct (generateStructDecl typedefMap model opaqueHandles s)
+                | Some layout -> GStruct (generateExplicitStructDecl typedefMap model opaqueHandles delegateNames layout s)
+                | None -> GStruct (generateStructDecl typedefMap model opaqueHandles delegateNames s)
         OnFunction = fun f -> GFunc f
         OnMacro = fun m ->
             let decls = generateMacroDeclIfNumeric m
@@ -296,11 +299,7 @@ module FidelityCodeGenerator =
         OnTypedef = fun _ -> GNone
         OnNamespace = fun _ -> GNone
         OnClass = fun _ -> GNone
-        OnDelegate = fun d ->
-            let mapType = mapCTypeToFidelityType typedefMap model opaqueHandles
-            let params' = d.Parameters |> List.map (fun (name, cType) -> (name, mapType cType))
-            let retType = mapType d.ReturnType
-            GDelegate [ DelegateType(d.Name, params', retType, d.Documentation) ]
+        OnDelegate = fun _ -> GNone // Delegates are CLR constructs; callback fields use nativeint at ABI level
     }
 
     // =========================================================================
@@ -313,6 +312,9 @@ module FidelityCodeGenerator =
     type GenerationContext = {
         TypedefMap: Map<string, string>
         OpaqueHandles: Set<string>
+        /// Names of delegate types (callback function pointers) — mapped to nativeint in struct fields.
+        /// CCS doesn't support CLR delegates; these are raw function pointers at the ABI level.
+        DelegateNames: Set<string>
         DataModel: PlatformABI
         StructLayouts: Map<string, CppParser.StructLayoutInfo>
         /// Nonnull annotations from pilot TOML (None = all pointers nullable by default)
@@ -325,8 +327,14 @@ module FidelityCodeGenerator =
         (model: PlatformABI)
         (structLayouts: Map<string, CppParser.StructLayoutInfo>)
         : GenerationContext =
+        let delegateNames =
+            declarations |> List.choose (function
+                | CppParser.Declaration.Delegate d -> Some d.Name
+                | _ -> None)
+            |> Set.ofList
         { TypedefMap = buildTypedefMap declarations
           OpaqueHandles = detectOpaqueHandles declarations
+          DelegateNames = delegateNames
           DataModel = model
           StructLayouts = structLayouts
           NonnullAnnotations = None }
@@ -349,11 +357,10 @@ module FidelityCodeGenerator =
 
         let groups =
             DeclarationAlgebra.cataDeclarations
-                (generationAlgebra ctx.TypedefMap ctx.DataModel ctx.OpaqueHandles ctx.StructLayouts)
+                (generationAlgebra ctx.TypedefMap ctx.DataModel ctx.OpaqueHandles ctx.DelegateNames ctx.StructLayouts)
                 declarations
 
         let enums = groups |> List.collect (function GEnum d -> d | _ -> [])
-        let delegates = groups |> List.collect (function GDelegate d -> d | _ -> [])
         let structs = groups |> List.collect (function GStruct d -> d | _ -> [])
         let functions =
             groups
@@ -367,7 +374,7 @@ module FidelityCodeGenerator =
             else Comment "// Macro constants" :: macros @ [BlankLine]
 
         let openDecls = openModules |> List.map OpenModule
-        let allDecls = openDecls @ opaqueHandleDecls @ enums @ delegates @ structs @ functions @ macroSection
+        let allDecls = openDecls @ opaqueHandleDecls @ enums @ structs @ functions @ macroSection
         let moduleDecl = Module(namespace', comment, allDecls)
 
         CodeRenderer.render moduleDecl

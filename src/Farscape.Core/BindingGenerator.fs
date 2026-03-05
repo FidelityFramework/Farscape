@@ -282,9 +282,26 @@ module BindingGenerator =
                         | PilotTypes.Errno ->
                             WrapperTypes.UseErrno $"{nsPrefix}.Errno"
                         | PilotTypes.EnumErrorCode (errorType, successValue, _, _) ->
-                            let structName = EnumErrorModuleGenerator.deriveErrorStructName errorType
-                            WrapperTypes.UseEnumError (errorType, successValue, structName,
-                                                      $"{nsPrefix}.{structName}")
+                            // Only use enum error handling if the error enum exists in declarations
+                            let enumExists =
+                                declarations |> List.exists (function
+                                    | CppParser.Declaration.Enum e when e.Name = errorType -> true
+                                    | _ -> false)
+                            if not enumExists then
+                                logVerbose $"Warning: error enum '{errorType}' not found in declarations; falling back to NoErrors" verbose
+                                WrapperTypes.NoErrors
+                            else
+                                let structName = EnumErrorModuleGenerator.deriveErrorStructName errorType
+                                // Look up success value's integer from the enum declaration
+                                let successIntValue =
+                                    declarations |> List.tryPick (function
+                                        | CppParser.Declaration.Enum e when e.Name = errorType ->
+                                            e.Values |> List.tryPick (fun v ->
+                                                if v.Name = successValue then Some v.Value else None)
+                                        | _ -> None)
+                                    |> Option.defaultValue 0L
+                                WrapperTypes.UseEnumError (errorType, successIntValue, structName,
+                                                          $"{nsPrefix}.{structName}")
                         | PilotTypes.NullWithReason reasonFn ->
                             WrapperTypes.UseNullWithReason reasonFn
                         | _ -> WrapperTypes.NoErrors
@@ -310,6 +327,39 @@ module BindingGenerator =
                 // ── Error module ────────────────────────────────────────────
                 let errorModuleFiles =
                     match errorHandling with
+                    | WrapperTypes.UseErrno _ ->
+                        // Extract errno macros from declarations; if none present
+                        // (macro_prefixes didn't include "E"), parse errno.h directly
+                        let macros =
+                            declarations |> List.choose (function
+                                | CppParser.Declaration.Macro m -> Some m
+                                | _ -> None)
+                        let errnoConstants = ErrnoModuleGenerator.filterErrnoMacros macros
+                        let effectiveMacros =
+                            if not errnoConstants.IsEmpty then macros
+                            else
+                                // Targeted parse of errno.h for errno constants
+                                logVerbose "No errno macros in declarations; parsing errno.h directly" verbose
+                                let errnoOptions : CppParser.HeaderParserOptions = {
+                                    HeaderFile = "/usr/include/errno.h"
+                                    IncludePaths = project.Library.IncludePaths
+                                    Defines = project.Library.Defines
+                                    Verbose = false
+                                    IncludeMacros = true
+                                    MacroPrefixes = ["E"]
+                                    IncludeRoot = None
+                                }
+                                match CppParser.parseHeaderFull errnoOptions with
+                                | Ok result -> result.Macros
+                                | Error e ->
+                                    logVerbose $"Warning: errno.h parse failed: {e}" verbose
+                                    []
+                        let errnoNs = $"{nsPrefix}.Errno"
+                        let output = ErrnoModuleGenerator.generate effectiveMacros errnoNs project.Library.Name
+                        let errorPath = Path.Combine(outputDir, "Errno.clef")
+                        File.WriteAllText(errorPath, output)
+                        logVerbose $"Errno module: {errorPath}" verbose
+                        [errorPath]
                     | WrapperTypes.UseEnumError (errorType, _, _, _) ->
                         let errorEnum =
                             declarations |> List.tryPick (function
@@ -445,7 +495,22 @@ module BindingGenerator =
 
                         localTypeFiles @ [funcPath] @ wrapperFiles)
 
-                let allFiles = [sharedTypesPath] @ errorModuleFiles @ descriptorFiles @ nsFiles
+                // ── L2 Listener Builders (in main package) ──────────────
+                let l2CallbackModule = $"{nsPrefix}.Callbacks"
+                let l2CallbackFiles =
+                    match callbackSpec with
+                    | Some spec when generateWrappers ->
+                        let l2Opens = [$"{nsPrefix}.Types"]
+                        match CallbackWrapperGenerator.generateL2 spec declarations l2CallbackModule l2Opens with
+                        | Some output ->
+                            let l2CallbackPath = Path.Combine(outputDir, "Callbacks.clef")
+                            File.WriteAllText(l2CallbackPath, output)
+                            logVerbose $"  Callbacks.clef (L2 listener builders)" verbose
+                            [l2CallbackPath]
+                        | None -> []
+                    | _ -> []
+
+                let allFiles = [sharedTypesPath] @ errorModuleFiles @ descriptorFiles @ nsFiles @ l2CallbackFiles
 
                 // Generate canonical fidproj for the binding library
                 let fidprojFile = generateFidproj project nsPrefix outputDir allFiles verbose
@@ -506,11 +571,11 @@ module BindingGenerator =
                                         else
                                             let lastSeg = ns.Name.Split('.') |> Array.last
                                             let dispatchNs = $"{bridgeName}.{lastSeg}"
+                                            // NativePtr.ofNativeInt/set are Clef intrinsics — no namespace import needed
                                             let openModules =
                                                 [ $"{nsPrefix}.Types"
                                                   "Fidelity.Libc.DynamicLink"
                                                   "Fidelity.Libc.Memory"
-                                                  "Microsoft.FSharp.NativeInterop"
                                                   match project.ProtocolConfig with
                                                   | Some cfg -> cfg.MarshalModule
                                                   | None -> () ]
@@ -538,9 +603,9 @@ module BindingGenerator =
                                     |> List.map (fun reg -> resolveModule reg.Function)
                                     |> List.distinct
                                 let callbackOpens =
-                                    [$"{nsPrefix}.Types"; "Fidelity.Libc.DynamicLink"] @ registrationModules
+                                    [l2CallbackModule; $"{nsPrefix}.Types"; "Fidelity.Libc.DynamicLink"] @ registrationModules
                                     |> List.distinct
-                                match CallbackWrapperGenerator.generate spec declarations callbackNs dataModel callbackOpens with
+                                match CallbackWrapperGenerator.generate spec declarations callbackNs dataModel callbackOpens l2CallbackModule with
                                 | Some output ->
                                     let callbackPath = Path.Combine(bridgeDir, "Callbacks.clef")
                                     File.WriteAllText(callbackPath, output)

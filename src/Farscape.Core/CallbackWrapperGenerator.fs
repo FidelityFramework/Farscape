@@ -2,6 +2,7 @@ namespace Farscape.Core
 
 open CodeAST
 open PilotTypes
+open ActivePatterns
 
 /// Generates Layer 2 callback wrappers that wire C callback parameters
 /// by resolving symbol names at runtime via dlsym(RTLD_DEFAULT, name).
@@ -104,10 +105,11 @@ module CallbackWrapperGenerator =
 
         let returnType = mapReturnType funcDecl.ReturnType model
 
-        // Body: let handler = dlsym 0n handlerSymbol in originalFunc arg1 handler arg2 ...
+        // Body: let handler = Fidelity.Libc.DynamicLink.dlsym 0n handlerSymbol in originalFunc arg1 handler arg2 ...
+        // Fully qualified to avoid L2 wrapper shadowing (L2 dlsym returns Result<nativeint, CError>)
         let body =
             LetIn("handler",
-                FunctionCall("", "dlsym", [Literal "0n"; Identifier "handlerSymbol"]),
+                FunctionCall("Fidelity.Libc.DynamicLink", "dlsym", [Literal "0n"; Identifier "handlerSymbol"]),
                 FunctionCall("", reg.Function,
                     funcDecl.Parameters |> List.map (fun (name, _) ->
                         if name = reg.CallbackParam then Identifier "handler"
@@ -126,10 +128,15 @@ module CallbackWrapperGenerator =
     // Pattern B: Listener Struct Builder
     // =========================================================================
 
-    /// Generate a builder function for a listener struct.
-    /// Each callback field becomes a string parameter (symbol name).
-    /// The builder resolves all symbols via dlsym and returns the populated struct.
-    let generateListenerBuilder
+    /// A field is a callback if it's a C function pointer or a known delegate type.
+    let private isCallbackField (delegateNames: Set<string>) (f: CppParser.FieldDecl) =
+        f.Type.Contains("(*)") || f.Type.Contains("(**)") || Set.contains f.Type delegateNames
+
+    /// Generate a direct builder function for a listener struct (Layer 2).
+    /// Each callback field becomes a nativeint parameter. Record construction
+    /// happens here — in the same package where the struct types are defined,
+    /// avoiding CCS cross-package record field resolution issues.
+    let generateListenerDirectBuilder
         (ls: ListenerStruct)
         (structDecl: CppParser.StructDecl)
         (delegateNames: Set<string>)
@@ -137,11 +144,39 @@ module CallbackWrapperGenerator =
 
         let builderName = toBuilderName ls.Name
 
-        /// A field is a callback if it's a C function pointer or a known delegate type.
-        let isCallbackField (f: CppParser.FieldDecl) =
-            f.Type.Contains("(*)") || f.Type.Contains("(**)") || Set.contains f.Type delegateNames
+        let callbackFields = structDecl.Fields |> List.filter (isCallbackField delegateNames)
 
-        let callbackFields = structDecl.Fields |> List.filter isCallbackField
+        if callbackFields.IsEmpty then []
+        else
+            let params' =
+                callbackFields |> List.map (fun f ->
+                    { Name = f.Name; Type = Named "nativeint" })
+
+            let fields =
+                structDecl.Fields |> List.map (fun f ->
+                    if isCallbackField delegateNames f then
+                        (f.Name, Identifier (cleanParamName f.Name))
+                    else
+                        (f.Name, Literal "NativeDefault.zeroed ()"))
+
+            let body = RecordConstruction fields
+
+            [ XmlDoc $"Build a {ls.Name} from resolved function pointers."
+              LetBinding(builderName, params', Named ls.Name, body, []) ]
+
+    /// Generate a bridge builder function for a listener struct (Layer 3).
+    /// Each callback field becomes a string parameter (symbol name).
+    /// The builder resolves symbols via dlsym then delegates to the L2 direct builder.
+    let generateListenerBuilder
+        (ls: ListenerStruct)
+        (structDecl: CppParser.StructDecl)
+        (delegateNames: Set<string>)
+        (l2CallbackModule: string)
+        : FsDecl list =
+
+        let builderName = toBuilderName ls.Name
+
+        let callbackFields = structDecl.Fields |> List.filter (isCallbackField delegateNames)
 
         if callbackFields.IsEmpty then []
         else
@@ -149,17 +184,13 @@ module CallbackWrapperGenerator =
                 callbackFields |> List.map (fun f ->
                     { Name = f.Name + "Sym"; Type = Named "string" })
 
-            // Build the struct record with dlsym-resolved fields
-            let fields =
-                structDecl.Fields |> List.map (fun f ->
-                    if isCallbackField f then
-                        (f.Name, FunctionCall("", "dlsym",
-                            [Literal "0n"; Identifier (f.Name + "Sym")]))
-                    else
-                        // Non-callback field: zero-init
-                        (f.Name, Literal "Unchecked.defaultof<_>"))
+            // Resolve each symbol via dlsym, then call the L2 direct builder
+            let dlsymArgs =
+                callbackFields |> List.map (fun f ->
+                    FunctionCall("Fidelity.Libc.DynamicLink", "dlsym",
+                        [Literal "0n"; Identifier (f.Name + "Sym")]))
 
-            let body = RecordConstruction fields
+            let body = FunctionCall(l2CallbackModule, builderName, dlsymArgs)
 
             [ XmlDoc $"Build a {ls.Name} by resolving C symbol names via dlsym(RTLD_DEFAULT)."
               XmlDoc "Each parameter is a C symbol name resolved at runtime."
@@ -169,23 +200,45 @@ module CallbackWrapperGenerator =
     // Complete Module Generation
     // =========================================================================
 
-    /// Generate callback FsDecl list from a CallbackSpec and available declarations.
+    /// Collect delegate names from declarations for listener field type matching.
+    let private collectDelegateNames (declarations: CppParser.Declaration list) =
+        declarations |> List.choose (function
+            | CppParser.Declaration.Delegate d -> Some d.Name
+            | _ -> None)
+        |> Set.ofList
+
+    /// Look up a struct declaration by name.
+    let private findStructDecl (declarations: CppParser.Declaration list) (name: string) =
+        declarations |> List.tryPick (function
+            | CppParser.Declaration.Struct s when s.Name = name -> Some s
+            | _ -> None)
+
+    /// Generate Layer 2 direct listener builder decls (record construction with nativeint params).
+    /// These belong in the main package where the struct types are defined.
+    let generateL2Decls
+        (spec: CallbackSpec)
+        (declarations: CppParser.Declaration list)
+        : FsDecl list =
+
+        let delegateNames = collectDelegateNames declarations
+
+        spec.ListenerStructs |> List.collect (fun ls ->
+            match findStructDecl declarations ls.Name with
+            | Some s -> generateListenerDirectBuilder ls s delegateNames
+            | None -> [])
+
+    /// Generate Layer 3 bridge callback decls (registration wrappers + listener builders with dlsym).
     let generateDecls
         (spec: CallbackSpec)
         (declarations: CppParser.Declaration list)
         (model: Types.PlatformABI)
+        (l2CallbackModule: string)
         : FsDecl list =
 
-        // Collect delegate names for listener field type matching
-        let delegateNames =
-            declarations |> List.choose (function
-                | CppParser.Declaration.Delegate d -> Some d.Name
-                | _ -> None)
-            |> Set.ofList
+        let delegateNames = collectDelegateNames declarations
 
         let registrationDecls =
             spec.Registrations |> List.collect (fun reg ->
-                // Look up the full function declaration
                 let funcDecl =
                     declarations |> List.tryPick (function
                         | CppParser.Declaration.Function f when f.Name = reg.Function -> Some f
@@ -196,12 +249,8 @@ module CallbackWrapperGenerator =
 
         let listenerDecls =
             spec.ListenerStructs |> List.collect (fun ls ->
-                let structDecl =
-                    declarations |> List.tryPick (function
-                        | CppParser.Declaration.Struct s when s.Name = ls.Name -> Some s
-                        | _ -> None)
-                match structDecl with
-                | Some s -> generateListenerBuilder ls s delegateNames
+                match findStructDecl declarations ls.Name with
+                | Some s -> generateListenerBuilder ls s delegateNames l2CallbackModule
                 | None -> [])
 
         match registrationDecls, listenerDecls with
@@ -210,18 +259,35 @@ module CallbackWrapperGenerator =
         | [], listeners -> listeners
         | regs, listeners -> regs @ [ BlankLine ] @ listeners
 
-    /// Generate the complete callback wrappers module as a rendered source string.
+    /// Generate the complete Layer 3 bridge callback wrappers module as a rendered source string.
     let generate
         (spec: CallbackSpec)
         (declarations: CppParser.Declaration list)
         (namespace': string)
         (model: Types.PlatformABI)
         (openModules: string list)
+        (l2CallbackModule: string)
         : string option =
 
-        let decls = generateDecls spec declarations model
+        let decls = generateDecls spec declarations model l2CallbackModule
         if decls.IsEmpty then None
         else
             let opens = openModules |> List.map OpenModule
             let moduleDecl = Module(namespace', "Callback wrappers — dlsym-based runtime symbol resolution", opens @ decls)
+            Some (CodeRenderer.render moduleDecl)
+
+    /// Generate the Layer 2 direct listener builders module as a rendered source string.
+    /// This goes in the main package where struct types are in scope.
+    let generateL2
+        (spec: CallbackSpec)
+        (declarations: CppParser.Declaration list)
+        (namespace': string)
+        (openModules: string list)
+        : string option =
+
+        let decls = generateL2Decls spec declarations
+        if decls.IsEmpty then None
+        else
+            let opens = openModules |> List.map OpenModule
+            let moduleDecl = Module(namespace', "Listener builder functions — direct record construction", opens @ decls)
             Some (CodeRenderer.render moduleDecl)
