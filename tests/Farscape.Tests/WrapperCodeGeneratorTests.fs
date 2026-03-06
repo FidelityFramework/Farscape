@@ -117,11 +117,11 @@ module ErrnoWrapperTests =
         WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" (UseErrno "Fidelity.Errno") Types.LP64 None
 
     [<Fact>]
-    let ``errno-enabled wrapper uses Result<T, CError> return type`` () =
+    let ``errno-enabled wrapper uses Result<T, string> return type`` () =
         let output = generateWithErrno "read" "ssize_t"
                         [("fd", "int"); ("buf", "void *"); ("count", "size_t")]
                         []
-        Assert.Contains("Result<nativeint, CError>", output)
+        Assert.Contains("Result<nativeint, string>", output)
 
     [<Fact>]
     let ``errno-enabled wrapper includes captureErrno helper`` () =
@@ -131,14 +131,15 @@ module ErrnoWrapperTests =
         Assert.Contains("let captureErrno", output)
         Assert.Contains("NativePtr.read", output)
         Assert.Contains("__errno_location", output)
-        Assert.Contains("Errno.capture", output)
+        Assert.Contains("describe", output)
 
     [<Fact>]
-    let ``errno-enabled wrapper opens errno module`` () =
+    let ``errno-enabled wrapper opens errno module and submodule`` () =
         let output = generateWithErrno "read" "ssize_t"
                         [("fd", "int"); ("buf", "void *"); ("count", "size_t")]
                         []
         Assert.Contains("open Fidelity.Errno", output)
+        Assert.Contains("open Fidelity.Errno.Errno", output)
         // NativePtr.read is a Clef intrinsic — no Microsoft.FSharp.NativeInterop import needed
         Assert.DoesNotContain("Microsoft.FSharp.NativeInterop", output)
 
@@ -155,7 +156,7 @@ module ErrnoWrapperTests =
         let output = generateWithErrno "fclose" "int"
                         [("stream", "void *")]
                         []
-        Assert.Contains("Result<unit, CError>", output)
+        Assert.Contains("Result<unit, string>", output)
         Assert.Contains("Error (captureErrno ())", output)
 
     [<Fact>]
@@ -163,16 +164,16 @@ module ErrnoWrapperTests =
         let output = generateWithErrno "malloc" "void *"
                         [("size", "size_t")]
                         [{ CppParser.AttributeData.Kind = "MallocAttr"; Args = []; StringArg = None }]
-        Assert.Contains("Result<nativeint, CError>", output)
+        Assert.Contains("Result<nativeint, string>", output)
         Assert.Contains("Error (captureErrno ())", output)
 
     [<Fact>]
-    let ``errno-enabled captureErrno builds CError record`` () =
+    let ``errno-enabled captureErrno returns string via describe`` () =
         let output = generateWithErrno "read" "ssize_t"
                         [("fd", "int"); ("buf", "void *"); ("count", "size_t")]
                         []
-        // captureErrno delegates to Errno.capture to avoid record ambiguity
-        Assert.Contains("Errno.capture", output)
+        // captureErrno calls describe to return human-readable string (Errno submodule opened)
+        Assert.Contains("describe (NativePtr.read", output)
         Assert.Contains("NativePtr.ofNativeInt", output)
 
     [<Fact>]
@@ -204,28 +205,27 @@ module EnumErrorWrapperTests =
         Assert.Contains("| 0L ->", output)
 
     [<Fact>]
-    let ``enum error wrapper uses typed error struct in return`` () =
+    let ``enum error wrapper uses string error type in return`` () =
         let output = generateWithEnumError "hipMalloc" "hipError_t"
                         [("devPtr", "void **"); ("size", "size_t")]
                         []
-        Assert.Contains("Result<unit, HipError>", output)
+        Assert.Contains("Result<unit, string>", output)
 
     [<Fact>]
-    let ``enum error wrapper calls captureEnumError on error path`` () =
+    let ``enum error wrapper calls capture function on error path`` () =
         let output = generateWithEnumError "hipMalloc" "hipError_t"
                         [("devPtr", "void **"); ("size", "size_t")]
                         []
-        Assert.Contains("captureEnumError", output)
+        Assert.Contains("captureHipError", output)
         Assert.Contains("Ok ()", output)
 
     [<Fact>]
-    let ``enum error wrapper generates captureEnumError helper`` () =
+    let ``enum error wrapper generates capture function returning string`` () =
         let output = generateWithEnumError "hipMalloc" "hipError_t"
                         [("devPtr", "void **"); ("size", "size_t")]
                         []
-        Assert.Contains("let captureEnumError", output)
-        // captureEnumError delegates to companion capture function to avoid record ambiguity
-        Assert.Contains("HipError.capture", output)
+        Assert.Contains("let captureHipError", output)
+        Assert.Contains("describe", output)
 
     [<Fact>]
     let ``enum error applies to int-returning function in enum_error_code library`` () =
@@ -237,7 +237,7 @@ module EnumErrorWrapperTests =
         // Should use enum match pattern with int-appropriate literal (no suffix)
         Assert.Contains("match result with", output)
         Assert.Contains("| 0 ->", output)
-        Assert.Contains("Result<unit, HipError>", output)
+        Assert.Contains("Result<unit, string>", output)
 
     [<Fact>]
     let ``enum error applies to int32_t-returning function with int32 literal`` () =
@@ -248,7 +248,7 @@ module EnumErrorWrapperTests =
         // Should use enum match pattern with int32-appropriate literal (l suffix)
         Assert.Contains("match result with", output)
         Assert.Contains("| 0l ->", output)
-        Assert.Contains("Result<unit, HipError>", output)
+        Assert.Contains("Result<unit, string>", output)
 
     [<Fact>]
     let ``PureValue wrapper unchanged with enum error enabled`` () =
@@ -300,7 +300,7 @@ module NullWithReasonWrapperTests =
                         [("filename", "const char *"); ("x", "int *"); ("y", "int *"); ("channels", "int *"); ("desired", "int")]
                         [{ CppParser.AttributeData.Kind = "MallocAttr"; Args = []; StringArg = None }]
         Assert.DoesNotContain("let captureErrno", output)
-        Assert.DoesNotContain("let captureEnumError", output)
+        Assert.DoesNotContain("captureError", output)  // No capture*Error helper for null_with_reason
         Assert.DoesNotContain("__errno_location", output)
 
     [<Fact>]

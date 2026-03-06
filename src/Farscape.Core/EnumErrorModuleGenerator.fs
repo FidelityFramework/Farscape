@@ -50,18 +50,6 @@ module EnumErrorModuleGenerator =
           ErrorStringFn = errorStringFn
           ErrorNameFn = errorNameFn }
 
-    /// Generate [<Struct>] type {ErrorStructName} = { ErrorCode: {ErrorType}; ErrorMessage: string }
-    /// Field names are intentionally distinct from CError (Code/Description) to avoid
-    /// record construction ambiguity when both error types are in scope.
-    let generateErrorType (config: EnumErrorConfig) : FsDecl list =
-        [
-            RecordType(
-                config.ErrorStructName,
-                [ ("ErrorCode", Named config.ErrorType); ("ErrorMessage", Named "string") ],
-                Some $"Stack-allocated {config.ErrorType} error — carries error code and human-readable description.",
-                [ "Struct" ])
-        ]
-
     /// Generate the describe function body as a MatchExpr over enum integer values.
     /// match code with | 0 -> "Success" | 1 -> "InvalidValue" | _ -> "Unknown error"
     /// Uses integer literal patterns because CCS does not yet register enum value bindings.
@@ -74,46 +62,31 @@ module EnumErrorModuleGenerator =
                     | Some d -> d
                     | None -> v.Name
                 ($"{v.Value}L", Literal $"\"{description}\""))
-        let defaultCase = ("_", Literal $"\"Unknown {config.ErrorType} error\"")
+        let defaultCase = ("other", Literal $"\"Unknown {config.ErrorType} error\"")
         MatchExpr(Identifier "code", cases @ [ defaultCase ])
 
-    /// Generate the describe + capture functions as FsDecl list.
+    /// Generate the describe function as FsDecl list.
     let generateCompanionDecls (config: EnumErrorConfig) (values: CppParser.EnumValue list) : FsDecl list =
         let describeBody = generateDescribeBody config values
         let describeFunc =
             LetBinding(
                 "describe",
-                [ { Name = "code"; Type = Named config.ErrorType } ],
+                [ { Name = "code"; Type = Named "int32" } ],
                 Named "string",
                 describeBody,
                 [])
-        let captureBody =
-            RecordConstruction [
-                ("ErrorCode", Identifier "code")
-                ("ErrorMessage", FunctionCall("", "describe", [Identifier "code"]))
-            ]
-        let captureFunc =
-            LetBinding(
-                "capture",
-                [ { Name = "code"; Type = Named config.ErrorType } ],
-                Named config.ErrorStructName,
-                captureBody,
-                [])
         [ XmlDoc $"Error code to description string. Generated from header comments."
           XmlDoc "Compiles to a jump table with string pointers into rodata. Zero allocation."
-          describeFunc
-          BlankLine
-          XmlDoc $"Capture {config.ErrorType} error with compile-time description."
-          captureFunc ]
+          describeFunc ]
 
     /// Generate the complete enum error infrastructure as FsDecl list.
-    /// Returns: RecordType (error struct) + SubModule (describe + capture).
+    /// Returns: SubModule with describe function. No custom error struct —
+    /// errors are marshaled to string at the boundary.
     let generateDecls (config: EnumErrorConfig) (values: CppParser.EnumValue list) : FsDecl list =
         if values.IsEmpty then []
         else
-            let errorType = generateErrorType config
             let companion = generateCompanionDecls config values
-            errorType @ [ SubModule(config.ErrorStructName, companion); BlankLine ]
+            [ SubModule(config.ErrorStructName, companion); BlankLine ]
 
     /// Generate the complete enum error module as a rendered source string.
     /// Finds the error enum in declarations, generates error struct + describe + capture.

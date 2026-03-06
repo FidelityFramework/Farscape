@@ -282,26 +282,32 @@ module BindingGenerator =
                         | PilotTypes.Errno ->
                             WrapperTypes.UseErrno $"{nsPrefix}.Errno"
                         | PilotTypes.EnumErrorCode (errorType, successValue, _, _) ->
-                            // Only use enum error handling if the error enum exists in declarations
+                            // Resolve the error enum — check both named enums and typedef'd anonymous enums
+                            // C pattern: typedef enum { ... } name; produces anonymous enum + typedef
                             let enumExists =
                                 declarations |> List.exists (function
                                     | CppParser.Declaration.Enum e when e.Name = errorType -> true
+                                    | CppParser.Declaration.Typedef t when t.Name = errorType ->
+                                        t.UnderlyingType.Contains("enum")
                                     | _ -> false)
                             if not enumExists then
-                                logVerbose $"Warning: error enum '{errorType}' not found in declarations; falling back to NoErrors" verbose
-                                WrapperTypes.NoErrors
-                            else
-                                let structName = EnumErrorModuleGenerator.deriveErrorStructName errorType
-                                // Look up success value's integer from the enum declaration
-                                let successIntValue =
-                                    declarations |> List.tryPick (function
-                                        | CppParser.Declaration.Enum e when e.Name = errorType ->
-                                            e.Values |> List.tryPick (fun v ->
-                                                if v.Name = successValue then Some v.Value else None)
-                                        | _ -> None)
-                                    |> Option.defaultValue 0L
-                                WrapperTypes.UseEnumError (errorType, successIntValue, structName,
-                                                          $"{nsPrefix}.{structName}")
+                                failwithf "error_conventions declares error_type '%s' but no matching enum or typedef found in declarations. Fix the pilot TOML or ensure the header is parsed correctly." errorType
+
+                            let structName = EnumErrorModuleGenerator.deriveErrorStructName errorType
+                            // Look up success value's integer — check named enum first, then any enum containing the value
+                            let successIntValue =
+                                declarations |> List.tryPick (function
+                                    | CppParser.Declaration.Enum e when e.Name = errorType ->
+                                        e.Values |> List.tryPick (fun v ->
+                                            if v.Name = successValue then Some v.Value else None)
+                                    | CppParser.Declaration.Enum e when e.Name = "" ->
+                                        // Anonymous enum (typedef'd) — search by success value name
+                                        e.Values |> List.tryPick (fun v ->
+                                            if v.Name = successValue then Some v.Value else None)
+                                    | _ -> None)
+                                |> Option.defaultValue 0L
+                            WrapperTypes.UseEnumError (errorType, successIntValue, structName,
+                                                      $"{nsPrefix}.{structName}")
                         | PilotTypes.NullWithReason reasonFn ->
                             WrapperTypes.UseNullWithReason reasonFn
                         | _ -> WrapperTypes.NoErrors
@@ -361,10 +367,29 @@ module BindingGenerator =
                         logVerbose $"Errno module: {errorPath}" verbose
                         [errorPath]
                     | WrapperTypes.UseEnumError (errorType, _, _, _) ->
+                        // Find enum by name or by typedef (anonymous enum pattern)
                         let errorEnum =
                             declarations |> List.tryPick (function
                                 | CppParser.Declaration.Enum e when e.Name = errorType -> Some e
                                 | _ -> None)
+                            |> Option.orElseWith (fun () ->
+                                // typedef enum { ... } name; — find anonymous enum containing success value
+                                let hasTypedef = declarations |> List.exists (function
+                                    | CppParser.Declaration.Typedef t when t.Name = errorType -> true
+                                    | _ -> false)
+                                if hasTypedef then
+                                    match project.ErrorConventions with
+                                    | Some spec ->
+                                        match spec.Default with
+                                        | PilotTypes.EnumErrorCode (_, sv, _, _) ->
+                                            declarations |> List.tryPick (function
+                                                | CppParser.Declaration.Enum e when e.Name = "" ->
+                                                    if e.Values |> List.exists (fun v -> v.Name = sv) then Some e
+                                                    else None
+                                                | _ -> None)
+                                        | _ -> None
+                                    | None -> None
+                                else None)
                         match errorEnum with
                         | Some enumDecl ->
                             match project.ErrorConventions with
@@ -384,8 +409,7 @@ module BindingGenerator =
                                 | _ -> []
                             | None -> []
                         | None ->
-                            logVerbose $"Warning: error enum '{errorType}' not found in declarations" verbose
-                            []
+                            failwithf "error_conventions declares error_type '%s' but enum values not found in declarations" errorType
                     | _ -> []
 
                 // ── BAREWire descriptors ─────────────────────────────────────

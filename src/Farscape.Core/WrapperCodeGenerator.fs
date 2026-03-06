@@ -30,7 +30,7 @@ module WrapperCodeGenerator =
     let private wrapperReturnType (semantic: ReturnSemantic) (rawRetType: FsType) (errorHandling: ErrorHandling) : FsType =
         let errorType =
             match errorHandling with
-            | UseErrno _ -> Named "CError"
+            | UseErrno _ -> Named "string"
             | UseNullWithReason _ -> Named "nativeint"
             | _ -> Unit
         let hasErrors = match errorHandling with NoErrors -> false | _ -> true
@@ -47,8 +47,8 @@ module WrapperCodeGenerator =
         | AllocatedPointer | OpaqueHandleReturn ->
             if hasErrors then Generic2("Result", Named "nativeint", errorType)
             else Generic("Result", Named "nativeint")
-        | EnumReturnError (_, _, errorStructName) ->
-            Generic2("Result", Unit, Named errorStructName)
+        | EnumReturnError _ ->
+            Generic2("Result", Unit, Named "string")
         | PureValue ->
             rawRetType
         | NeverReturns ->
@@ -146,26 +146,40 @@ module WrapperCodeGenerator =
         | "int" | "unsigned int" -> $"{successIntValue}"
         | _ -> $"{successIntValue}L"
 
+    /// Derive a unique capture function name from the C enum type.
+    /// e.g., "resvg_error" → "captureResvgError", "hipError_t" → "captureHipError"
+    let internal captureEnumErrorName (enumType: string) =
+        // Strip _t suffix, underscores → spaces, split into words
+        let stripped = enumType.Replace("_t", "").Replace("_", " ")
+        let words = stripped.Split(' ', System.StringSplitOptions.RemoveEmptyEntries)
+        // Drop trailing "error"/"Error" word to avoid doubling (we append "Error" ourselves)
+        let words =
+            if words.Length > 1 && words.[words.Length - 1].ToLowerInvariant() = "error" then
+                words.[.. words.Length - 2]
+            else
+                words
+        let camelWords = words |> Array.map (fun w -> string (System.Char.ToUpper w.[0]) + w.[1..])
+        let joined = camelWords |> String.concat ""
+        // Also strip trailing "Error" from camelCase names like "HipError"
+        let trimmed =
+            if joined.EndsWith("Error") && joined.Length > 5 then
+                joined.[.. joined.Length - 6]
+            else
+                joined
+        "capture" + trimmed + "Error"
+
     /// Generate wrapper body for EnumReturnError pattern (e.g., HIP hipStreamCreate).
     /// let result = Bindings.hipStreamCreate stream
-    /// match result with | 0L -> Ok () | err -> Error (captureEnumError err)
+    /// match result with | 0L -> Ok () | err -> Error (captureHipError err)
     /// Uses integer literal pattern because CCS does not yet register enum value bindings.
     /// When C return type differs from the enum type (e.g. int32_t vs resvg_error),
-    /// inlines error construction to avoid type mismatch with captureEnumError.
+    /// inlines error construction to avoid type mismatch with the capture function.
     let private enumReturnErrorBody (bindingsModule: string) (funcName: string) (paramNames: string list)
-                                    (enumType: string) (successIntValue: int64) (errorStructName: string) (cReturnType: string) : FsExpr =
+                                    (enumType: string) (successIntValue: int64) (_errorStructName: string) (cReturnType: string) : FsExpr =
         let rawCall = buildRawCall bindingsModule funcName paramNames
         let successLit = enumSuccessLiteral successIntValue cReturnType
-        let returnTypeMatchesEnum = cReturnType.Replace("const ", "").Trim() = enumType
-        let errorExpr =
-            if returnTypeMatchesEnum then
-                FunctionCall("", "captureEnumError", [Identifier "err"])
-            else
-                // C return type is integer, not the enum — inline error construction
-                RecordConstruction [
-                    ("ErrorCode", Identifier "err")
-                    ("ErrorMessage", FunctionCall(errorStructName, "describe", [Identifier "err"]))
-                ]
+        let captureName = captureEnumErrorName enumType
+        let errorExpr = FunctionCall("", captureName, [TypeConversion("int32", Identifier "err")])
         LetIn("result", rawCall,
             MatchExpr(Identifier "result", [
                 (successLit, ResultOk (Literal "()"))
@@ -369,32 +383,32 @@ module WrapperCodeGenerator =
             match errorHandling with
             | UseErrno errnoModuleName ->
                 let openErrno = Comment $"open {errnoModuleName}"
-                // captureError helper: captures errno and builds CError with description
-                // NativePtr intrinsics are Clef builtins — no namespace import needed
-                // __errno_location returns nativeint → cast to nativeptr<int> → NativePtr.read
-                // Delegates record construction to Errno.capture to avoid record type ambiguity
-                // when multiple error types (CError, HipError) share identical field names
+                let openErrnoSub = Comment $"open {errnoModuleName}.Errno"
+                // captureErrno helper: reads thread-local errno and returns human-readable description string.
+                // NativePtr intrinsics are Clef builtins — no namespace import needed.
+                // __errno_location returns nativeint → cast to nativeptr<int> → NativePtr.read → describe
                 let captureErrorBody =
-                    FunctionCall("Errno", "capture",
+                    FunctionCall("", "describe",
                         [FunctionCall("NativePtr", "read",
                             [FunctionCall("NativePtr", "ofNativeInt",
                                 [FunctionCall("", "__errno_location", [Literal "()"])])])])
                 let captureErrorDecl =
-                    LetBinding("captureErrno", [], Named "CError", captureErrorBody, [])
-                [ openErrno; BlankLine
-                  XmlDoc "Capture errno and build CError with description from header comments."
+                    LetBinding("captureErrno", [], Named "string", captureErrorBody, [])
+                [ openErrno; openErrnoSub; BlankLine
+                  XmlDoc "Capture errno as human-readable description string from header comments."
                   captureErrorDecl; BlankLine ]
             | UseEnumError (enumType, _, errorStructName, describeModuleName) ->
                 let openErrorModule = Comment $"open {describeModuleName}"
-                // Delegates to companion module's capture function to avoid record type ambiguity
+                let openErrorSub = Comment $"open {describeModuleName}.{errorStructName}"
+                let captureName = captureEnumErrorName enumType
                 let captureErrorBody =
-                    FunctionCall(errorStructName, "capture", [Identifier "code"])
+                    FunctionCall("", "describe", [Identifier "code"])
                 let captureErrorDecl =
-                    LetBinding("captureEnumError",
-                        [ { Name = "code"; Type = Named enumType } ],
-                        Named errorStructName, captureErrorBody, [])
-                [ openErrorModule; BlankLine
-                  XmlDoc $"Capture {enumType} error with compile-time description from header comments."
+                    LetBinding(captureName,
+                        [ { Name = "code"; Type = Named "int32" } ],
+                        Named "string", captureErrorBody, [])
+                [ openErrorModule; openErrorSub; BlankLine
+                  XmlDoc $"Capture {enumType} error as human-readable description string from header comments."
                   captureErrorDecl; BlankLine ]
             | UseNullWithReason reasonFn ->
                 // NullWithReason: no helper needed — the reason function is called directly

@@ -449,7 +449,7 @@ module ProtocolParser =
                 // Build the sequential expression: alloc, write args, marshal, free
                 // L1 malloc returns Option<nativeint> — unwrap for internal use
                 let mallocCall =
-                    FunctionCall("", "malloc",
+                    FunctionCall("Fidelity.Libc.Memory", "malloc",
                         [ TypeConversion("unativeint", Literal allocSize) ])
                 let allocExpr =
                     MatchExpr(mallocCall,
@@ -470,7 +470,7 @@ module ProtocolParser =
                           FunctionCall("", "Some", [Identifier "argsRaw"]) ])
 
                 let freeCall =
-                    FunctionCall("", "free",
+                    FunctionCall("Fidelity.Libc.Memory", "free",
                         [ FunctionCall("", "Some", [Identifier "argsRaw"]) ])
 
                 // Build nested let expressions for arg writes, then marshal + free

@@ -107,7 +107,7 @@ module CallbackWrapperGenerator =
 
         // Body: let handler = match dlsym (Some 0n) (Some handlerSymbol.Pointer) with Some v -> v | None -> 0n
         //       in originalFunc arg1 handler arg2 ...
-        // Fully qualified to avoid L2 wrapper shadowing (L2 dlsym returns Result<nativeint, CError>)
+        // Fully qualified to L1 (L2 dlsym returns Result<nativeint, string>, but L1 returns Option)
         let dlsymCall =
             MatchExpr(
                 FunctionCall("Fidelity.Libc.DynamicLink", "dlsym",

@@ -489,7 +489,7 @@ let ``request with args unwraps malloc Option`` () =
         let decls = ProtocolParser.interfaceRequestDecls iface marshalConfig
         let output = decls |> List.map CodeRenderer.render |> String.concat "\n"
         // malloc returns Option<nativeint> — must be unwrapped via match
-        Assert.Contains("match malloc", output)
+        Assert.Contains("match Fidelity.Libc.Memory.malloc", output)
         Assert.Contains("| Some v -> v", output)
         Assert.Contains("| None -> 0n", output)
         // Must NOT use raw malloc result directly as nativeint

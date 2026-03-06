@@ -2,7 +2,7 @@ namespace Farscape.Core
 
 open CodeAST
 
-/// Generates CError struct type, Errno constants module, and Errno.describe function
+/// Generates Errno constants module and Errno.describe function
 /// from parsed C header macros enriched with raw header comments.
 ///
 /// The generated Errno.describe function compiles to a jump table over rodata strings —
@@ -35,16 +35,8 @@ module ErrnoModuleGenerator =
         |> List.sortBy (fun c -> c.Value)
         |> List.distinctBy (fun c -> c.Name)
 
-    /// Generate [<Struct>] type CError = { Code: int; Description: string }
-    /// Code is NTU `int` (register-width dimensional) — errno is C `int`.
-    let generateCErrorType () : FsDecl list =
-        [
-            RecordType(
-                "CError",
-                [ ("Code", Named "int"); ("Description", Named "string") ],
-                Some "Stack-allocated FFI error — carries errno code and human-readable description.",
-                [ "Struct" ])
-        ]
+    // CError struct removed — errno errors are represented as native Result<T, string>.
+    // Errno.describe returns the human-readable string directly.
 
     /// Generate [<Literal>] constants with XML doc comments from header.
     /// Each constant gets its description as an XML doc comment for IDE support.
@@ -68,7 +60,7 @@ module ErrnoModuleGenerator =
                     Some (c.Name, Literal $"\"{desc}\"")
                 | None ->
                     Some (c.Name, Literal $"\"{c.Name}\""))
-        let defaultCase = ("_", Literal "\"Unknown error\"")
+        let defaultCase = ("other", Literal "\"Unknown error\"")
         MatchExpr(Identifier "code", cases @ [ defaultCase ])
 
     /// Generate the Errno submodule: constants + describe function.
@@ -83,27 +75,12 @@ module ErrnoModuleGenerator =
                 Named "string",
                 describeBody,
                 [])
-        let captureBody =
-            RecordConstruction [
-                ("Code", Identifier "code")
-                ("Description", FunctionCall("", "describe", [Identifier "code"]))
-            ]
-        let captureFunc =
-            LetBinding(
-                "capture",
-                [ { Name = "code"; Type = Named "int" } ],
-                Named "CError",
-                captureBody,
-                [])
         let innerDecls =
             literals
             @ [ BlankLine
                 XmlDoc "Errno code to description string. Generated from header comments."
                 XmlDoc "Compiles to a jump table with string pointers into rodata. Zero allocation."
-                describeFunc
-                BlankLine
-                XmlDoc "Capture errno code with compile-time description."
-                captureFunc ]
+                describeFunc ]
         [ SubModule("Errno", innerDecls) ]
 
     /// Generate the __errno_location FidelityExtern declaration.
@@ -114,8 +91,8 @@ module ErrnoModuleGenerator =
                      [$"FidelityExtern(\"{cLibraryName}\", \"__errno_location\")"]) ]
 
     /// Generate the complete errno infrastructure as a rendered source string.
-    /// Produces: CError type + __errno_location extern + Errno submodule (constants + describe).
-    /// Always generates output — CError and __errno_location are needed even without errno constants.
+    /// Produces: __errno_location extern + Errno submodule (constants + describe).
+    /// Always generates output — __errno_location and describe are needed even without errno constants.
     let generate
         (macros: CppParser.MacroDecl list)
         (namespace': string)
@@ -123,9 +100,8 @@ module ErrnoModuleGenerator =
         : string =
 
         let constants = filterErrnoMacros macros
-        let errorTypeDecls = generateCErrorType ()
         let externDecl = generateErrnoLocationExtern cLibraryName
         let errnoDecls = generateErrnoDecls constants
-        let allDecls = errorTypeDecls @ [ BlankLine ] @ externDecl @ [ BlankLine ] @ errnoDecls
+        let allDecls = externDecl @ [ BlankLine ] @ errnoDecls
         let moduleDecl = Module(namespace', $"Errno infrastructure for {cLibraryName}", allDecls)
         CodeRenderer.render moduleDecl

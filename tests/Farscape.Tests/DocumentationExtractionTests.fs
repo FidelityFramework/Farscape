@@ -16,8 +16,8 @@ module RawHeaderCommentTests =
 
     [<Fact>]
     let ``Generic2 renders two-parameter generic type`` () =
-        let ty = Generic2("Result", Named "nativeint", Named "CError")
-        Assert.Equal("Result<nativeint, CError>", renderType ty)
+        let ty = Generic2("Result", Named "nativeint", Named "string")
+        Assert.Equal("Result<nativeint, string>", renderType ty)
 
     [<Fact>]
     let ``RecordConstruction renders struct literal`` () =
