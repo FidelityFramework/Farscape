@@ -64,6 +64,7 @@ module CodeRenderer =
                 |> List.map (fun (pattern, body) -> $"\n{indent}| {pattern} -> {renderExpr indent body}")
                 |> String.concat ""
             $"match {renderExpr indent scrutinee} with{caseStr}"
+        | RawExpr code -> code
 
     /// Render an expression as a function argument, parenthesizing compound expressions.
     and renderArg (indent: string) (expr: FsExpr) =

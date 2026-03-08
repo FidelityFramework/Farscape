@@ -27,7 +27,9 @@ module WrapperCodeGenerator =
     // =========================================================================
 
     /// Compute the wrapper's F# return type from ReturnSemantic and the raw mapped return type.
-    let private wrapperReturnType (semantic: ReturnSemantic) (rawRetType: FsType) (errorHandling: ErrorHandling) : FsType =
+    /// For OpaqueHandleReturn, resolvedHandleType carries the actual handle struct type
+    /// when the C return type maps to a known opaque handle; otherwise falls back to nativeint.
+    let private wrapperReturnType (semantic: ReturnSemantic) (rawRetType: FsType) (errorHandling: ErrorHandling) (resolvedHandleType: FsType option) : FsType =
         let errorType =
             match errorHandling with
             | UseErrno _ -> Named "string"
@@ -44,9 +46,13 @@ module WrapperCodeGenerator =
         | IntValueOrError ->
             if hasErrors then Generic2("Result", rawRetType, errorType)
             else Generic("Result", rawRetType)
-        | AllocatedPointer | OpaqueHandleReturn ->
+        | AllocatedPointer ->
             if hasErrors then Generic2("Result", Named "nativeint", errorType)
             else Generic("Result", Named "nativeint")
+        | OpaqueHandleReturn ->
+            let handleType = resolvedHandleType |> Option.defaultValue (Named "nativeint")
+            if hasErrors then Generic2("Result", handleType, errorType)
+            else Generic("Result", handleType)
         | EnumReturnError _ ->
             Generic2("Result", Unit, Named "string")
         | PureValue ->
@@ -302,8 +308,8 @@ module WrapperCodeGenerator =
                 let finalType = if isNullable then FidelityCodeGenerator.wrapOption fsType else fsType
                 { FsParam.Name = cleanParamName name; Type = finalType })
 
+        let baseRetType = mapType func.ReturnType
         let rawRetType =
-            let baseType = mapType func.ReturnType
             let returnIsPointer = FidelityCodeGenerator.isCDataPointer func.ReturnType
             let returnNonnull =
                 nonnullAnnotations
@@ -312,9 +318,14 @@ module WrapperCodeGenerator =
             let hasReturnsNonnullAttr =
                 func.Attributes |> List.exists (fun a -> a.Kind = "ReturnsNonNullAttr")
             if returnIsPointer && not returnNonnull && not hasReturnsNonnullAttr
-            then FidelityCodeGenerator.wrapOption baseType
-            else baseType
-        let retType = wrapperReturnType semantic rawRetType errorHandling
+            then FidelityCodeGenerator.wrapOption baseRetType
+            else baseRetType
+        // For OpaqueHandleReturn: use the actual handle type if the return maps to a known opaque handle
+        let resolvedHandleType =
+            match baseRetType with
+            | Named name when opaqueHandles.Contains name -> Some (Named name)
+            | _ -> None
+        let retType = wrapperReturnType semantic rawRetType errorHandling resolvedHandleType
 
         let paramNames = parameters |> List.map (fun p -> p.Name)
         let body = generateBody bindingsModule func.Name paramNames semantic errorHandling func.ReturnType

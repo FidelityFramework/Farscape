@@ -117,7 +117,7 @@ module GenerationTests =
         Assert.Contains("Struct", attrs)
 
     [<Fact>]
-    let ``generates companion SubModule with zero and isNull`` () =
+    let ``generates companion SubModule with zero, isNull, and ofHandle`` () =
         let decls = FidelityCodeGenerator.generateOpaqueHandleDecls (Set.ofList ["hipStream_t"])
         let submodules = decls |> List.choose (function SubModule (n, d) -> Some (n, d) | _ -> None)
         Assert.Equal(1, submodules.Length)
@@ -126,6 +126,7 @@ module GenerationTests =
         let bindings = children |> List.choose (function LetBinding (n, _, _, _, _) -> Some n | _ -> None)
         Assert.Contains("zero", bindings)
         Assert.Contains("isNull", bindings)
+        Assert.Contains("ofHandle", bindings)
 
     [<Fact>]
     let ``multiple handles generate distinct types`` () =
@@ -161,7 +162,10 @@ module SubModuleRenderTests =
         Assert.Contains("Handle: nativeint", rendered)
         Assert.Contains("module hipStream_t =", rendered)
         Assert.Contains("let zero", rendered)
+        Assert.Contains("{ hipStream_t.Handle = 0n }", rendered)
         Assert.Contains("let isNull", rendered)
+        Assert.Contains("let ofHandle", rendered)
+        Assert.Contains("{ hipStream_t.Handle = h }", rendered)
 
 // =============================================================================
 // FidelityCodeGenerator Integration Tests

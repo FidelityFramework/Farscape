@@ -234,12 +234,11 @@ module BindingGenerator =
                            DestroyFlag = 1u } : PilotTypes.ProtocolConfig)
 
                 let xmlTypeDecls = xmlProtocols |> List.map ProtocolParser.toTypeDeclarations
-                let xmlRequestDecls = xmlProtocols |> List.collect (fun p -> ProtocolParser.toRequestDecls p marshalConfig)
 
                 let allDeclLists = headerDeclLists @ xmlTypeDecls
                 let declarations = DeclarationAlgebra.mergeDeclarations allDeclLists
                 let sourceCount = project.Library.Headers.Length + project.Library.XmlProtocols.Length
-                logVerbose $"Merged {declarations.Length} declarations from {sourceCount} source(s) ({xmlRequestDecls.Length} protocol request implementations)" verbose
+                logVerbose $"Merged {declarations.Length} declarations from {sourceCount} source(s)" verbose
 
                 // Resolve output directory relative to the project file location
                 let projectDir = Path.GetDirectoryName(Path.GetFullPath(projectPath))
@@ -270,6 +269,12 @@ module BindingGenerator =
                 let ctx =
                     let baseCtx = FidelityCodeGenerator.buildGenerationContext declarations dataModel structLayouts
                     { baseCtx with NonnullAnnotations = project.Nonnull }
+
+                // Generate protocol request implementations AFTER ctx is built,
+                // so opaque handle types from XML interfaces are available for typed signatures
+                let xmlRequestDecls = xmlProtocols |> List.collect (fun p -> ProtocolParser.toRequestDecls p marshalConfig ctx.OpaqueHandles)
+                if not xmlRequestDecls.IsEmpty then
+                    logVerbose $"  {xmlRequestDecls.Length} protocol request implementations with typed handles" verbose
 
                 // Derive common namespace prefix for the project
                 let nsPrefix = deriveNamespacePrefix project
@@ -436,7 +441,7 @@ module BindingGenerator =
                             [descriptorPath]
                     else []
 
-                // ── Callback spec (resolved here, used by Layer 3) ─────────
+                // ── Callback spec (resolved here, used by L2 marshaling) ────
                 let callbackSpec =
                     if generateWrappers then
                         let spec =
@@ -539,7 +544,7 @@ module BindingGenerator =
                 // Generate canonical fidproj for the binding library
                 let fidprojFile = generateFidproj project nsPrefix outputDir allFiles verbose
 
-                // ── Layer 3 Bridge package ─────────────────────────────────
+                // ── Layer 2 Marshaling Bridge package ─────────────────────
                 let unpairedConstructors =
                     let allInterfaces = xmlProtocols |> List.collect (fun p -> p.Interfaces)
                     let withDestroy =
@@ -605,14 +610,14 @@ module BindingGenerator =
                                                   | None -> () ]
                                             let moduleDecl =
                                                 CodeAST.Module(dispatchNs,
-                                                    $"{lastSeg} protocol dispatch — Layer 3 bridge",
+                                                    $"{lastSeg} protocol dispatch — Layer 2 protocol marshaling",
                                                     [ for m in openModules -> CodeAST.OpenModule m ]
                                                     @ [CodeAST.BlankLine]
                                                     @ nsRequestDecls)
                                             let code = CodeRenderer.render moduleDecl
                                             let dispatchPath = Path.Combine(bridgeDir, $"{lastSeg}Dispatch.clef")
                                             File.WriteAllText(dispatchPath, code)
-                                            logVerbose $"  Layer 3: {lastSeg}Dispatch.clef ({nsRequestDecls.Length} protocol requests)" verbose
+                                            logVerbose $"  L2 marshaling: {lastSeg}Dispatch.clef ({nsRequestDecls.Length} protocol requests)" verbose
                                             [dispatchPath])
                             else []
 
@@ -633,7 +638,7 @@ module BindingGenerator =
                                 | Some output ->
                                     let callbackPath = Path.Combine(bridgeDir, "Callbacks.clef")
                                     File.WriteAllText(callbackPath, output)
-                                    logVerbose $"  Layer 3: Callbacks.clef" verbose
+                                    logVerbose $"  L2 marshaling: Callbacks.clef" verbose
                                     [callbackPath]
                                 | None -> []
                             | _ -> []
@@ -654,7 +659,7 @@ module BindingGenerator =
                             sb.AppendLine("[package]") |> ignore
                             sb.AppendLine($"name = \"{bridgeName}\"") |> ignore
                             sb.AppendLine("version = \"0.1.0\"") |> ignore
-                            sb.AppendLine($"description = \"Layer 3 bridge for {project.Library.Name} — protocol dispatch and callback wrappers.\"") |> ignore
+                            sb.AppendLine($"description = \"Layer 2 marshaling for {project.Library.Name} — protocol dispatch and callback wrappers.\"") |> ignore
                             sb.AppendLine() |> ignore
                             sb.AppendLine("[compilation]") |> ignore
                             sb.AppendLine("target = \"cpu\"") |> ignore
@@ -694,11 +699,11 @@ module BindingGenerator =
 
                             let bridgeFidprojPath = Path.Combine(fidprojDir, $"{bridgeName}.fidproj")
                             File.WriteAllText(bridgeFidprojPath, sb.ToString())
-                            logVerbose $"Generated Layer 3 fidproj: {bridgeFidprojPath}" verbose
+                            logVerbose $"Generated L2 marshaling fidproj: {bridgeFidprojPath}" verbose
 
                             // Generate LAYER3-REPORT.md
                             let report = System.Text.StringBuilder()
-                            report.AppendLine($"# Layer 3 Bridge Report: {bridgeName}") |> ignore
+                            report.AppendLine($"# Layer 2 Marshaling Report: {bridgeName}") |> ignore
                             report.AppendLine() |> ignore
                             report.AppendLine("## Generated") |> ignore
                             report.AppendLine() |> ignore
@@ -745,7 +750,7 @@ module BindingGenerator =
 
                             let reportPath = Path.Combine(fidprojDir, "LAYER3-REPORT.md")
                             File.WriteAllText(reportPath, report.ToString())
-                            logVerbose $"Layer 3 report: {reportPath}" verbose
+                            logVerbose $"L2 marshaling report: {reportPath}" verbose
 
                             bridgeFiles @ [bridgeFidprojPath; reportPath]
                         else []

@@ -211,10 +211,12 @@ module ProtocolParser =
         | Array -> "struct wl_array *"
 
     /// Generate the opaque handle typedef for an interface.
+    /// Uses "struct {name}_opaque *" so isOpaqueHandleTypedef detects it:
+    /// pointer to struct not in defined struct set → opaque handle record type.
     let private interfaceHandleTypedef (iface: ProtocolInterface) : CppParser.Declaration =
         CppParser.Declaration.Typedef {
             Name = iface.Name
-            UnderlyingType = "void *"
+            UnderlyingType = $"struct {iface.Name}_opaque *"
             Documentation = iface.Documentation
         }
 
@@ -303,32 +305,36 @@ module ProtocolParser =
     open Farscape.Core.CodeAST
 
     /// Map a protocol arg type to the Clef FsType used in the generated function signature.
-    let private argToFsType (arg: ProtocolArg) : FsType =
+    /// All handles are nativeint in protocol dispatch (CCS FieldLabels workaround).
+    let private argToFsType (_opaqueHandles: Set<string>) (arg: ProtocolArg) : FsType =
         match arg.Type with
         | Int -> Named "int32"
         | Uint -> Named "uint32"
         | Fixed -> Named "int32"  // wl_fixed_t is int32
         | String -> Named "nativeint"  // string pointer, passed as nativeint in arg array
-        | Object -> Named "nativeint"  // proxy handle
+        | Object -> Named "nativeint"  // all handles nativeint (CCS FieldLabels workaround)
         | NewId -> Named "nativeint"
         | Fd -> Named "int32"
         | Array -> Named "nativeint"  // wl_array pointer
 
     /// Convert a protocol arg value to nativeint for the argument array.
-    let private argToNativeint (arg: ProtocolArg) : FsExpr =
+    let private argToNativeint (_opaqueHandles: Set<string>) (arg: ProtocolArg) : FsExpr =
         match arg.Type with
         | Int | Uint | Fixed | Fd ->
             TypeConversion("nativeint", Identifier arg.Name)
-        | String | Object | Array ->
-            // Option<nativeint/nativeptr> — extract via match or pass as-is
-            // For simplicity, use the identifier directly (marshal accepts nativeint)
+        | String | Array ->
+            Identifier arg.Name
+        | Object ->
+            // All handles are nativeint in protocol dispatch (CCS FieldLabels workaround)
             Identifier arg.Name
         | NewId ->
-            Identifier arg.Name
+            // NewId in the args array: value 0n (the C function assigns the real ID).
+            // wl_closure_marshal reads args[i] for new_id but overwrites with allocated ID.
+            Literal "0n"
 
     /// Generate FsDecl for a single protocol request.
     /// opcode = index of the request within the interface's request list.
-    let private generateRequestDecl (iface: ProtocolInterface) (opcode: int) (request: ProtocolMessage) (config: MarshalConfig) : FsDecl list =
+    let private generateRequestDecl (iface: ProtocolInterface) (opcode: int) (request: ProtocolMessage) (config: MarshalConfig) (opaqueHandles: Set<string>) : FsDecl list =
         let funcName = $"{iface.Name}_{request.Name}"
         let interfaceSymbol = $"{iface.Name}_interface"
 
@@ -341,9 +347,14 @@ module ProtocolParser =
             | None -> false
 
         // Build parameters: self + non-new_id args (+ interface/version for untyped new_id)
-        let selfParam = { Name = "self"; Type = Named "nativeint" }
+        // NOTE: All handles are nativeint in protocol dispatch to avoid CCS FieldLabels
+        // pollution (28 records with { Handle: nativeint } cause "last definition wins"
+        // inference cascade). Type safety is provided by function names + return types.
+        // This will be reverted when .clefi signature-based loading lands.
+        let selfType = Named "nativeint"
+        let selfParam = { Name = "self"; Type = selfType }
         let regularArgs = request.Args |> List.filter (fun a -> a.Type <> NewId)
-        let regularParams = regularArgs |> List.map (fun a -> { Name = a.Name; Type = argToFsType a })
+        let regularParams = regularArgs |> List.map (fun a -> { Name = a.Name; Type = argToFsType opaqueHandles a })
 
         let extraParams =
             if isUntypedNewId then
@@ -354,9 +365,9 @@ module ProtocolParser =
 
         let allParams = selfParam :: regularParams @ extraParams
 
-        // Return type
+        // Return type: all constructors return option<nativeint> (CCS FieldLabels workaround)
         let returnType =
-            if isConstructor then Named "nativeint"
+            if isConstructor then Generic("option", Named "nativeint")
             else Named "unit"
 
         // Build the body
@@ -383,54 +394,110 @@ module ProtocolParser =
             else
                 Literal "0n"
 
+        // Self is always nativeint in protocol dispatch (no .Handle unwrap needed)
+        let selfRaw = Identifier "self"
+
         // Version: get from proxy for normal requests, from caller for untyped new_id
         let versionExpr =
             if isUntypedNewId then
                 Identifier "version"
             else
-                FunctionCall("", config.VersionFunction, [FunctionCall("", "Some", [Identifier "self"])])
+                FunctionCall("", config.VersionFunction, [FunctionCall("", "Some", [selfRaw])])
 
-        // For requests with no args (besides self and new_id), pass None for args array
-        // For requests with args, we need to construct the argument array
-        let marshalArgs = regularArgs
+        // Build the args array from ALL args in their original positions.
+        // wl_closure_marshal reads args[i] for every argument type including new_id,
+        // so NewId entries must be present (value 0n — the C function assigns the real ID).
+        // Only truly argument-less requests (no args at all) can pass None.
+        let marshalArgs = request.Args
+
+        // Constructor result expression: all return option<nativeint> (CCS FieldLabels workaround)
+        let constructorResultExpr =
+            MatchExpr(Identifier "result",
+                [ ("Some v", FunctionCall("", "Some", [Identifier "v"]))
+                  ("None", Identifier "None") ])
 
         let body =
-            if marshalArgs.IsEmpty && not isUntypedNewId then
-                // Simple case: no argument array needed
+            if marshalArgs.IsEmpty then
+                // Truly no arguments (no regular args, no new_id): pass None for args array
                 let marshalCall =
                     FunctionCall("", config.MarshalFunction,
-                        [ FunctionCall("", "Some", [Identifier "self"])
+                        [ FunctionCall("", "Some", [selfRaw])
                           opcodeExpr
                           FunctionCall("", "Some", [interfaceExpr])
                           versionExpr
                           flags
                           Identifier "None" ])
                 if isConstructor then
-                    // Constructor: extract from Option, return nativeint
-                    LetIn("result", marshalCall,
-                        MatchExpr(Identifier "result",
-                            [ ("Some v", Identifier "v")
-                              ("None", Literal "0n") ]))
+                    LetIn("result", marshalCall, constructorResultExpr)
                 else
                     // Void: call and ignore result
                     LetIn("_", marshalCall, Literal "()")
             elif isUntypedNewId then
                 // Special: untyped new_id (e.g. wl_registry_bind)
-                // Args: name, interface->name, version, NULL
-                // This requires constructing an argument array with the bind-specific args
-                // For now, generate with the regular args + interface name + version + NULL sentinel
+                // libwayland internally prepends 3 extra args for untyped new_id:
+                //   args[0..N-1] = regular args (e.g. 'name' for bind)
+                //   args[N]     = interface_name (string pointer)
+                //   args[N+1]   = interface_version (uint)
+                //   args[N+2]   = 0 (new_id placeholder)
+                let totalArgCount = regularArgs.Length + 3
+                let allocSize = $"{totalArgCount * 8}"
+
+                let writeRegularArgs =
+                    regularArgs |> List.mapi (fun i arg ->
+                        (i, FunctionCall("NativePtr", "set",
+                            [ Identifier "argsPtr"; Literal $"{i}"; argToNativeint opaqueHandles arg ])))
+
+                let baseIdx = regularArgs.Length
+                // interface_name: cast interface pointer to get name string
+                let writeIfaceName =
+                    (baseIdx, FunctionCall("NativePtr", "set",
+                        [ Identifier "argsPtr"; Literal $"{baseIdx}"; Identifier "``interface``" ]))
+                // interface_version
+                let writeIfaceVersion =
+                    (baseIdx + 1, FunctionCall("NativePtr", "set",
+                        [ Identifier "argsPtr"; Literal $"{baseIdx + 1}";
+                          TypeConversion("nativeint", Identifier "version") ]))
+                // new_id placeholder
+                let writeNewId =
+                    (baseIdx + 2, FunctionCall("NativePtr", "set",
+                        [ Identifier "argsPtr"; Literal $"{baseIdx + 2}"; Literal "0n" ]))
+
+                let allWrites = writeRegularArgs @ [ writeIfaceName; writeIfaceVersion; writeNewId ]
+
+                let mallocCall =
+                    FunctionCall("Fidelity.Libc.Memory", "malloc",
+                        [ TypeConversion("unativeint", Literal allocSize) ])
+                let allocExpr =
+                    MatchExpr(mallocCall,
+                        [ ("Some v", Identifier "v")
+                          ("None", Literal "0n") ])
+                let castExpr =
+                    FunctionCall("NativePtr", "ofNativeInt",
+                        [ Identifier "argsRaw" ])
+
                 let marshalCall =
                     FunctionCall("", config.MarshalFunction,
-                        [ FunctionCall("", "Some", [Identifier "self"])
+                        [ FunctionCall("", "Some", [selfRaw])
                           opcodeExpr
                           FunctionCall("", "Some", [Identifier "``interface``"])
                           Identifier "version"
                           flags
-                          Identifier "None" ])
-                LetIn("result", marshalCall,
-                    MatchExpr(Identifier "result",
-                        [ ("Some v", Identifier "v")
-                          ("None", Literal "0n") ]))
+                          FunctionCall("", "Some", [Identifier "argsRaw"]) ])
+
+                let freeCall =
+                    FunctionCall("Fidelity.Libc.Memory", "free",
+                        [ FunctionCall("", "Some", [Identifier "argsRaw"]) ])
+
+                let innerBody =
+                    LetIn("result", marshalCall,
+                        LetIn("_", freeCall, constructorResultExpr))
+
+                let withWrites =
+                    List.foldBack (fun (_, writeExpr) body ->
+                        LetIn("_", writeExpr, body)) allWrites innerBody
+
+                LetIn("argsRaw", allocExpr,
+                    LetIn("argsPtr", castExpr, withWrites))
             else
                 // Has arguments: need to construct wl_argument array
                 // Each wl_argument is 8 bytes on LP64, all args fit in nativeint
@@ -443,7 +510,7 @@ module ProtocolParser =
                         // NativePtr.set on the buffer cast to nativeptr<nativeint>
                         let writeExpr =
                             FunctionCall("NativePtr", "set",
-                                [ Identifier "argsPtr"; Literal $"{i}"; argToNativeint arg ])
+                                [ Identifier "argsPtr"; Literal $"{i}"; argToNativeint opaqueHandles arg ])
                         (i, writeExpr))
 
                 // Build the sequential expression: alloc, write args, marshal, free
@@ -462,7 +529,7 @@ module ProtocolParser =
                 // Chain: let argsRaw = malloc(...) in let argsPtr = cast in write0; write1; ... marshal; free
                 let marshalCall =
                     FunctionCall("", config.MarshalFunction,
-                        [ FunctionCall("", "Some", [Identifier "self"])
+                        [ FunctionCall("", "Some", [selfRaw])
                           opcodeExpr
                           FunctionCall("", "Some", [interfaceExpr])
                           versionExpr
@@ -477,10 +544,7 @@ module ProtocolParser =
                 let innerBody =
                     if isConstructor then
                         LetIn("result", marshalCall,
-                            LetIn("_", freeCall,
-                                MatchExpr(Identifier "result",
-                                    [ ("Some v", Identifier "v")
-                                      ("None", Literal "0n") ])))
+                            LetIn("_", freeCall, constructorResultExpr))
                     else
                         LetIn("_", marshalCall,
                             LetIn("_", freeCall, Literal "()"))
@@ -505,15 +569,15 @@ module ProtocolParser =
         doc @ [ LetBinding(funcName, allParams, returnType, body, []) ]
 
     /// Generate all request implementation FsDecl for an interface.
-    let interfaceRequestDecls (iface: ProtocolInterface) (config: MarshalConfig) : FsDecl list =
+    let interfaceRequestDecls (iface: ProtocolInterface) (config: MarshalConfig) (opaqueHandles: Set<string>) : FsDecl list =
         iface.Requests |> List.mapi (fun opcode request ->
-            generateRequestDecl iface opcode request config)
+            generateRequestDecl iface opcode request config opaqueHandles)
         |> List.concat
 
     /// Generate all request implementations for a protocol.
-    let toRequestDecls (protocol: Protocol) (config: MarshalConfig) : FsDecl list =
+    let toRequestDecls (protocol: Protocol) (config: MarshalConfig) (opaqueHandles: Set<string>) : FsDecl list =
         protocol.Interfaces |> List.collect (fun iface ->
-            interfaceRequestDecls iface config)
+            interfaceRequestDecls iface config opaqueHandles)
 
     // =========================================================================
     // Combined Output
@@ -522,10 +586,10 @@ module ProtocolParser =
     /// Produce both streams from a protocol:
     /// 1. Type declarations (→ CppParser.Declaration pipeline → FidelityCodeGenerator)
     /// 2. Request implementations (→ FsDecl directly, with marshal call bodies)
-    let protocolToOutput (protocol: Protocol) (config: MarshalConfig)
+    let protocolToOutput (protocol: Protocol) (config: MarshalConfig) (opaqueHandles: Set<string>)
         : CppParser.Declaration list * FsDecl list =
         let typeDecls = toTypeDeclarations protocol
-        let requestDecls = toRequestDecls protocol config
+        let requestDecls = toRequestDecls protocol config opaqueHandles
         (typeDecls, requestDecls)
 
     // =========================================================================

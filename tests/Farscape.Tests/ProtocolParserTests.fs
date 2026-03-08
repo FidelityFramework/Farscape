@@ -165,7 +165,7 @@ let ``toDeclarations produces typedef for interface handle`` () =
         // One typedef per interface: wl_display, wl_callback
         Assert.Equal(2, typedefs.Length)
         Assert.Equal("wl_display", typedefs.[0].Name)
-        Assert.Equal("void *", typedefs.[0].UnderlyingType)
+        Assert.Equal("struct wl_display_opaque *", typedefs.[0].UnderlyingType)
         Assert.Equal("wl_callback", typedefs.[1].Name)
     | Error e -> failwith e
 
@@ -486,7 +486,7 @@ let ``request with args unwraps malloc Option`` () =
     match ProtocolParser.parseProtocolXml requestWithArgs with
     | Ok proto ->
         let iface = proto.Interfaces.[0]
-        let decls = ProtocolParser.interfaceRequestDecls iface marshalConfig
+        let decls = ProtocolParser.interfaceRequestDecls iface marshalConfig Set.empty
         let output = decls |> List.map CodeRenderer.render |> String.concat "\n"
         // malloc returns Option<nativeint> — must be unwrapped via match
         Assert.Contains("match Fidelity.Libc.Memory.malloc", output)
@@ -501,9 +501,126 @@ let ``destructor request does not use malloc`` () =
     match ProtocolParser.parseProtocolXml requestWithArgs with
     | Ok proto ->
         let iface = proto.Interfaces.[0]
-        let decls = ProtocolParser.interfaceRequestDecls iface marshalConfig
+        let decls = ProtocolParser.interfaceRequestDecls iface marshalConfig Set.empty
         let output = decls |> List.map CodeRenderer.render |> String.concat "\n"
         let destroySection = output.Split("let wl_surface_destroy").[1].Split("let wl_surface_").[0]
         // Destructor with no args should not use malloc
         Assert.DoesNotContain("malloc", destroySection)
+    | Error e -> failwith e
+
+// =============================================================================
+// Typed Opaque Handle Tests (protocol dispatch signatures)
+// =============================================================================
+
+let private typedHandleProtocol = """<?xml version="1.0"?>
+<protocol name="test">
+  <interface name="wl_compositor" version="6">
+    <request name="create_surface">
+      <arg name="id" type="new_id" interface="wl_surface"/>
+    </request>
+    <request name="create_region">
+      <arg name="id" type="new_id" interface="wl_region"/>
+    </request>
+  </interface>
+  <interface name="wl_surface" version="6">
+    <request name="attach">
+      <arg name="buffer" type="object" interface="wl_buffer" allow-null="true"/>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </request>
+    <request name="destroy" type="destructor"/>
+    <request name="set_opaque_region">
+      <arg name="region" type="object" interface="wl_region"/>
+    </request>
+  </interface>
+  <interface name="wl_region" version="1"/>
+  <interface name="wl_buffer" version="1"/>
+</protocol>"""
+
+let private knownHandles = Set.ofList ["wl_compositor"; "wl_surface"; "wl_region"; "wl_buffer"]
+
+[<Fact>]
+let ``typed handle: self parameter uses nativeint (CCS FieldLabels workaround)`` () =
+    match ProtocolParser.parseProtocolXml typedHandleProtocol with
+    | Ok proto ->
+        let compositor = proto.Interfaces.[0]
+        let decls = ProtocolParser.interfaceRequestDecls compositor marshalConfig knownHandles
+        let output = decls |> List.map CodeRenderer.render |> String.concat "\n"
+        Assert.Contains("(self: nativeint)", output)
+    | Error e -> failwith e
+
+[<Fact>]
+let ``typed handle: constructor returns option nativeint (CCS FieldLabels workaround)`` () =
+    match ProtocolParser.parseProtocolXml typedHandleProtocol with
+    | Ok proto ->
+        let compositor = proto.Interfaces.[0]
+        let decls = ProtocolParser.interfaceRequestDecls compositor marshalConfig knownHandles
+        let output = decls |> List.map CodeRenderer.render |> String.concat "\n"
+        // All constructors return option<nativeint> (CCS FieldLabels workaround)
+        Assert.Contains(": option<nativeint> =", output)
+    | Error e -> failwith e
+
+[<Fact>]
+let ``typed handle: object arg with interface uses nativeint (CCS FieldLabels workaround)`` () =
+    match ProtocolParser.parseProtocolXml typedHandleProtocol with
+    | Ok proto ->
+        let surface = proto.Interfaces.[1]
+        let decls = ProtocolParser.interfaceRequestDecls surface marshalConfig knownHandles
+        let output = decls |> List.map CodeRenderer.render |> String.concat "\n"
+        // All handles are nativeint in protocol dispatch (CCS FieldLabels workaround)
+        Assert.Contains("(region: nativeint)", output)
+    | Error e -> failwith e
+
+[<Fact>]
+let ``typed handle: self passed directly as nativeint (no Handle unwrap)`` () =
+    match ProtocolParser.parseProtocolXml typedHandleProtocol with
+    | Ok proto ->
+        let compositor = proto.Interfaces.[0]
+        let decls = ProtocolParser.interfaceRequestDecls compositor marshalConfig knownHandles
+        let output = decls |> List.map CodeRenderer.render |> String.concat "\n"
+        // Body passes self directly (no .Handle unwrap needed — self is nativeint)
+        Assert.DoesNotContain("self.Handle", output)
+        Assert.Contains("(Some self)", output)
+    | Error e -> failwith e
+
+[<Fact>]
+let ``typed handle: constructor passes through nativeint (no ofHandle)`` () =
+    match ProtocolParser.parseProtocolXml typedHandleProtocol with
+    | Ok proto ->
+        let compositor = proto.Interfaces.[0]
+        let decls = ProtocolParser.interfaceRequestDecls compositor marshalConfig knownHandles
+        let output = decls |> List.map CodeRenderer.render |> String.concat "\n"
+        // No ofHandle call — returns option<nativeint> directly (CCS FieldLabels workaround)
+        Assert.DoesNotContain("ofHandle", output)
+        Assert.Contains("| Some v -> Some v", output)
+        Assert.Contains("| None -> None", output)
+    | Error e -> failwith e
+
+[<Fact>]
+let ``typed handle: untyped object args remain nativeint`` () =
+    let untypedProtocol = """<?xml version="1.0"?>
+<protocol name="test">
+  <interface name="wl_foo" version="1">
+    <request name="do_thing">
+      <arg name="target" type="object"/>
+    </request>
+  </interface>
+</protocol>"""
+    match ProtocolParser.parseProtocolXml untypedProtocol with
+    | Ok proto ->
+        let iface = proto.Interfaces.[0]
+        let decls = ProtocolParser.interfaceRequestDecls iface marshalConfig Set.empty
+        let output = decls |> List.map CodeRenderer.render |> String.concat "\n"
+        Assert.Contains("(target: nativeint)", output)
+    | Error e -> failwith e
+
+[<Fact>]
+let ``typed handle: without opaqueHandles set, self remains nativeint`` () =
+    match ProtocolParser.parseProtocolXml typedHandleProtocol with
+    | Ok proto ->
+        let compositor = proto.Interfaces.[0]
+        let decls = ProtocolParser.interfaceRequestDecls compositor marshalConfig Set.empty
+        let output = decls |> List.map CodeRenderer.render |> String.concat "\n"
+        Assert.Contains("(self: nativeint)", output)
+        Assert.DoesNotContain("(self: wl_compositor)", output)
     | Error e -> failwith e

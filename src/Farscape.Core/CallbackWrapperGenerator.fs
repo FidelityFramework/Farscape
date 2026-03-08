@@ -250,7 +250,7 @@ module CallbackWrapperGenerator =
             | Some s -> generateListenerDirectBuilder ls s delegateNames
             | None -> [])
 
-    /// Generate Layer 3 bridge callback decls (registration wrappers + listener builders with dlsym).
+    /// Generate Layer 2 callback decls (registration wrappers + listener builders with dlsym).
     let generateDecls
         (spec: CallbackSpec)
         (declarations: CppParser.Declaration list)
@@ -282,7 +282,7 @@ module CallbackWrapperGenerator =
         | [], listeners -> listeners
         | regs, listeners -> regs @ [ BlankLine ] @ listeners
 
-    /// Generate the complete Layer 3 bridge callback wrappers module as a rendered source string.
+    /// Generate the complete Layer 2 callback wrappers module as a rendered source string.
     let generate
         (spec: CallbackSpec)
         (declarations: CppParser.Declaration list)

@@ -86,11 +86,15 @@ module FidelityCodeGenerator =
               SubModule(name, [
                   LetBinding("zero", [],
                       Named name,
-                      RecordConstruction [("Handle", Literal "0n")],
+                      RecordConstruction [($"{name}.Handle", Literal "0n")],
                       [])
                   LetBinding("isNull", [{ Name = "h"; Type = Named name }],
                       Named "bool",
                       Comparison(Identifier "h.Handle", "=", Literal "0n"),
+                      [])
+                  LetBinding("ofHandle", [{ Name = "h"; Type = Named "nativeint" }],
+                      Named name,
+                      RecordConstruction [($"{name}.Handle", Identifier "h")],
                       [])
               ])
               BlankLine ])

@@ -159,17 +159,17 @@ module PilotTypes =
     }
 
     // =========================================================================
-    // Layer 3 Bridge Requirements
+    // Layer 2 Marshaling Requirements
     // =========================================================================
 
-    /// External dependencies required by Layer 3 bridge code.
+    /// External dependencies required by Layer 2 marshaling code.
     type Layer3Dependency =
         /// dlsym for interface resolution + callback binding
         | LibcDynamicLink
         /// malloc/free for protocol argument arrays
         | LibcMemory
 
-    /// Layer 3 requirement analysis result — determines whether a Bridge package is needed.
+    /// Layer 2 marshaling requirement analysis — determines whether a Bridge package is needed.
     type Layer3Requirement = {
         /// External dependencies the bridge code needs
         Dependencies: Layer3Dependency list
@@ -198,7 +198,7 @@ module PilotTypes =
         Nonnull: NonnullAnnotations option
         /// Protocol dispatch configuration (None = no XML protocol request generation)
         ProtocolConfig: ProtocolConfig option
-        /// Layer 3 bridge requirements (None = no bridge package needed).
+        /// Layer 2 marshaling requirements (None = no marshaling package needed).
         /// Computed by PilotAnalyzer.analyzeLayer3Requirements, not serialized.
         Layer3: Layer3Requirement option
     }

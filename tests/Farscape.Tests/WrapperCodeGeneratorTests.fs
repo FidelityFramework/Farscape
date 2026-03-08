@@ -371,3 +371,40 @@ let ``int32_t returning function uses int32 literal 0l for zero comparison`` () 
                     []
     Assert.Contains("= 0l then", output)
     Assert.DoesNotContain("= 0 then", output)
+
+// =============================================================================
+// Opaque Handle Return Type Tests
+// =============================================================================
+
+[<Fact>]
+let ``wrapper returns Result<HandleType, string> for opaque handle return with errno`` () =
+    // Declaration with opaque handle typedef + function returning that type
+    let decls = [
+        CppParser.Declaration.Typedef
+            { Name = "hipStream_t"; UnderlyingType = "struct ihipStream_t *"; Documentation = None }
+        CppParser.Declaration.Function
+            { Name = "hipStreamCreate"
+              ReturnType = "hipStream_t"
+              Parameters = [("flags", "unsigned int")]
+              Documentation = None
+              IsVirtual = false; IsStatic = false; IsInline = false; Attributes = [] }
+    ]
+    let output = WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" (UseErrno "Fidelity.Errno") Types.LP64 None
+    // Return type should use the handle type, not nativeint
+    Assert.Contains("Result<hipStream_t, string>", output)
+    Assert.DoesNotContain("Result<nativeint, string>", output)
+
+[<Fact>]
+let ``wrapper returns Result<nativeint, string> for non-opaque pointer with errno`` () =
+    // Regular void* return without opaque handle typedef
+    let decls = [
+        CppParser.Declaration.Function
+            { Name = "mmap"
+              ReturnType = "void *"
+              Parameters = [("addr", "void *"); ("length", "size_t")]
+              Documentation = None
+              IsVirtual = false; IsStatic = false; IsInline = false; Attributes = [] }
+    ]
+    let output = WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" (UseErrno "Fidelity.Errno") Types.LP64 None
+    // void* should use nativeint, not a handle type
+    Assert.Contains("Result<nativeint, string>", output)

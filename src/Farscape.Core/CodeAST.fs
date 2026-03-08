@@ -46,6 +46,8 @@ module CodeAST =
         | RecordConstruction of fields: (string * FsExpr) list
         /// Match expression: match scrutinee with | pattern1 -> body1 | pattern2 -> body2
         | MatchExpr of scrutinee: FsExpr * cases: (string * FsExpr) list
+        /// Raw code fragment — for patterns not expressible via other AST nodes
+        | RawExpr of string
 
     /// A function parameter
     type FsParam = {
