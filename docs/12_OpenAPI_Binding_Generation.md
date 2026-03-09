@@ -2,7 +2,7 @@
 
 ## Context
 
-Farscape generates Clef bindings from C headers. This document extends Farscape's binding generation to cover **OpenAPI/REST API specifications**, producing strongly-typed F# management clients for services like the Cloudflare API.
+Farscape generates Clef bindings from C headers. This document extends Farscape's binding generation to cover **OpenAPI/REST API specifications**, producing strongly-typed Clef management clients for services like the Cloudflare API.
 
 This design replaces the current approach of using [Hawaii](https://github.com/Zaid-Ajaj/Hawaii) (a capable but unmaintained F# OpenAPI client generator) augmented with a pipeline of 5+ postprocessors and a multi-pass bash preprocessor. The goal is a **single clean-pass transformer** that handles modern, large-scale OpenAPI specs natively — no pre/post processing.
 
@@ -10,7 +10,7 @@ This design replaces the current approach of using [Hawaii](https://github.com/Z
 
 Hawaii is excellent pioneering work by Zaid Ajaj. However:
 
-1. **Architectural mismatch**: Hawaii uses the full F# compiler AST (`FSharp.Compiler.Syntax`) + Fantomas formatting, which is heavyweight and couples to the .NET F# compiler. Farscape's `FsDecl` typed AST + `CodeRenderer` is lighter and portable to Clef self-hosting.
+1. **Architectural mismatch**: Hawaii uses the full F# compiler AST (`FSharp.Compiler.Syntax`) + Fantomas formatting, which is heavyweight and couples to the .NET F# compiler. Farscape's `ClefDecl` typed AST + `CodeRenderer` is lighter and portable to Clef self-hosting.
 
 2. **String-based normalization**: Hawaii uses ad-hoc string manipulation and regex for type name normalization, leading to the inconsistencies that require 5+ postprocessors. Farscape's XParsec + Active Pattern approach is structurally sound.
 
@@ -27,11 +27,11 @@ Hawaii is excellent pioneering work by Zaid Ajaj. However:
 | **XParsec Parsers** | C type strings, macro values | OpenAPI schema types, $ref resolution, allOf composition |
 | **Active Patterns** | Type classification, keyword quoting | Schema classification, identifier sanitization, response pattern detection |
 | **Catamorphism** | `Declaration` DU fold | `ApiDeclaration` DU fold |
-| **Typed Code AST** | `FsDecl` → Clef source | `FsDecl` → F# source (same AST, different renderer configuration) |
+| **Typed Code AST** | `ClefDecl` → Clef source | `ClefDecl` → Clef source (same AST, renderer-configured per target) |
 
 ### 2. Single-Pass Clean Transform
 
-No preprocessors. No postprocessors. The transformer reads an OpenAPI spec and produces correct, compilable F# in one pass. Every bug currently handled by external scripts is handled natively:
+No preprocessors. No postprocessors. The transformer reads an OpenAPI spec and produces correct, compilable Clef in one pass. Every bug currently handled by external scripts is handled natively:
 
 | Current External Fix | Clean-Pass Solution |
 |---------------------|---------------------|
@@ -86,11 +86,11 @@ OpenAPI Spec (JSON/YAML)
 [Catamorphism]                     -- Single fold over ApiDeclaration DU
   |                                   Produces: type definitions, client methods, response DUs
   v
-[FsDecl AST]                      -- Same typed AST as Farscape Core
-  |                                   (reused: FsType, FsExpr, FsDecl, FsModule)
+[ClefDecl AST]                     -- Same typed AST as Farscape Core
+  |                                   (reused: NTUType, ClefExpr, ClefDecl, ClefModule)
   v
-[CodeRenderer]                     -- FsDecl → F# source string
-                                      (same StringBuilder-only renderer, configured for F# output)
+[CodeRenderer]                     -- ClefDecl → Clef source string
+                                      (same StringBuilder-only renderer, configured per target)
 ```
 
 ### Core Types
@@ -196,14 +196,14 @@ let rec classifySchema (root: JsonNode) (node: JsonNode) : SchemaType =
 Single, consistent sanitization applied once during AST construction:
 
 ```fsharp
-/// Classify whether an OpenAPI name needs F# backtick quoting
+/// Classify whether an OpenAPI name needs backtick quoting
 let (|NeedsQuoting|ValidIdent|) (name: string) =
     if containsSpecialChars name || isFSharpKeyword name then
         NeedsQuoting name
     else
         ValidIdent name
 
-/// Normalize an OpenAPI schema name to a consistent F# identifier
+/// Normalize an OpenAPI schema name to a consistent Clef identifier
 let normalizeTypeName (name: string) : string =
     // Single function. Applied once. No inconsistencies.
     name
@@ -274,21 +274,21 @@ This replaces the current `services.json` + `extract-service.sh` + Hawaii config
 
 ### HTTP Library Generation
 
-Instead of Hawaii's approach of copying a static `OpenApiHttp.fs` template, generate the HTTP library from the same `FsDecl` AST:
+Instead of Hawaii's approach of copying a static `OpenApiHttp.fs` template, generate the HTTP library from the same `ClefDecl` AST:
 
 ```fsharp
 /// Generate the RequestPart DU and OpenApiHttp module
-let generateHttpLibrary (config: GenerationConfig) : FsDecl list =
+let generateHttpLibrary (config: GenerationConfig) : ClefDecl list =
     // RequestPart union: Query | Path | Header | JsonContent | ...
     // OpenApiHttp module: getAsync, postAsync, putAsync, deleteAsync, patchAsync
-    // Serializer module: serialize, deserialize (using configured JSON library)
-    // All generated as FsDecl nodes, not copied from a template file
+    // Serializer module: serialize, deserialize (using configured serialization)
+    // All generated as ClefDecl nodes, not copied from a template file
 ```
 
-This means the HTTP library adapts to the target:
-- **F# (.NET)**: `System.Net.Http.HttpClient`, `System.Text.Json` or `Newtonsoft.Json`
-- **Fable**: `Fetch` API, `Thoth.Json`
-- **Clef (future)**: Fidelity HTTP primitives
+This means the HTTP library adapts to the compilation target:
+- **Clef (native)**: Fidelity HTTP primitives, BAREWire serialization
+- **Clef → JS (via Composer)**: Fetch API, JSON serialization (js_of_ocaml model)
+- **Clef → Wasm**: Fidelity HTTP over WASI
 
 ## Integration with Farscape
 
@@ -296,8 +296,8 @@ This means the HTTP library adapts to the target:
 
 | Component | Farscape Core | OpenAPI Extension |
 |-----------|---------------|-------------------|
-| `CodeAST.fs` | FsType, FsExpr, FsDecl | Same types, reused directly |
-| `CodeRenderer.fs` | Renders Clef source | Renders F# source (minor config differences) |
+| `CodeAST.fs` | NTUType, ClefExpr, ClefDecl | Same types, reused directly |
+| `CodeRenderer.fs` | Renders Clef source | Renders Clef source (minor config differences) |
 | Active Patterns | Type classification for C types | Schema classification for OpenAPI types |
 | XParsec | C type parsing | $ref resolution, schema composition |
 | Pilot | `.pilot.toml` for C SDKs | `.pilot.toml` for OpenAPI services |
@@ -320,8 +320,8 @@ src/Farscape.Core/
     SchemaResolver.fs         # $ref resolution, allOf merge, discriminator detection
     OpenApiActivePatterns.fs  # Schema classification, identifier sanitization
     OpenApiAlgebra.fs         # Catamorphism over ApiDeclaration
-    ClientGenerator.fs        # ApiDeclaration → FsDecl (client methods)
-    TypeGenerator.fs          # SchemaType → FsDecl (type definitions)
+    ClientGenerator.fs        # ApiDeclaration → ClefDecl (client methods)
+    TypeGenerator.fs          # SchemaType → ClefDecl (type definitions)
     HttpLibraryGenerator.fs   # Generate OpenApiHttp module
     ServicePartitioner.fs     # Pilot-style service splitting
 
@@ -369,7 +369,7 @@ The following bugs were discovered during Fidelity.CloudEdge's migration from ra
 | Definition says `workersfoo` but reference says `workers_foo` | Different normalization for defs vs refs | Single `normalizeTypeName` function, applied once |
 | `$metadata` not backtick-quoted | Hawaii doesn't detect `$` as special | `(|NeedsQuoting|ValidIdent|)` active pattern |
 | `Gre+icmp` DU case not renamed | Only type defs scanned, not DU cases | Scan ALL identifiers for invalid chars |
-| F# keyword stubs (`type when = string`) | False-positive type reference detection | Comprehensive keyword/exclusion set in resolver |
+| Keyword stubs (`type when = string`) | False-positive type reference detection | Comprehensive keyword/exclusion set in resolver |
 
 ### Code Generation Bugs
 
@@ -384,18 +384,20 @@ The following bugs were discovered during Fidelity.CloudEdge's migration from ra
 
 This design is intentionally structured for eventual self-hosting in Clef:
 
-1. **No Fantomas dependency**: CodeRenderer is a simple StringBuilder walker, not a full F# formatter
+1. **No Fantomas dependency**: CodeRenderer is a simple StringBuilder walker, not a full formatter
 2. **No Microsoft.OpenApi dependency**: XParsec-based schema parsing replaces the C# library
-3. **No FSharp.Compiler.Service**: FsDecl typed AST replaces SynType/SynExpr
+3. **No FSharp.Compiler.Service**: ClefDecl typed AST replaces SynType/SynExpr
 4. **Pure functional pipeline**: No mutable state except final file I/O
 5. **TOML configuration**: Already supported in Clef via Fidelity libraries
 
-When Clef reaches sufficient maturity, the entire OpenAPI → F# pipeline can be rewritten as a Clef program that generates Clef source, completing the self-hosting loop.
+The entire OpenAPI → Clef pipeline is designed to self-host: a Clef program generating Clef source, running inside Composer.
 
 ## Relationship to Existing Work
 
-- **Hawaii** (Zaid Ajaj): Pioneered F# OpenAPI client generation. This design builds on Hawaii's key insight — using discriminated unions for response types — while replacing its implementation with Farscape's architectural patterns.
+- **Hawaii** (Zaid Ajaj): Pioneered OpenAPI client generation using discriminated unions for response types. This design builds on that key insight while replacing Hawaii's implementation with Farscape's architectural patterns.
 
 - **Fidelity.CloudEdge**: Current consumer. The postprocessor pipeline developed for CloudEdge serves as the comprehensive bug catalog and test suite for this design.
 
 - **Farscape Core**: Provides the four architectural patterns, the typed code AST, and the Pilot project system. OpenAPI generation is a natural extension of the same pipeline.
+
+- **TypeScript Ingestion** ([Architecture](./13a_TypeScript_Ingestion_Architecture.md) | [Fearless JavaScript](./13b_Fearless_JavaScript.md) | [Output & Integration](./13c_TypeScript_Output_and_Integration.md)): Companion design using the same four patterns for TypeScript `.d.ts` ingestion.
