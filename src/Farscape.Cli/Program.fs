@@ -320,6 +320,7 @@ let pilotInitCommand =
             Nonnull = None
             ProtocolConfig = None
             Layer3 = None
+            CppConfig = None
         }
 
         let tomlPath = Path.Combine(outputDir, $"{library}.pilot.toml")

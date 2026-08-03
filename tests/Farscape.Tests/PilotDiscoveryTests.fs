@@ -110,6 +110,149 @@ std::string getName();
         Assert.True(isCpp)
 
 // =========================================================================
+// C++ Standard Library Include Detection
+// =========================================================================
+
+module CppStdlibDetectionTests =
+
+    [<Fact>]
+    let ``classifyHeaderContent detects cerrno include as C++`` () =
+        let content = """
+#ifndef UTIL_H
+#define UTIL_H
+#include <cerrno>
+int get_error();
+#endif
+"""
+        let isCpp, _ = classifyHeaderContent content
+        Assert.True(isCpp)
+
+    [<Fact>]
+    let ``classifyHeaderContent detects cstring include as C++`` () =
+        let content = "#include <cstring>\nvoid copy(char *dst, const char *src);\n"
+        let isCpp, _ = classifyHeaderContent content
+        Assert.True(isCpp)
+
+    [<Fact>]
+    let ``classifyHeaderContent detects vector include as C++`` () =
+        let content = "#include <vector>\n"
+        let isCpp, _ = classifyHeaderContent content
+        Assert.True(isCpp)
+
+    [<Fact>]
+    let ``classifyHeaderContent detects memory include as C++`` () =
+        let content = "#include <memory>\n"
+        let isCpp, _ = classifyHeaderContent content
+        Assert.True(isCpp)
+
+    [<Fact>]
+    let ``classifyHeaderContent detects optional include as C++`` () =
+        let content = "#include <optional>\nstruct Config {};\n"
+        let isCpp, _ = classifyHeaderContent content
+        Assert.True(isCpp)
+
+    [<Fact>]
+    let ``classifyHeaderContent does not flag C stdlib includes as C++`` () =
+        let content = """
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+void init();
+"""
+        let isCpp, _ = classifyHeaderContent content
+        Assert.False(isCpp)
+
+    [<Fact>]
+    let ``classifyHeaderContent detects unordered_map as C++`` () =
+        let content = "#include <unordered_map>\n"
+        let isCpp, _ = classifyHeaderContent content
+        Assert.True(isCpp)
+
+    [<Fact>]
+    let ``classifyHeaderContent detects string_view as C++`` () =
+        let content = "#include <string_view>\nvoid process(std::string_view sv);\n"
+        let isCpp, _ = classifyHeaderContent content
+        Assert.True(isCpp)
+
+// =========================================================================
+// Forwarding Header Detection
+// =========================================================================
+
+module ForwardingHeaderTests =
+
+    [<Fact>]
+    let ``isForwardingHeader detects single-include zero-declaration header`` () =
+        let content = """
+// Forwarding shim for compat
+#include "../actual_header.h"
+"""
+        Assert.True(isForwardingHeader content)
+
+    [<Fact>]
+    let ``isForwardingHeader rejects header with declarations`` () =
+        let content = """
+#include "base.h"
+int my_func(int x);
+"""
+        Assert.False(isForwardingHeader content)
+
+    [<Fact>]
+    let ``isForwardingHeader rejects header with multiple includes`` () =
+        let content = """
+#include "a.h"
+#include "b.h"
+"""
+        Assert.False(isForwardingHeader content)
+
+    [<Fact>]
+    let ``isForwardingHeader rejects header with zero includes`` () =
+        let content = "int standalone_func(void);\n"
+        Assert.False(isForwardingHeader content)
+
+// =========================================================================
+// countDeclarations Comment Exclusion
+// =========================================================================
+
+module CountDeclarationsTests =
+
+    [<Fact>]
+    let ``countDeclarations counts function signatures`` () =
+        let content = "int read(int fd, void *buf, size_t count);\nvoid write(int fd);\n"
+        Assert.Equal(2, countDeclarations content)
+
+    [<Fact>]
+    let ``countDeclarations counts typedefs and structs`` () =
+        let content = "typedef unsigned long size_t;\nstruct foo { int x; };\nenum bar { A, B };\n"
+        Assert.Equal(3, countDeclarations content)
+
+    [<Fact>]
+    let ``countDeclarations excludes single-line comments`` () =
+        let content = "// int not_a_decl(void);\nint real_decl(int x);\n"
+        Assert.Equal(1, countDeclarations content)
+
+    [<Fact>]
+    let ``countDeclarations excludes block comment start lines`` () =
+        let content = "/* Copyright (c) 2024 */\nint func(void);\n"
+        Assert.Equal(1, countDeclarations content)
+
+    [<Fact>]
+    let ``countDeclarations excludes block comment continuation lines with parens`` () =
+        // This was the bug: lines like "* Copyright (c) ..." matched as declarations
+        let content = """
+/*
+ * Copyright (c) 2024 Xilinx, Inc.
+ * Licensed under the Apache License, Version 2.0 (the "License")
+ */
+int actual_func(void);
+"""
+        Assert.Equal(1, countDeclarations content)
+
+    [<Fact>]
+    let ``countDeclarations excludes preprocessor directives`` () =
+        let content = "#include <stdio.h>\n#define FOO(x) (x+1)\nint func(void);\n"
+        Assert.Equal(1, countDeclarations content)
+
+// =========================================================================
 // Umbrella Header Detection
 // =========================================================================
 
@@ -353,6 +496,33 @@ extern "C" { int hipInit(int flags); }
         match result with
         | Some (CHeader (_, isUmbrella, _)) -> Assert.True(isUmbrella)
         | _ -> Assert.Fail("Expected CHeader with isUmbrella=true")
+
+    [<Fact>]
+    let ``classifyFile marks forwarding header as internal`` () =
+        let content = "// Forwarding shim\n#include \"../real_header.h\"\n"
+        let files = Map.ofList ["/root/experimental/compat.h", content]
+        let result = classifyFile "/root" "/root/experimental/compat.h" (mockReader files)
+        match result with
+        | Some (CHeader (_, _, isInternal)) -> Assert.True(isInternal)
+        | _ -> Assert.Fail("Expected CHeader with isInternal=true for forwarding header")
+
+    [<Fact>]
+    let ``classifyFile marks C++ forwarding header as internal`` () =
+        let content = "// Forwarding shim\n#include \"../real_header.hpp\"\nnamespace foo {}\n"
+        let files = Map.ofList ["/root/experimental/compat.hpp", content]
+        let result = classifyFile "/root" "/root/experimental/compat.hpp" (mockReader files)
+        match result with
+        | Some (CppHeader (_, _, isInternal)) -> Assert.True(isInternal)
+        | _ -> Assert.Fail("Expected CppHeader with isInternal=true for forwarding header")
+
+    [<Fact>]
+    let ``classifyFile detects C++ stdlib include in .h file`` () =
+        let content = "#include <cerrno>\n#include <vector>\nint get_error();\n"
+        let files = Map.ofList ["/root/util.h", content]
+        let result = classifyFile "/root" "/root/util.h" (mockReader files)
+        match result with
+        | Some (CppHeader _) -> ()
+        | _ -> Assert.Fail("Expected CppHeader for .h file with C++ stdlib includes")
 
     [<Fact>]
     let ``classifyFile ignores non-protocol XML`` () =

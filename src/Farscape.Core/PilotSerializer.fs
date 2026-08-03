@@ -174,6 +174,43 @@ module PilotSerializer =
         |> TomlTable.add "destroy_flag" (TomlValue.Integer (int64 config.DestroyFlag))
         |> TomlValue.Table
 
+    /// Serialize a CppClassSpec to a TOML table value.
+    let private serializeCppClassSpec (spec: CppClassSpec) : TomlValue =
+        let table =
+            TomlTable.empty
+            |> TomlTable.add "name" (TomlValue.String spec.Name)
+            |> TomlTable.add "namespace" (TomlValue.String spec.Namespace)
+        let table =
+            if not spec.Bind then TomlTable.add "bind" (TomlValue.Boolean false) table
+            else table
+        let table =
+            match spec.KindOverride with
+            | Some k -> TomlTable.add "kind" (TomlValue.String k) table
+            | None -> table
+        let table =
+            match spec.SizeOverride with
+            | Some s -> TomlTable.add "size" (TomlValue.Integer (int64 s)) table
+            | None -> table
+        TomlValue.Table table
+
+    /// Serialize a CppConfig to a TOML table value.
+    let private serializeCppConfig (config: CppConfig) : TomlValue =
+        let table =
+            TomlTable.empty
+            |> TomlTable.add "symbol_library" (TomlValue.String config.SymbolLibrary)
+        let table =
+            if not config.PimplDetection then
+                TomlTable.add "pimpl_detection" (TomlValue.Boolean false) table
+            else table
+        let table =
+            if config.GapAnalysis then
+                TomlTable.add "gap_analysis" (TomlValue.Boolean true) table
+            else table
+        let table =
+            if config.Classes.IsEmpty then table
+            else TomlTable.add "class" (TomlValue.Array (config.Classes |> List.map serializeCppClassSpec)) table
+        TomlValue.Table table
+
     /// Serialize a complete PilotProject to a TomlDocument.
     let serialize (project: PilotProject) : TomlDocument =
         let table =
@@ -206,6 +243,10 @@ module PilotSerializer =
         let table =
             match project.ProtocolConfig with
             | Some config -> table |> TomlTable.add "protocol" (serializeProtocolConfig config)
+            | None -> table
+        let table =
+            match project.CppConfig with
+            | Some config -> table |> TomlTable.add "cpp" (serializeCppConfig config)
             | None -> table
         table
 
@@ -477,6 +518,57 @@ module PilotSerializer =
                        DestroyFlag = destroyFlag }
             | _ -> None
 
+    /// Deserialize the optional [cpp] section for C++ class binding configuration.
+    let private deserializeCppConfig (doc: TomlDocument) : CppConfig option =
+        match Toml.getTable "cpp" doc with
+        | None -> None
+        | Some table ->
+            let symbolLibrary =
+                match TomlTable.tryFind "symbol_library" table with
+                | Some (TomlValue.String s) -> s
+                | _ -> ""
+            let pimplDetection =
+                match TomlTable.tryFind "pimpl_detection" table with
+                | Some (TomlValue.Boolean b) -> b
+                | _ -> true
+            let gapAnalysis =
+                match TomlTable.tryFind "gap_analysis" table with
+                | Some (TomlValue.Boolean b) -> b
+                | _ -> false
+            let classes =
+                match TomlTable.tryFind "class" table with
+                | Some (TomlValue.Array items) ->
+                    items |> List.choose (fun item ->
+                        match item with
+                        | TomlValue.Table t ->
+                            match TomlTable.tryFind "name" t with
+                            | Some (TomlValue.String name) ->
+                                let ns =
+                                    match TomlTable.tryFind "namespace" t with
+                                    | Some (TomlValue.String s) -> s
+                                    | _ -> ""
+                                let bind =
+                                    match TomlTable.tryFind "bind" t with
+                                    | Some (TomlValue.Boolean b) -> b
+                                    | _ -> true
+                                let kindOverride = optionalString "kind" t
+                                let sizeOverride =
+                                    match TomlTable.tryFind "size" t with
+                                    | Some (TomlValue.Integer i) -> Some (int i)
+                                    | _ -> None
+                                Some { CppClassSpec.Name = name
+                                       Namespace = ns
+                                       Bind = bind
+                                       KindOverride = kindOverride
+                                       SizeOverride = sizeOverride }
+                            | _ -> None
+                        | _ -> None)
+                | _ -> []
+            Some { SymbolLibrary = symbolLibrary
+                   PimplDetection = pimplDetection
+                   GapAnalysis = gapAnalysis
+                   Classes = classes }
+
     /// Deserialize a TomlDocument to a PilotProject.
     let deserialize (doc: TomlDocument) : Result<PilotProject, string> =
         match deserializeLibrary doc, deserializeOutput doc, deserializeNamespaces doc with
@@ -489,7 +581,8 @@ module PilotSerializer =
                  Callbacks = deserializeCallbacks doc
                  Nonnull = deserializeNonnull doc
                  ProtocolConfig = deserializeProtocolConfig doc
-                 Layer3 = None }
+                 Layer3 = None
+                 CppConfig = deserializeCppConfig doc }
         | Error e, _, _ | _, Error e, _ | _, _, Error e -> Error e
 
     // =========================================================================

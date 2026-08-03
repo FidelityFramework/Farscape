@@ -16,6 +16,7 @@
     <Compile Include="ActivePatterns.fs" />
     <Compile Include="PilotTypes.fs" />
     <Compile Include="DeclarationAlgebra.fs" />
+    <Compile Include="CppClassAnalysis.fs" />
     <Compile Include="PilotAnalyzer.fs" />
     <Compile Include="PilotDiscovery.fs" />
     <Compile Include="PilotSerializer.fs" />
@@ -35,7 +36,9 @@
 
   <ItemGroup>
     <PackageReference Include="FSharp.Data" Version="6.6.0" />
-    <ProjectReference Include="../../../Fidelity.Data/src/Fidelity.Data/Fidelity.Data.fsproj" />
+    <Reference Include="Fidelity.Data">
+      <HintPath>../../../Fidelity.Data/src/Fidelity.Data/bin/Debug/net10.0/Fidelity.Data.dll</HintPath>
+    </Reference>
   </ItemGroup>
 
   <!-- XParsec: NuGet for packaging, local project ref for dev override -->

@@ -105,7 +105,7 @@ type SchemaType =
     | Map of valueType: SchemaType
     | TypeAlias of name: string * target: SchemaType
     | DiscriminatedUnion of name: string * cases: DUCase list
-    | FreeForm                             // JToken / obj fallback
+    | FreeForm                             // obj fallback (unstructured JSON)
 
 and FieldDef = {
     name: string
@@ -360,7 +360,7 @@ The following bugs were discovered during Fidelity.CloudEdge's migration from ra
 | Discriminator types not synthesized as DUs | Hawaii ignores OpenAPI `discriminator` field | `SchemaResolver.synthesizeDU` detects and generates DUs |
 | Missing operationId causes crash | Hawaii requires operationId, OpenAPI makes it optional | Synthesize from path + method: `getAccountsWorkers` |
 | Wildcard status codes (`4XX`) crash | Hawaii expects concrete codes | Map wildcards: `4XX` → `400`, `5XX` → `500` |
-| Empty schema in content types | Malformed spec, Hawaii crashes | Default to `FreeForm` (JToken) with warning |
+| Empty schema in content types | Malformed spec, Hawaii crashes | Default to `FreeForm` (`obj`) with warning |
 
 ### Type Name Normalization Bugs
 

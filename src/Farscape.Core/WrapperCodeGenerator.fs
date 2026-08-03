@@ -34,6 +34,7 @@ module WrapperCodeGenerator =
             match errorHandling with
             | UseErrno _ -> Named "string"
             | UseNullWithReason _ -> Named "nativeint"
+            | UseReturnCode _ -> Named "string"
             | _ -> Unit
         let hasErrors = match errorHandling with NoErrors -> false | _ -> true
         match semantic with
@@ -79,6 +80,7 @@ module WrapperCodeGenerator =
         match errorHandling with
         | UseErrno _ -> FunctionCall("", "captureErrno", [Literal "()"])
         | UseNullWithReason reasonFn -> FunctionCall(bindingsModule, reasonFn, [Literal "()"])
+        | UseReturnCode _ -> FunctionCall("", "captureReturnCode", [TypeConversion("int32", Identifier "result")])
         | _ -> fallback
 
     /// Generate wrapper body for CountOrError pattern (e.g., read, write).
@@ -133,7 +135,12 @@ module WrapperCodeGenerator =
     /// | None -> Error (captureReason ())
     let private allocatedPointerBody (bindingsModule: string) (funcName: string) (paramNames: string list) (errorHandling: ErrorHandling) : FsExpr =
         let rawCall = buildRawCall bindingsModule funcName paramNames
-        let errorExpr = buildErrorExpr errorHandling bindingsModule (Literal "()")
+        // For UseReturnCode, handle-returning functions have no return code to inspect;
+        // use a static error string describing the null handle.
+        let errorExpr =
+            match errorHandling with
+            | UseReturnCode _ -> Literal $"\"{funcName} returned null handle\""
+            | _ -> buildErrorExpr errorHandling bindingsModule (Literal "()")
         MatchExpr(rawCall,
             [("Some result", ResultOk(Identifier "result"))
              ("None", ResultError(errorExpr))])
@@ -173,6 +180,11 @@ module WrapperCodeGenerator =
             else
                 joined
         "capture" + trimmed + "Error"
+
+    /// Derive a capture function name for return code errors.
+    /// e.g., "Xrt" → "captureReturnCode"
+    /// The function name is constant per-library; the prefix is for documentation only.
+    let internal captureReturnCodeName = "captureReturnCode"
 
     /// Generate wrapper body for EnumReturnError pattern (e.g., HIP hipStreamCreate).
     /// let result = Bindings.hipStreamCreate stream
@@ -292,6 +304,10 @@ module WrapperCodeGenerator =
             | UseEnumError (enumType, successIntValue, errorStructName, _)
                 when isEnumCompatibleReturnType func.ReturnType enumType && not pattern.IsPure && pattern.ReturnSemantic <> NeverReturns ->
                 EnumReturnError (enumType, successIntValue, errorStructName)
+            | UseReturnCode _ when not pattern.IsPure && pattern.ReturnSemantic <> NeverReturns ->
+                // ReturnCode: int-returning functions use ZeroSuccessOrError;
+                // handle-returning functions keep OpaqueHandleReturn
+                pattern.ReturnSemantic
             | NoErrors ->
                 match pattern.ReturnSemantic with
                 | AllocatedPointer | OpaqueHandleReturn | CountOrError | ZeroSuccessOrError -> PureValue
@@ -420,6 +436,18 @@ module WrapperCodeGenerator =
                         Named "string", captureErrorBody, [])
                 [ openErrorModule; openErrorSub; BlankLine
                   XmlDoc $"Capture {enumType} error as human-readable description string from header comments."
+                  captureErrorDecl; BlankLine ]
+            | UseReturnCode (libPrefix, describeModuleName) ->
+                let openErrorModule = Comment $"open {describeModuleName}"
+                let openErrorSub = Comment $"open {describeModuleName}.ReturnCode"
+                let captureErrorBody =
+                    FunctionCall("", "describe", [Identifier "code"])
+                let captureErrorDecl =
+                    LetBinding(captureReturnCodeName,
+                        [ { Name = "code"; Type = Named "int32" } ],
+                        Named "string", captureErrorBody, [])
+                [ openErrorModule; openErrorSub; BlankLine
+                  XmlDoc $"Capture {libPrefix} return code as human-readable error string."
                   captureErrorDecl; BlankLine ]
             | UseNullWithReason reasonFn ->
                 // NullWithReason: no helper needed — the reason function is called directly

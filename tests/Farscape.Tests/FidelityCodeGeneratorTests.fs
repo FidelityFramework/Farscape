@@ -271,7 +271,8 @@ let ``TOML nonnull annotations override nullable default`` () =
           DelegateNames = Set.empty
           DataModel = Types.LP64
           StructLayouts = Map.empty
-          NonnullAnnotations = nonnull }
+          NonnullAnnotations = nonnull
+          KnownClasses = Map.empty }
     let result = FidelityCodeGenerator.generateModule ctx Set.empty decls "Test" "lib" "test" []
     // ctx (idx 0) is nonnull via TOML
     Assert.Contains("(ctx: nativeint)", result)
@@ -289,7 +290,8 @@ let ``TOML nonnull_returns prevents Option on return type`` () =
           DelegateNames = Set.empty
           DataModel = Types.LP64
           StructLayouts = Map.empty
-          NonnullAnnotations = nonnull }
+          NonnullAnnotations = nonnull
+          KnownClasses = Map.empty }
     let result = FidelityCodeGenerator.generateModule ctx Set.empty decls "Test" "lib" "test" []
     // Return is nonnull via TOML
     Assert.Contains(": nativeint =", result)
@@ -370,3 +372,131 @@ let ``fieldless struct emits no record type (opaque, handled via typedef path)``
     Assert.DoesNotContain("type wl_object", result)
     // Structs with fields should still be emitted
     Assert.Contains("type Point = {", result)
+
+// ─── C++ Class Binding Tests ────────────────────────────────────────
+
+[<Fact>]
+let ``generate emits pimpl class struct and destructor`` () =
+    let cls = mkClassPimpl "device" "device_impl"
+    let cls = { cls with DestructorMangledName = Some "_ZN3xrt6deviceD1Ev" }
+    let decls = [CppParser.Declaration.Class cls]
+    let result = FidelityCodeGenerator.generate decls "Fidelity.xrt.Core" "xrt_coreutil" Types.LP64 Map.empty
+    Assert.Contains("type device = {", result)
+    Assert.Contains("Handle: nativeint", result)
+    Assert.Contains("CppPimpl", result)
+    Assert.Contains("device_dtor", result)
+    Assert.Contains("_ZN3xrt6deviceD1Ev", result)
+
+[<Fact>]
+let ``generate emits pimpl class constructor with mangled name`` () =
+    let ctor = { mkFunc "device" "void" [("id", "unsigned int")] with MangledName = Some "_ZN3xrt6deviceC1Ej" }
+    let cls = mkClassWithCtors "device" [mkField "m_impl" "std::shared_ptr<device_impl>"] [ctor] true
+    let decls = [CppParser.Declaration.Class cls]
+    let result = FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty
+    Assert.Contains("device_ctor", result)
+    Assert.Contains("_ZN3xrt6deviceC1Ej", result)
+
+[<Fact>]
+let ``generate emits pimpl class method with sret when return type is non-trivial`` () =
+    let uuidCls = mkClassValue "uuid" [mkField "data" "uint8_t"]
+    let method = mkFunc "get_uuid" "uuid" []
+    let deviceCls = mkClassWithMethods "device" [mkField "m_impl" "std::shared_ptr<device_impl>"] [method] true
+    let decls = [
+        CppParser.Declaration.Class deviceCls
+        CppParser.Declaration.Class uuidCls
+    ]
+    let result = FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty
+    // Method should have sret parameter for uuid return
+    Assert.Contains("retStorage", result)
+    Assert.Contains("sret", result)
+
+[<Fact>]
+let ``generate skips abstract classes`` () =
+    let cls = mkClassAbstract "IPlugin"
+    let decls = [CppParser.Declaration.Class cls]
+    let result = FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty
+    Assert.DoesNotContain("type IPlugin", result)
+
+[<Fact>]
+let ``generate skips opaque classes`` () =
+    let cls = mkClassEmpty "ForwardDeclared"
+    let decls = [CppParser.Declaration.Class cls]
+    let result = FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty
+    Assert.DoesNotContain("type ForwardDeclared", result)
+
+[<Fact>]
+let ``generate emits POD class as struct`` () =
+    let fields = [mkField "x" "float"; mkField "y" "float"; mkField "z" "float"]
+    let cls = mkClassPod "Vec3" fields
+    let decls = [CppParser.Declaration.Class cls]
+    let result = FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty
+    Assert.Contains("type Vec3 = {", result)
+    Assert.Contains("POD type", result)
+
+[<Fact>]
+let ``generate emits value class with sret annotation`` () =
+    let fields = [mkField "data" "uint8_t"]
+    let cls = mkClassValue "uuid" fields
+    let decls = [CppParser.Declaration.Class cls]
+    let result = FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty
+    Assert.Contains("type uuid = {", result)
+    Assert.Contains("value type", result)
+    Assert.Contains("sret", result)
+
+[<Fact>]
+let ``generate filters deprecated methods from C++ class`` () =
+    let normalMethod = mkFunc "start" "void" []
+    let deprecatedMethod = mkFuncWithAttrs "old_start" "void" [] [mkAttr "DeprecatedAttr" [] None]
+    let cls = mkClassWithMethods "device" [mkField "m_impl" "std::shared_ptr<device_impl>"] [normalMethod; deprecatedMethod] true
+    let decls = [CppParser.Declaration.Class cls]
+    let result = FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty
+    Assert.Contains("device_start", result)
+    Assert.DoesNotContain("device_old_start", result)
+
+[<Fact>]
+let ``generate uses mangled name for C++ methods`` () =
+    let method = { mkFunc "start" "void" [] with MangledName = Some "_ZN3xrt6device5startEv" }
+    let cls = mkClassWithMethods "device" [mkField "m_impl" "std::shared_ptr<device_impl>"] [method] true
+    let decls = [CppParser.Declaration.Class cls]
+    let result = FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty
+    Assert.Contains("_ZN3xrt6device5startEv", result)
+
+[<Fact>]
+let ``generate emits unique_ptr pimpl with 8-byte size`` () =
+    let cls = mkClassPimplUnique "stream" "stream_impl"
+    let decls = [CppParser.Declaration.Class cls]
+    let result = FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty
+    Assert.Contains("type stream = {", result)
+    Assert.Contains("pimpl", result.ToLowerInvariant())
+    Assert.Contains("8 bytes", result)
+
+[<Fact>]
+let ``generate emits destructor for value class`` () =
+    let fields = [mkField "data" "uint8_t"]
+    let cls = { mkClassValue "uuid" fields with DestructorMangledName = Some "_ZN3xrt4uuidD1Ev" }
+    let decls = [CppParser.Declaration.Class cls]
+    let result = FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty
+    Assert.Contains("uuid_dtor", result)
+    Assert.Contains("_ZN3xrt4uuidD1Ev", result)
+
+[<Fact>]
+let ``generate emits pimpl bindings for inherited base-class pimpl`` () =
+    let cls = mkClassPimplBase "hw_context" "xrt::detail::pimpl<xrt::hw_context_impl>"
+    let decls = [CppParser.Declaration.Class cls]
+    let result = FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty
+    // Should generate as PimplClass (16 bytes), not ValueClass or OpaqueClass
+    Assert.Contains("type hw_context = {", result)
+    Assert.Contains("pimpl", result.ToLowerInvariant())
+    Assert.Contains("16 bytes", result)
+
+[<Fact>]
+let ``generate emits pimpl struct for xclbin-like inherited pimpl with no dtor`` () =
+    // Simulates xclbin: inherits detail::pimpl<T>, has constructors, no user dtor
+    let ctor = mkFunc "xclbin" "void" [("this", "xclbin *")]
+    let cls =
+        { mkClass "xclbin" [] [] [CppParser.Declaration.Function ctor] false false false false None with
+            BaseClasses = ["xrt::detail::pimpl<xrt::xclbin_impl>"] }
+    let decls = [CppParser.Declaration.Class cls]
+    let result = FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty
+    Assert.Contains("type xclbin = {", result)
+    Assert.Contains("16 bytes", result)

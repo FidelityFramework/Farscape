@@ -1,5 +1,17 @@
 # Library Verification Pipeline
 
+## Status: Design Phase (verified 2026-08-03)
+
+**`farscape verify` is not implemented.** The CLI root command is
+`generate | pilot {analyze,init,discover} | project`; there is no `verify` subcommand. Every
+description of the command below — its flags, its exit codes, the shell transcripts, the
+remediation cycle — is a specification of intended behaviour written in the indicative.
+Read it as a design, not as documentation of a working tool.
+
+Note also that CCS type-checking is a **necessary and insufficient** gate. Four known
+classes of binding defect are entirely type-clean and would pass this pipeline once it
+exists; see `docs/14_Binding_Generation_Gaps.md` §6.
+
 ## Purpose
 
 Farscape generates Clef source libraries from C headers. These libraries are consumed by Composer (via CCS type-checking) and must be **verified error-free** before they can be trusted within the Fidelity Framework ecosystem. Library verification serves two goals:
@@ -71,17 +83,24 @@ This cycle matures the binding generation process over time. Each fix addresses 
 
 ---
 
-## Known Type Issues (March 2026)
+## Known Issues
 
-Current generation produces these classes of CCS type errors:
+Defects in generated bindings are catalogued in **`docs/14_Binding_Generation_Gaps.md`**,
+which supersedes the table that stood here. That table listed three classes of CCS type
+error; its first row stated the `int` mapping backwards — `TypeMapper.fs` maps C `int` to
+Clef `int` deliberately, as register-width dimensional and explicitly *not* `int32`, per
+`.serena/memories/TYPE_MAPPING_ARCHITECTURE_ANALYSIS.md`. Applying its prescribed fix would
+undo that decision.
 
-| Issue | Root Cause | Fix Location |
-|-------|-----------|--------------|
-| `int32` vs `int` mismatch | C `int` mapped to `int32` but some NTU contexts expect `int` (platform word) | TypeMapper.fs — ensure consistent Fixed-width mapping |
-| `Option` type constructors | Generated code uses Option patterns not recognized by CCS | WrapperCodeGenerator.fs — align with NTU Option representation |
-| Missing module opens | Generated Layer 2 files reference Layer 1 types without proper `open` | BindingGenerator.fs — emit correct module references |
+More importantly, the table's premise was that binding defects surface as type errors. The
+four defects now catalogued are all type-clean: a struct dropped by declaration shadowing
+produces no node to check; a packed record with wrong offsets checks and reads the wrong
+bytes; a memref-backed handle record checks and passes the wrong pointer; a collapsed fixed
+array is a valid one-element field. This pipeline cannot detect any of them.
 
-These are systematic issues. Fixing them in the generator fixes all libraries simultaneously.
+The systematic-fix principle still holds — each generator fix addresses a class of C API
+patterns across every library at once. It simply covers a narrower class of defect than this
+document originally assumed.
 
 ---
 

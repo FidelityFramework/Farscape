@@ -4,16 +4,19 @@ open CodeAST
 open PilotTypes
 open ActivePatterns
 
-/// Generates Layer 2 callback wrappers that wire C callback parameters
-/// by resolving symbol names at runtime via dlsym(RTLD_DEFAULT, name).
+/// Generates Layer 2/3 callback wrappers for C callback parameters.
 ///
-/// Two patterns:
-///   Pattern A (registration function): replaces function pointer param with string symbol name,
+/// Three patterns:
+///   Pattern A (dlsym registration): replaces function pointer param with string symbol name,
 ///     resolves via dlsym, passes nativeint to Layer 1 function.
 ///   Pattern B (listener struct): builds a struct of function pointers by resolving
 ///     each field's symbol name via dlsym, returns the populated struct.
+///   Pattern C (managed trampoline): generates a delegate type matching the C callback
+///     signature, accepts a managed function, pins via GCHandle, and converts to
+///     nativeint via Marshal.GetFunctionPointerForDelegate.
 ///
-/// Both patterns depend on Fidelity.Libc.DynamicLink.dlsym being available.
+/// Patterns A and B depend on Fidelity.Libc.DynamicLink.dlsym.
+/// Pattern C depends on System.Runtime.InteropServices.Marshal and GCHandle.
 module CallbackWrapperGenerator =
 
     /// Convert a C function name to a camelCase wrapper name.
@@ -220,6 +223,205 @@ module CallbackWrapperGenerator =
               LetBinding(builderName, params', Named ls.Name, body, []) ]
 
     // =========================================================================
+    // Pattern C: Managed Trampoline Wrappers
+    // =========================================================================
+
+    /// Parse a C function pointer type string into (returnType, paramTypes).
+    /// Input: "void (*)(xrtRunHandle, enum ert_cmd_state, void *)"
+    /// Output: Some ("void", ["xrtRunHandle"; "enum ert_cmd_state"; "void *"])
+    let private parseFunctionPointerType (cType: string) : (string * string list) option =
+        let trimmed = cType.Trim()
+        // Pattern: returnType (*)(paramTypes)
+        let parenStar = trimmed.IndexOf("(*)")
+        if parenStar < 0 then None
+        else
+            let retType = trimmed.[..parenStar - 1].Trim()
+            let afterStar = trimmed.[parenStar + 3..].Trim()
+            if afterStar.Length < 2 || afterStar.[0] <> '(' then None
+            else
+                let inner = afterStar.[1..afterStar.Length - 2].Trim()
+                let paramTypes =
+                    if inner = "" || inner = "void" then []
+                    else
+                        inner.Split(',')
+                        |> Array.map (fun s -> s.Trim())
+                        |> Array.toList
+                Some (retType, paramTypes)
+
+    /// Strip the parameter name from a C type+name string, leaving just the type.
+    /// "const char * bdf" → "const char *", "void * data" → "void *", "int index" → "int"
+    let private stripParamName (cTypeWithName: string) : string =
+        let trimmed = cTypeWithName.Trim()
+        if trimmed.Contains("*") then
+            // Pointer type: everything up to and including the last *
+            let lastStar = trimmed.LastIndexOf('*')
+            trimmed.[..lastStar].Trim()
+        else
+            // Non-pointer: last token is the name, rest is type. But if single token, it's a type.
+            let parts = trimmed.Split([|' '|], System.StringSplitOptions.RemoveEmptyEntries)
+            if parts.Length <= 1 then trimmed
+            else parts.[..parts.Length - 2] |> String.concat " "
+
+    /// Generate a PascalCase delegate name from a registration function name.
+    /// xrtRunSetCallback → XrtRunCallbackDelegate
+    let private toDelegateName (regFunction: string) (callbackParam: string) : string =
+        let parts = regFunction.Split('_') |> Array.toList
+        let pascal =
+            parts |> List.map (fun s ->
+                if s.Length > 0 then string (System.Char.ToUpper s.[0]) + s.[1..]
+                else "") |> String.concat ""
+        pascal + "Delegate"
+
+    /// Generate a trampoline wrapper for a callback registration function.
+    /// Produces:
+    ///   1. A delegate type matching the C callback signature
+    ///   2. A wrapper that accepts a managed function, pins it as a delegate,
+    ///      converts to nativeint via Marshal.GetFunctionPointerForDelegate,
+    ///      and calls the L1 registration function.
+    let generateTrampolineWrapper
+        (reg: CallbackRegistration)
+        (funcDecl: CppParser.FunctionDecl)
+        (model: Types.PlatformABI)
+        : FsDecl list =
+
+        // Find the callback parameter's C type string
+        let callbackCType =
+            funcDecl.Parameters
+            |> List.tryFind (fun (name, _) -> name = reg.CallbackParam)
+            |> Option.map snd
+
+        match callbackCType |> Option.bind parseFunctionPointerType with
+        | None -> []  // Can't parse the function pointer type; skip
+        | Some (retType, paramCTypes) ->
+
+        let delegateName = toDelegateName funcDecl.Name reg.CallbackParam
+
+        // Strip the userdata param from the callback signature for the managed function type.
+        // Convention: the last void* in the callback is the userdata param.
+        let hasUserdata = reg.DataParam.IsSome
+        let managedParamCTypes =
+            if hasUserdata && paramCTypes.Length > 0 then
+                // Remove the last void* parameter (userdata forwarded by the runtime)
+                let lastType = paramCTypes |> List.last |> stripParamName
+                if lastType = "void *" || lastType = "void*" then
+                    paramCTypes |> List.take (paramCTypes.Length - 1)
+                else paramCTypes
+            else paramCTypes
+
+        // Build delegate type: all original callback params (including userdata)
+        let delegateParams =
+            paramCTypes |> List.mapi (fun i cType ->
+                let cleanType = stripParamName cType
+                ($"p{i}", mapParamType cleanType model))
+
+        let delegateRetType = mapReturnType retType model
+
+        let delegateDecl =
+            DelegateType(delegateName, delegateParams, delegateRetType,
+                Some $"Native callback delegate for {funcDecl.Name}.")
+
+        // Build the managed function parameter type as a Clef function type string.
+        // For the wrapper, we accept a curried function: (p0Type -> p1Type -> retType)
+        let managedParamTypes =
+            managedParamCTypes |> List.map (fun cType ->
+                let cleanType = stripParamName cType
+                mapParamType cleanType model)
+
+        let managedFnType =
+            let paramStr =
+                managedParamTypes
+                |> List.map (fun t ->
+                    match t with
+                    | Named n -> n
+                    | Unit -> "unit"
+                    | _ -> "nativeint")
+                |> String.concat " -> "
+            let retStr =
+                match delegateRetType with
+                | Unit -> "unit"
+                | Named n -> n
+                | _ -> "nativeint"
+            if paramStr = "" then retStr
+            else $"{paramStr} -> {retStr}"
+
+        // Wrapper function name: same as dlsym wrapper but with "Managed" suffix
+        let wrapperName = toWrapperName funcDecl.Name + "Managed"
+
+        // Build wrapper parameters: replace callback with managed function, remove userdata
+        let wrapperParams =
+            funcDecl.Parameters |> List.choose (fun (name, cType) ->
+                if name = reg.CallbackParam then
+                    Some { Name = "handler"; Type = Named $"({managedFnType})" }
+                elif reg.DataParam = Some name then
+                    None
+                else
+                    Some { Name = name; Type = mapParamType cType model })
+
+        let returnType = mapReturnType funcDecl.ReturnType model
+
+        // Body:
+        //   let wrappedDelegate = DelegateName(fun p0 p1 p2 -> handler p0 p1)
+        //   let pin = System.Runtime.InteropServices.GCHandle.Alloc(wrappedDelegate)
+        //   let fnPtr = System.Runtime.InteropServices.Marshal.GetFunctionPointerForDelegate(wrappedDelegate)
+        //   originalFunc arg1 fnPtr 0n ...
+        //
+        // Note: The pin keeps the delegate alive. Caller is responsible for freeing via pin.Free().
+        // We return a tuple of (result, pin) so the caller can manage lifetime.
+
+        // For simplicity, generate as RawExpr since the nested delegate construction
+        // and Marshal calls are complex to express in the current AST.
+        let managedParamNames =
+            managedParamCTypes |> List.mapi (fun i _ -> $"p{i}")
+        let allParamNames =
+            paramCTypes |> List.mapi (fun i _ -> $"p{i}")
+        let handlerCallArgs =
+            managedParamNames |> String.concat " "
+        let lambdaParams =
+            allParamNames |> String.concat " "
+
+        // Build the userdata handling: if original has userdata, the lambda accepts it but ignores it
+        let lambdaBody =
+            if hasUserdata && managedParamNames.Length < allParamNames.Length then
+                $"handler {handlerCallArgs}"
+            else
+                $"handler {handlerCallArgs}"
+
+        let delegateConstruction = $"{delegateName}(fun {lambdaParams} -> {lambdaBody})"
+        let l1CallArgs =
+            funcDecl.Parameters |> List.map (fun (name, _) ->
+                if name = reg.CallbackParam then "fnPtr"
+                elif reg.DataParam = Some name then "0n"
+                else name)
+            |> String.concat " "
+
+        let bodyCode =
+            [ $"let wrappedDelegate = {delegateConstruction}"
+              "let pin = System.Runtime.InteropServices.GCHandle.Alloc(wrappedDelegate)"
+              "let fnPtr = System.Runtime.InteropServices.Marshal.GetFunctionPointerForDelegate(wrappedDelegate)"
+              $"let result = {funcDecl.Name} {l1CallArgs}"
+              "(result, pin)" ]
+            |> String.concat "\n        "
+
+        // Return type is a tuple: (originalReturn * GCHandle)
+        let retTypeStr =
+            match returnType with
+            | Named n -> n
+            | Unit -> "unit"
+            | _ -> "nativeint"
+        let tupleReturnType = Named $"({retTypeStr} * System.Runtime.InteropServices.GCHandle)"
+
+        let wrapperDecl =
+            LetBinding(wrapperName, wrapperParams, tupleReturnType,
+                RawExpr bodyCode, [])
+
+        [ BlankLine
+          delegateDecl
+          XmlDoc $"Register a managed function as callback. Returns (result, pin)."
+          XmlDoc "The caller must keep the GCHandle alive for the callback's lifetime"
+          XmlDoc "and call pin.Free() when the callback is no longer needed."
+          wrapperDecl ]
+
+    // =========================================================================
     // Complete Module Generation
     // =========================================================================
 
@@ -270,17 +472,28 @@ module CallbackWrapperGenerator =
                 | Some f -> generateRegistrationWrapper reg f model
                 | None -> [])
 
+        let trampolineDecls =
+            spec.Registrations |> List.collect (fun reg ->
+                let funcDecl =
+                    declarations |> List.tryPick (function
+                        | CppParser.Declaration.Function f when f.Name = reg.Function -> Some f
+                        | _ -> None)
+                match funcDecl with
+                | Some f -> generateTrampolineWrapper reg f model
+                | None -> [])
+
         let listenerDecls =
             spec.ListenerStructs |> List.collect (fun ls ->
                 match findStructDecl declarations ls.Name with
                 | Some s -> generateListenerBuilder ls s delegateNames l2CallbackModule
                 | None -> [])
 
-        match registrationDecls, listenerDecls with
-        | [], [] -> []
-        | regs, [] -> regs
-        | [], listeners -> listeners
-        | regs, listeners -> regs @ [ BlankLine ] @ listeners
+        let sections =
+            [ registrationDecls; trampolineDecls; listenerDecls ]
+            |> List.filter (not << List.isEmpty)
+        match sections with
+        | [] -> []
+        | _ -> sections |> List.reduce (fun a b -> a @ [ BlankLine ] @ b)
 
     /// Generate the complete Layer 2 callback wrappers module as a rendered source string.
     let generate
@@ -296,7 +509,7 @@ module CallbackWrapperGenerator =
         if decls.IsEmpty then None
         else
             let opens = openModules |> List.map OpenModule
-            let moduleDecl = Module(namespace', "Callback wrappers — dlsym-based runtime symbol resolution", opens @ decls)
+            let moduleDecl = Module(namespace', "Callback wrappers — dlsym symbol resolution and managed trampolines", opens @ decls)
             Some (CodeRenderer.render moduleDecl)
 
     /// Generate the Layer 2 direct listener builders module as a rendered source string.

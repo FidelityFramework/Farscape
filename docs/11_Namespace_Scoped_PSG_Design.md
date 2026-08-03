@@ -12,6 +12,14 @@ flat TypeEnv. This creates three categories of problems:
    wins" when field names are ambiguous. This is an adversarial input to Hindley-Milner
    unification.
 
+   > **Superseded.** `docs/14_Binding_Generation_Gaps.md` §3 establishes that these records
+   > should not be emitted at all — a single-word handle record is memref-backed and reaches
+   > a C callee as the address of a slot rather than as the handle, and `ofHandle` allocates
+   > and leaks eight bytes per construction. The correct Layer 1 output is bare `nativeint`.
+   > Many of these 28 records are also debris from the declaration-shadowing defect in §1
+   > rather than deliberate design. If Layer 1 is corrected, this problem does not arise.
+   > Problems 2 and 3 below are unaffected and remain the case for this design.
+
 2. **Memory and graph bloat** — A library that needs only `Fidelity.Libc.Memory.malloc`
    pulls in ALL of `Fidelity.Libc` (errno, dynamic linking, signal handling, etc).
    Each loaded file adds to TypeDefs, RecordDefs, FieldLabels monotonically.

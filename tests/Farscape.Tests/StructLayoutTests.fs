@@ -210,6 +210,7 @@ generate_descriptors = true
             Nonnull = None
             ProtocolConfig = None
             Layer3 = None
+            CppConfig = None
         }
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("abi_critical_structs", toml)

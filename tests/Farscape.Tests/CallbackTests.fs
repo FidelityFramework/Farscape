@@ -227,6 +227,7 @@ module CallbackSerializerTests =
             Nonnull = None
             ProtocolConfig = None
             Layer3 = None
+            CppConfig = None
         }
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("callbacks", toml)
@@ -266,6 +267,7 @@ module CallbackSerializerTests =
             Nonnull = None
             ProtocolConfig = None
             Layer3 = None
+            CppConfig = None
         }
         let toml = PilotSerializer.toTomlString project
         Assert.Contains("listener_structs", toml)
@@ -311,6 +313,7 @@ module CallbackSerializerTests =
             Nonnull = None
             ProtocolConfig = None
             Layer3 = None
+            CppConfig = None
         }
         let toml = PilotSerializer.toTomlString project
         match Fidelity.Data.TOML.Toml.parse toml with
@@ -454,6 +457,184 @@ module CallbackWrapperGeneratorTests =
         }
         let result = CallbackWrapperGenerator.generate spec [] "Ns.Bridge" LP64 [] "Ns"
         Assert.True(result.IsNone)
+
+// =============================================================================
+// CallbackWrapperGenerator: Managed Trampoline Generation (Pattern C)
+// =============================================================================
+
+module ManagedTrampolineTests =
+
+    open PilotTypes
+    open Farscape.Core.Types
+
+    [<Fact>]
+    let ``generates delegate type for callback with userdata`` () =
+        let spec : CallbackSpec = {
+            Registrations = [
+                { Function = "xrtRunSetCallback"; CallbackParam = "callback"; DataParam = Some "data" }
+            ]
+            ListenerStructs = []
+        }
+        let decls = [
+            CppParser.Declaration.Function (
+                mkFunc "xrtRunSetCallback" "int"
+                    [("rhdl", "void *"); ("state", "int");
+                     ("callback", "void (*)(void *, int, void *)"); ("data", "void *")])
+        ]
+        match CallbackWrapperGenerator.generate spec decls "Fidelity.XRT.Bridge.Callbacks" LP64 [] "Fidelity.XRT.Callbacks" with
+        | None -> Assert.Fail "Expected some generated output"
+        | Some code ->
+            Assert.Contains("Delegate", code)
+            Assert.Contains("delegate of", code)
+
+    [<Fact>]
+    let ``trampoline wrapper accepts managed function parameter`` () =
+        let spec : CallbackSpec = {
+            Registrations = [
+                { Function = "xrtRunSetCallback"; CallbackParam = "callback"; DataParam = Some "data" }
+            ]
+            ListenerStructs = []
+        }
+        let decls = [
+            CppParser.Declaration.Function (
+                mkFunc "xrtRunSetCallback" "int"
+                    [("rhdl", "void *"); ("state", "int");
+                     ("callback", "void (*)(void *, int, void *)"); ("data", "void *")])
+        ]
+        match CallbackWrapperGenerator.generate spec decls "Fidelity.XRT.Bridge.Callbacks" LP64 [] "Fidelity.XRT.Callbacks" with
+        | None -> Assert.Fail "Expected some output"
+        | Some code ->
+            // Should have a Managed-suffixed wrapper
+            Assert.Contains("Managed", code)
+            // Should accept a handler function, not a string
+            Assert.Contains("handler", code)
+
+    [<Fact>]
+    let ``trampoline wrapper pins delegate via GCHandle`` () =
+        let spec : CallbackSpec = {
+            Registrations = [
+                { Function = "xrtRunSetCallback"; CallbackParam = "callback"; DataParam = Some "data" }
+            ]
+            ListenerStructs = []
+        }
+        let decls = [
+            CppParser.Declaration.Function (
+                mkFunc "xrtRunSetCallback" "int"
+                    [("rhdl", "void *"); ("state", "int");
+                     ("callback", "void (*)(void *, int, void *)"); ("data", "void *")])
+        ]
+        match CallbackWrapperGenerator.generate spec decls "Fidelity.XRT.Bridge.Callbacks" LP64 [] "Fidelity.XRT.Callbacks" with
+        | None -> Assert.Fail "Expected some output"
+        | Some code ->
+            Assert.Contains("GCHandle.Alloc", code)
+            Assert.Contains("GetFunctionPointerForDelegate", code)
+
+    [<Fact>]
+    let ``trampoline wrapper returns tuple of result and pin`` () =
+        let spec : CallbackSpec = {
+            Registrations = [
+                { Function = "xrtRunSetCallback"; CallbackParam = "callback"; DataParam = Some "data" }
+            ]
+            ListenerStructs = []
+        }
+        let decls = [
+            CppParser.Declaration.Function (
+                mkFunc "xrtRunSetCallback" "int"
+                    [("rhdl", "void *"); ("state", "int");
+                     ("callback", "void (*)(void *, int, void *)"); ("data", "void *")])
+        ]
+        match CallbackWrapperGenerator.generate spec decls "Fidelity.XRT.Bridge.Callbacks" LP64 [] "Fidelity.XRT.Callbacks" with
+        | None -> Assert.Fail "Expected some output"
+        | Some code ->
+            Assert.Contains("(result, pin)", code)
+            Assert.Contains("GCHandle)", code)
+
+    [<Fact>]
+    let ``trampoline strips userdata from managed function signature`` () =
+        let spec : CallbackSpec = {
+            Registrations = [
+                { Function = "xrtRunSetCallback"; CallbackParam = "callback"; DataParam = Some "data" }
+            ]
+            ListenerStructs = []
+        }
+        let decls = [
+            CppParser.Declaration.Function (
+                mkFunc "xrtRunSetCallback" "int"
+                    [("rhdl", "void *"); ("state", "int");
+                     ("callback", "void (*)(void *, int, void *)"); ("data", "void *")])
+        ]
+        match CallbackWrapperGenerator.generate spec decls "Fidelity.XRT.Bridge.Callbacks" LP64 [] "Fidelity.XRT.Callbacks" with
+        | None -> Assert.Fail "Expected some output"
+        | Some code ->
+            // Managed handler should have 2 params (void*, int), not 3 (userdata stripped)
+            Assert.Contains("nativeint -> int -> unit", code)
+
+    [<Fact>]
+    let ``trampoline passes 0n for userdata param`` () =
+        let spec : CallbackSpec = {
+            Registrations = [
+                { Function = "g_idle_add"; CallbackParam = "function"; DataParam = Some "data" }
+            ]
+            ListenerStructs = []
+        }
+        let decls = [
+            CppParser.Declaration.Function (
+                mkFunc "g_idle_add" "unsigned int"
+                    [("function", "int (*)(void *)"); ("data", "void *")])
+        ]
+        match CallbackWrapperGenerator.generate spec decls "Fidelity.GTK.Bridge.Callbacks" LP64 [] "Fidelity.GTK.Callbacks" with
+        | None -> Assert.Fail "Expected some output"
+        | Some code ->
+            // The L1 call should pass 0n for userdata
+            Assert.Contains("0n", code)
+
+    [<Fact>]
+    let ``trampoline not generated when function pointer type unparseable`` () =
+        // Typedef'd callback type cannot be parsed as function pointer
+        let spec : CallbackSpec = {
+            Registrations = [
+                { Function = "hipStreamAddCallback"; CallbackParam = "callback"; DataParam = Some "userData" }
+            ]
+            ListenerStructs = []
+        }
+        let decls = [
+            CppParser.Declaration.Function (
+                mkFunc "hipStreamAddCallback" "int"
+                    [("stream", "void *"); ("callback", "hipStreamCallback_t");
+                     ("userData", "void *"); ("flags", "unsigned int")])
+        ]
+        match CallbackWrapperGenerator.generate spec decls "Bridge.Callbacks" LP64 [] "Ns.Callbacks" with
+        | None -> Assert.Fail "Expected dlsym wrapper even without trampoline"
+        | Some code ->
+            // dlsym wrapper should still be generated (Pattern A)
+            Assert.Contains("dlsym", code)
+            // But trampoline should NOT be generated (can't parse typedef type)
+            Assert.DoesNotContain("GCHandle", code)
+            Assert.DoesNotContain("Delegate", code)
+
+    [<Fact>]
+    let ``both dlsym and trampoline wrappers generated for same registration`` () =
+        let spec : CallbackSpec = {
+            Registrations = [
+                { Function = "xrtRunSetCallback"; CallbackParam = "callback"; DataParam = Some "data" }
+            ]
+            ListenerStructs = []
+        }
+        let decls = [
+            CppParser.Declaration.Function (
+                mkFunc "xrtRunSetCallback" "int"
+                    [("rhdl", "void *"); ("state", "int");
+                     ("callback", "void (*)(void *, int, void *)"); ("data", "void *")])
+        ]
+        match CallbackWrapperGenerator.generate spec decls "Bridge.Callbacks" LP64 [] "Ns.Callbacks" with
+        | None -> Assert.Fail "Expected output"
+        | Some code ->
+            // Pattern A: dlsym wrapper
+            Assert.Contains("handlerSymbol", code)
+            Assert.Contains("dlsym", code)
+            // Pattern C: trampoline wrapper
+            Assert.Contains("GCHandle", code)
+            Assert.Contains("GetFunctionPointerForDelegate", code)
 
 // =============================================================================
 // L2 Direct Builder Generation (generateListenerDirectBuilder / generateL2)

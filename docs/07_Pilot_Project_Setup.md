@@ -48,7 +48,7 @@ transitive_headers = ["driver_types.h"]
 | `transitive_headers` | string array | no | **Filenames** (not paths) of headers transitively included by the primary headers, whose declarations should also be extracted. See [Transitive Headers](#transitive-headers-for-multi-file-sdk-apis) below. |
 | `macro_prefixes` | string array | no | Name prefixes for macro constants to include (e.g., `["WL_", "WAYLAND_"]`). When set, only `#define` constants whose names start with a listed prefix are extracted. When omitted or empty, all user-defined macros pass through, which can pull in constants from system headers like `stdint.h` or `math.h`. Recommended for any library whose headers transitively include system headers with many `#define` constants. |
 
-When multiple `headers` are listed, each is parsed as a separate clang invocation and the resulting declaration lists are merged via `DeclarationAlgebra.mergeDeclarations`, which deduplicates by declaration name and kind.
+When multiple `headers` are listed, each is parsed as a separate clang invocation and the resulting declaration lists are merged via `DeclarationAlgebra.mergeDeclarations`, which deduplicates by **bare declaration name**, first occurrence wins. There is no declaration kind in the key and no preference for the more complete declaration. For headers that forward-declare a struct before defining it, this silently discards the definition — see `docs/14_Binding_Generation_Gaps.md` §1.
 
 ### `[output]`: Where Generated Files Land
 
@@ -60,7 +60,7 @@ directory = "../Bindings"
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `mode` | string | yes | Always `"fidelity"` for Farscape's Clef output. |
+| `mode` | string | no | Parsed into `OutputSpec.Mode` and never read. No code path consults it; wrapper emission is selected by the `project --wrappers` flag alone. Retained for round-tripping. |
 | `directory` | string | yes | Output directory, **relative to the pilot.toml file location**. Farscape resolves relative paths from the TOML file's parent directory, not from the working directory. |
 
 ### `[error_conventions]`: Error Handling Strategy
@@ -115,18 +115,23 @@ For a survey of common error patterns and which ones Farscape handles automatica
 
 ```toml
 [options]
-opaque_handles = true
-flags_enums = true
 abi_critical_structs = ["drm_mode_create_dumb"]
 generate_descriptors = true
 ```
 
+`deserializeOptions` reads exactly two keys. **There is no validation pass anywhere in the
+serializer** — an unrecognized key produces no warning and no error, it is simply dropped.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `opaque_handles` | bool | false | Detect `typedef struct X* X_t` patterns and generate distinct `[<Struct>]` wrapper types with `Handle: nativeint`, `zero()`, and `isNull()` instead of raw `nativeint`. |
-| `flags_enums` | bool | false | Detect power-of-two enum value patterns and emit `[<System.Flags>]` attribute. |
-| `abi_critical_structs` | string array | `[]` | Struct names requiring ABI-exact layout. Farscape runs `clang -fdump-record-layouts-simple` to extract byte offsets and generates `[<StructLayout(LayoutKind.Explicit, Size=N)>]` with per-field `[<FieldOffset(N)>]`. |
+| `abi_critical_structs` | string array | `[]` | Struct names requiring ABI-exact layout. Farscape runs `clang -fdump-record-layouts-simple` to extract byte offsets. **This key is also the sole trigger for that clang pass** — a project that omits it gets no measured offsets for any struct. See `docs/14_Binding_Generation_Gaps.md` §2 before relying on the emitted record form. |
 | `generate_descriptors` | bool | false | Generate BAREWire `StructDescriptor` values for ABI-critical structs (requires `abi_critical_structs` to be non-empty). |
+
+**Keys that are not keys.** `opaque_handles` and `flags_enums` appear in older examples
+throughout this repository and in at least one production pilot file. Neither has ever been
+read. Both behaviours are unconditional: `FidelityCodeGenerator.detectOpaqueHandles` and
+`ActivePatterns.isBitmaskEnum` run on every generation with no config gate. Setting them to
+`false` does not disable anything. Remove them from any pilot file that carries them.
 
 ### `[[namespace]]`: Namespace Decomposition
 
@@ -151,6 +156,50 @@ Note the TOML array-of-tables syntax: `[[namespace]]` (double brackets), and sin
 | `xml_interfaces` | string array | no | XML protocol interface names to include (e.g., `["wl_surface", "wl_compositor"]`). Functions and types from parsed XML protocols matching these interface names are included. |
 
 A function is included in a namespace if it matches **any** of: a prefix, an explicit function name, or an XML interface. Non-function declarations (structs, enums, typedefs) are distributed automatically by the type-dependency analysis; they do not need to be listed in namespaces.
+
+The distribution mechanism works as described. Whether the declarations it distributes are
+*complete* is a separate question — see `docs/14_Binding_Generation_Gaps.md` §1, which gives
+a second and independent cause for the empty-`Types.clef` symptom described under
+[Transitive Headers](#transitive-headers-for-multi-file-sdk-apis) below.
+
+### `[annotations.nonnull]`: Proven Non-Null Pointers
+
+Documented in full in `docs/08_Nullable_Pointer_Architecture.md`. Summarised here because it
+belongs to this schema: absent this section and absent clang `NonNullAttr` in the headers,
+**every** pointer parameter and return in the binding becomes `option<...>`, including every
+handle. That is the default, not an edge case.
+
+The serializer accepts the key both flat as `[annotations.nonnull]` and nested as
+`[annotations]` with a `nonnull` sub-table.
+
+### `[callbacks]`: Callback Parameter Handling
+
+Read by the serializer; not previously documented. Governs how function-pointer parameters
+are wrapped. Omitting the section entirely triggers auto-discovery — but **only** under
+`project --wrappers`. The implemented mechanism is `dlsym` symbol resolution passing
+`nativeint` to the Layer 1 function, not a typed function-pointer primitive; see
+`docs/14_Binding_Generation_Gaps.md` §7 for the discrepancy between this and the
+`FnPtr<'F>` design described elsewhere in the corpus.
+
+### `[protocol]`: Protocol Argument Marshalling
+
+Read by the serializer; not previously documented anywhere. Supplies
+`ProtocolConfig { MarshalFunction; MarshalModule }`, which determines the function emitted
+to pack request arguments — defaulted in code to `wl_proxy_marshal_array_flags` in
+`Fidelity.Wayland.Core`.
+
+**Miss any of the three required keys and the whole section silently becomes `None`**,
+falling back to the defaults with no warning.
+
+This is currently the only place in Farscape where flat Clef values are marshalled into a C
+argument array, which makes it the most relevant prior art for any future unification of
+boundary representation.
+
+### `[error_conventions.overrides]`: Per-Function Convention Overrides
+
+A sub-table of `[error_conventions]`, read by the serializer and not documented in the
+section above. Maps individual function names to a convention that differs from the
+library default.
 
 ## Transitive Headers for Multi-File SDK APIs
 

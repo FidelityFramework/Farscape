@@ -95,6 +95,14 @@ type CPeripheralInstance = {
 
 ### Stage 3: Layout Calculation
 
+> **Read `docs/14_Binding_Generation_Gaps.md` §2 before implementing against this section.**
+> The natural-alignment arithmetic below cannot be reproduced by an emitted Clef record:
+> records lower packed with no alignment padding, `int`/`uint` are register width, and
+> nested struct fields lower through memref descriptors rather than inline. A descriptor
+> computed here and a record emitted alongside it will disagree about every offset after the
+> first mixed-width field. The conclusion reached there is that such structs should emit a
+> layout module — literal offsets and typed accessors — rather than a record.
+
 Farscape calculates field offsets and struct size:
 
 ```fsharp

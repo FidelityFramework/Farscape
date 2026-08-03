@@ -394,7 +394,8 @@ module PilotAnalyzer =
           Callbacks = None
           Nonnull = None
           ProtocolConfig = None
-          Layer3 = None }
+          Layer3 = None
+          CppConfig = None }
 
     // =========================================================================
     // Declaration Filtering (for scoped generation)
@@ -432,34 +433,42 @@ module PilotAnalyzer =
     let filterDeclarationsForNamespace
         (spec: NamespaceSpec)
         (declarations: CppParser.Declaration list) : CppParser.Declaration list =
-        let explicitSet = Set.ofList spec.Functions
-        let xmlInterfacePascals =
-            spec.XmlInterfaces |> List.map toPascalCase
-        declarations |> List.filter (fun decl ->
-            match decl with
-            | CppParser.Declaration.Function f ->
-                let matchesPrefix =
-                    spec.Prefixes |> List.exists (fun prefix -> f.Name.StartsWith prefix)
-                let matchesExplicit = Set.contains f.Name explicitSet
-                let matchesXmlInterface =
-                    spec.XmlInterfaces |> List.exists (fun iface ->
-                        f.Name.StartsWith(iface + "_") || f.Name = iface)
-                matchesPrefix || matchesExplicit || matchesXmlInterface
-            | _ when not spec.XmlInterfaces.IsEmpty ->
-                // When XML interface filtering is active, non-function declarations
-                // must also match: name starts with interface name (snake_case)
-                // or matches delegate PascalCase pattern
-                match declarationName decl with
-                | Some name ->
-                    let matchesSnake =
+        // When all routing criteria are empty, treat as "match all" wildcard.
+        // This makes auto-discovered single-namespace projects route all functions
+        // without requiring manual prefix curation.
+        let isUnconstrainedNamespace =
+            spec.Prefixes.IsEmpty && spec.Functions.IsEmpty && spec.XmlInterfaces.IsEmpty
+        if isUnconstrainedNamespace then
+            declarations
+        else
+            let explicitSet = Set.ofList spec.Functions
+            let xmlInterfacePascals =
+                spec.XmlInterfaces |> List.map toPascalCase
+            declarations |> List.filter (fun decl ->
+                match decl with
+                | CppParser.Declaration.Function f ->
+                    let matchesPrefix =
+                        spec.Prefixes |> List.exists (fun prefix -> f.Name.StartsWith prefix)
+                    let matchesExplicit = Set.contains f.Name explicitSet
+                    let matchesXmlInterface =
                         spec.XmlInterfaces |> List.exists (fun iface ->
-                            name.StartsWith(iface + "_") || name = iface)
-                    let matchesPascal =
-                        xmlInterfacePascals |> List.exists (fun pascal ->
-                            name.StartsWith pascal)
-                    matchesSnake || matchesPascal
-                | None -> true
-            | _ -> true)
+                            f.Name.StartsWith(iface + "_") || f.Name = iface)
+                    matchesPrefix || matchesExplicit || matchesXmlInterface
+                | _ when not spec.XmlInterfaces.IsEmpty ->
+                    // When XML interface filtering is active, non-function declarations
+                    // must also match: name starts with interface name (snake_case)
+                    // or matches delegate PascalCase pattern
+                    match declarationName decl with
+                    | Some name ->
+                        let matchesSnake =
+                            spec.XmlInterfaces |> List.exists (fun iface ->
+                                name.StartsWith(iface + "_") || name = iface)
+                        let matchesPascal =
+                            xmlInterfacePascals |> List.exists (fun pascal ->
+                                name.StartsWith pascal)
+                        matchesSnake || matchesPascal
+                    | None -> true
+                | _ -> true)
 
     // =========================================================================
     // Type-Dependency Analysis (for multi-namespace projects)
@@ -550,25 +559,38 @@ module PilotAnalyzer =
                 | None -> false)
 
     /// Filter declarations for a namespace: functions by prefix/name, types by explicit set.
+    /// Unconstrained namespaces (empty prefixes, functions, and xmlInterfaces) match
+    /// all functions; types are still filtered by the typeNames set.
     let filterDeclarationsWithTypes
         (spec: NamespaceSpec)
         (typeNames: Set<string>)
         (declarations: CppParser.Declaration list) : CppParser.Declaration list =
-        let explicitSet = Set.ofList spec.Functions
-        declarations |> List.filter (fun decl ->
-            match decl with
-            | CppParser.Declaration.Function f ->
-                let matchesPrefix =
-                    spec.Prefixes |> List.exists (fun prefix -> f.Name.StartsWith prefix)
-                let matchesExplicit = Set.contains f.Name explicitSet
-                let matchesXmlInterface =
-                    spec.XmlInterfaces |> List.exists (fun iface ->
-                        f.Name.StartsWith(iface + "_") || f.Name = iface)
-                matchesPrefix || matchesExplicit || matchesXmlInterface
-            | _ ->
-                match declarationName decl with
-                | Some name -> Set.contains name typeNames
-                | None -> false)
+        let isUnconstrainedNamespace =
+            spec.Prefixes.IsEmpty && spec.Functions.IsEmpty && spec.XmlInterfaces.IsEmpty
+        if isUnconstrainedNamespace then
+            declarations |> List.filter (fun decl ->
+                match decl with
+                | CppParser.Declaration.Function _ -> true
+                | _ ->
+                    match declarationName decl with
+                    | Some name -> Set.contains name typeNames
+                    | None -> false)
+        else
+            let explicitSet = Set.ofList spec.Functions
+            declarations |> List.filter (fun decl ->
+                match decl with
+                | CppParser.Declaration.Function f ->
+                    let matchesPrefix =
+                        spec.Prefixes |> List.exists (fun prefix -> f.Name.StartsWith prefix)
+                    let matchesExplicit = Set.contains f.Name explicitSet
+                    let matchesXmlInterface =
+                        spec.XmlInterfaces |> List.exists (fun iface ->
+                            f.Name.StartsWith(iface + "_") || f.Name = iface)
+                    matchesPrefix || matchesExplicit || matchesXmlInterface
+                | _ ->
+                    match declarationName decl with
+                    | Some name -> Set.contains name typeNames
+                    | None -> false)
 
     // =========================================================================
     // Layer 3 Bridge Requirement Analysis

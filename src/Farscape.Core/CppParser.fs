@@ -58,6 +58,10 @@ module CppParser =
         IsInline: bool
         /// Raw clang AST attributes (AllocSizeAttr, NonNullAttr, etc.)
         Attributes: AttributeData list
+        /// Itanium-mangled symbol name from clang AST (e.g., "_ZN3xrt6deviceC1Ej").
+        /// Present for C++ methods, constructors, and destructors; None for C functions
+        /// (which use unmangled names directly).
+        MangledName: string option
     }
 
     /// Represents a C/C++ struct declaration
@@ -133,9 +137,26 @@ module CppParser =
     and ClassDecl = {
         Name: string
         Methods: Declaration list
+        /// CXXConstructorDecl nodes parsed as FunctionDecl (name = class name).
+        /// Includes both user-defined and implicit constructors.
+        Constructors: Declaration list
         Fields: FieldDecl list
         Documentation: string option
         IsAbstract: bool
+        /// True when a non-implicit (user-defined or explicitly-defaulted) destructor exists.
+        /// Determines triviality: classes with user destructors are non-trivially copyable
+        /// and use MEMORY return classification (sret) under SysV x86_64 ABI.
+        HasUserDestructor: bool
+        /// Itanium-mangled symbol for the D1 (complete object) destructor, if present.
+        /// Extracted from clang AST "mangledName" field on CXXDestructorDecl.
+        DestructorMangledName: string option
+        /// True when a non-implicit copy constructor exists (user-defined or explicitly-defaulted).
+        HasUserCopyConstructor: bool
+        /// True when a non-implicit move constructor exists (user-defined or explicitly-defaulted).
+        HasUserMoveConstructor: bool
+        /// Base class type strings from clang AST "bases" array.
+        /// Used to detect inherited pimpl pattern (e.g., "detail::pimpl<xclbin_impl>").
+        BaseClasses: string list
     }
 
     // =========================================================================
@@ -179,7 +200,34 @@ module CppParser =
         /// When set, only declarations from files under this path are extracted.
         /// Derived automatically from pkg-config include paths.
         IncludeRoot: string option
+        /// When true, invoke clang in C++ mode (-x c++ -std=c++17).
+        /// Required for .h headers that contain C++ class declarations
+        /// behind #ifdef __cplusplus guards.
+        CppMode: bool
     }
+
+    /// Detect whether a header file should be parsed in C++ mode.
+    /// Returns true for .hpp/.hxx/.hh extensions, or for .h files whose
+    /// content contains C++ indicators (namespace, class, template, std::).
+    let detectCppMode (headerFile: string) : bool =
+        let ext = Path.GetExtension(headerFile).ToLowerInvariant()
+        match ext with
+        | ".hpp" | ".hxx" | ".hh" -> true
+        | ".h" ->
+            try
+                let content = File.ReadAllText(headerFile)
+                content.Contains("namespace ") ||
+                content.Contains("class ") ||
+                content.Contains("template<") ||
+                content.Contains("template <") ||
+                content.Contains("std::") ||
+                // C++ stdlib includes: <cXXX> wrappers or extensionless STL headers
+                System.Text.RegularExpressions.Regex.IsMatch(
+                    content, @"#\s*include\s*<c(errno|string|stdlib|stdio|math|locale|type)\b") ||
+                System.Text.RegularExpressions.Regex.IsMatch(
+                    content, @"#\s*include\s*<(vector|string|memory|map|set|list|array|optional|variant|tuple|algorithm|functional|iostream|fstream|sstream|chrono|thread|mutex|atomic|utility|numeric|deque|queue|stack|bitset|span|ranges|format|any|regex|filesystem|future|exception|typeinfo|type_traits|initializer_list|string_view|unordered_map|unordered_set)>")
+            with _ -> false
+        | _ -> false
 
     /// Create default parser options for a header file
     let defaultOptions headerFile = {
@@ -190,6 +238,7 @@ module CppParser =
         IncludeMacros = true
         MacroPrefixes = []
         IncludeRoot = None
+        CppMode = detectCppMode headerFile
     }
 
     // =========================================================================
@@ -395,6 +444,7 @@ module CppParser =
             let isInline = getBool node "inline"
             let attributes = extractAttributes node
             let documentation = extractDocumentation node
+            let mangledName = getString node "mangledName"
 
             Some {
                 Name = name
@@ -405,6 +455,7 @@ module CppParser =
                 IsStatic = isStatic
                 IsInline = isInline
                 Attributes = attributes
+                MangledName = mangledName
             }
 
     /// Process FieldDecl AST node
@@ -560,7 +611,19 @@ module CppParser =
             let isImplicit = getBool node "isImplicit"
             let kind = getStringOr node "kind" ""
 
-            if not isImplicit && isFromTargetFile node then
+            // NamespaceDecl is a structural container, not a declaration.
+            // Always recurse into namespace children regardless of file context,
+            // because clang often elides the file attribute on NamespaceDecl nodes
+            // (it only emits file on the first source-file change). The library
+            // boundary check applies to leaf declarations inside the namespace.
+            if kind = "NamespaceDecl" then
+                match getString node "name" with
+                | Some name when not (System.String.IsNullOrEmpty(name)) ->
+                    for inner in getArray node "inner" do
+                        processNode inner
+                | _ -> ()
+
+            elif not isImplicit && isFromTargetFile node then
                 if verbose then
                     let name = getStringOr node "name" "<anonymous>"
                     printfn "[CppParser] Processing %s: %s (file: %A)" kind name currentFile
@@ -588,9 +651,29 @@ module CppParser =
 
                 | "CXXRecordDecl" ->
                     match getString node "name" with
-                    | Some name when not (String.IsNullOrEmpty(name)) ->
+                    | Some name when not (System.String.IsNullOrEmpty(name)) ->
+                        let innerNodes = getArray node "inner"
+
+                        // Extract base class types from clang's "bases" array.
+                        // Each entry has type.qualType (written) and type.desugaredQualType (canonical).
+                        // Use desugaredQualType when available for full namespace resolution.
+                        let baseClasses =
+                            match node.TryGetProperty("bases") with
+                            | Some (JsonValue.Array basesArr) ->
+                                [ for baseNode in basesArr do
+                                    match baseNode.TryGetProperty("type") with
+                                    | Some typeNode ->
+                                        match getString typeNode "desugaredQualType" with
+                                        | Some t -> yield t
+                                        | None ->
+                                            match getString typeNode "qualType" with
+                                            | Some t -> yield t
+                                            | None -> ()
+                                    | None -> () ]
+                            | _ -> []
+
                         let methods =
-                            getArray node "inner"
+                            innerNodes
                             |> Seq.filter (fun inner ->
                                 let k = getStringOr inner "kind" ""
                                 k = "CXXMethodDecl" || k = "FunctionDecl")
@@ -598,45 +681,106 @@ module CppParser =
                             |> Seq.map Function
                             |> List.ofSeq
 
+                        // Capture constructors (CXXConstructorDecl) as FunctionDecl.
+                        // The constructor name in clang AST is the class name.
+                        let constructors =
+                            innerNodes
+                            |> Seq.filter (fun inner ->
+                                getStringOr inner "kind" "" = "CXXConstructorDecl")
+                            |> Seq.choose processFunctionDecl
+                            |> Seq.map Function
+                            |> List.ofSeq
+
                         let fields =
-                            getArray node "inner"
+                            innerNodes
                             |> Seq.filter (fun inner ->
                                 getStringOr inner "kind" "" = "FieldDecl")
                             |> Seq.choose processFieldDecl
                             |> List.ofSeq
 
                         let isAbstract =
-                            getArray node "inner"
+                            innerNodes
                             |> Seq.exists (fun inner ->
                                 getStringOr inner "kind" "" = "CXXMethodDecl" &&
                                 getBool inner "pure")
 
+                        // Detect non-implicit (user-defined) destructor and extract its
+                        // mangled symbol. Under SysV x86_64 ABI, a user-defined destructor
+                        // makes the type non-trivially copyable, triggering MEMORY classification
+                        // and hidden sret pointer for return-by-value.
+                        let userDtorNode =
+                            innerNodes
+                            |> Seq.tryFind (fun inner ->
+                                getStringOr inner "kind" "" = "CXXDestructorDecl" &&
+                                not (getBool inner "isImplicit"))
+                        let hasUserDestructor = userDtorNode.IsSome
+                        let destructorMangledName =
+                            userDtorNode |> Option.bind (fun n -> getString n "mangledName")
+
+                        // Detect non-implicit copy constructor.
+                        // A copy ctor takes a single const-ref-to-self parameter.
+                        let hasUserCopyConstructor =
+                            innerNodes
+                            |> Seq.exists (fun inner ->
+                                getStringOr inner "kind" "" = "CXXConstructorDecl" &&
+                                not (getBool inner "isImplicit") &&
+                                (match getString inner "explicitlyDefaulted" with
+                                 | Some "deleted" -> false
+                                 | _ ->
+                                    let params =
+                                        getArray inner "inner"
+                                        |> Seq.filter (fun p -> getStringOr p "kind" "" = "ParmVarDecl")
+                                        |> List.ofSeq
+                                    params.Length = 1 &&
+                                    (let t = getQualType params.[0]
+                                     t.Contains("const") && t.Contains("&") && t.Contains(name))))
+
+                        // Detect non-implicit move constructor.
+                        // A move ctor takes a single rvalue-ref-to-self parameter.
+                        let hasUserMoveConstructor =
+                            innerNodes
+                            |> Seq.exists (fun inner ->
+                                getStringOr inner "kind" "" = "CXXConstructorDecl" &&
+                                not (getBool inner "isImplicit") &&
+                                (match getString inner "explicitlyDefaulted" with
+                                 | Some "deleted" -> false
+                                 | _ ->
+                                    let params =
+                                        getArray inner "inner"
+                                        |> Seq.filter (fun p -> getStringOr p "kind" "" = "ParmVarDecl")
+                                        |> List.ofSeq
+                                    params.Length = 1 &&
+                                    (let t = getQualType params.[0]
+                                     t.Contains("&&") && t.Contains(name) && not (t.Contains("const")))))
+
                         results.Add(Class {
                             Name = name
                             Methods = methods
+                            Constructors = constructors
                             Fields = fields
                             Documentation = None
                             IsAbstract = isAbstract
+                            HasUserDestructor = hasUserDestructor
+                            DestructorMangledName = destructorMangledName
+                            HasUserCopyConstructor = hasUserCopyConstructor
+                            HasUserMoveConstructor = hasUserMoveConstructor
+                            BaseClasses = baseClasses
                         })
-                    | _ -> ()
-
-                | "NamespaceDecl" ->
-                    match getString node "name" with
-                    | Some name when not (String.IsNullOrEmpty(name)) ->
-                        // Process namespace contents
-                        for inner in getArray node "inner" do
-                            processNode inner
-
-                        // Collect namespace declarations (not implemented yet for simplicity)
-                        ()
                     | _ -> ()
 
                 | _ -> ()
 
-            // Recurse into children (except already-handled namespace)
-            if kind <> "NamespaceDecl" then
+                // Recurse into children for non-namespace declarations
                 for inner in getArray node "inner" do
                     processNode inner
+
+            else
+                // Outside the target file: still recurse to find target-file
+                // declarations that may appear deeper in the AST (e.g. in
+                // TranslationUnitDecl or LinkageSpecDecl wrappers).
+                if kind <> "NamespaceDecl" then
+                    for inner in getArray node "inner" do
+                        processNode inner
 
         // Start processing from root
         processNode root
@@ -905,6 +1049,14 @@ module CppParser =
     /// Build common clang arguments
     let private buildClangArgs (options: HeaderParserOptions) : ResizeArray<string> =
         let args = ResizeArray<string>()
+
+        // Force C++ mode for headers containing C++ content.
+        // Without this, clang treats .h files as C and skips
+        // #ifdef __cplusplus blocks entirely.
+        if options.CppMode then
+            args.Add("-x")
+            args.Add("c++")
+            args.Add("-std=c++17")
 
         for includePath in options.IncludePaths do
             args.Add($"-I{includePath}")
@@ -1179,6 +1331,7 @@ module CppParser =
             IncludeMacros = true
             MacroPrefixes = []
             IncludeRoot = None
+            CppMode = detectCppMode headerFile
         }
         parseHeader options
 
@@ -1197,6 +1350,7 @@ module CppParser =
             IncludeMacros = true
             MacroPrefixes = []
             IncludeRoot = None
+            CppMode = detectCppMode headerFile
         }
         parseHeader options
 
@@ -1217,6 +1371,7 @@ module CppParser =
             IncludeMacros = true
             MacroPrefixes = macroPrefixes
             IncludeRoot = includeRoot
+            CppMode = detectCppMode headerFile
         }
         parseHeader options
 
@@ -1235,5 +1390,6 @@ module CppParser =
             IncludeMacros = true
             MacroPrefixes = []
             IncludeRoot = None
+            CppMode = false  // CMSIS headers are always C
         }
         parseHeaderFull options

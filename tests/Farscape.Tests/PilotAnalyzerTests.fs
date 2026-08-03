@@ -140,6 +140,64 @@ let ``filterDeclarationsForNamespace passes through non-function declarations`` 
     // Structs and enums pass through, memcpy gets filtered out
     Assert.Equal(2, filtered.Length)
 
+// --- unconstrained namespace (auto-discovered) wildcard tests ---
+
+[<Fact>]
+let ``filterDeclarationsForNamespace routes all declarations when unconstrained`` () =
+    let spec : PilotTypes.NamespaceSpec =
+        { Name = "Test.Core"; Description = ""; Library = "lib"
+          Prefixes = []; Functions = []; XmlInterfaces = [] }
+    let decls = [
+        CppParser.Declaration.Function (mkFunc "xrtDeviceOpen" "int" [])
+        CppParser.Declaration.Function (mkFunc "xrtBOAlloc" "int" [])
+        CppParser.Declaration.Struct (mkStructSimple "xrt_device_info")
+    ]
+    let filtered = PilotAnalyzer.filterDeclarationsForNamespace spec decls
+    Assert.Equal(3, filtered.Length)
+
+[<Fact>]
+let ``filterDeclarationsForNamespace still filters when prefixes are set`` () =
+    let spec : PilotTypes.NamespaceSpec =
+        { Name = "Test.Device"; Description = ""; Library = "lib"
+          Prefixes = ["xrtDevice"]; Functions = []; XmlInterfaces = [] }
+    let decls = [
+        CppParser.Declaration.Function (mkFunc "xrtDeviceOpen" "int" [])
+        CppParser.Declaration.Function (mkFunc "xrtBOAlloc" "int" [])
+        CppParser.Declaration.Struct (mkStructSimple "xrt_device_info")
+    ]
+    let filtered = PilotAnalyzer.filterDeclarationsForNamespace spec decls
+    // Function matching: only xrtDeviceOpen. Struct passes through (no XML filter).
+    Assert.Equal(2, filtered.Length)
+
+[<Fact>]
+let ``filterDeclarationsWithTypes routes all functions when unconstrained`` () =
+    let spec : PilotTypes.NamespaceSpec =
+        { Name = "Test.Core"; Description = ""; Library = "lib"
+          Prefixes = []; Functions = []; XmlInterfaces = [] }
+    let decls = [
+        CppParser.Declaration.Function (mkFunc "xrtDeviceOpen" "int" [])
+        CppParser.Declaration.Function (mkFunc "xrtBOAlloc" "int" [])
+        CppParser.Declaration.Struct (mkStructSimple "xrt_device_info")
+    ]
+    let typeNames = Set.ofList ["xrt_device_info"]
+    let filtered = PilotAnalyzer.filterDeclarationsWithTypes spec typeNames decls
+    // All functions pass (unconstrained), struct passes because it's in typeNames
+    Assert.Equal(3, filtered.Length)
+
+[<Fact>]
+let ``filterDeclarationsWithTypes excludes unlisted types even when unconstrained`` () =
+    let spec : PilotTypes.NamespaceSpec =
+        { Name = "Test.Core"; Description = ""; Library = "lib"
+          Prefixes = []; Functions = []; XmlInterfaces = [] }
+    let decls = [
+        CppParser.Declaration.Function (mkFunc "foo" "int" [])
+        CppParser.Declaration.Struct (mkStructSimple "unlisted_struct")
+    ]
+    let typeNames = Set.empty<string>
+    let filtered = PilotAnalyzer.filterDeclarationsWithTypes spec typeNames decls
+    // Function passes, struct excluded (not in typeNames)
+    Assert.Equal(1, filtered.Length)
+
 // --- sub-prefix splitting tests ---
 
 [<Fact>]

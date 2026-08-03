@@ -99,6 +99,55 @@ module PilotTypes =
     }
 
     // =========================================================================
+    // C++ Class Binding Configuration
+    // =========================================================================
+
+    /// Per-class binding specification in pilot.toml [[cpp.class]] array.
+    type CppClassSpec = {
+        /// Fully qualified C++ class name, e.g. "xrt::device"
+        Name: string
+        /// Clef namespace for generated bindings
+        Namespace: string
+        /// Whether to generate bindings (default true)
+        Bind: bool
+        /// Override kind detection: "pimpl", "pod", "value", "interface"
+        KindOverride: string option
+        /// Override size in bytes (for when clang cannot compute it, e.g. opaque pimpl)
+        SizeOverride: int option
+    }
+
+    /// C++ binding configuration from pilot.toml [cpp] section.
+    type CppConfig = {
+        /// Shared library to scan for mangled symbols (e.g. "libxrt_coreutil.so")
+        SymbolLibrary: string
+        /// Enable pimpl pattern detection (default true)
+        PimplDetection: bool
+        /// Enable C vs C++ API gap analysis (default false)
+        GapAnalysis: bool
+        /// Per-class binding overrides
+        Classes: CppClassSpec list
+    }
+
+    // =========================================================================
+    // C++ Diagnostic Signals
+    // =========================================================================
+
+    /// Diagnostic signals emitted during C++ class pre-analysis.
+    /// Consumed by the Pilot report and by downstream code generators.
+    type CppDiagnostic =
+        /// A pimpl-pattern class was detected (single smart pointer field).
+        | PimplClassDetected of className: string * size: int * hasDestructor: bool
+        /// A method returns a non-trivially-copyable type via hidden sret pointer.
+        /// The binding must include the sret pointer as the first argument.
+        | SretReturnDetected of className: string * methodName: string * returnTypeName: string
+        /// Operations that exist only in C++ classes, with no extern "C" equivalent.
+        | CppOnlyOperations of operations: string list
+        /// Count of mangled symbols resolved against the library .dynsym.
+        | MangledSymbolsAvailable of count: int
+        /// Gap analysis: operations split between C-only and C++-only surfaces.
+        | ExternCGapDetected of cppOps: string list * cOps: string list
+
+    // =========================================================================
     // Nonnull Annotations
     // =========================================================================
 
@@ -201,6 +250,9 @@ module PilotTypes =
         /// Layer 2 marshaling requirements (None = no marshaling package needed).
         /// Computed by PilotAnalyzer.analyzeLayer3Requirements, not serialized.
         Layer3: Layer3Requirement option
+        /// C++ class binding configuration (None = no C++ class analysis).
+        /// Enables pimpl detection, sret analysis, and gap analysis.
+        CppConfig: CppConfig option
     }
 
     // =========================================================================

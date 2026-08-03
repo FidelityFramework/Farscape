@@ -622,7 +622,7 @@ module ProtocolParser =
                 Parameters = parameters
                 Documentation = request.Documentation
                 IsVirtual = false; IsStatic = false; IsInline = false
-                Attributes = []
+                Attributes = []; MangledName = None
             })
 
     /// Convert a single interface to its complete set of declarations (types + request functions).

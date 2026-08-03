@@ -84,7 +84,7 @@ module PilotDiscovery =
     // Classification Heuristics (pure, no IO)
     // =========================================================================
 
-    /// Check if a relative path matches internal/private header patterns.
+    /// Check if a relative path matches internal/private/deprecated header patterns.
     let isInternalPath (relativePath: string) : bool =
         let normalized = relativePath.Replace('\\', '/')
         let fileName = System.IO.Path.GetFileName(normalized)
@@ -95,7 +95,8 @@ module PilotDiscovery =
         fileName.EndsWith("_private.hpp") ||
         fileName.EndsWith("_impl.h") ||
         fileName.EndsWith("_impl.hpp") ||
-        dirParts |> Array.exists (fun p -> p = "detail" || p = "internal" || p = "private")
+        dirParts |> Array.exists (fun p ->
+            p = "detail" || p = "internal" || p = "private" || p = "deprecated")
 
     /// Classify header content as C or C++.
     /// Returns (isCpp, hasExternC).
@@ -108,7 +109,12 @@ module PilotDiscovery =
             content.Contains("std::") ||
             content.Contains("public:") ||
             content.Contains("private:") ||
-            content.Contains("protected:")
+            content.Contains("protected:") ||
+            // C++ stdlib includes: <cXXX> wrappers or extensionless STL headers
+            System.Text.RegularExpressions.Regex.IsMatch(
+                content, @"#\s*include\s*<c(errno|string|stdlib|stdio|math|locale|type)\b") ||
+            System.Text.RegularExpressions.Regex.IsMatch(
+                content, @"#\s*include\s*<(vector|string|memory|map|set|list|array|optional|variant|tuple|algorithm|functional|iostream|fstream|sstream|chrono|thread|mutex|atomic|utility|numeric|deque|queue|stack|bitset|span|ranges|format|any|regex|filesystem|future|exception|typeinfo|type_traits|initializer_list|string_view|unordered_map|unordered_set)>")
         let hasExternC = content.Contains("extern \"C\"")
         (hasCppIndicators, hasExternC)
 
@@ -119,14 +125,16 @@ module PilotDiscovery =
         |> Array.length
 
     /// Rough count of own declarations (functions, structs, enums, typedefs).
+    /// Excludes comment lines: //, /*, and block comment continuations starting with *.
     let countDeclarations (content: string) : int =
         content.Split('\n')
         |> Array.filter (fun line ->
             let t = line.TrimStart()
+            not (t.StartsWith("//")) && not (t.StartsWith("/*")) && not (t.StartsWith("*")) &&
             (t.StartsWith("typedef ") ||
              t.StartsWith("struct ") ||
              t.StartsWith("enum ") ||
-             (t.Contains("(") && not (t.StartsWith("#")) && not (t.StartsWith("//")) && not (t.StartsWith("/*")))))
+             (t.Contains("(") && not (t.StartsWith("#")))))
         |> Array.length
 
     /// Detect umbrella header: high include count relative to own declarations.
@@ -134,6 +142,15 @@ module PilotDiscovery =
         let includes = countIncludes content
         let decls = countDeclarations content
         includes >= 5 && (decls < includes / 2 || decls < 3)
+
+    /// Detect forwarding shim: a header whose only substantive content is a
+    /// single #include directive. These appear in experimental/ or compat/
+    /// directories as re-export aliases; parsing them separately produces
+    /// either duplicates or transitive C++ compile errors.
+    let isForwardingHeader (content: string) : bool =
+        let includes = countIncludes content
+        let decls = countDeclarations content
+        includes = 1 && decls = 0
 
     /// Classify XML file by root element using Fidelity.Data.XML.
     let classifyXml (content: string) : XmlProtocolFormat option =
@@ -215,7 +232,7 @@ module PilotDiscovery =
             match readFile filePath with
             | Some content ->
                 let isCpp, hasExternC = classifyHeaderContent content
-                let isInternal = isInternalPath relativePath
+                let isInternal = isInternalPath relativePath || isForwardingHeader content
                 let isUmbrella = isUmbrellaHeader content
                 if isCpp && not hasExternC then
                     Some (CppHeader (relativePath, false, isInternal))
@@ -228,7 +245,7 @@ module PilotDiscovery =
             match readFile filePath with
             | Some content ->
                 let _, hasExternC = classifyHeaderContent content
-                let isInternal = isInternalPath relativePath
+                let isInternal = isInternalPath relativePath || isForwardingHeader content
                 Some (CppHeader (relativePath, hasExternC, isInternal))
             | None -> None
         | ".xml" ->
@@ -378,10 +395,13 @@ module PilotDiscovery =
                     Some (System.IO.Path.Combine(root, path))
                 | _ -> None)
 
-        // Collect non-internal C++ headers with extern "C" (bindable surface)
+        // Collect non-internal C++ headers.
+        // Both extern "C" headers (C-linkage surface) and pure C++ headers
+        // (class declarations) are included; the parser uses CppMode to
+        // invoke clang with -x c++ so #ifdef __cplusplus content is visible.
         let bindableCppHeaders =
             result.Files |> List.choose (function
-                | CppHeader (path, hasExternC, isInternal) when hasExternC && not isInternal ->
+                | CppHeader (path, _, isInternal) when not isInternal ->
                     Some (System.IO.Path.Combine(root, path))
                 | _ -> None)
 
@@ -425,7 +445,8 @@ module PilotDiscovery =
           Callbacks = None
           Nonnull = None
           ProtocolConfig = None
-          Layer3 = None }
+          Layer3 = None
+          CppConfig = None }
 
     // =========================================================================
     // IO Layer (CLI consumption)

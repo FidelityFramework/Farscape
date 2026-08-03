@@ -91,16 +91,64 @@ module DeclarationAlgebra =
         OnDelegate  = fun d -> Some d.Name
     }
 
-    /// Merge declaration lists from multiple headers, deduplicating by name.
-    /// First-occurrence-wins: if the same typedef/struct/enum/macro appears
-    /// in multiple headers (common for shared system types like size_t, pid_t),
-    /// the first parsed version is kept.
+    /// Extract a composite (kind, name) key for deduplication.
+    /// Different declaration kinds with the same name (e.g. an enum "device"
+    /// and a class "device") are distinct entities and must not collide.
+    let private declarationKeyAlgebra : DeclarationAlgebra<(string * string) option> = {
+        OnFunction  = fun f -> Some ("func", f.Name)
+        OnStruct    = fun s -> if s.Name <> "" then Some ("struct", s.Name) else None
+        OnEnum      = fun e -> if e.Name <> "" then Some ("enum", e.Name) else None
+        OnTypedef   = fun t -> Some ("typedef", t.Name)
+        OnMacro     = fun m -> Some ("macro", m.Name)
+        OnNamespace = fun n -> Some ("namespace", n.Name)
+        OnClass     = fun c -> if c.Name <> "" then Some ("class", c.Name) else None
+        OnDelegate  = fun d -> Some ("delegate", d.Name)
+    }
+
+    /// Compute a "completeness" score for a class declaration.
+    /// Higher score = more structural information captured. When the same
+    /// class appears in multiple translation units (via transitive includes),
+    /// the version parsed from its primary header will have the most fields
+    /// and methods because it sees the full definition.
+    let private classCompleteness (decl: CppParser.Declaration) : int =
+        match decl with
+        | CppParser.Declaration.Class c ->
+            // Fields are the most critical signal (pimpl detection depends on them)
+            // Weight fields heavily, then methods + constructors
+            c.Fields.Length * 10 + c.Methods.Length + c.Constructors.Length
+        | _ -> 0
+
+    /// Compute a "completeness" score for a struct declaration.
+    let private structCompleteness (decl: CppParser.Declaration) : int =
+        match decl with
+        | CppParser.Declaration.Struct s -> s.Fields.Length
+        | _ -> 0
+
+    /// Merge declaration lists from multiple headers, deduplicating by (kind, name).
+    /// First-occurrence-wins for most declarations. For classes and structs,
+    /// the most complete definition wins: when the same class appears in multiple
+    /// translation units via transitive includes, the version from its primary
+    /// header (with fields visible) supersedes partial views from other headers.
     let mergeDeclarations (declLists: CppParser.Declaration list list) : CppParser.Declaration list =
-        let seen = System.Collections.Generic.HashSet<string>()
-        declLists
-        |> List.concat
-        |> List.filter (fun decl ->
-            let names = cataDeclarations declarationNameAlgebra [decl]
-            match names with
-            | [Some name] -> seen.Add(name)
-            | _ -> true)
+        let seen = System.Collections.Generic.Dictionary<string * string, int>()
+        let result = ResizeArray<CppParser.Declaration>()
+        for decl in List.concat declLists do
+            let keys = cataDeclarations declarationKeyAlgebra [decl]
+            match keys with
+            | [Some key] ->
+                match seen.TryGetValue(key) with
+                | false, _ ->
+                    seen.[key] <- result.Count
+                    result.Add(decl)
+                | true, idx ->
+                    // Already seen. Replace if the new declaration is more complete.
+                    let existing = result.[idx]
+                    let shouldReplace =
+                        match fst key with
+                        | "class" -> classCompleteness decl > classCompleteness existing
+                        | "struct" -> structCompleteness decl > structCompleteness existing
+                        | _ -> false
+                    if shouldReplace then
+                        result.[idx] <- decl
+            | _ -> result.Add(decl)
+        List.ofSeq result

@@ -373,6 +373,91 @@ let ``int32_t returning function uses int32 literal 0l for zero comparison`` () 
     Assert.DoesNotContain("= 0 then", output)
 
 // =============================================================================
+// ReturnCode Wrapper Generation Tests
+// =============================================================================
+
+module ReturnCodeWrapperTests =
+
+    let private generateWithReturnCode name retType parms attrs =
+        let decls = [ mkDecl name retType parms attrs ]
+        WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test"
+            (UseReturnCode ("Xrt", "Fidelity.XRT.ReturnCode")) Types.LP64 None
+
+    [<Fact>]
+    let ``return code wrapper generates captureReturnCode helper`` () =
+        let output = generateWithReturnCode "xrtDeviceClose" "int"
+                        [("dhdl", "void *")]
+                        []
+        Assert.Contains("let captureReturnCode", output)
+        Assert.Contains("describe", output)
+
+    [<Fact>]
+    let ``return code wrapper opens error module`` () =
+        let output = generateWithReturnCode "xrtDeviceClose" "int"
+                        [("dhdl", "void *")]
+                        []
+        Assert.Contains("open Fidelity.XRT.ReturnCode", output)
+
+    [<Fact>]
+    let ``ZeroSuccessOrError with return code generates Result<unit, string>`` () =
+        let output = generateWithReturnCode "xrtDeviceClose" "int"
+                        [("dhdl", "void *")]
+                        []
+        Assert.Contains("Result<unit, string>", output)
+        Assert.Contains("= 0 then", output)
+        Assert.Contains("Ok ()", output)
+        Assert.Contains("captureReturnCode", output)
+
+    [<Fact>]
+    let ``return code wrapper uses int32 cast in error path`` () =
+        let output = generateWithReturnCode "xrtDeviceClose" "int"
+                        [("dhdl", "void *")]
+                        []
+        Assert.Contains("captureReturnCode (int32", output)
+
+    [<Fact>]
+    let ``AllocatedPointer with return code generates static error string`` () =
+        let output = generateWithReturnCode "xrtDeviceOpen" "void *"
+                        [("index", "unsigned int")]
+                        [{ CppParser.AttributeData.Kind = "MallocAttr"; Args = []; StringArg = None }]
+        // Handle-returning functions use a static error string, not captureReturnCode
+        Assert.Contains("Result<nativeint, string>", output)
+        Assert.Contains("returned null handle", output)
+
+    [<Fact>]
+    let ``PureValue wrapper unchanged with return code enabled`` () =
+        let output = generateWithReturnCode "xrtRunState" "int"
+                        [("rhdl", "void *")]
+                        [{ CppParser.AttributeData.Kind = "PureAttr"; Args = []; StringArg = None }]
+        Assert.Contains("let xrtRunState", output)
+        Assert.DoesNotContain("Result<", output.Split("let xrtRunState").[1])
+
+    [<Fact>]
+    let ``VoidReturn unchanged with return code enabled`` () =
+        let output = generateWithReturnCode "xrtFree" "void"
+                        [("ptr", "void *")]
+                        []
+        Assert.Contains("let xrtFree", output)
+        Assert.Contains(": unit =", output)
+        Assert.DoesNotContain("Result<", output.Split("let xrtFree").[1])
+
+    [<Fact>]
+    let ``return code captureReturnCode XML doc includes library prefix`` () =
+        let output = generateWithReturnCode "xrtDeviceClose" "int"
+                        [("dhdl", "void *")]
+                        []
+        Assert.Contains("Xrt return code", output)
+
+    [<Fact>]
+    let ``return code does not generate errno or enum error helpers`` () =
+        let output = generateWithReturnCode "xrtDeviceClose" "int"
+                        [("dhdl", "void *")]
+                        []
+        Assert.DoesNotContain("captureErrno", output)
+        Assert.DoesNotContain("__errno_location", output)
+        Assert.DoesNotContain("match result with", output)
+
+// =============================================================================
 // Opaque Handle Return Type Tests
 // =============================================================================
 
@@ -387,7 +472,7 @@ let ``wrapper returns Result<HandleType, string> for opaque handle return with e
               ReturnType = "hipStream_t"
               Parameters = [("flags", "unsigned int")]
               Documentation = None
-              IsVirtual = false; IsStatic = false; IsInline = false; Attributes = [] }
+              IsVirtual = false; IsStatic = false; IsInline = false; Attributes = []; MangledName = None }
     ]
     let output = WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" (UseErrno "Fidelity.Errno") Types.LP64 None
     // Return type should use the handle type, not nativeint
@@ -403,7 +488,7 @@ let ``wrapper returns Result<nativeint, string> for non-opaque pointer with errn
               ReturnType = "void *"
               Parameters = [("addr", "void *"); ("length", "size_t")]
               Documentation = None
-              IsVirtual = false; IsStatic = false; IsInline = false; Attributes = [] }
+              IsVirtual = false; IsStatic = false; IsInline = false; Attributes = []; MangledName = None }
     ]
     let output = WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" (UseErrno "Fidelity.Errno") Types.LP64 None
     // void* should use nativeint, not a handle type

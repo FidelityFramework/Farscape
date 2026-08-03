@@ -111,6 +111,11 @@ module WrapperTypes =
         /// Null return with companion reason function (stb_image, SDL pattern).
         /// On null pointer return, calls the reason function to get an error string pointer.
         | UseNullWithReason of reasonFunction: string
+        /// Nonzero return code IS the error (pthread, XRT, POSIX pattern).
+        /// 0 = success, nonzero = error code passed to a generated describe function.
+        /// libraryPrefix: human-readable prefix for error function naming (e.g. "Xrt").
+        /// describeModuleName: fully qualified module containing the describe function.
+        | UseReturnCode of libraryPrefix: string * describeModuleName: string
 
     // =========================================================================
     // Complete Wrapper Pattern

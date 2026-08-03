@@ -19,6 +19,11 @@ There is no P/Invoke in the Fidelity framework. Farscape generates `[<FidelityEx
 7. [Pilot Project Setup](./07_Pilot_Project_Setup.md): Pilot TOML project system
 8. [Nullable Pointer Architecture](./08_Nullable_Pointer_Architecture.md): NullWithReason error convention
 9. [Library Verification](./09_Library_Verification.md): CCS-based verification pipeline, clefpak prerequisites, fidproj hierarchy
+10. [Boundary Marshaling Specification](./10_Boundary_Marshaling_Spec.md): Layer discipline at the C boundary
+11. [Namespace-Scoped PSG Loading](./11_Namespace_Scoped_PSG_Design.md): Demand-driven module loading in CCS
+12. [OpenAPI Binding Generation](./12_OpenAPI_Binding_Generation.md): REST surface ingestion
+13. TypeScript and JavaScript: [Ingestion](./13a_TypeScript_Ingestion_Architecture.md), [Fearless JavaScript](./13b_Fearless_JavaScript.md), [Output and Integration](./13c_TypeScript_Output_and_Integration.md)
+14. [Binding Generation Gaps](./14_Binding_Generation_Gaps.md): Silent defects in generated bindings — read before trusting a generated struct or handle
 
 ## Position in the Fidelity Closed-Loop Pipeline
 

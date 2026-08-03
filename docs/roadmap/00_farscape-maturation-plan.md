@@ -784,6 +784,6 @@ binding          (libdrm + libgbm + Wayland XML)
 
 ---
 
-*Companion documents: "Farscape Phase 4: NPU Binding via XRT/XDNA" and "Farscape Phase 5+: MFEM Algorithmic Ingestion"*
+*Companion documents: "Farscape Phase 4: NPU Binding via DRM UAPI + XRT", "Farscape Phase 4C: PipeWire Audio Binding", "Farscape Phase 4D: ONNX Runtime Binding", and "Farscape Phase 5+: MFEM Algorithmic Ingestion"*
 
 *SpeakEZ Technologies | Fidelity Framework*
