@@ -23,6 +23,8 @@ CCS performs reachability analysis on the PSG. Diagnostics on nodes not reachabl
 - Errors only surface when application code reaches for those bindings
 - Library verification must bypass this demotion to catch errors early
 
+> **Not implemented (verified 2026-08-03).** The CLI root command is `generate | pilot | project`; there is no `verify` subcommand. The description below is a design. See `docs/09_Library_Verification.md` and `docs/14_Binding_Generation_Gaps.md` §6.
+
 ### `farscape verify` Command
 
 ```
@@ -91,7 +93,7 @@ Farscape is an interim tool. Its capabilities evolve into Composer features acce
 |---|---|
 | C header parsing + binding generation | **Transpose**: Typed dynamic binding with full NTU/BAREWire integration |
 | Layer 1 + Layer 2 + Overlay output | Integrated into Composer's binding pipeline |
-| `farscape verify` | Composer library verification (built-in) |
+| `farscape verify` *(planned)* | Composer library verification (built-in) |
 | Pilot TOML project system | Composer project dependencies |
 
 **Transcribe** (full algorithmic port from foreign source) extends beyond Farscape's scope — it handles source-to-source translation, not just FFI binding.

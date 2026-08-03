@@ -15,12 +15,12 @@ This is a closed system. Every component carries binding intent forward.
 ```fsharp
 [<FidelityExtern("libc", "memcpy")>]
 let memcpy (dest: nativeint) (src: nativeint) (n: nativeint) : nativeint =
-    Unchecked.defaultof<nativeint>
+    NativeDefault.zeroed ()
 ```
 
 CCS recognizes `[<FidelityExtern>]` and carries library name + symbol through the PSG. Alex emits MLIR with `fidelity.binding_strategy` and `fidelity.library_name` attributes. The linker auto-collects all referenced libraries and generates appropriate flags (`-lc`, etc.).
 
-**Current state**: Declarations generate without the attribute; Alex infers from naming conventions. Adding `[<FidelityExtern>]` is core infrastructure that closes the pipeline loop.
+**Current state** (verified 2026-08-03): the attribute **is** emitted (`FidelityCodeGenerator.fs:221, 279`). Adding `[<FidelityExtern>]` is core infrastructure that closes the pipeline loop.
 
 **Farscape is Fidelity-only. No P/Invoke or .NET interop.**
 
@@ -135,7 +135,7 @@ Alex does NOT work with Clef source directly. It transforms MLIR based on bindin
 
 ## Library Verification
 
-Farscape-generated libraries must be **verified error-free** via CCS before consumption. CCS's reachability analysis demotes unreachable diagnostics from Error→Info, masking type errors in dependencies until application code `open`s them. The `farscape verify` command invokes CCS with all modules treated as reachable, catching type errors at library build time rather than application build time.
+Farscape-generated libraries must be **verified error-free** via CCS before consumption. CCS's reachability analysis demotes unreachable diagnostics from Error→Info, masking type errors in dependencies until application code `open`s them. The planned `farscape verify` command (not implemented as of 2026-08-03) would invoke CCS with all modules treated as reachable, catching type errors at library build time rather than application build time.
 
 See `library_verification_clefpak` memory for full verification and clefpak architecture.
 

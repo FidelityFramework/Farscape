@@ -45,7 +45,7 @@ Farscape is one component of a closed-loop native compilation system. `[<Fidelit
 
 ## Two-Layer Binding Model
 
-**Layer 1: Platform.Bindings** - `[<FidelityExtern>]` attributed binding declarations with `Unchecked.defaultof<T>` bodies. Core infrastructure.
+**Layer 1: Platform.Bindings** - `[<FidelityExtern>]` attributed binding declarations with `NativeDefault.zeroed ()` bodies. Core infrastructure.
 
 **Layer 2: Idiomatic Clef Wrappers** (implemented) - Safe functional APIs with Result types, null checking, error handling. Driven by 12 clang attribute types and 7 return semantic patterns.
 
@@ -81,7 +81,8 @@ BAREWire provides hardware descriptor types (`PeripheralDescriptor`, `FieldDescr
 - Active pattern decomposition (type classification, macro filtering)
 - Catamorphism-based declaration traversal
 - Typed code AST (FsDecl/FsType) with single CodeRenderer
-- Fidelity binding generation (`Unchecked.defaultof` pattern)
+- Fidelity binding generation (`NativeDefault.zeroed ()` pattern)
+- `[<FidelityExtern>]` attribute emission (library name + symbol carried through the PSG)
 - Layer 2 wrapper generation (WrapperPatternAnalyzer + WrapperCodeGenerator)
 - Typedef chain resolution, macro constant extraction
 - Pilot namespace analysis and TOML project files
@@ -97,7 +98,6 @@ BAREWire provides hardware descriptor types (`PeripheralDescriptor`, `FieldDescr
 
 ## Roadmap
 
-- `[<FidelityExtern>]` attribute generation (core infrastructure)
 - `farscape verify` — CCS-based library verification pipeline
 - BAREWire peripheral descriptor generation from header AST
 - CMSIS qualifier extraction (`__I`, `__O`, `__IO` → `AccessKind`)

@@ -13,6 +13,22 @@ This rule extends beyond type names (the original `boundary_marshaling.md` scope
 | **Layer 1** — FidelityExtern declarations | Farscape | Yes — raw C types in signatures | Layer 2 only |
 | **Layer 2** — Idiomatic wrappers, protocol marshaling, callback builders | Farscape | Yes — this IS the membrane | Layer 3 |
 | **Layer 3** — Composition libraries | Developer | **No — pure Clef** | Application code |
+
+> **Two caveats added 2026-08-03.**
+>
+> **Layer 3 is a convention, not a mechanism.** `Layer3` is a declared type in
+> `PilotTypes.fs` and is set to `None` at every construction site;
+> `PilotAnalyzer.analyzeLayer3Requirements` runs only on the protocol and callback paths.
+> Nothing enforces the prohibitions below. They are discipline for a developer writing an
+> overlay by hand.
+>
+> **This table specifies idiom containment and says nothing about representation.** That
+> gap is load-bearing: a handle expressed as a Clef record satisfies every rule in this
+> document and still reaches a C callee as the address of a slot rather than as the handle,
+> because records are memref-backed. See `docs/14_Binding_Generation_Gaps.md` §3 and §7.
+> The correct Layer 1 output for a pointer typedef is bare `nativeint`, which §4 below
+> currently reads as a violation. A future revision of this document should gain a
+> Representation section rather than a sibling document being created.
 | **Application** — end-user programs | Developer | **No — pure Clef** | End user |
 
 Layer 2 includes:

@@ -35,7 +35,7 @@ Every module in Farscape is built from one of four patterns:
 
 ### 4. Two-Layer Binding Model
 
-- **Layer 1**: `[<FidelityExtern>]` binding declarations with `Unchecked.defaultof<T>` bodies. Alex provides platform-specific MLIR implementations.
+- **Layer 1**: `[<FidelityExtern>]` binding declarations with `NativeDefault.zeroed ()` bodies. Alex provides platform-specific MLIR implementations.
 - **Layer 2** (implemented): Idiomatic Clef wrappers with Result types, null checking, error handling. Driven by 12 clang attribute types and 7 return semantic patterns. CLI: `--output-mode fidelity-wrappers`
 
 Both layers compile to zero-overhead native code via type erasure. No BCL dependencies in generated code.
@@ -166,7 +166,7 @@ Typed representation of generated Clef code:
 ```fsharp
 type FsType = Named of string | Generic of string * FsType | Unit
 type FsExpr =
-    | DefaultOf of FsType                    // Layer 1: Unchecked.defaultof<T>
+    | DefaultOf of FsType                    // Layer 1: NativeDefault.zeroed ()
     | FunctionCall | IfThenElse | ResultOk   // Layer 2: wrapper constructs
     | ResultError | LetIn | Comparison | ... // (see CodeAST.fs for full list)
 type FsDecl =
@@ -229,7 +229,7 @@ module Fidelity.libc.Memory
     /// C signature: void * memcpy(void *restrict __dest, const void *restrict __src, size_t __n)
     [<FidelityExtern("libc", "memcpy")>]
     let memcpy (dest: nativeint) (src: nativeint) (n: unativeint) : nativeint =
-        Unchecked.defaultof<nativeint>
+        NativeDefault.zeroed ()
 ```
 
 ## File Compile Order
@@ -299,7 +299,7 @@ tests/Farscape.Tests/
 
 These are not optional future features. They are what closes the Fidelity system loop:
 
-1. **`[<FidelityExtern>]` attributes**: Binding metadata carried through the PSG pipeline. Currently Alex infers from naming conventions; the attribute makes it explicit.
+1. ~~**`[<FidelityExtern>]` attributes**~~ — **shipped**. Emitted at `FidelityCodeGenerator.fs:221, 279` and `ErrnoModuleGenerator.fs:91`. Binding metadata is carried through the PSG pipeline; the attribute makes it explicit.
 2. **BAREWire memory/type layout capture**: Reading header AST for precise struct layout, access constraints, memory regions. Core to memory safety guarantees.
 3. **CMSIS qualifier extraction**: `__I`/`__O`/`__IO` → `AccessKind` for hardware-enforced access constraints.
 

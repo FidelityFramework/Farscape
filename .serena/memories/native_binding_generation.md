@@ -16,7 +16,7 @@ Farscape runs at **generation time**, before Composer compilation.
 ```fsharp
 [<FidelityExtern("libc", "write")>]
 let write (fd: int32) (buf: nativeint) (count: nativeint) : int64 =
-    Unchecked.defaultof<int64>
+    NativeDefault.zeroed ()
 ```
 
 ### Layer 2: Idiomatic Clef Wrappers
@@ -73,7 +73,7 @@ These are separate artifacts with completely different purposes.
 
 ## Library Verification (Mar 2026)
 
-Generated libraries must pass CCS type-checking with zero errors before they are trusted. The `farscape verify` command runs CCS against a library's fidproj, reporting diagnostics at true severity (bypassing CCS's reachability-based demotion). Verification failures are bugs in the generation pipeline, fixed systematically. See `library_verification_clefpak` memory.
+Generated libraries must pass CCS type-checking with zero errors before they are trusted. The planned (not yet implemented as of 2026-08-03) `farscape verify` command runs CCS against a library's fidproj, reporting diagnostics at true severity (bypassing CCS's reachability-based demotion). Verification failures are bugs in the generation pipeline, fixed systematically. See `library_verification_clefpak` memory.
 
 ## fidproj Generation and Resolution (Mar 2026)
 

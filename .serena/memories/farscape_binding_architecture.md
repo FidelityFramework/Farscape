@@ -26,7 +26,7 @@ let write (fd: int) (buf: nativeint) (count: nativeint) : int64 =
 
 The `NativeDefault.zeroed()` body is a CCS intrinsic (`unit → 'T`, polymorphic zero init). `Unchecked.defaultof<T>` is BCL and rejected by CCS. CCS type-checks the declaration. Baker recognizes the pattern. Alex emits platform-specific MLIR. The `[<FidelityExtern>]` attribute tells the pipeline which library and symbol this binding targets.
 
-**Current state**: Declarations generate without `[<FidelityExtern>]` attribute. Alex infers from naming conventions. Adding the attribute is core infrastructure work that closes the loop.
+**Current state** (verified 2026-08-03): the attribute **is** emitted (`FidelityCodeGenerator.fs:221, 279`, `ErrnoModuleGenerator.fs:91`). Adding the attribute is core infrastructure work that closes the loop.
 
 ### Layer 2: Idiomatic Clef Wrappers (implemented)
 Safe functional APIs that call Layer 1:
@@ -71,6 +71,8 @@ Farscape generates Clef source libraries that must be **verified error-free** vi
 
 **The reachability trap**: CCS demotes diagnostics on unreachable nodes from Error→Info. A library with type errors appears clean as a dependency until application code `open`s its modules. Library verification must bypass this demotion.
 
+> **Not implemented (verified 2026-08-03).** The CLI root command is `generate | pilot | project`; there is no `verify` subcommand. The description below is a design. See `docs/09_Library_Verification.md` and `docs/14_Binding_Generation_Gaps.md` §6.
+
 **Command**: `farscape verify --fidproj <path>` — invokes CCS against library sources, reports diagnostics at true severity.
 
 **Feedback loop**: Verification failures → fix TypeMapper/WrapperCodeGenerator → regenerate → re-verify. Each fix addresses a class of C API patterns, maturing the generator over time.
@@ -103,7 +105,7 @@ rethinking. But the solution lives in the NTU and Fidelity.Platform, not in Fars
 **For Fidelity output**: Farscape uses PlatformABI to resolve C-specific widths at generation
 time, emitting Fixed-width NTU types. C `int` → NTU `int` (register-width dimensional, NOT int32). C `unsigned int` → NTU `uint` (NOT uint32). C `long` on LP64 → `int64` (Fixed 64). Only genuinely fixed-width C types (`int32_t`, `uint16_t`) map to fixed NTU types. Platform-abstract types (`size_t → unativeint`, `intptr_t → nativeint`) use Resolved dimensions.
 
-**Callback struct fields use `FnPtr<'F>`** — Clef-native typed function pointer. NOT CLR delegates (not in Clef's type algebra), NOT raw nativeint (loses callback signature). Callback builders use `FnPtr.fromSymbol` for runtime symbol resolution.
+**Callback struct fields — ASPIRATIONAL, NOT IMPLEMENTED (verified 2026-08-03).** `FnPtr` appears in the source only in two comments (`FidelityCodeGenerator.fs:122, 171`) and is never emitted. The implemented mechanism is `dlsym` symbol resolution passing `nativeint` to Layer 1 (`CallbackWrapperGenerator.fs:10-18, 111-121`). The intended design was: callback struct fields use `FnPtr<'F>` — Clef-native typed function pointer. NOT CLR delegates (not in Clef's type algebra), NOT raw nativeint (loses callback signature). Callback builders use `FnPtr.fromSymbol` for runtime symbol resolution.
 
 **What this means for Farscape**: No changes needed beyond PlatformABI-aware Fidelity output.
 New NTU dimensions come from Fidelity.Platform, not from binding generators. Farscape binds

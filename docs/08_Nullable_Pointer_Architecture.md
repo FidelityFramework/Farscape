@@ -16,7 +16,7 @@ C has no non-null guarantee unless explicitly annotated. Absence of proof is not
 | `void *` | `Option<nativeint>` | `nativeint` |
 | `struct foo *` | `Option<nativeint>` | `nativeint` |
 | `int **` | `Option<nativeint>` | `nativeint` |
-| Opaque handle (e.g. `hipStream_t`) | `Option<HandleType>` | `HandleType` |
+| Opaque handle (e.g. `hipStream_t`) | `Option<nativeint>` | `nativeint` | See `docs/14_Binding_Generation_Gaps.md` §3 — a handle record is memref-backed and must not cross a call boundary; `Option<Record>` compounds it with a second indirection |
 | Function pointer `void (*)(...)` | `nativeint` | `nativeint` (not a data pointer) |
 
 Return types follow the same rule: pointer returns are `Option<>` unless proven non-null.

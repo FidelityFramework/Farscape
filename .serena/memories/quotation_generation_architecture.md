@@ -6,7 +6,7 @@ There is NO P/Invoke in the Fidelity framework. Only `[<FidelityExtern>]`.
 
 ## Current Implementation: Platform.Bindings
 
-Farscape generates Platform.Bindings pattern files with `Unchecked.defaultof<T>` bodies:
+Farscape generates Platform.Bindings pattern files with `NativeDefault.zeroed ()` bodies:
 
 ```fsharp
 module Fidelity.libc.Memory
@@ -16,7 +16,7 @@ module Fidelity.libc.Memory
 
     /// void * memcpy(void *restrict __dest, const void *restrict __src, size_t __n)
     let memcpy (dest: nativeint) (src: nativeint) (n: nativeint) : nativeint =
-        Unchecked.defaultof<nativeint>
+        NativeDefault.zeroed ()
 ```
 
 Alex recognizes this pattern and provides platform-specific MLIR implementations.
@@ -39,12 +39,12 @@ The target output adds binding metadata that travels through the entire pipeline
 ```fsharp
 [<FidelityExtern("libc", "memcpy")>]
 let memcpy (dest: nativeint) (src: nativeint) (n: nativeint) : nativeint =
-    Unchecked.defaultof<nativeint>
+    NativeDefault.zeroed ()
 ```
 
 CCS recognizes the attribute and carries library name + symbol through the PSG. Alex emits MLIR with `fidelity.binding_strategy` and `fidelity.library_name` attributes. The linker auto-collects library flags.
 
-**Current state**: Declarations generate without the attribute. Adding it is core infrastructure work.
+**Current state** (verified 2026-08-03): the attribute **is** emitted (`FidelityCodeGenerator.fs:221, 279`, `ErrnoModuleGenerator.fs:91`).
 
 ## Core Infrastructure: Quotation-Based Output
 
@@ -85,4 +85,4 @@ Layer 2 wrappers are implemented and working:
 
 ## Library Verification
 
-Generated output must pass `farscape verify` (CCS type-check with all modules reachable) before it can be packaged as clefpak. See `library_verification_clefpak` memory for the full pipeline.
+Generated output is intended to pass `farscape verify` (not yet implemented as of 2026-08-03) (CCS type-check with all modules reachable) before it can be packaged as clefpak. See `library_verification_clefpak` memory for the full pipeline.

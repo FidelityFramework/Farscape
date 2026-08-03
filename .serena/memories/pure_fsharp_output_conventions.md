@@ -113,9 +113,9 @@ For extern declarations, use the module convention:
 ```fsharp
 // Generated Platform.Bindings module
 module Platform.Bindings =
-    let halGpioInit gpio init : unit = Unchecked.defaultof<unit>
-    let halGpioWritePin gpio pin state : unit = Unchecked.defaultof<unit>
-    let halGpioReadPin gpio pin : GPIO_PinState = Unchecked.defaultof<GPIO_PinState>
+    let halGpioInit gpio init : unit = NativeDefault.zeroed ()
+    let halGpioWritePin gpio pin state : unit = NativeDefault.zeroed ()
+    let halGpioReadPin gpio pin : GPIO_PinState = NativeDefault.zeroed ()
 ```
 
 Alex recognizes this pattern and provides platform-specific implementations.

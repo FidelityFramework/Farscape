@@ -330,7 +330,98 @@ comments (`FidelityCodeGenerator.fs:122, 171`) and is never emitted;
 `docs/roadmap/06_farscape-phase4d-onnxruntime.md:87, 266` plans against the same
 non-existent primitive.
 
-## 8. Corrections applied to the corpus
+## 8. A nominated goal: provenance-ordered claims
+
+This section states a goal, not a design. The path is not fully clear and the open questions
+at the end are real. It is recorded here because every defect above shares one property —
+an assertion existed with nothing able to contradict it — and the generalisation of the fix
+is worth naming before it is worth building.
+
+The target is a formalism in which **structure overrides inference by construction** rather
+than by convention, so that Layer 3 can be mostly derived and the part that cannot be
+derived is explicitly marked as taste.
+
+### Strata
+
+Every claim about a binding carries a provenance, and provenance is ordered:
+
+| Stratum | Source | Example claim |
+|---|---|---|
+| **Measured** | clang record-layout dump; actual byte offsets | `FT_GlyphSlotRec_.bitmap` is at offset 152 |
+| **Derived** | graph traversal over measured facts | `FT_Face → glyph → bitmap` is a valid typed path |
+| **Declared** | the human, in the pilot file | that projection is named `glyphBitmap`, grouped under `Face` |
+| **Inferred** | heuristic or model proposal | `FT_New_Face` / `FT_Done_Face` are an acquire/release pair |
+
+The rule: a lower stratum may **refine** where a higher one is silent, and may never
+**contradict** it. Structural override stops being a special case, and "the human outranks
+the model" falls out of the same rule as "measurement outranks everyone."
+
+### Admissibility is decidable per claim kind
+
+What makes this a formalism rather than a policy is that each claim kind carries a decision
+procedure against the measured stratum:
+
+| Claim kind | Admissible iff |
+|---|---|
+| Projection path | the path exists in the measured struct graph |
+| Resource lifecycle | acquire's out-param type and release's parameter type are the same handle type |
+| Out-param inversion | the parameter is a trailing pointer-to-`T` and the return is the library's error type |
+| Layout module | every named field offset matches the clang dump |
+
+These are checks, not judgements.
+
+### The partition that matters
+
+Claims divide into **structurally constrained** — where inference can be refuted — and
+**structurally free**, which is naming and grouping. Structure has nothing to say about
+whether an accessor is called `glyphBitmap` or `bitmapOf`. A formalism that admits it has
+nothing to say about names is stronger than one that pretends otherwise, because it
+localises taste instead of diffusing it.
+
+Most of what a hand-written Layer 3 overlay carries is **usage protocol** — that
+`FT_Load_Char` precedes `FT_Render_Glyph` precedes reading `face->glyph->bitmap`. That
+sequencing appears in no signature today, which is why generating it feels like guesswork:
+the input is absent, not the method. Resource lifecycle and projection paths recover most of
+it structurally once the layout graph is retained rather than discarded.
+
+### Refutability is the load-bearing property
+
+An inference that cannot be wrong is not a proposal; it is a decision wearing a proposal's
+clothes. Every inferred claim must be expressible in a form the measured stratum can
+contradict.
+
+This is precisely what the standing corpus lacked. Eight documented claims were internally
+coherent, mutually consistent, and false, because none of them stood in any admissibility
+relation to the code. §1 through §7 are the cost of that.
+
+### Consequence for Atelier
+
+Each proposed binding element carries its provenance and its status: derived and checked;
+inferred and admissible but unverified; inferred and **refuted by structure**. A human edit
+is recorded as a *declared* claim, which outranks the inference and is still checked against
+measurement — so "rolling your own" FFI means overriding the guess, never escaping the
+check.
+
+Because claims key on structural identity rather than file position, regeneration after a
+header change either preserves a claim or invalidates it loudly. A hand-written overlay
+cannot do this; it goes stale silently, which is the failure mode this whole document
+describes.
+
+### Open questions
+
+1. **Measured-versus-declared conflict needs a policy, not an error.** Sometimes the human
+   legitimately knows the header lies — a variable-length struct, a vendor-reserved field.
+   The top of the lattice likely needs an explicit recorded escape carrying a justification,
+   rather than being inviolable.
+2. **Claim identity under C-level renames is unsolved.** Keying on type name plus path is
+   stable across field reordering and fragile across renaming.
+3. **Whether grouping heuristics generalise is unknown.** FreeType is well-behaved. A
+   convention-heavy surface such as GObject is the real test, and until that experiment runs
+   this is a formalism-shaped hypothesis rather than a formalism.
+4. **Where the model proposal runs.** Proposing pilot stanzas for human review keeps
+   inference inside the check; proposing Clef directly does not.
+
+## 9. Corrections applied to the corpus
 
 Applied in the same pass as this document:
 
@@ -342,21 +433,23 @@ Applied in the same pass as this document:
 | `docs/02_BAREWire_Integration.md` | Cross-reference from the layout section to §2 here |
 | `docs/11_Namespace_Scoped_PSG_Design.md` | Cross-reference noting that problem 1 is superseded by §3 here |
 
-Outstanding, recorded so they are not lost:
+A second pass corrected the drift the first pass catalogued:
 
-- Eleven files show `Unchecked.defaultof<T>` as the Layer 1 body. `CodeRenderer.fs:26`
-  emits `NativeDefault.zeroed ()`, and
-  `.serena/memories/farscape_binding_architecture.md:27` already notes that
-  `Unchecked.defaultof` is BCL and rejected by CCS.
-- Eight files describe `[<FidelityExtern>]` as not yet emitted. It is emitted at
-  `FidelityCodeGenerator.fs:221, 279` and `ErrnoModuleGenerator.fs:91`.
-- The root `README.md:175-185` type table predates the February 2026 NTU mapping decision.
-- `docs/roadmap/*` example TOMLs use a `[sources]` section and a singular
-  `[error_convention]`, neither of which the serializer reads. A reader copying one of
-  those recipes gets a silently degenerate project.
-- Six memories and `docs/09` describe `farscape verify` in the indicative.
-- `docs/02:184-190` shows a `FS8001` write-only-register diagnostic; no `AccessKind` is
-  extracted today.
+| Correction | Scope |
+|---|---|
+| `Unchecked.defaultof<T>` → `NativeDefault.zeroed ()` as the Layer 1 body | 22 occurrences across 11 files. The two statements that correctly note `Unchecked.defaultof` is BCL and rejected by CCS were left intact |
+| `[<FidelityExtern>]` reclassified from under-development to shipped | 6 files, plus added to the implemented list in `docs/README.md` |
+| `farscape verify` marked not-implemented | 5 memories, with a status blockquote above each specification of the command |
+| Root `README.md` type table corrected to the register-width NTU mapping; `T *` row corrected to `option<nativeint>`; stale test count removed | 1 file |
+| Schema-caveat banner on roadmap recipes using `[sources]` and singular `[error_convention]` | 5 roadmap documents |
+| Handle-record validation criteria flagged as inverted | 4 roadmap documents, plus the `Option<HandleType>` row in `docs/08` |
+| `FnPtr<'F>` marked aspirational; the implemented path is `dlsym` → `nativeint` | 2 files |
+| `FS8001` write-only-register diagnostic marked not-implemented | `docs/02` |
+| Layer 3 marked a convention rather than a mechanism, and `docs/10` flagged as specifying containment without representation | `docs/10` |
+
+Deliberately not attempted: rewriting the roadmap example TOMLs themselves. Those documents
+carry other staleness beyond section names, and a banner prevents the copy-paste failure
+without pretending the recipes have been validated.
 
 ## Related Documents
 

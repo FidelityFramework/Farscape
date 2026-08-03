@@ -165,7 +165,7 @@ type FsType =
     | Unit
 
 type FsExpr =
-    | DefaultOf of FsType          // Unchecked.defaultof<T>
+    | DefaultOf of FsType          // NativeDefault.zeroed ()
 
 type FsDecl =
     | Module of name * comment * decls

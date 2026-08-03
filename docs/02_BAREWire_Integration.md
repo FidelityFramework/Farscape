@@ -193,7 +193,8 @@ Example error:
 // Clef code (using Farscape-generated bindings)
 let value = gpio.BSRR  // Attempt to read write-only register
 
-// Compile error:
+// Intended compile error (NOT IMPLEMENTED — no AccessKind is extracted today,
+// see docs/03_fsnative_Integration.md; this compiles and reads the register):
 // FS8001: Cannot read from write-only pointer 'BSRR'
 ```
 

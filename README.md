@@ -158,22 +158,24 @@ module Fidelity.libc.Memory
     /// void * memcpy(void *restrict __dest, const void *restrict __src, size_t __n)
     [<FidelityExtern("libc", "memcpy")>]
     let memcpy (dest: nativeint) (src: nativeint) (n: unativeint) : nativeint =
-        Unchecked.defaultof<nativeint>
+        NativeDefault.zeroed ()
 
     /// char * strcpy(char *restrict __dest, const char *restrict __src)
     [<FidelityExtern("libc", "strcpy")>]
     let strcpy (dest: nativeptr<byte>) (src: nativeptr<byte>) : nativeptr<byte> =
-        Unchecked.defaultof<nativeptr<byte>>
+        NativeDefault.zeroed ()>
 ```
 
 ## Type Mapping
 
 Type widths for `int` and `long` are resolved per PlatformABI (LP64, LLP64, ILP32, IP16). Fixed-width types (`int32_t`, `int64_t`) and pointer-width types (`size_t`, `intptr_t`) are platform-invariant. The `--data-model` CLI option selects the target ABI.
 
-| C Type | F# Type | Notes |
-|--------|---------|-------|
-| `int` / `int32_t` | `int32` | 32-bit on LP64/LLP64/ILP32; 16-bit on IP16 |
-| `unsigned int` / `uint32_t` | `uint32` | Same width rules as `int` |
+| C Type | Clef Type | Notes |
+|--------|-----------|-------|
+| `int` | `int` | **NTU register-width dimensional, not `int32`.** Deliberate — see `.serena/memories/TYPE_MAPPING_ARCHITECTURE_ANALYSIS.md`. Correct for parameters; see `docs/14_Binding_Generation_Gaps.md` §2 for why it makes a record unable to overlay a C struct. |
+| `unsigned int` | `uint` | Register-width, as above |
+| `int32_t` | `int32` | Fixed width, platform-invariant |
+| `uint32_t` | `uint32` | Fixed width, platform-invariant |
 | `long` / `long int` | `int64` (LP64) / `int32` (LLP64, ILP32) | Platform-dependent via PlatformABI |
 | `unsigned long` | `uint64` (LP64) / `uint32` (LLP64, ILP32) | Platform-dependent via PlatformABI |
 | `long long` | `int64` | Always 64-bit |
@@ -182,7 +184,7 @@ Type widths for `int` and `long` are resolved per PlatformABI (LP64, LLP64, ILP3
 | `double` | `double` | 64-bit float |
 | `char *` | `nativeptr<byte>` | Char pointer (active pattern: `CharPointer`) |
 | `void *` | `nativeint` | Void pointer (active pattern: `VoidPointer`) |
-| `T *` (other) | `nativeint` | Typed pointer (active pattern: `TypedPointer`) |
+| `T *` (other) | `option<nativeint>` | Typed pointer (active pattern: `TypedPointer`). **Wrapped in `option<>` by default** — absent clang `NonNullAttr` or an `[annotations.nonnull]` entry, every pointer parameter and return is nullable. See `docs/08_Nullable_Pointer_Architecture.md`. |
 | `void (*)(...)` | `nativeint` | Function pointer (detected by `(*)`) |
 | `size_t` / `uintptr_t` | `unativeint` | Pointer-width unsigned (NTU Resolved Pointer) |
 | `ssize_t` / `intptr_t` | `nativeint` | Pointer-width signed (NTU Resolved Pointer) |
@@ -204,7 +206,7 @@ Output is byte-identical across runs (deterministic).
 ## Testing
 
 ```bash
-# Run the test suite (194 tests)
+# Run the test suite
 cd tests/Farscape.Tests && dotnet test
 
 # Tests cover:

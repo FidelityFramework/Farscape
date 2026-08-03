@@ -33,12 +33,12 @@ CCS lives at `~/repos/fsnative/` and is registered as the `CCS` Serena project.
 ```fsharp
 [<FidelityExtern("libc", "memcpy")>]
 let memcpy (dest: nativeint) (src: nativeint) (n: nativeint) : nativeint =
-    Unchecked.defaultof<nativeint>
+    NativeDefault.zeroed ()
 ```
 
-CCS recognizes the `[<FidelityExtern>]` attribute and carries library name + symbol through the PSG. Baker recognizes the `Unchecked.defaultof` pattern and elaborates it with intrinsic metadata. Alex emits MLIR with `fidelity.binding_strategy` and `fidelity.library_name` attributes. The linker auto-collects all referenced libraries and generates appropriate flags (`-lc`, `-lwayland-client`, etc.).
+CCS recognizes the `[<FidelityExtern>]` attribute and carries library name + symbol through the PSG. Baker recognizes the `NativeDefault.zeroed ()` pattern and elaborates it with intrinsic metadata. Alex emits MLIR with `fidelity.binding_strategy` and `fidelity.library_name` attributes. The linker auto-collects all referenced libraries and generates appropriate flags (`-lc`, `-lwayland-client`, etc.).
 
-**Current state**: Binding declarations generate without the attribute; Alex infers from naming conventions. Adding `[<FidelityExtern>]` is core infrastructure that closes the pipeline loop.
+**Current state** (verified 2026-08-03): the attribute **is** emitted — `FidelityCodeGenerator.fs:221, 279` and `ErrnoModuleGenerator.fs:91` build it on every generated extern. Earlier revisions of this document described it as pending; it is not. Adding `[<FidelityExtern>]` was core infrastructure that closes the pipeline loop.
 
 ## Sliced Package Architecture
 
@@ -92,7 +92,7 @@ For the current focus (libc dynamic binding), Alex emits dynamic binding MLIR. S
 
 | Aspect | Current | Target |
 |--------|---------|--------|
-| Output format | `Unchecked.defaultof` binding declarations | `[<FidelityExtern>]` attributed binding declarations |
+| Output format | `NativeDefault.zeroed ()` binding declarations | `[<FidelityExtern>]` attributed binding declarations |
 | Library metadata | None: Alex infers from symbol names | Library name + symbol carried through PSG |
 | CMSIS support | Structs/enums parsed, qualifiers not extracted | Full qualifier → access constraint mapping |
 | Linker flags | Hard-coded | Auto-collected from `fidelity.library_name` attributes |

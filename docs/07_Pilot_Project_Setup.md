@@ -320,7 +320,7 @@ open Fidelity.ROCm.Memory.Types  // local types (hipMemcpyKind, hipPitchedPtr, .
 
 [<FidelityExtern("amdhip64", "hipMalloc")>]
 let hipMalloc (devPtr: nativeint) (size: nativeint) : hipError_t =
-    Unchecked.defaultof<hipError_t>
+    NativeDefault.zeroed ()
 ```
 
 The shared types module uses the namespace prefix derived from the project's namespace names. For namespaces `Fidelity.ROCm.Device`, `Fidelity.ROCm.Memory`, and so on, the common prefix is `Fidelity.ROCm`, so the shared types module is `Fidelity.ROCm.Types`.

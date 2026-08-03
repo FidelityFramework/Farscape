@@ -7,6 +7,24 @@
 
 ---
 
+> **Schema caveat (added 2026-08-03).** The example `.pilot.toml` recipes in this document
+> use section names the serializer does not read: `[sources]` (the real section is
+> `[library]`, with `headers`) and `[error_convention]` singular (the real section is
+> `[error_conventions]`). `PilotSerializer` performs no validation and silently drops
+> unrecognized sections, so copying a recipe from this document verbatim yields a project
+> with no headers and no error convention, and no warning. Several recipes also carry
+> `opaque_handles` and `flags_enums`, which have never been keys. See
+> `docs/07_Pilot_Project_Setup.md` for the authoritative schema and
+> `docs/14_Binding_Generation_Gaps.md` for why these went unnoticed.
+
+> **Handle-record caveat (added 2026-08-03).** Validation criteria in this document that
+> require opaque handles to emit as distinct wrapper structs rather than `nativeint` are
+> **inverted**. A single-word `{ Handle: nativeint }` record is memref-backed under the
+> current compiler and reaches a C callee as the address of a slot rather than as the
+> handle; `ofHandle` also allocates and leaks eight bytes per construction. Bare `nativeint`
+> is the correct Layer 1 output. These gates would pass while producing miscompiling code —
+> see `docs/14_Binding_Generation_Gaps.md` §3.
+
 ## 1. Purpose
 
 This document covers the Farscape binding for PipeWire, the audio/video infrastructure that provides low-latency capture and playback on the target system. PipeWire replaces PulseAudio and JACK on modern Linux; it is the audio I/O foundation for the Strix Halo voice-guided assistant.

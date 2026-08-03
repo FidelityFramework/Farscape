@@ -7,6 +7,16 @@
 
 ---
 
+> **Schema caveat (added 2026-08-03).** The example `.pilot.toml` recipes in this document
+> use section names the serializer does not read: `[sources]` (the real section is
+> `[library]`, with `headers`) and `[error_convention]` singular (the real section is
+> `[error_conventions]`). `PilotSerializer` performs no validation and silently drops
+> unrecognized sections, so copying a recipe from this document verbatim yields a project
+> with no headers and no error convention, and no warning. Several recipes also carry
+> `opaque_handles` and `flags_enums`, which have never been keys. See
+> `docs/07_Pilot_Project_Setup.md` for the authoritative schema and
+> `docs/14_Binding_Generation_Gaps.md` for why these went unnoticed.
+
 ## 1. Context
 
 Phases 0-4 of the Farscape Maturation Plan establish Farscape as a production-quality C binding generator:
