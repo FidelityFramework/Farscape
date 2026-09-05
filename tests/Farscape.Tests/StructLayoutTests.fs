@@ -83,42 +83,46 @@ Layout: <ASTRecordLayout
         Assert.True(result.ContainsKey "Valid")
 
 // =========================================================================
-// CodeAST + Renderer Tests (ExplicitLayoutRecord)
+// CodeAST + Renderer Tests (layout module and descriptor nodes)
 // =========================================================================
 
-module ExplicitLayoutRendering =
+module LayoutModuleRendering =
 
     [<Fact>]
-    let ``render ExplicitLayoutRecord produces StructLayout attribute`` () =
-        let decl = ExplicitLayoutRecord("Point", [
-            { Name = "x"; Type = Named "int32"; OffsetBytes = 0 }
-            { Name = "y"; Type = Named "int32"; OffsetBytes = 4 }
-        ], 8, None)
+    let ``render ValueBinding produces a typed value, not a function`` () =
+        let decl = ValueBinding("Descriptor", Named "StructDescriptor", RecordBlock [ "Name", Literal "\"Point\"" ])
         let output = CodeRenderer.render (Module("Test", "test", [decl]))
-        Assert.Contains("[<StructLayout(LayoutKind.Explicit, Size = 8)>]", output)
-        Assert.Contains("[<Struct>]", output)
+        Assert.Contains("let Descriptor : StructDescriptor =", output)
+        Assert.Contains("{ Name = \"Point\" }", output)
+        Assert.DoesNotContain("let Descriptor ()", output)
 
     [<Fact>]
-    let ``render ExplicitLayoutRecord produces FieldOffset per field`` () =
-        let decl = ExplicitLayoutRecord("Point", [
-            { Name = "x"; Type = Named "int32"; OffsetBytes = 0 }
-            { Name = "y"; Type = Named "int32"; OffsetBytes = 4 }
-        ], 8, None)
+    let ``render Quoted RecordBlock produces a quotation with one field per line`` () =
+        let decl =
+            ValueBinding("writeDescriptor", Generic("Expr", Named "FunctionDescriptor"),
+                Quoted(RecordBlock [
+                    "CName", Literal "\"write\""
+                    "Parameters", ArrayBlock [ Commented(Literal "{ Name = \"fd\" }", "width declared: int under LP64") ]
+                    "CallingConvention", Identifier "CDecl" ]))
         let output = CodeRenderer.render (Module("Test", "test", [decl]))
-        Assert.Contains("[<FieldOffset(0)>]", output)
-        Assert.Contains("[<FieldOffset(4)>]", output)
-        Assert.Contains("x: int32", output)
-        Assert.Contains("y: int32", output)
+        Assert.Contains("<@", output)
+        Assert.Contains("@>", output)
+        Assert.Contains("{ CName = \"write\"\n", output)
+        Assert.Contains("[|\n", output)
+        Assert.Contains("{ Name = \"fd\" } // width declared: int under LP64\n", output)
+        Assert.Contains("|]\n", output)
+        Assert.Contains("CallingConvention = CDecl }", output)
 
     [<Fact>]
-    let ``render ExplicitLayoutRecord with documentation`` () =
-        let decl = ExplicitLayoutRecord("drm_mode_create_dumb", [
-            { Name = "height"; Type = Named "uint32"; OffsetBytes = 0 }
-            { Name = "width"; Type = Named "uint32"; OffsetBytes = 4 }
-        ], 32, Some "Create a dumb buffer")
+    let ``render SubModule of literal offsets aligns literals with the descriptor`` () =
+        let decl = SubModule("drm_mode_create_dumb", [
+            LiteralBinding("Size", "32")
+            LiteralBinding("heightOffset", "0")
+            ValueBinding("Descriptor", Named "StructDescriptor", RecordBlock [ "Name", Literal "\"drm_mode_create_dumb\"" ]) ])
         let output = CodeRenderer.render (Module("Test", "test", [decl]))
-        Assert.Contains("/// Create a dumb buffer", output)
-        Assert.Contains("type drm_mode_create_dumb", output)
+        Assert.Contains("module drm_mode_create_dumb =\n        [<Literal>]\n        let Size = 32\n", output)
+        Assert.Contains("        let heightOffset = 0\n", output)
+        Assert.Contains("        let Descriptor : StructDescriptor =", output)
 
 // =========================================================================
 // FidelityCodeGenerator Tests (ABI-critical dispatch)
@@ -127,41 +131,43 @@ module ExplicitLayoutRendering =
 module GeneratorDispatch =
 
     [<Fact>]
-    let ``generate produces ExplicitLayoutRecord for ABI-critical struct`` () =
+    let ``generate produces a measured layout module for a struct the pilot measured`` () =
         let decls = [
             CppParser.Declaration.Struct (mkStruct "Point" [mkField "x" "int"; mkField "y" "int"] None)
         ]
         let layouts = Map.ofList [("Point", mkLayout "Point" 64 32 [0; 32])]
         let output = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 layouts
-        Assert.Contains("[<StructLayout(LayoutKind.Explicit", output)
-        Assert.Contains("[<FieldOffset(0)>]", output)
-        Assert.Contains("[<FieldOffset(4)>]", output)
+        Assert.Contains("layout measured (clang record layout dump)", output)
+        Assert.Contains("module Point =", output)
+        Assert.Contains("let xOffset = 0", output)
+        Assert.Contains("let yOffset = 4", output)
+        Assert.Contains("offset measured; repr declared: int under LP64", output)
+        Assert.DoesNotContain("type Point", output)
 
     [<Fact>]
-    let ``generate produces plain RecordType for non-ABI-critical struct`` () =
+    let ``generate produces a declared layout module for an unmeasured struct`` () =
         let decls = [
             CppParser.Declaration.Struct (mkStruct "Point" [mkField "x" "int"; mkField "y" "int"] None)
         ]
         let output = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
-        Assert.DoesNotContain("StructLayout", output)
-        Assert.DoesNotContain("FieldOffset", output)
-        Assert.Contains("type Point", output)
+        Assert.Contains("layout declared (natural alignment under LP64", output)
+        Assert.Contains("let Size = 8", output)
+        Assert.Contains("let Alignment = 4", output)
+        Assert.Contains("let yOffset = 4", output)
+        Assert.DoesNotContain("type Point", output)
 
     [<Fact>]
-    let ``generate handles mixed ABI-critical and normal structs`` () =
+    let ``generate names the stratum per struct when measured and unmeasured mix`` () =
         let decls = [
             CppParser.Declaration.Struct (mkStruct "AbiStruct" [mkField "a" "uint32_t"] None)
             CppParser.Declaration.Struct (mkStruct "NormalStruct" [mkField "b" "int"] None)
         ]
         let layouts = Map.ofList [("AbiStruct", mkLayout "AbiStruct" 32 32 [0])]
         let output = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 layouts
-        // ABI-critical struct gets explicit layout
-        Assert.Contains("[<StructLayout(LayoutKind.Explicit", output)
-        // Normal struct does not
-        Assert.Contains("type NormalStruct", output)
-        // Count occurrences: exactly one StructLayout attribute
-        let structLayoutCount = output.Split("[<StructLayout").Length - 1
-        Assert.Equal(1, structLayoutCount)
+        Assert.Contains("module AbiStruct =", output)
+        Assert.Contains("module NormalStruct =", output)
+        Assert.Equal(1, output.Split("layout measured").Length - 1)
+        Assert.Equal(1, output.Split("layout declared").Length - 1)
 
 // =========================================================================
 // PilotSerializer Tests ([options] section)
@@ -248,34 +254,39 @@ directory = "./out"
 
 module DescriptorGen =
 
-    [<Fact>]
-    let ``mapToNTUKindString maps int32 correctly`` () =
-        Assert.Equal("NTUKind.NTUint32", DescriptorGenerator.mapToNTUKindString "int32")
+    let private repr family bits : TypeMapper.AbiRepr =
+        { Family = family; Bits = bits; Stratum = TypeMapper.Declared; CType = "t" }
 
     [<Fact>]
-    let ``mapToNTUKindString maps uint64 correctly`` () =
-        Assert.Equal("NTUKind.NTUuint64", DescriptorGenerator.mapToNTUKindString "uint64")
+    let ``reprSource maps signed 32 to Repr.I32`` () =
+        Assert.Equal("Repr.I32", DescriptorGenerator.reprSource (repr TypeMapper.Signed 32))
 
     [<Fact>]
-    let ``mapToNTUKindString maps nativeint to int64`` () =
-        Assert.Equal("NTUKind.NTUint64", DescriptorGenerator.mapToNTUKindString "nativeint")
+    let ``reprSource maps unsigned 64 to Repr.U64`` () =
+        Assert.Equal("Repr.U64", DescriptorGenerator.reprSource (repr TypeMapper.Unsigned 64))
+
+    [<Fact>]
+    let ``reprSource maps a pointer to Repr.Pointer`` () =
+        Assert.Equal("Repr.Pointer", DescriptorGenerator.reprSource (repr TypeMapper.Pointer 64))
 
     [<Fact>]
     let ``generate produces valid BAREWire StructDescriptor source`` () =
-        let s = mkStruct "Point" [mkField "x" "int"; mkField "y" "int"] None
-        let layout = mkLayout "Point" 64 32 [0; 32]
-        let output = DescriptorGenerator.generate [(s, layout)] "Fidelity.Test.Descriptors" Map.empty Types.LP64 Set.empty
-        Assert.Contains("module Fidelity.Test.Descriptors", output)
+        let decls = [ CppParser.Declaration.Struct (mkStruct "Point" [mkField "x" "int"; mkField "y" "int"] None) ]
+        let layouts = Map.ofList [("Point", mkLayout "Point" 64 32 [0; 32])]
+        let output = FidelityCodeGenerator.generate decls "Fidelity.Test.Types" "test" Types.LP64 layouts
+        Assert.Contains("module Fidelity.Test.Types", output)
         Assert.Contains("open BAREWire.Hardware", output)
-        Assert.Contains("let Point : StructDescriptor", output)
+        Assert.Contains("let Descriptor : StructDescriptor", output)
         Assert.Contains("Name = \"Point\"", output)
+        Assert.Contains("Size = 8", output)
+        Assert.Contains("Alignment = 4", output)
 
     [<Fact>]
-    let ``generate includes correct field offsets and types`` () =
-        let s = mkStruct "Pair" [mkField "a" "uint32_t"; mkField "b" "uint64_t"] None
-        let layout = mkLayout "Pair" 128 64 [0; 32]
-        let output = DescriptorGenerator.generate [(s, layout)] "Test.Descriptors" Map.empty Types.LP64 Set.empty
+    let ``generate includes correct field offsets and representations`` () =
+        let decls = [ CppParser.Declaration.Struct (mkStruct "Pair" [mkField "a" "uint32_t"; mkField "b" "uint64_t"] None) ]
+        let layouts = Map.ofList [("Pair", mkLayout "Pair" 128 64 [0; 64])]
+        let output = FidelityCodeGenerator.generate decls "Test.Types" "test" Types.LP64 layouts
         Assert.Contains("Offset = 0", output)
-        Assert.Contains("Offset = 4", output)
-        Assert.Contains("NTUKind.NTUuint32", output)
-        Assert.Contains("NTUKind.NTUuint64", output)
+        Assert.Contains("Offset = 8", output)
+        Assert.Contains("Repr = Repr.U32", output)
+        Assert.Contains("Repr = Repr.U64", output)

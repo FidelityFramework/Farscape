@@ -28,15 +28,17 @@ module WrapperCodeGenerator =
 
     /// Compute the wrapper's F# return type from ReturnSemantic and the raw mapped return type.
     /// For OpaqueHandleReturn, resolvedHandleType carries the actual handle struct type
-    /// when the C return type maps to a known opaque handle; otherwise falls back to nativeint.
+    /// when the C return type maps to a known opaque handle; otherwise the mapped CHandle stands.
     let private wrapperReturnType (semantic: ReturnSemantic) (rawRetType: FsType) (errorHandling: ErrorHandling) (resolvedHandleType: FsType option) : FsType =
         let errorType =
             match errorHandling with
             | UseErrno _ -> Named "string"
-            | UseNullWithReason _ -> Named "nativeint"
+            | UseNullWithReason _ -> Generic("CHandle", Named "int")
             | UseReturnCode _ -> Named "string"
             | _ -> Unit
         let hasErrors = match errorHandling with NoErrors -> false | _ -> true
+        // A pointer return is option-wrapped at Layer 1; the wrapper unwraps it, so Ok carries the bare handle
+        let bareHandle = match rawRetType with Generic("option", t) -> t | t -> t
         match semantic with
         | CountOrError ->
             if hasErrors then Generic2("Result", rawRetType, errorType)
@@ -48,10 +50,10 @@ module WrapperCodeGenerator =
             if hasErrors then Generic2("Result", rawRetType, errorType)
             else Generic("Result", rawRetType)
         | AllocatedPointer ->
-            if hasErrors then Generic2("Result", Named "nativeint", errorType)
-            else Generic("Result", Named "nativeint")
+            if hasErrors then Generic2("Result", bareHandle, errorType)
+            else Generic("Result", bareHandle)
         | OpaqueHandleReturn ->
-            let handleType = resolvedHandleType |> Option.defaultValue (Named "nativeint")
+            let handleType = resolvedHandleType |> Option.defaultValue bareHandle
             if hasErrors then Generic2("Result", handleType, errorType)
             else Generic("Result", handleType)
         | EnumReturnError _ ->
@@ -80,7 +82,7 @@ module WrapperCodeGenerator =
         match errorHandling with
         | UseErrno _ -> FunctionCall("", "captureErrno", [Literal "()"])
         | UseNullWithReason reasonFn -> FunctionCall(bindingsModule, reasonFn, [Literal "()"])
-        | UseReturnCode _ -> FunctionCall("", "captureReturnCode", [TypeConversion("int32", Identifier "result")])
+        | UseReturnCode _ -> FunctionCall("", "captureReturnCode", [TypeConversion("int", Identifier "result")])
         | _ -> fallback
 
     /// Generate wrapper body for CountOrError pattern (e.g., read, write).
@@ -197,7 +199,7 @@ module WrapperCodeGenerator =
         let rawCall = buildRawCall bindingsModule funcName paramNames
         let successLit = enumSuccessLiteral successIntValue cReturnType
         let captureName = captureEnumErrorName enumType
-        let errorExpr = FunctionCall("", captureName, [TypeConversion("int32", Identifier "err")])
+        let errorExpr = FunctionCall("", captureName, [TypeConversion("int", Identifier "err")])
         LetIn("result", rawCall,
             MatchExpr(Identifier "result", [
                 (successLit, ResultOk (Literal "()"))
@@ -270,7 +272,7 @@ module WrapperCodeGenerator =
         (func: CppParser.FunctionDecl)
         : FsDecl list =
 
-        let mapType = FidelityCodeGenerator.mapCTypeToFidelityType typedefMap model opaqueHandles Set.empty
+        let mapType = FidelityCodeGenerator.mapCTypeToFidelityType typedefMap model opaqueHandles Map.empty
         let pattern = WrapperPatternAnalyzer.analyze func typedefMap
 
         // Collect proven-nonnull parameter indices (same logic as FidelityCodeGenerator)
@@ -432,7 +434,7 @@ module WrapperCodeGenerator =
                     FunctionCall("", "describe", [Identifier "code"])
                 let captureErrorDecl =
                     LetBinding(captureName,
-                        [ { Name = "code"; Type = Named "int32" } ],
+                        [ { Name = "code"; Type = Named "int" } ],
                         Named "string", captureErrorBody, [])
                 [ openErrorModule; openErrorSub; BlankLine
                   XmlDoc $"Capture {enumType} error as human-readable description string from header comments."
@@ -444,7 +446,7 @@ module WrapperCodeGenerator =
                     FunctionCall("", "describe", [Identifier "code"])
                 let captureErrorDecl =
                     LetBinding(captureReturnCodeName,
-                        [ { Name = "code"; Type = Named "int32" } ],
+                        [ { Name = "code"; Type = Named "int" } ],
                         Named "string", captureErrorBody, [])
                 [ openErrorModule; openErrorSub; BlankLine
                   XmlDoc $"Capture {libPrefix} return code as human-readable error string."

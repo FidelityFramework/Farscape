@@ -17,6 +17,12 @@ open Types
 /// MLIR with fidelity.binding_strategy and fidelity.library_name attributes.
 /// No DllImport, no Marshal, no BCL dependencies.
 ///
+/// Widths (Dimensional_Range_Design.md, "Rulings for CS-12", the Farscape leg): a signature spells
+/// only `int`, `uint`, `float`, `bool`, `unit`, `CHandle<'T>` and `FnPtr<'F>`; the width of every
+/// parameter and return is the ABI representation carried by the `Expr<FunctionDescriptor>`
+/// quotation emitted beside each extern (platform-bindings.md, Layer 2), and a C struct is a
+/// layout module plus a BAREWire `StructDescriptor` (docs/14 §2), never a record.
+///
 /// Architecture:
 ///   Catamorphism (DeclarationAlgebra) → FsDecl list → CodeRenderer.render
 ///   Active patterns for type classification and macro filtering.
@@ -100,49 +106,170 @@ module FidelityCodeGenerator =
               BlankLine ])
 
     // =========================================================================
-    // Fidelity-Specific Type Mapping (active patterns, zero Regex)
+    // C type resolution: one resolution, two projections (Clef spelling, ABI representation)
     // =========================================================================
 
-    /// Map pointer/value type info to FsType using active pattern decomposition.
-    let mapTypeInfo (baseTypeFn: string -> FsType) = function
-        | CharPointer -> Generic("nativeptr", Named "byte")
-        | VoidPointer -> Named "nativeint"
-        | TypedPointer _ -> Named "nativeint"
-        | ValueType baseType -> baseTypeFn baseType
+    /// A C type as the generator resolved it, once, for both the Clef signature and the descriptor.
+    type ResolvedCType =
+        /// A scalar with a representation in TypeMapper's one-kind table.
+        | Scalar of TypeMapper.AbiRepr
+        /// A data pointer: `CHandle<pointee>` in Clef, a Pointer at the ABI.
+        | DataPointer of pointee: FsType
+        /// A function pointer: `FnPtr<signature>` in Clef, a Pointer at the ABI.
+        | FunctionPointer of parameters: FsType list * ret: FsType
+        /// An opaque handle typedef, spelled by its own name, a Pointer at the ABI.
+        | OpaqueHandle of string
+        /// A C enum, spelled by its name; an integer of its underlying representation at the ABI.
+        | CEnum of name: string * TypeMapper.AbiRepr
+        /// A named type the generator cannot represent (a struct by value, a union): no ABI claim.
+        | Unresolved of string
 
-    /// Map a C type string to an FsType suitable for Fidelity native compilation.
-    /// Uses ParsedCType active pattern (XParsec-backed) instead of Regex/string munging.
-    /// PlatformABI determines concrete widths for C int/long (resolved at generation time).
-    /// Used by both FidelityCodeGenerator (Layer 1) and WrapperCodeGenerator (Layer 2).
-    let mapCTypeToFidelityType (typedefMap: Map<string, string>) (model: PlatformABI) (opaqueHandles: Set<string>) (delegateNames: Set<string>) (cType: string) : FsType =
-        // Opaque handle types preserve their wrapper struct name
-        if opaqueHandles.Contains(cType) then Named cType
-        // Delegate types (callback function pointers) → nativeint at ABI level.
-        // CCS doesn't have CLR delegates; these are raw function pointers.
-        // Type safety is provided by Layer 2 callback builders using FnPtr.fromSymbol.
-        elif delegateNames.Contains(cType) then Named "nativeint"
-        // Function pointer types: "void (*)(void)" or "void (**)(void)"; always nativeint
-        elif cType.Contains("(*)") || cType.Contains("(**)") then Named "nativeint"
+    /// The return and parameter type strings of a C function-pointer type "R (*)(A, B)".
+    let private splitFunctionPointer (cType: string) : (string * string list) option =
+        match cType.IndexOf("(*)") with
+        | -1 -> None
+        | i ->
+            let ret = cType.Substring(0, i).Trim()
+            let rest = cType.Substring(i + 3).Trim()
+            if rest.StartsWith("(") && rest.EndsWith(")") then
+                let inner = rest.Substring(1, rest.Length - 2)
+                // Split at depth zero: a parameter may itself be a function pointer
+                let parts, last, _ =
+                    inner
+                    |> Seq.fold (fun (parts, current: string, depth) c ->
+                        match c with
+                        | '(' -> parts, current + string c, depth + 1
+                        | ')' -> parts, current + string c, depth - 1
+                        | ',' when depth = 0 -> parts @ [current.Trim()], "", depth
+                        | _ -> parts, current + string c, depth) ([], "", 0)
+                let all = parts @ [last.Trim()] |> List.filter (fun p -> p <> "" && p <> "void")
+                Some (ret, all)
+            else None
+
+    /// The ABI representation of an enum: its underlying type when clang reports one (declared),
+    /// else the profile's int, unsigned unless an enumerator is negative (inferred: C leaves the
+    /// choice to the implementation).
+    let private enumRepr (model: PlatformABI) (e: CppParser.EnumDecl) : TypeMapper.AbiRepr =
+        match e.UnderlyingType |> Option.bind (TypeMapper.tryScalar model) with
+        | Some r -> { r with CType = $"enum {e.Name} : {r.CType}" }
+        | None ->
+            let negative = e.Values |> List.exists (fun v -> v.Value < 0L)
+            { Family = (if negative then TypeMapper.Signed else TypeMapper.Unsigned)
+              Bits = TypeMapper.intWidth model
+              Stratum = TypeMapper.Inferred
+              CType = $"enum {e.Name} without a declared underlying type" }
+
+    /// Resolve a C type string once. Opaque handles keep their names; delegates and function
+    /// pointers become FnPtr signatures (pointer parameters nullable, ffi-boundary.md §1); data
+    /// pointers become CHandle of their pointee; scalars come from the one-kind table, through the
+    /// typedef map when the spelling is not in it; enums carry their underlying representation.
+    let rec resolveCType
+        (typedefMap: Map<string, string>) (model: PlatformABI)
+        (opaqueHandles: Set<string>) (delegates: Map<string, CppParser.DelegateDecl>)
+        (enums: Map<string, CppParser.EnumDecl>)
+        (cType: string) : ResolvedCType =
+        let recur = resolveCType typedefMap model opaqueHandles delegates enums
+        let cleaned = TypeMapper.cleanTypeName cType
+        let nullableClef (resolved: ResolvedCType) =
+            match resolved with
+            | DataPointer _ -> Generic("option", clefTypeOf resolved)
+            | _ -> clefTypeOf resolved
+        let functionPointer (ret: string) (parameters: string list) =
+            FunctionPointer (parameters |> List.map (recur >> nullableClef), clefTypeOf (recur ret))
+        // A pointer's pointee: a scalar's spelling, a named type, or what a typedef stands for
+        let pointee (baseType: string) : FsType =
+            match TypeMapper.tryScalar model baseType with
+            | Some r -> Named (TypeMapper.clefSpelling r.Family)
+            | None ->
+                let name = TypeMapper.cleanTypeName baseType
+                match Map.tryFind name typedefMap with
+                | Some underlying when TypeMapper.cleanTypeName underlying <> name
+                                       && not (opaqueHandles.Contains name) && not (enums.ContainsKey name) ->
+                    match recur underlying with
+                    | Scalar r -> Named (TypeMapper.clefSpelling r.Family)
+                    | DataPointer _ | FunctionPointer _ as resolved -> clefTypeOf resolved
+                    | _ -> Named name
+                | _ -> Named name
+        let scalarOrNamed (baseType: string) : ResolvedCType =
+            match TypeMapper.tryScalar model baseType with
+            | Some r -> Scalar r
+            | None ->
+                let name = TypeMapper.cleanTypeName baseType
+                match Map.tryFind name enums with
+                | Some e -> CEnum (name, enumRepr model e)
+                | None ->
+                    match Map.tryFind name typedefMap with
+                    | Some underlying when TypeMapper.cleanTypeName underlying <> name ->
+                        match recur underlying with
+                        | Unresolved _ -> Unresolved name
+                        | CEnum (_, r) -> CEnum (name, r)
+                        | resolved -> resolved
+                    | _ -> Unresolved name
+        if opaqueHandles.Contains cType || opaqueHandles.Contains cleaned then OpaqueHandle cleaned
         else
+        match Map.tryFind cleaned delegates with
+        | Some d -> functionPointer d.ReturnType (d.Parameters |> List.map snd)
+        | None ->
+        match splitFunctionPointer cType with
+        | Some (ret, parameters) -> functionPointer ret parameters
+        | None when cType.Contains("(**)") -> DataPointer (Generic("CHandle", Named "unit"))
+        | None ->
         match cType with
-        | ParsedCType info ->
-            info |> mapTypeInfo (fun baseType ->
-                // Check type dictionary FIRST — preserves platform-abstract types
-                // e.g. size_t → unativeint directly, skipping typedef chain size_t → unsigned long → unativeint
-                let direct = TypeMapper.getFSharpType model baseType
-                if direct <> baseType then
-                    Named direct
-                else
-                    // Unknown type: try typedef resolution
-                    let resolved = resolveType typedefMap baseType
-                    if resolved.Contains("(*)") then Named "nativeint"
-                    else
-                    match resolved with
-                    | ParsedCType resolvedInfo ->
-                        resolvedInfo |> mapTypeInfo (fun resolvedBase ->
-                            Named (TypeMapper.getFSharpType model resolvedBase))
-                    | _ -> Named (TypeMapper.getFSharpType model resolved))
-        | _ -> Named (TypeMapper.getFSharpType model cType)
+        | ParsedCType info when info.PointerDepth > 0 ->
+            let inner = pointee info.BaseType
+            DataPointer (List.fold (fun t _ -> Generic("CHandle", t)) inner [ 2 .. info.PointerDepth ])
+        | ParsedCType info -> scalarOrNamed info.BaseType
+        | _ when cType.Contains("*") -> DataPointer (Named "unit")
+        | _ -> scalarOrNamed cleaned
+
+    /// The Clef spelling of a resolved C type: the one kind per family, never a width.
+    and clefTypeOf (resolved: ResolvedCType) : FsType =
+        match resolved with
+        | Scalar r -> Named (TypeMapper.clefSpelling r.Family)
+        | DataPointer pointee -> Generic("CHandle", pointee)
+        | FunctionPointer (parameters, ret) -> Generic("FnPtr", FunctionType(parameters, ret))
+        | OpaqueHandle name | CEnum (name, _) | Unresolved name -> Named name
+
+    /// The ABI representation of a resolved C type, when the generator can claim one.
+    let abiReprOf (model: PlatformABI) (cType: string) (resolved: ResolvedCType) : TypeMapper.AbiRepr option =
+        match resolved with
+        | Scalar r -> Some r
+        | CEnum (_, r) -> Some r
+        | DataPointer _ | FunctionPointer _ | OpaqueHandle _ -> Some (TypeMapper.pointerRepr model cType)
+        | Unresolved _ -> None
+
+    /// Map a C type string to its Clef spelling.
+    /// Used by FidelityCodeGenerator (Layer 1) and WrapperCodeGenerator (Layer 2).
+    let mapCTypeToFidelityType (typedefMap: Map<string, string>) (model: PlatformABI) (opaqueHandles: Set<string>) (delegates: Map<string, CppParser.DelegateDecl>) (cType: string) : FsType =
+        resolveCType typedefMap model opaqueHandles delegates Map.empty cType |> clefTypeOf
+
+    // =========================================================================
+    // Generation Context (pre-computed from full declaration list)
+    // =========================================================================
+
+    /// Pre-computed resolution context built once from the full declaration list.
+    /// Passed to generateModule so each sub-file gets correct type resolution
+    /// even when it only contains a subset of declarations.
+    type GenerationContext = {
+        TypedefMap: Map<string, string>
+        OpaqueHandles: Set<string>
+        /// Delegate types (callback function pointers) by name: FnPtr of their signature in Clef.
+        Delegates: Map<string, CppParser.DelegateDecl>
+        /// Named enums: an integer of the enum's underlying representation at the ABI.
+        Enums: Map<string, CppParser.EnumDecl>
+        /// Defined structs by name: a nested struct field's extent comes from its own layout.
+        Structs: Map<string, CppParser.StructDecl>
+        DataModel: PlatformABI
+        StructLayouts: Map<string, CppParser.StructLayoutInfo>
+        /// Nonnull annotations from pilot TOML (None = all pointers nullable by default)
+        NonnullAnnotations: NonnullAnnotations option
+        /// C++ class lookup map for sret return type analysis (empty for C-only libraries)
+        KnownClasses: Map<string, CppParser.ClassDecl>
+    }
+
+    /// Resolve a C type under the context.
+    let private resolveIn (ctx: GenerationContext) (cType: string) : ResolvedCType =
+        resolveCType ctx.TypedefMap ctx.DataModel ctx.OpaqueHandles ctx.Delegates ctx.Enums cType
 
     // =========================================================================
     // Declaration Generation Helpers (produce FsDecl, not strings)
@@ -167,17 +294,57 @@ module FidelityCodeGenerator =
     let wrapOption (ty: FsType) : FsType = Generic("option", ty)
 
     /// Check if a C type string represents a data pointer (not a function pointer).
-    /// Function pointers contain "(*)" and are excluded — they map to nativeint
+    /// Function pointers contain "(*)" and are excluded — they map to FnPtr<'F>
     /// and have different nullability semantics (use Option<FnPtr<'F>> instead).
     let isCDataPointer (cType: string) : bool =
         cType.Contains("*") && not (cType.Contains("(*)") || cType.Contains("(**)"))
 
-    /// Generate FsDecl list for a single function binding.
+    let private quoteString (s: string) =
+        "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+
+    /// The `TypeRef` source and the provenance note of one parameter or return.
+    let private abiClaim (ctx: GenerationContext) (cType: string) : string * string =
+        let resolved = resolveIn ctx cType
+        match abiReprOf ctx.DataModel cType resolved with
+        | Some r -> DescriptorGenerator.typeRefSource r, DescriptorGenerator.widthProvenance ctx.DataModel r
+        | None ->
+            let name = match resolved with Unresolved n -> n | _ -> cType
+            $"Named {quoteString name}", $"width unknown: no representation for {name}"
+
+    /// The Layer 2 `Expr<FunctionDescriptor>` quotation beside an extern (platform-bindings.md,
+    /// "Binding Libraries"): the C name, each parameter's and the return's ABI representation
+    /// (family and bits under the profile) and passing, the calling convention, and ownership.
+    /// Each width fact carries its stratum as a trailing comment; the spec's record has no
+    /// provenance field.
+    let private generateDescriptorDecls (ctx: GenerationContext) (func: CppParser.FunctionDecl) : FsDecl list =
+        let parameterInfos =
+            func.Parameters
+            |> List.map (fun (name, cType) ->
+                let typeRef, provenance = abiClaim ctx cType
+                let clefName = (cleanParamName name).Replace("``", "")
+                Commented(
+                    RecordConstruction [
+                        "Name", Literal (quoteString clefName)
+                        "Type", Literal typeRef
+                        "PassBy", Identifier "Value" ],
+                    provenance))
+        let returnRef, returnProvenance = abiClaim ctx func.ReturnType
+        [ XmlDoc $"ABI descriptor of `{func.Name}` (Layer 2): each parameter's and the return's representation under {ctx.DataModel}, every width naming its stratum. The header declares no ownership; Borrowed is the inferred default until a pilot declaration says otherwise."
+          ValueBinding($"{func.Name}Descriptor", Generic("Expr", Named "FunctionDescriptor"),
+              Quoted(RecordBlock [
+                  "CName", Literal (quoteString func.Name)
+                  "Parameters", ArrayBlock parameterInfos
+                  "ReturnType", Commented(Literal returnRef, returnProvenance)
+                  "CallingConvention", Identifier "CDecl"
+                  "OwnershipTransfer", Identifier "Borrowed" ])) ]
+
+    /// Generate FsDecl list for a single function binding, followed by its descriptor.
     /// Pointer parameters are nullable (Option<>) by default unless proven non-null via:
     /// 1. Clang NonNullAttr — parameter indices explicitly marked non-null
     /// 2. Pilot TOML [annotations.nonnull] — developer-asserted non-null
-    let private generateFunctionDecls (typedefMap: Map<string, string>) (model: PlatformABI) (opaqueHandles: Set<string>) (libraryName: string) (nonnullAnnotations: NonnullAnnotations option) (func: CppParser.FunctionDecl) : FsDecl list =
-        let mapType = mapCTypeToFidelityType typedefMap model opaqueHandles Set.empty
+    let private generateFunctionDecls (ctx: GenerationContext) (libraryName: string) (func: CppParser.FunctionDecl) : FsDecl list =
+        let mapType = resolveIn ctx >> clefTypeOf
+        let nonnullAnnotations = ctx.NonnullAnnotations
 
         // Collect proven-nonnull parameter indices from clang attributes
         let clangNonnull =
@@ -219,7 +386,8 @@ module FidelityCodeGenerator =
         [
             LetBinding(func.Name, parameters, finalReturnType, NativeZeroed,
                       [$"FidelityExtern(\"{libraryName}\", \"{func.Name}\")"])
-        ]
+        ] @
+        generateDescriptorDecls ctx func
 
     /// Generate FsDecl list for an enum type.
     /// Automatically detects bitmask (flags) enums via value pattern analysis.
@@ -228,25 +396,20 @@ module FidelityCodeGenerator =
         let isFlags = ActivePatterns.isBitmaskEnum values
         [ EnumType(e.Name, values, e.Documentation, isFlags) ]
 
-    /// Generate FsDecl list for a struct type (as F# record).
-    let private generateStructDecl (typedefMap: Map<string, string>) (model: PlatformABI) (opaqueHandles: Set<string>) (delegateNames: Set<string>) (s: CppParser.StructDecl) : FsDecl list =
-        let mapType = mapCTypeToFidelityType typedefMap model opaqueHandles delegateNames
-        let fields = s.Fields |> List.map (fun f -> (f.Name, mapType f.Type))
-        [ RecordType(s.Name, fields, s.Documentation, []) ]
-
-    /// Generate FsDecl list for an ABI-critical struct with explicit layout.
-    /// Uses StructLayoutInfo (from clang -fdump-record-layouts-simple) for byte offsets.
-    let private generateExplicitStructDecl
-        (typedefMap: Map<string, string>) (model: PlatformABI) (opaqueHandles: Set<string>) (delegateNames: Set<string>)
-        (layoutInfo: CppParser.StructLayoutInfo) (s: CppParser.StructDecl) : FsDecl list =
-        let mapType = mapCTypeToFidelityType typedefMap model opaqueHandles delegateNames
-        let fields =
-            List.zip s.Fields layoutInfo.FieldOffsetsBits
-            |> List.map (fun (f, offsetBits) ->
-                { CodeAST.ExplicitField.Name = f.Name
-                  Type = mapType f.Type
-                  OffsetBytes = offsetBits / 8 })
-        [ ExplicitLayoutRecord(s.Name, fields, layoutInfo.SizeBits / 8, s.Documentation) ]
+    /// Generate FsDecl list for a C struct: a layout module of literal offsets plus its
+    /// BAREWire StructDescriptor (docs/14 §2), measured when the pilot measured it.
+    let private generateStructDecl (ctx: GenerationContext) (s: CppParser.StructDecl) : FsDecl list =
+        let shape (cType: string) : DescriptorGenerator.FieldShape =
+            match resolveIn ctx cType with
+            | Unresolved name when ctx.Structs.ContainsKey name -> DescriptorGenerator.StructField name
+            | Unresolved name -> DescriptorGenerator.UnknownField name
+            | resolved ->
+                match abiReprOf ctx.DataModel cType resolved with
+                | Some r -> DescriptorGenerator.ScalarField r
+                | None -> DescriptorGenerator.UnknownField cType
+        DescriptorGenerator.structDecls
+            { Structs = ctx.Structs; Layouts = ctx.StructLayouts; Model = ctx.DataModel; Shape = shape }
+            s
 
     /// Generate FsDecl list for a macro constant (numeric values only).
     /// Uses CompilerBuiltin/InternalMacro/UserMacro active patterns for classification
@@ -531,18 +694,13 @@ module FidelityCodeGenerator =
     /// This is the SINGLE traversal of declarations for code generation.
     /// All context (typedef map, ABI model, opaque handles, struct layouts, C++ class map) is captured in the closure.
     let private generationAlgebra
-        (typedefMap: Map<string, string>) (model: PlatformABI)
-        (opaqueHandles: Set<string>) (delegateNames: Set<string>) (structLayouts: Map<string, CppParser.StructLayoutInfo>)
-        (libraryName: string) (knownClasses: Map<string, CppParser.ClassDecl>)
+        (ctx: GenerationContext) (libraryName: string)
         : DeclarationAlgebra.DeclarationAlgebra<DeclGroup> = {
         OnEnum = fun e -> if e.Name <> "" then GEnum (generateEnumDecl e) else GNone
         OnStruct = fun s ->
             if s.Name = "" then GNone
-            elif s.Fields.IsEmpty then GNone  // Fieldless structs are opaque — no record type (empty records are invalid syntax)
-            else
-                match Map.tryFind s.Name structLayouts with
-                | Some layout -> GStruct (generateExplicitStructDecl typedefMap model opaqueHandles delegateNames layout s)
-                | None -> GStruct (generateStructDecl typedefMap model opaqueHandles delegateNames s)
+            elif s.Fields.IsEmpty then GNone  // Fieldless structs are opaque — no layout (nothing to lay out)
+            else GStruct (generateStructDecl ctx s)
         OnFunction = fun f ->
             // Skip functions marked with __attribute__((deprecated))
             let isDeprecated = f.Attributes |> List.exists (fun a -> a.Kind = "DeprecatedAttr")
@@ -557,37 +715,16 @@ module FidelityCodeGenerator =
             else
                 match CppClassAnalysis.classifyClass c with
                 | CppClassAnalysis.PimplClass(_, size) ->
-                    GCppClassBindings (generatePimplBindings libraryName knownClasses c size)
+                    GCppClassBindings (generatePimplBindings libraryName ctx.KnownClasses c size)
                 | CppClassAnalysis.PODClass size ->
                     GCppClassBindings (generatePodBindings c size)
                 | CppClassAnalysis.ValueClass(size, rc) ->
-                    GCppClassBindings (generateValueClassBindings libraryName knownClasses c size rc)
+                    GCppClassBindings (generateValueClassBindings libraryName ctx.KnownClasses c size rc)
                 | CppClassAnalysis.InterfaceClass ->
                     GNone  // Abstract classes cannot be bound directly
                 | CppClassAnalysis.OpaqueClass ->
                     GNone  // No visible structure; requires developer intervention
-        OnDelegate = fun _ -> GNone // Delegates are CLR constructs; callback fields use nativeint at ABI level
-    }
-
-    // =========================================================================
-    // Generation Context (pre-computed from full declaration list)
-    // =========================================================================
-
-    /// Pre-computed resolution context built once from the full declaration list.
-    /// Passed to generateModule so each sub-file gets correct type resolution
-    /// even when it only contains a subset of declarations.
-    type GenerationContext = {
-        TypedefMap: Map<string, string>
-        OpaqueHandles: Set<string>
-        /// Names of delegate types (callback function pointers) — mapped to nativeint in struct fields.
-        /// CCS doesn't support CLR delegates; these are raw function pointers at the ABI level.
-        DelegateNames: Set<string>
-        DataModel: PlatformABI
-        StructLayouts: Map<string, CppParser.StructLayoutInfo>
-        /// Nonnull annotations from pilot TOML (None = all pointers nullable by default)
-        NonnullAnnotations: NonnullAnnotations option
-        /// C++ class lookup map for sret return type analysis (empty for C-only libraries)
-        KnownClasses: Map<string, CppParser.ClassDecl>
+        OnDelegate = fun _ -> GNone // A delegate is spelled FnPtr<'F> where it is used; no type of its own
     }
 
     /// Build a GenerationContext from the full, unfiltered declaration list.
@@ -596,14 +733,26 @@ module FidelityCodeGenerator =
         (model: PlatformABI)
         (structLayouts: Map<string, CppParser.StructLayoutInfo>)
         : GenerationContext =
-        let delegateNames =
+        let delegates =
             declarations |> List.choose (function
-                | CppParser.Declaration.Delegate d -> Some d.Name
+                | CppParser.Declaration.Delegate d -> Some (d.Name, d)
                 | _ -> None)
-            |> Set.ofList
+            |> Map.ofList
+        let enums =
+            declarations |> List.choose (function
+                | CppParser.Declaration.Enum e when e.Name <> "" -> Some (e.Name, e)
+                | _ -> None)
+            |> Map.ofList
+        let structs =
+            declarations |> List.choose (function
+                | CppParser.Declaration.Struct s when s.Name <> "" -> Some (s.Name, s)
+                | _ -> None)
+            |> Map.ofList
         { TypedefMap = buildTypedefMap declarations
           OpaqueHandles = detectOpaqueHandles declarations
-          DelegateNames = delegateNames
+          Delegates = delegates
+          Enums = enums
+          Structs = structs
           DataModel = model
           StructLayouts = structLayouts
           NonnullAnnotations = None
@@ -612,7 +761,8 @@ module FidelityCodeGenerator =
     /// Generate a Clef module with explicit control over what gets emitted.
     /// Uses the full GenerationContext for type resolution, but only declares
     /// the opaque handles in handlesToDeclare and the declarations passed in.
-    /// openModules are emitted as `open` directives after the module header.
+    /// openModules are emitted as `open` directives after the module header; the
+    /// BAREWire vocabularies are opened when a struct descriptor or a function descriptor is emitted.
     let generateModule
         (ctx: GenerationContext)
         (handlesToDeclare: Set<string>)
@@ -626,9 +776,7 @@ module FidelityCodeGenerator =
         let opaqueHandleDecls = generateOpaqueHandleDecls handlesToDeclare
 
         let groups =
-            DeclarationAlgebra.cataDeclarations
-                (generationAlgebra ctx.TypedefMap ctx.DataModel ctx.OpaqueHandles ctx.DelegateNames ctx.StructLayouts libraryName ctx.KnownClasses)
-                declarations
+            DeclarationAlgebra.cataDeclarations (generationAlgebra ctx libraryName) declarations
 
         let enums = groups |> List.collect (function GEnum d -> d | _ -> [])
         let structs = groups |> List.collect (function GStruct d -> d | _ -> [])
@@ -636,7 +784,7 @@ module FidelityCodeGenerator =
             groups
             |> List.choose (function GFunc f -> Some f | _ -> None)
             |> List.distinctBy (fun f -> f.Name)
-            |> List.collect (generateFunctionDecls ctx.TypedefMap ctx.DataModel ctx.OpaqueHandles libraryName ctx.NonnullAnnotations)
+            |> List.collect (generateFunctionDecls ctx libraryName)
         let macros = groups |> List.collect (function GMacro d -> d | _ -> [])
         let cppClasses = groups |> List.collect (function GCppClassBindings d -> d | _ -> [])
 
@@ -648,7 +796,13 @@ module FidelityCodeGenerator =
             if cppClasses.IsEmpty then []
             else Comment "// C++ class bindings" :: BlankLine :: cppClasses
 
-        let openDecls = openModules |> List.map OpenModule
+        let vocabularyOpens =
+            [ if not structs.IsEmpty then "BAREWire.Hardware"
+              if not functions.IsEmpty then "BAREWire.Descriptors" ]
+        let openDecls =
+            match (openModules @ vocabularyOpens) |> List.distinct with
+            | [] -> []
+            | opens -> (opens |> List.map OpenModule) @ [BlankLine]
         let allDecls = openDecls @ opaqueHandleDecls @ enums @ structs @ functions @ macroSection @ cppSection
         let moduleDecl = Module(namespace', comment, allDecls)
 
@@ -660,8 +814,8 @@ module FidelityCodeGenerator =
 
     /// Generate a complete Fidelity binding source file from parsed declarations.
     /// Architecture: Pre-passes build context → Algebra captures context in closure → Catamorphism → FsDecl tree → Render
-    /// PlatformABI determines concrete widths for C int/long in NTU output.
-    /// structLayouts: pre-computed layout data for ABI-critical structs (empty for normal generation).
+    /// PlatformABI fixes the ABI representation each descriptor declares; the signatures spell the one kind.
+    /// structLayouts: measured layouts for the structs the pilot measured (declared layouts otherwise).
     let generate
         (declarations: CppParser.Declaration list)
         (namespace': string)

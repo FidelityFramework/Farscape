@@ -32,33 +32,33 @@ let ``generate produces valid Fidelity binding for simple function`` () =
     Assert.Contains("NativeDefault.zeroed ()", result)
 
 [<Fact>]
-let ``generate maps char pointer params to option<nativeptr<byte>> (nullable by default)`` () =
+let ``generate maps char pointer params to option<CHandle<int>> (nullable by default)`` () =
     let decls = [
         CppParser.Declaration.Function (mkFunc "strlen" "unsigned long" [("__s", "const char *")])
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
-    Assert.Contains("(s: option<nativeptr<byte>>)", result)
+    Assert.Contains("(s: option<CHandle<int>>)", result)
 
 [<Fact>]
-let ``generate maps void pointer params to option<nativeint> (nullable by default)`` () =
+let ``generate maps void pointer params to option<CHandle<unit>> (nullable by default)`` () =
     let decls = [
         CppParser.Declaration.Function (mkFunc "memset" "void *" [("__s", "void *"); ("__c", "int"); ("__n", "size_t")])
         CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
-    Assert.Contains("(s: option<nativeint>)", result)
-    Assert.Contains(": option<nativeint> =", result)
+    Assert.Contains("(s: option<CHandle<unit>>)", result)
+    Assert.Contains(": option<CHandle<unit>> =", result)
 
 [<Fact>]
-let ``generate handles function pointer params as nativeint`` () =
+let ``generate handles function pointer params as FnPtr`` () =
     let decls = [
         CppParser.Declaration.Function (mkFunc "atexit" "int" [("__func", "void (*)(void)")])
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
-    Assert.Contains("(func: nativeint)", result)
+    Assert.Contains("(func: FnPtr<unit -> unit>)", result)
 
 [<Fact>]
-let ``generate resolves typedef to function pointer as nativeint`` () =
+let ``generate resolves typedef to function pointer as FnPtr`` () =
     let decls = [
         CppParser.Declaration.Typedef (mkTypedef "__compar_fn_t" "int (*)(const void *, const void *)")
         CppParser.Declaration.Function (mkFunc "qsort" "void" [
@@ -68,17 +68,17 @@ let ``generate resolves typedef to function pointer as nativeint`` () =
         CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
-    Assert.Contains("(compar: nativeint)", result)
+    Assert.Contains("(compar: FnPtr<option<CHandle<unit>> -> option<CHandle<unit>> -> int>)", result)
 
 [<Fact>]
-let ``generate does not map wchar_t pointer as nativeptr<byte>`` () =
+let ``generate maps wchar_t pointer as CHandle of int`` () =
     let decls = [
         CppParser.Declaration.Function (mkFunc "mbtowc" "int" [("__pwc", "wchar_t *"); ("__s", "const char *"); ("__n", "size_t")])
         CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
-    // wchar_t * should be option<nativeint>, not nativeptr<byte>
-    Assert.Contains("(pwc: option<nativeint>)", result)
+    // wchar_t is an integer at the ABI: CHandle<int>, nullable by default
+    Assert.Contains("(pwc: option<CHandle<int>>)", result)
 
 [<Fact>]
 let ``generate emits numeric macro constants`` () =
@@ -177,14 +177,18 @@ let ``enum case names starting with digit get underscore prefix`` () =
     Assert.Contains("| _270 = 3L", result)
 
 [<Fact>]
-let ``generate emits struct as record`` () =
+let ``generate emits struct as layout module plus StructDescriptor, never a record`` () =
     let decls = [
         CppParser.Declaration.Struct (mkStruct "Point" [mkField "x" "int"; mkField "y" "int"] (Some "A point"))
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
-    Assert.Contains("type Point = {", result)
-    Assert.Contains("x: int", result)
-    Assert.Contains("y: int", result)
+    Assert.DoesNotContain("type Point", result)
+    Assert.Contains("module Point =", result)
+    Assert.Contains("let Size = 8", result)
+    Assert.Contains("let xOffset = 0", result)
+    Assert.Contains("let yOffset = 4", result)
+    Assert.Contains("let Descriptor : StructDescriptor =", result)
+    Assert.Contains("layout declared", result)
 
 [<Fact>]
 let ``generate emits FidelityExtern attribute on function bindings`` () =
@@ -212,7 +216,7 @@ let ``pointer param without NonNullAttr emits as option`` () =
         CppParser.Declaration.Function (mkFunc "read" "ssize_t" [("fd", "int"); ("buf", "void *"); ("count", "size_t")])
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "libc" Types.LP64 Map.empty
-    Assert.Contains("(buf: option<nativeint>)", result)
+    Assert.Contains("(buf: option<CHandle<unit>>)", result)
 
 [<Fact>]
 let ``pointer param WITH NonNullAttr emits without Option`` () =
@@ -222,7 +226,7 @@ let ``pointer param WITH NonNullAttr emits without Option`` () =
     let decls = [ CppParser.Declaration.Function func ]
     let result = FidelityCodeGenerator.generate decls "Test" "libc" Types.LP64 Map.empty
     // param index 1 (buf) is non-null via clang attr
-    Assert.Contains("(buf: nativeint)", result)
+    Assert.Contains("(buf: CHandle<unit>)", result)
 
 [<Fact>]
 let ``mixed nullable and nonnull params in same function`` () =
@@ -232,8 +236,8 @@ let ``mixed nullable and nonnull params in same function`` () =
     let decls = [ CppParser.Declaration.Function func ]
     let result = FidelityCodeGenerator.generate decls "Test" "libc" Types.LP64 Map.empty
     // dest (idx 0) and src (idx 1) are nonnull
-    Assert.Contains("(dest: nativeint)", result)
-    Assert.Contains("(src: nativeint)", result)
+    Assert.Contains("(dest: CHandle<unit>)", result)
+    Assert.Contains("(src: CHandle<unit>)", result)
 
 [<Fact>]
 let ``pointer return type emits as option by default`` () =
@@ -241,15 +245,15 @@ let ``pointer return type emits as option by default`` () =
         CppParser.Declaration.Function (mkFunc "malloc" "void *" [("size", "size_t")])
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "libc" Types.LP64 Map.empty
-    Assert.Contains(": option<nativeint> =", result)
+    Assert.Contains(": option<CHandle<unit>> =", result)
 
 [<Fact>]
-let ``const char pointer param emits as option of nativeptr`` () =
+let ``const char pointer param emits as option of CHandle`` () =
     let decls = [
         CppParser.Declaration.Function (mkFunc "puts" "int" [("s", "const char *")])
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "libc" Types.LP64 Map.empty
-    Assert.Contains("(s: option<nativeptr<byte>>)", result)
+    Assert.Contains("(s: option<CHandle<int>>)", result)
 
 [<Fact>]
 let ``function pointer param does NOT get Option wrapping`` () =
@@ -257,8 +261,8 @@ let ``function pointer param does NOT get Option wrapping`` () =
         CppParser.Declaration.Function (mkFunc "signal" "void (*)(int)" [("sig", "int"); ("handler", "void (*)(int)")])
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "libc" Types.LP64 Map.empty
-    // function pointer → nativeint, NOT option<nativeint>
-    Assert.Contains("(handler: nativeint)", result)
+    // function pointer → FnPtr<sig>, NOT option<FnPtr<sig>>
+    Assert.Contains("(handler: FnPtr<int -> unit>)", result)
 
 [<Fact>]
 let ``TOML nonnull annotations override nullable default`` () =
@@ -268,16 +272,18 @@ let ``TOML nonnull annotations override nullable default`` () =
     let ctx : FidelityCodeGenerator.GenerationContext =
         { TypedefMap = FidelityCodeGenerator.buildTypedefMap decls
           OpaqueHandles = FidelityCodeGenerator.detectOpaqueHandles decls
-          DelegateNames = Set.empty
+          Delegates = Map.empty
+          Enums = Map.empty
+          Structs = Map.empty
           DataModel = Types.LP64
           StructLayouts = Map.empty
           NonnullAnnotations = nonnull
           KnownClasses = Map.empty }
     let result = FidelityCodeGenerator.generateModule ctx Set.empty decls "Test" "lib" "test" []
     // ctx (idx 0) is nonnull via TOML
-    Assert.Contains("(ctx: nativeint)", result)
+    Assert.Contains("(ctx: CHandle<unit>)", result)
     // buf (idx 1) is still nullable
-    Assert.Contains("(buf: option<nativeint>)", result)
+    Assert.Contains("(buf: option<CHandle<unit>>)", result)
 
 [<Fact>]
 let ``TOML nonnull_returns prevents Option on return type`` () =
@@ -287,20 +293,21 @@ let ``TOML nonnull_returns prevents Option on return type`` () =
     let ctx : FidelityCodeGenerator.GenerationContext =
         { TypedefMap = FidelityCodeGenerator.buildTypedefMap decls
           OpaqueHandles = FidelityCodeGenerator.detectOpaqueHandles decls
-          DelegateNames = Set.empty
+          Delegates = Map.empty
+          Enums = Map.empty
+          Structs = Map.empty
           DataModel = Types.LP64
           StructLayouts = Map.empty
           NonnullAnnotations = nonnull
           KnownClasses = Map.empty }
     let result = FidelityCodeGenerator.generateModule ctx Set.empty decls "Test" "lib" "test" []
     // Return is nonnull via TOML
-    Assert.Contains(": nativeint =", result)
-    Assert.DoesNotContain("option<nativeint> =", result)
+    Assert.Contains(": CHandle<unit> =", result)
+    Assert.DoesNotContain("option<CHandle<unit>> =", result)
 
-// ─── NTU Dimensional Type System (DTS) Tests ────────────────────────────
-// These tests ensure Farscape emits NTU dimensional types (int, uint) for
-// platform-width C types, NOT fixed-width types (int32, uint32).
-// The DTS defers width resolution to the platform context in the pipeline.
+// ─── One-kind signature tests (Dimensional_Range_Design.md, CS-12 rulings) ────
+// Every C integer is `int` or `uint` in the signature; the width is the ABI
+// representation the FunctionDescriptor quotation carries, never a Clef type.
 
 [<Fact>]
 let ``C int maps to NTU int (dimensional), not int32 (fixed-width)`` () =
@@ -322,12 +329,16 @@ let ``C unsigned int maps to NTU uint (dimensional), not uint32 (fixed-width)`` 
     Assert.DoesNotContain("uint32", result)
 
 [<Fact>]
-let ``C int32_t stays int32 (genuinely fixed-width)`` () =
+let ``C int32_t is int in the signature; the descriptor carries Signed 32`` () =
     let decls = [
         CppParser.Declaration.Function (mkFunc "resvg_parse" "int32_t" [("data", "const char *")])
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "resvg" Types.LP64 Map.empty
-    Assert.Contains(": int32 =", result)
+    Assert.Contains(": int =", result)
+    Assert.DoesNotContain(": int32 =", result)
+    Assert.Contains("let resvg_parseDescriptor : Expr<FunctionDescriptor> =", result)
+    Assert.Contains("ReturnType = Integer (Signed, 32) // width declared: int32_t under LP64", result)
+    Assert.Contains("{ Name = \"data\"; Type = Pointer 64; PassBy = Value } // width declared: pointer under LP64", result)
 
 [<Fact>]
 let ``C int dimensional type is consistent across all platform ABIs`` () =
@@ -341,22 +352,26 @@ let ``C int dimensional type is consistent across all platform ABIs`` () =
         Assert.DoesNotContain("int16", result)
 
 [<Fact>]
-let ``delegate-typed struct fields map to nativeint`` () =
+let ``delegate-typed struct fields are pointers in the descriptor`` () =
     let decls = [
         CppParser.Declaration.Delegate { Name = "wl_display_error_func_t"; Parameters = [("data", "void *"); ("code", "int")]; ReturnType = "void"; Documentation = None }
         CppParser.Declaration.Struct (mkStruct "wl_listener" [mkField "notify" "wl_display_error_func_t"] None)
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty
-    Assert.Contains("notify: nativeint", result)
+    Assert.Contains("let notifyOffset = 0", result)
+    Assert.Contains("Repr = Repr.Pointer", result)
     Assert.DoesNotContain("delegate of", result)
 
 [<Fact>]
-let ``struct fields with C int use NTU int`` () =
+let ``struct fields with C int are I32 at measured-or-declared offsets`` () =
     let decls = [
         CppParser.Declaration.Struct (mkStruct "Rect" [mkField "x" "int"; mkField "y" "int"; mkField "w" "int"; mkField "h" "int"] None)
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty
-    Assert.Contains("x: int", result)
+    Assert.Contains("let xOffset = 0", result)
+    Assert.Contains("let hOffset = 12", result)
+    Assert.Contains("let Size = 16", result)
+    Assert.Contains("Repr = Repr.I32", result)
     Assert.DoesNotContain("int32", result)
 
 [<Fact>]
@@ -370,8 +385,9 @@ let ``fieldless struct emits no record type (opaque, handled via typedef path)``
     // Fieldless structs should be suppressed — they are opaque types
     Assert.DoesNotContain("type wl_proxy", result)
     Assert.DoesNotContain("type wl_object", result)
-    // Structs with fields should still be emitted
-    Assert.Contains("type Point = {", result)
+    // Structs with fields are emitted as layout modules
+    Assert.DoesNotContain("module wl_proxy", result)
+    Assert.Contains("module Point =", result)
 
 // ─── C++ Class Binding Tests ────────────────────────────────────────
 

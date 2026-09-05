@@ -43,7 +43,7 @@ let ``generates describe function with integer literal patterns`` () =
     let config = makeHipConfig ()
     let output = EnumErrorModuleGenerator.generate { Name = "hipError_t"; Values = hipValues; Documentation = None; UnderlyingType = None } config "Fidelity.HIP.Errors" ["Fidelity.HIP.Types"]
     let text = output.Value
-    Assert.Contains("let describe (code: int32) : string =", text)
+    Assert.Contains("let describe (code: int) : string =", text)
     Assert.Contains("| 0L ->", text)
     Assert.Contains("\"Successful completion\"", text)
     Assert.Contains("| 1L ->", text)

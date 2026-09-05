@@ -46,38 +46,15 @@ module CallbackWrapperGenerator =
                 else "") |> String.concat ""
         "build" + pascal
 
-    /// Map a C parameter type to a Clef type for wrapper signatures.
-    /// Simplified version — pointers become nativeint, basic types map directly.
+    /// Map a C parameter type to a Clef type for wrapper signatures: the generator's one
+    /// resolution (one kind per family, CHandle for pointers, FnPtr for function pointers).
     let private mapParamType (cType: string) (model: Types.PlatformABI) : FsType =
-        if cType.Contains("(*)") || cType.Contains("(**)") then Named "nativeint"
-        elif cType.Contains("*") then Named "nativeint"
-        elif cType.Contains("void") && not (cType.Contains("*")) then Unit
-        else
-            let trimmed = cType.Replace("const ", "").Replace("unsigned ", "u").Replace("signed ", "").Trim()
-            match trimmed with
-            | "int" -> Named "int"          // NTU register-width dimensional
-            | "int32_t" -> Named "int32"
-            | "uint" -> Named "uint"        // NTU register-width dimensional
-            | "uint32_t" | "guint" -> Named "uint32"
-            | "long" -> Named "int64"
-            | "ulong" | "unsigned long" -> Named "uint64"
-            | "uint64_t" | "gulong" -> Named "uint64"
-            | "int64_t" -> Named "int64"
-            | "char" | "uchar" | "gchar" -> Named "byte"
-            | "short" | "int16_t" -> Named "int16"
-            | "ushort" | "uint16_t" -> Named "uint16"
-            | "float" -> Named "float32"
-            | "double" -> Named "float"
-            | "size_t" -> Named "unativeint"
-            | "ssize_t" -> Named "nativeint"
-            | _ -> Named "nativeint"
+        FidelityCodeGenerator.mapCTypeToFidelityType Map.empty model Set.empty Map.empty cType
 
     /// Map a C return type to a Clef type for wrapper signatures.
     let private mapReturnType (cType: string) (model: Types.PlatformABI) : FsType =
-        let trimmed = cType.Trim()
-        if trimmed = "void" then Unit
-        elif trimmed.Contains("*") then Named "nativeint"
-        else mapParamType trimmed model
+        if cType.Trim() = "void" then Unit
+        else mapParamType cType model
 
     // =========================================================================
     // Pattern A: Registration Function Wrappers

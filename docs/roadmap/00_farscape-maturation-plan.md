@@ -802,6 +802,22 @@ binding          (libdrm + libgbm + Wayland XML)
 
 ---
 
+## 9. The Regeneration Horizon and the Layer 3 Commitment
+
+Two commitments sit above the phase sequence and govern every binding this plan produces.
+
+**The regeneration horizon.** The bindings generated to date work, and they are trusted, at less-than-optimal structure. They were deliberately fitted inside the language support available when they were generated; certain pure functional forms were simply not available to emit, and the emitted shapes accommodate that absence. When the full expression of the language lands (dimensional types, the NTU as the numeric substrate, and the full syntax surface) every binding in the corpus will be re-generated against it. This is a planned, single, corpus-wide regeneration, not a rolling migration: one horizon keeps the direction steady, prevents per-library drift toward the interim shapes, and states plainly that the interim forms are not the target forms. Nothing about the current bindings' fitness for use is retracted by this; what is retracted in advance is any claim that their structure is final. The callback marshaling path shares a gate with this horizon: the typed function-pointer primitive that `docs/roadmap/06_farscape-phase4d-onnxruntime.md` §5 depends on (`FnPtr<'F>`, not yet built) arrives with the same language surface, so the regeneration and the ONNX Runtime function-table work draw on one prerequisite.
+
+**The Layer 3 commitment.** User-facing API quality is a deliverable, demonstrated per library, and never presumed from the generator's ML metaprogramming pedigree. Layer 3 is where the generator's full utility is shown, and this plan does not hand-wave it: a binding whose Layer 3 story is that a skilled developer could write a pleasant overlay has not shipped its Layer 3. Each library binding therefore carries Layer 3 validation criteria of its own, in the style of the per-phase criteria above:
+
+- A per-library Layer 3 sample compiles and runs, exercising each callback tier the library's surface presents (Tiers A, B, C per the Representation section of `docs/10_Boundary_Marshaling_Spec.md`)
+- For Tier A surfaces, the destroy-hook full loop is demonstrated: registration, invocation, teardown by the C side, environment released by the generated thunk, no manual release anywhere in the sample
+- No `nativeint` is visible in any Layer 3 signature the sample consumes
+- The generated corpus contains no `NativePtr` outside the Layer 1/2 membrane, and the count of membrane-interior sites is reported per binding: this is the TCB metric of `~/repos/Composer/docs/Closure_Nanopass_Architecture.md` ("Why Flat: the finiteness lemma"), expected to trend to zero across the regeneration
+- The sample reads as Clef, not as transcribed C; naming and grouping choices are recorded as declared claims where the formalism of `docs/14_Binding_Generation_Gaps.md` §8 applies
+
+---
+
 *Companion documents: "Farscape Phase 4: NPU Binding via DRM UAPI + XRT", "Farscape Phase 4C: PipeWire Audio Binding", "Farscape Phase 4D: ONNX Runtime Binding", and "Farscape Phase 5+: MFEM Algorithmic Ingestion"*
 
 *SpeakEZ Technologies | Fidelity Framework*

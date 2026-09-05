@@ -71,7 +71,7 @@ module EnumErrorModuleGenerator =
         let describeFunc =
             LetBinding(
                 "describe",
-                [ { Name = "code"; Type = Named "int32" } ],
+                [ { Name = "code"; Type = Named "int" } ],
                 Named "string",
                 describeBody,
                 [])

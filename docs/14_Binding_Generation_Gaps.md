@@ -177,7 +177,11 @@ is missing is an emitter, plus a **fixed-width ABI type map** distinct from `Typ
 register-width map — `unsigned int → uint32`, `int → int32`, `long → int64`.
 
 The `NativePtr.read (NativePtr.ofNativeInt<'T> …)` idiom is proven under the pin; it is in
-shipping use at `HelloWayland/src/Gpu/Fill.clef:83`.
+shipping use at `HelloWayland/src/Gpu/Fill.clef:83`. Its exit is recorded in
+`docs/08_Nullable_Pointer_Architecture.md` (exit-strategy note) and the Representation
+section of `docs/10_Boundary_Marshaling_Spec.md`: membrane-confined plumbing, demoted in the
+spec and retired at the regeneration horizon of `docs/roadmap/00_farscape-maturation-plan.md`
+§9.
 
 Two constraints on such an emitter:
 
@@ -323,6 +327,16 @@ fork it — is a statement in both vocabularies at once, and until now there was
 in which such a statement could be filed. A future `docs/10` gains a Representation section
 rather than a sibling document being created.
 
+**Addressed 2026-08-16.** `docs/10` now carries that Representation section. It specifies
+the callback tier taxonomy (A: userdata plus destroy hook; B: userdata, no destroy hook;
+C: no userdata) and the full destroy-hook loop for Tier A: registration wires the C destroy
+hook to a generated release thunk, and teardown by the C side frees the arena-hoisted
+environment, leaving no manual release. The address-of-slot objection recorded in the
+`docs/10:103-117` row above is answered there by ownership: the address handed to C as
+userdata is an arena-hoisted closure environment with an owner and an explicit release
+point, where §3's defect is the address of a transient slot with neither. Re-verify the
+claim against the section, not against this summary.
+
 `.serena/memories/farscape_binding_architecture.md:106` asserts that callback struct fields
 use `FnPtr<'F>` resolved via `FnPtr.fromSymbol`. `FnPtr` appears in the source only in two
 comments (`FidelityCodeGenerator.fs:122, 171`) and is never emitted;
@@ -367,6 +381,7 @@ procedure against the measured stratum:
 | Resource lifecycle | acquire's out-param type and release's parameter type are the same handle type |
 | Out-param inversion | the parameter is a trailing pointer-to-`T` and the return is the library's error type |
 | Layout module | every named field offset matches the clang dump |
+| Callback lifetime | the destroy hook or the linear registration handle releases the environment exactly once, after the last invocation |
 
 These are checks, not judgements.
 

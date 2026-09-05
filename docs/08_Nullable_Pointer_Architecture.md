@@ -21,6 +21,17 @@ C has no non-null guarantee unless explicitly annotated. Absence of proof is not
 
 Return types follow the same rule: pointer returns are `Option<>` unless proven non-null.
 
+> **Exit strategy, noted 2026-08-16.** Every `nativeptr` and `nativeint` in the table above
+> is Layer 1/2 membrane surface, confined to generated code and counted as TCB, never an
+> application-facing type. The spec demotes `nativeptr` to internal `TNativePtr` plumbing
+> (`ffi-boundary.md`, `ntu-types.md`, `special-attributes-and-types.md`), and each mapping
+> is replaced by its use-class type (flat closure environments, branded handles,
+> length-carried memrefs) at the corpus-wide regeneration of
+> `docs/roadmap/00_farscape-maturation-plan.md` §9. The reasoning is the finiteness
+> doctrine: an unwitnessed cast is an open edge in the boundary of the provable region. See
+> `~/repos/Composer/docs/Closure_Nanopass_Architecture.md` ("Why Flat: the finiteness
+> lemma") and the Representation section of `docs/10_Boundary_Marshaling_Spec.md`.
+
 ## Three Proof Sources for Non-Null
 
 ### 1. Clang `NonNullAttr`

@@ -4,6 +4,8 @@ Farscape implements a **two-layer binding model**. Layer 1 generates `[<Fidelity
 
 ## Two-Layer Architecture
 
+> **Membrane note.** The pointer surface in this document is Layer 1/2 membrane plumbing whose confinement and exit are recorded in the exit banner of `docs/08_Nullable_Pointer_Architecture.md` and the Representation section of `docs/10_Boundary_Marshaling_Spec.md`.
+
 ```
 Layer 1: Platform.Bindings (raw extern declarations):
     let read (fd: int32) (buf: nativeint) (count: nativeint) : nativeint =

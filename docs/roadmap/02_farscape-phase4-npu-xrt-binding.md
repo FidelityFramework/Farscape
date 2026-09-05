@@ -25,6 +25,8 @@
 > is the correct Layer 1 output. These gates would pass while producing miscompiling code —
 > see `docs/14_Binding_Generation_Gaps.md` §3.
 
+> **Membrane note.** The pointer surface in this document is Layer 1/2 membrane plumbing whose confinement and exit are recorded in the exit banner of `docs/08_Nullable_Pointer_Architecture.md` and the Representation section of `docs/10_Boundary_Marshaling_Spec.md`.
+
 ## 1. Prerequisites
 
 This document assumes Phases 0-3 of the Farscape Maturation Plan are complete:

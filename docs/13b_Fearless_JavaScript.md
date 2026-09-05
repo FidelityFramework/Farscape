@@ -17,6 +17,8 @@ Clef enforces absolute null-freedom. Null exists only at the FFI boundary. This 
 
 #### Lessons from the C Boundary
 
+> **Membrane note.** The pointer surface in this document is Layer 1/2 membrane plumbing whose confinement and exit are recorded in the exit banner of `docs/08_Nullable_Pointer_Architecture.md` and the Representation section of `docs/10_Boundary_Marshaling_Spec.md`.
+
 Farscape Core's C nullable handling was the largest single point of friction. The solution was:
 
 1. **Nullable-by-default**: All pointer parameters are `Option<nativeptr<'T>>` unless proven non-null

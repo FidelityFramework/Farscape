@@ -121,7 +121,7 @@ module ErrnoWrapperTests =
         let output = generateWithErrno "read" "ssize_t"
                         [("fd", "int"); ("buf", "void *"); ("count", "size_t")]
                         []
-        Assert.Contains("Result<nativeint, string>", output)
+        Assert.Contains("Result<int, string>", output)
 
     [<Fact>]
     let ``errno-enabled wrapper includes captureErrno helper`` () =
@@ -164,7 +164,7 @@ module ErrnoWrapperTests =
         let output = generateWithErrno "malloc" "void *"
                         [("size", "size_t")]
                         [{ CppParser.AttributeData.Kind = "MallocAttr"; Args = []; StringArg = None }]
-        Assert.Contains("Result<nativeint, string>", output)
+        Assert.Contains("Result<CHandle<unit>, string>", output)
         Assert.Contains("Error (captureErrno ())", output)
 
     [<Fact>]
@@ -271,11 +271,11 @@ module NullWithReasonWrapperTests =
             (UseNullWithReason "stbi_failure_reason") Types.LP64 None
 
     [<Fact>]
-    let ``null_with_reason AllocatedPointer uses Result<nativeint, nativeint>`` () =
+    let ``null_with_reason AllocatedPointer uses Result<CHandle<unit>, CHandle<int>>`` () =
         let output = generateWithNullReason "stbi_load" "void *"
                         [("filename", "const char *"); ("x", "int *"); ("y", "int *"); ("channels", "int *"); ("desired", "int")]
                         [{ CppParser.AttributeData.Kind = "MallocAttr"; Args = []; StringArg = None }]
-        Assert.Contains("Result<nativeint, nativeint>", output)
+        Assert.Contains("Result<CHandle<unit>, CHandle<int>>", output)
 
     [<Fact>]
     let ``null_with_reason calls reason function on null`` () =
@@ -409,11 +409,11 @@ module ReturnCodeWrapperTests =
         Assert.Contains("captureReturnCode", output)
 
     [<Fact>]
-    let ``return code wrapper uses int32 cast in error path`` () =
+    let ``return code wrapper uses int cast in error path`` () =
         let output = generateWithReturnCode "xrtDeviceClose" "int"
                         [("dhdl", "void *")]
                         []
-        Assert.Contains("captureReturnCode (int32", output)
+        Assert.Contains("captureReturnCode (int ", output)
 
     [<Fact>]
     let ``AllocatedPointer with return code generates static error string`` () =
@@ -421,7 +421,7 @@ module ReturnCodeWrapperTests =
                         [("index", "unsigned int")]
                         [{ CppParser.AttributeData.Kind = "MallocAttr"; Args = []; StringArg = None }]
         // Handle-returning functions use a static error string, not captureReturnCode
-        Assert.Contains("Result<nativeint, string>", output)
+        Assert.Contains("Result<CHandle<unit>, string>", output)
         Assert.Contains("returned null handle", output)
 
     [<Fact>]
@@ -480,7 +480,7 @@ let ``wrapper returns Result<HandleType, string> for opaque handle return with e
     Assert.DoesNotContain("Result<nativeint, string>", output)
 
 [<Fact>]
-let ``wrapper returns Result<nativeint, string> for non-opaque pointer with errno`` () =
+let ``wrapper returns Result<CHandle<unit>, string> for non-opaque pointer with errno`` () =
     // Regular void* return without opaque handle typedef
     let decls = [
         CppParser.Declaration.Function
@@ -492,4 +492,4 @@ let ``wrapper returns Result<nativeint, string> for non-opaque pointer with errn
     ]
     let output = WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" (UseErrno "Fidelity.Errno") Types.LP64 None
     // void* should use nativeint, not a handle type
-    Assert.Contains("Result<nativeint, string>", output)
+    Assert.Contains("Result<CHandle<unit>, string>", output)

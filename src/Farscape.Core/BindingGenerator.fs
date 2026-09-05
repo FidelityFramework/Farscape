@@ -153,6 +153,15 @@ module BindingGenerator =
                     // Absolute path as last resort
                     Path.GetFullPath(targetFidproj).Replace('\\', '/')
         sb.AppendLine($"Fidelity.Platform = {{ path = \"{platformDepPath}\" }}") |> ignore
+        // The descriptors reference BAREWire's Hardware and Descriptors vocabularies
+        let bareWireDepPath =
+            let reposDir = Path.GetFullPath(Path.Combine(fidprojDir, "../../../../"))
+            let targetFidproj = Path.Combine(reposDir, "BAREWire/src/BAREWire.fidproj")
+            if File.Exists(targetFidproj) then
+                Path.GetRelativePath(fidprojDir, targetFidproj).Replace('\\', '/')
+            else
+                Path.GetFullPath(targetFidproj).Replace('\\', '/')
+        sb.AppendLine($"BAREWire = {{ path = \"{bareWireDepPath}\" }}") |> ignore
 
         let content = sb.ToString()
         let fidprojName = $"{packageName}.fidproj"
@@ -452,7 +461,7 @@ module BindingGenerator =
                         sb.AppendLine() |> ignore
                         sb.AppendLine("    /// Describe a return code as a human-readable error string.") |> ignore
                         sb.AppendLine("    /// Override in an Overlay module for domain-specific error mapping.") |> ignore
-                        sb.AppendLine("    let describe (code: int32) : string =") |> ignore
+                        sb.AppendLine("    let describe (code: int) : string =") |> ignore
                         sb.AppendLine($"        $\"{libPrefix} error (code {{code}})\"") |> ignore
                         let output = sb.ToString()
                         let errorPath = Path.Combine(outputDir, "ReturnCode.clef")
@@ -462,28 +471,8 @@ module BindingGenerator =
                     | _ -> []
 
                 // ── BAREWire descriptors ─────────────────────────────────────
-                let descriptorFiles =
-                    let generateDescriptors =
-                        match project.Options with
-                        | Some opts -> opts.GenerateDescriptors && not structLayouts.IsEmpty
-                        | None -> false
-                    if generateDescriptors then
-                        let abiStructDecls =
-                            declarations |> List.choose (function
-                                | CppParser.Declaration.Struct s when Map.containsKey s.Name structLayouts ->
-                                    Some (s, structLayouts.[s.Name])
-                                | _ -> None)
-                        if abiStructDecls.IsEmpty then []
-                        else
-                            let descriptorNs = $"{nsPrefix}.Descriptors"
-                            let descriptorCode =
-                                DescriptorGenerator.generate abiStructDecls descriptorNs
-                                    ctx.TypedefMap dataModel ctx.OpaqueHandles
-                            let descriptorPath = Path.Combine(outputDir, "Descriptors.clef")
-                            File.WriteAllText(descriptorPath, descriptorCode)
-                            logVerbose $"Descriptor module: {descriptorPath}" verbose
-                            [descriptorPath]
-                    else []
+                // Every struct's StructDescriptor is emitted inside its layout module in the
+                // Types module (docs/14 §2); there is no separate Descriptors file to write.
 
                 // ── Callback spec (resolved here, used by L2 marshaling) ────
                 let callbackSpec =
@@ -583,7 +572,7 @@ module BindingGenerator =
                         | None -> []
                     | _ -> []
 
-                let allFiles = [sharedTypesPath] @ errorModuleFiles @ descriptorFiles @ nsFiles @ l2CallbackFiles
+                let allFiles = [sharedTypesPath] @ errorModuleFiles @ nsFiles @ l2CallbackFiles
 
                 // Generate canonical fidproj for the binding library
                 let fidprojFile = generateFidproj project nsPrefix outputDir allFiles verbose

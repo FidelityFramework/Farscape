@@ -16,6 +16,9 @@ module CodeRenderer =
         | Generic (outer, inner) -> $"{outer}<{renderType inner}>"
         | Generic2 (outer, a, b) -> $"{outer}<{renderType a}, {renderType b}>"
         | Unit -> "unit"
+        | FunctionType (parameters, ret) ->
+            let ps = if parameters.IsEmpty then ["unit"] else parameters |> List.map renderType
+            String.concat " -> " (ps @ [renderType ret])
 
     /// Render an FsParam to "(name: type)" form
     let renderParam (p: FsParam) = $"({cleanParamName p.Name}: {renderType p.Type})"
@@ -64,6 +67,33 @@ module CodeRenderer =
                 |> List.map (fun (pattern, body) -> $"\n{indent}| {pattern} -> {renderExpr indent body}")
                 |> String.concat ""
             $"match {renderExpr indent scrutinee} with{caseStr}"
+        | Quoted expr ->
+            let inner = indent + "    "
+            $"<@\n{inner}{renderExpr inner expr}\n{indent}@>"
+        | RecordBlock fields ->
+            // First field shares the line with "{ "; the rest align two columns in; a block-valued
+            // field (record, array, quotation) starts on its own line four columns in, so the
+            // offside rule holds for any nesting depth.
+            let inner = indent + "  "
+            let renderField (name: string, expr: FsExpr) =
+                match expr with
+                | RecordBlock _ | ArrayBlock _ | Quoted _ ->
+                    let block = indent + "    "
+                    $"{name} =\n{block}{renderExpr block expr}"
+                | _ -> $"{name} = {renderExpr inner expr}"
+            match fields with
+            | [] -> "{ }"
+            | first :: rest ->
+                let lines = renderField first :: (rest |> List.map (fun f -> inner + renderField f))
+                "{ " + String.concat "\n" lines + " }"
+        | ArrayBlock elements ->
+            match elements with
+            | [] -> "[||]"
+            | _ ->
+                let inner = indent + "  "
+                let lines = elements |> List.map (fun e -> inner + renderExpr inner e)
+                "[|\n" + String.concat "\n" lines + $"\n{indent}|]"
+        | Commented (expr, comment) -> $"{renderExpr indent expr} // {comment}"
         | RawExpr code -> code
 
     /// Render an expression as a function argument, parenthesizing compound expressions.
@@ -106,8 +136,15 @@ module CodeRenderer =
             sb.AppendLine() |> ignore
 
         | LiteralBinding (name, value) ->
-            sb.AppendLine($"{prefix}[<Literal>]") |> ignore
-            sb.AppendLine($"{prefix}let {name} = {value}") |> ignore
+            sb.AppendLine($"{prefix}    [<Literal>]") |> ignore
+            sb.AppendLine($"{prefix}    let {name} = {value}") |> ignore
+
+        | ValueBinding (name, type', body) ->
+            sb.AppendLine($"{prefix}    let {name} : {renderType type'} =") |> ignore
+            let bodyIndent = $"{prefix}        "
+            sb.Append($"{bodyIndent}{renderExpr bodyIndent body}") |> ignore
+            sb.AppendLine() |> ignore
+            sb.AppendLine() |> ignore
 
         | RecordType (name, fields, doc, attributes) ->
             match doc with
@@ -136,19 +173,6 @@ module CodeRenderer =
             sb.AppendLine($"{prefix}module {name} =") |> ignore
             for d in decls do
                 renderDecl sb (indent + 1) d
-            sb.AppendLine() |> ignore
-
-        | ExplicitLayoutRecord (name, fields, sizeBytes, doc) ->
-            match doc with
-            | Some d -> sb.AppendLine($"{prefix}/// {d}") |> ignore
-            | None -> ()
-            sb.AppendLine($"{prefix}[<StructLayout(LayoutKind.Explicit, Size = {sizeBytes})>]") |> ignore
-            sb.AppendLine($"{prefix}[<Struct>]") |> ignore
-            sb.AppendLine($"{prefix}type {name} = {{") |> ignore
-            for f in fields do
-                sb.AppendLine($"{prefix}    [<FieldOffset({f.OffsetBytes})>]") |> ignore
-                sb.AppendLine($"{prefix}    {f.Name}: {renderType f.Type}") |> ignore
-            sb.AppendLine($"{prefix}}}") |> ignore
             sb.AppendLine() |> ignore
 
         | DelegateType (name, parameters, returnType, doc) ->

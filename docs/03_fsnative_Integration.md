@@ -30,6 +30,8 @@ CCS lives at `~/repos/fsnative/` and is registered as the `CCS` Serena project.
 
 ### `[<FidelityExtern>]` Attributed Binding Declarations (Core Infrastructure)
 
+> **Membrane note.** The pointer surface in this document is Layer 1/2 membrane plumbing whose confinement and exit are recorded in the exit banner of `docs/08_Nullable_Pointer_Architecture.md` and the Representation section of `docs/10_Boundary_Marshaling_Spec.md`.
+
 ```fsharp
 [<FidelityExtern("libc", "memcpy")>]
 let memcpy (dest: nativeint) (src: nativeint) (n: nativeint) : nativeint =

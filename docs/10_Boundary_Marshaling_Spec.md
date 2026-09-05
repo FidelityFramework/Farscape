@@ -28,7 +28,8 @@ This rule extends beyond type names (the original `boundary_marshaling.md` scope
 > because records are memref-backed. See `docs/14_Binding_Generation_Gaps.md` §3 and §7.
 > The correct Layer 1 output for a pointer typedef is bare `nativeint`, which §4 below
 > currently reads as a violation. A future revision of this document should gain a
-> Representation section rather than a sibling document being created.
+> Representation section rather than a sibling document being created. The Representation
+> section below, added 2026-08-16, is that revision.
 | **Application** — end-user programs | Developer | **No — pure Clef** | End user |
 
 Layer 2 includes:
@@ -131,6 +132,61 @@ The target state uses flat closures: the closure's `code_ptr` becomes the callba
 | Static elision | Requires `-rdynamic` or explicit export | Direct — no runtime symbol lookup |
 
 **Principle**: The Layer 2 API surface (callback builders, listener constructors) should be the same whether the underlying mechanism is dlsym or closures. Only the Layer 2 internals change. Layer 3 code is unaffected.
+
+## Representation
+
+Idiom containment says which names may appear in each layer. Representation says what a value *is* when it crosses. The second caveat at the top of this document recorded the gap, and `docs/14_Binding_Generation_Gaps.md` §7 mandated that this document close it. This section closes it: it specifies what each crossing value is at the boundary, who owns it, and when it is released.
+
+### Callback Tiers
+
+A C callback surface classifies by the lifetime plumbing it offers, and the generator emits accordingly:
+
+| Tier | C Surface Shape | Generated Marshaling |
+|---|---|---|
+| **A** | `userdata` plus destroy hook (`GDestroyNotify`; GLib signals, IO watches) | Full closure. Environment arena-hoisted; the destroy hook releases it; nothing for the application to manage |
+| **B** | `userdata`, no destroy hook (Wayland listeners) | Full closure. Registration returns a linear handle whose consumption (disconnect, destroy) releases the environment |
+| **C** | No `userdata` (`qsort` comparators, `signal(2)`, `atexit`) | Closed functions only. An empty environment is a bare code pointer; arity analysis certifies which functions qualify, and the boundary type demands the property |
+
+The dlsym-and-slot-buffer mechanism described under Closure Roadmap above is the Tier C degenerate case imposed uniformly on Tiers A and B because the marshaling layer did not exist. It proved that the degenerate case works, not that it is the boundary.
+
+### The Destroy Hook Gets the Full Loop
+
+For Tier A the generator emits the complete cycle, not the registration half. Registration wires the C destroy hook to a generated release thunk that frees the arena-hoisted closure environment. Teardown by the C side is therefore the release point: when the library tears down the source or handler, the hook fires, the thunk runs, the arena slot is freed. Nothing manual remains, and a leaked environment is unrepresentable, because the only party that can release is the party that always does. The destroy hook is C's own acknowledgment that callbacks are closures with lifetimes; the generator's job is to take the acknowledgment literally.
+
+Absence of a destroy hook is what demotes a surface to Tier B. There the registration returns a linear handle, and consuming that handle (disconnect, destroy) is the release. Dropping the handle without consumption is a compile-time error where linearity is checkable, and a convention with a debug-build audit until it is. Tier C requires closed functions: a function whose closure conversion yields an empty environment *is* a bare code pointer, and the tier's boundary type requires exactly that property instead of assuming it.
+
+### Per-Typedef Trampolines
+
+The mechanism is one trampoline per callback typedef, generated once as part of the binding:
+
+```c
+void tramp_GIOFunc(GIOChannel* ch, GIOCondition cond, gpointer ud) {
+    closure* c = ud;
+    c->code(ch, cond, c);      /* tail-call into the flat closure */
+}
+```
+
+The C convention splits code and environment into two parameters; the flat closure fuses them into one struct whose address is a perfectly good `userdata`. The binding's public face accepts a Clef function value, and the boundary performs the split. No libffi, no runtime code generation: a Tier C surface that cannot carry an environment gets a closed function or it gets refused.
+
+`docs/14_Binding_Generation_Gaps.md` §7 objects that the closure target passes `&closure`, the same address-of-slot mechanic that §3 of that document identifies as the handle defect. The objection is answered by ownership, not denied. The address handed to C as `userdata` is the arena-hoisted closure environment: a value with an owner, a declared lifetime spanning the registration, and a release point wired per tier. The §3 defect is the address of a transient slot that no one owns and that the callee misreads as the value itself. Same instruction, different contract, and the contract is what this section adds.
+
+### String Contracts
+
+Generated signatures currently say "pointer" where the C contract says "NUL-terminated buffer" or "buffer plus length," and the corpus draws that distinction nowhere. The byte contract consequently lives in call-site discipline. Generated signatures distinguish the two cases: a borrowed NUL-terminated string and a length-carried memref are different boundary types. A computed string that is not reliably terminated then becomes unrepresentable instead of remembered.
+
+### Boundary Integrity
+
+Inviolable, restating `docs/14_Binding_Generation_Gaps.md` §3 as this document's own rule:
+
+- Layer 1 emits `nativeint` only in pointer positions. The extern's contract is the C ABI, transcribed.
+- Branded and typed forms (nominal handle types, tiered registration handles, string contract types) live above Layer 1, where they never cross a call boundary unconverted.
+- No raw pointer type crosses into the Layer 3 user-facing surface. `nativeint` in a Layer 3 signature is a generation defect, full stop.
+
+This discipline is a decidability condition, not hygiene: the provable region is closed exactly when every crossing has enumerated participants, known extent, and a single release, and each raw pointer that escapes the membrane is an open edge in its boundary (`~/repos/Composer/docs/Closure_Nanopass_Architecture.md`, "Why Flat: the finiteness lemma").
+
+### The Composer-Side Contract
+
+The tier taxonomy is one half of a contract whose other half attaches in Composer. `~/repos/Composer/docs/PRDs/C-01-Closures.md` §6.7 states the boundary crossing as a joint constraint over the crossing value's Clef type, its C ABI contract, and its lifetime owner, carried as a single hyperedge. The PHG addendum in `~/repos/Composer/docs/PSG_Nanopass_Architecture.md` specifies the promotion of such boundary edges to hyperedges, and `~/repos/Composer/docs/PRDs/D-01-GTKWindow.md` §4.2 names the saturation leaf the contract anchors to. Farscape supplies the typedef shape and the tier; the contract representation is what the trampoline mechanism discharges against.
 
 ## The Binding-Port Spectrum
 

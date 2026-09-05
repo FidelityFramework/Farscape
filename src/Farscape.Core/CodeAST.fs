@@ -17,6 +17,8 @@ module CodeAST =
         | Generic2 of string * FsType * FsType
         /// Unit type (special case for void returns)
         | Unit
+        /// Function signature: "int -> CHandle<unit> -> unit" (the payload of FnPtr<'F>)
+        | FunctionType of parameters: FsType list * ret: FsType
 
     /// F# expression representation
     type FsExpr =
@@ -46,6 +48,14 @@ module CodeAST =
         | RecordConstruction of fields: (string * FsExpr) list
         /// Match expression: match scrutinee with | pattern1 -> body1 | pattern2 -> body2
         | MatchExpr of scrutinee: FsExpr * cases: (string * FsExpr) list
+        /// Quotation: <@ expr @> — a compile-time declaration the compiler reads and never evaluates
+        | Quoted of FsExpr
+        /// Multi-line record: one field per line, block-valued fields on their own lines
+        | RecordBlock of fields: (string * FsExpr) list
+        /// Multi-line array literal: [| one element per line |]
+        | ArrayBlock of elements: FsExpr list
+        /// An expression with a trailing line comment: expr // text
+        | Commented of expr: FsExpr * comment: string
         /// Raw code fragment — for patterns not expressible via other AST nodes
         | RawExpr of string
 
@@ -53,13 +63,6 @@ module CodeAST =
     type FsParam = {
         Name: string
         Type: FsType
-    }
-
-    /// A field with explicit byte offset (for StructLayout.Explicit structs)
-    type ExplicitField = {
-        Name: string
-        Type: FsType
-        OffsetBytes: int
     }
 
     /// F# declaration representation: the core of the typed code AST
@@ -77,6 +80,8 @@ module CodeAST =
         | LetBinding of name: string * params': FsParam list * returnType: FsType * body: FsExpr * attributes: string list
         /// [<Literal>] let name = value
         | LiteralBinding of name: string * value: string
+        /// let name : type = body — a value, not a function (a descriptor, a quotation)
+        | ValueBinding of name: string * type': FsType * body: FsExpr
         /// type Name = { field1: type1; field2: type2 }
         /// Attributes are rendered as [<Attr>] lines before the type.
         | RecordType of name: string * fields: (string * FsType) list * doc: string option * attributes: string list
@@ -85,9 +90,6 @@ module CodeAST =
         | EnumType of name: string * values: (string * int64) list * doc: string option * isFlags: bool
         /// Nested module: module Name = \n    decls (for companion modules)
         | SubModule of name: string * decls: FsDecl list
-        /// ABI-critical struct with explicit layout.
-        /// Rendered with [<StructLayout(LayoutKind.Explicit, Size=N)>] [<Struct>] and per-field [<FieldOffset(N)>].
-        | ExplicitLayoutRecord of name: string * fields: ExplicitField list * sizeBytes: int * doc: string option
         /// Delegate type: type Name = delegate of p1: T1 * p2: T2 -> ReturnType
         /// Used for Wayland event handlers and other callback types.
         | DelegateType of name: string * parameters: (string * FsType) list * returnType: FsType * doc: string option

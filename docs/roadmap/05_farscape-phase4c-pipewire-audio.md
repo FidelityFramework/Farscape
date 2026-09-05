@@ -25,6 +25,8 @@
 > is the correct Layer 1 output. These gates would pass while producing miscompiling code —
 > see `docs/14_Binding_Generation_Gaps.md` §3.
 
+> **Membrane note.** The pointer surface in this document is Layer 1/2 membrane plumbing whose confinement and exit are recorded in the exit banner of `docs/08_Nullable_Pointer_Architecture.md` and the Representation section of `docs/10_Boundary_Marshaling_Spec.md`.
+
 ## 1. Purpose
 
 This document covers the Farscape binding for PipeWire, the audio/video infrastructure that provides low-latency capture and playback on the target system. PipeWire replaces PulseAudio and JACK on modern Linux; it is the audio I/O foundation for the Strix Halo voice-guided assistant.

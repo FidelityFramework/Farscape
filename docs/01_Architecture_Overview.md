@@ -85,6 +85,8 @@ type Declaration =
 
 ### CTypeParser.fs: XParsec Post-Processing
 
+> **Membrane note.** The pointer surface in this document is Layer 1/2 membrane plumbing whose confinement and exit are recorded in the exit banner of `docs/08_Nullable_Pointer_Architecture.md` and the Representation section of `docs/10_Boundary_Marshaling_Spec.md`.
+
 XParsec parsers for C type strings and macro values, using the generic class pattern:
 
 ```fsharp

@@ -308,13 +308,13 @@ module ProtocolParser =
     /// All handles are nativeint in protocol dispatch (CCS FieldLabels workaround).
     let private argToFsType (_opaqueHandles: Set<string>) (arg: ProtocolArg) : FsType =
         match arg.Type with
-        | Int -> Named "int32"
-        | Uint -> Named "uint32"
-        | Fixed -> Named "int32"  // wl_fixed_t is int32
+        | Int -> Named "int"
+        | Uint -> Named "uint"
+        | Fixed -> Named "int"  // wl_fixed_t: a 24.8 fixed-point integer, i32 at the ABI
         | String -> Named "nativeint"  // string pointer, passed as nativeint in arg array
         | Object -> Named "nativeint"  // all handles nativeint (CCS FieldLabels workaround)
         | NewId -> Named "nativeint"
-        | Fd -> Named "int32"
+        | Fd -> Named "int"
         | Array -> Named "nativeint"  // wl_array pointer
 
     /// Convert a protocol arg value to nativeint for the argument array.
@@ -360,7 +360,7 @@ module ProtocolParser =
             if isUntypedNewId then
                 // wl_registry_bind pattern: caller provides interface + version
                 [ { Name = "``interface``"; Type = Named "nativeint" }
-                  { Name = "version"; Type = Named "uint32" } ]
+                  { Name = "version"; Type = Named "uint" } ]
             else []
 
         let allParams = selfParam :: regularParams @ extraParams
@@ -372,10 +372,10 @@ module ProtocolParser =
 
         // Build the body
         let flags =
-            if request.IsDestructor then TypeConversion("uint32", Literal $"{config.DestroyFlag}")
-            else TypeConversion("uint32", Literal "0")
+            if request.IsDestructor then TypeConversion("uint", Literal $"{config.DestroyFlag}")
+            else TypeConversion("uint", Literal "0")
 
-        let opcodeExpr = TypeConversion("uint32", Literal $"{opcode}")
+        let opcodeExpr = TypeConversion("uint", Literal $"{opcode}")
 
         // Interface pointer: resolve via dlsym for typed new_id, or use caller-provided for untyped
         let interfaceExpr =

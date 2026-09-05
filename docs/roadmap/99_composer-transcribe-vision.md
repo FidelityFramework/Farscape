@@ -110,6 +110,8 @@ The merged AST enters a series of analysis passes that extract computational int
 
 **Loop analysis**: Iteration space extraction (bounds, stride, dependencies). Classification of loop bodies (map, fold/reduce, scan, stencil, scatter, gather). Detection of accumulation patterns (the `+=` idiom that signals potential quire accumulation benefit).
 
+> **Membrane note.** Pointer idioms analyzed in this document reach Clef only through the Layer 1/2 membrane, whose confinement and exit are recorded in the exit banner of `docs/08_Nullable_Pointer_Architecture.md` and the Representation section of `docs/10_Boundary_Marshaling_Spec.md`.
+
 **Aliasing analysis**: Pointer aliasing classification (must-alias, may-alias, no-alias). This is the hardest problem in C/C++ analysis and the most consequential for Clef port quality. Aliasing uncertainty forces conservative assumptions; Clef's ownership model eliminates the ambiguity.
 
 **Side effect classification**: Pure functions (no side effects), functions with local mutation only (convertible to copy-and-update), functions with I/O or global state (requiring actor-model wrapping). Most numerical kernels fall into the first two categories.

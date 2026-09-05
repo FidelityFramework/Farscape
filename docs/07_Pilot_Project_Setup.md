@@ -164,6 +164,8 @@ a second and independent cause for the empty-`Types.clef` symptom described unde
 
 ### `[annotations.nonnull]`: Proven Non-Null Pointers
 
+> **Membrane note.** The pointer surface in this document is Layer 1/2 membrane plumbing whose confinement and exit are recorded in the exit banner of `docs/08_Nullable_Pointer_Architecture.md` and the Representation section of `docs/10_Boundary_Marshaling_Spec.md`.
+
 Documented in full in `docs/08_Nullable_Pointer_Architecture.md`. Summarised here because it
 belongs to this schema: absent this section and absent clang `NonNullAttr` in the headers,
 **every** pointer parameter and return in the binding becomes `option<...>`, including every
@@ -180,6 +182,50 @@ are wrapped. Omitting the section entirely triggers auto-discovery — but **onl
 `nativeint` to the Layer 1 function, not a typed function-pointer primitive; see
 `docs/14_Binding_Generation_Gaps.md` §7 for the discrepancy between this and the
 `FnPtr<'F>` design described elsewhere in the corpus.
+
+```toml
+[callbacks]
+registrations = [
+  { function = "g_signal_connect_data", callback_param = "c_handler", data_param = "data" }
+]
+listener_structs = [
+  { name = "wl_pointer_listener", registration_function = "wl_pointer_add_listener" }
+]
+```
+
+`registrations` declares functions that accept a callback directly:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `function` | string | yes | Name of the C function that registers the callback (e.g., `g_signal_connect_data`). |
+| `callback_param` | string | yes | Name of the function-pointer parameter (e.g., `c_handler`). |
+| `data_param` | string | no | Name of the companion `void*` userdata parameter (e.g., `data`). |
+
+`listener_structs` declares structs whose fields are function pointers:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | yes | Struct name (e.g., `wl_pointer_listener`). |
+| `registration_function` | string | no | Companion function that installs the struct, if known (e.g., `wl_pointer_add_listener`). |
+
+The serializer's general posture applies here with particular force: **there is no
+validation pass**. A `registrations` entry missing `function` or `callback_param` is
+silently dropped, a misspelled key name yields an entry that never wraps, and no warning is
+emitted in either case. The same silent drop swallows any key `deserializeCallbacks` does
+not read, including the planned keys below.
+
+> **Planned keys caveat (added 2026-08-16, not yet implemented).** The tiered callback
+> marshaling specified in the Representation section of
+> `docs/10_Boundary_Marshaling_Spec.md` requires the schema to name the destroy hook. The
+> planned shape adds one per-registration field: `destroy_param`, naming the C
+> destroy-notify parameter (e.g., `destroy_data` of type `GDestroyNotify`), or
+> `destroy_function` where the hook is registered through a separate call. Tier inference
+> then follows from the fields present: `data_param` plus a destroy field → Tier A;
+> `data_param` only → Tier B; neither → Tier C. The intended posture is inference from the
+> header signature with per-entry override, matching the framework's standing treatment of
+> discovered facts. `deserializeCallbacks` reads none of these keys today, and per the
+> caveat above the serializer drops them silently; a pilot file carrying them is harmless
+> and does nothing until the keys land.
 
 ### `[protocol]`: Protocol Argument Marshalling
 
