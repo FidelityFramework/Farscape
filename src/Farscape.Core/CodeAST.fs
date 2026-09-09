@@ -82,6 +82,8 @@ module CodeAST =
         | LiteralBinding of name: string * value: string
         /// let name : type = body — a value, not a function (a descriptor, a quotation)
         | ValueBinding of name: string * type': FsType * body: FsExpr
+        /// A nominal phantom marker, carrying no native address or source storage.
+        | OpaqueMarker of name: string
         /// type Name = { field1: type1; field2: type2 }
         /// Attributes are rendered as [<Attr>] lines before the type.
         | RecordType of name: string * fields: (string * FsType) list * doc: string option * attributes: string list

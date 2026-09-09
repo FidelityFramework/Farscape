@@ -175,7 +175,7 @@ module FidelityCodeGenerator =
             | DataPointer _ -> Generic("option", clefTypeOf resolved)
             | _ -> clefTypeOf resolved
         let functionPointer (ret: string) (parameters: string list) =
-            FunctionPointer (parameters |> List.map (recur >> nullableClef), clefTypeOf (recur ret))
+            FunctionPointer (parameters |> List.map (recur >> nullableClef), nullableClef (recur ret))
         // A pointer's pointee: a scalar's spelling, a named type, or what a typedef stands for
         let pointee (baseType: string) : FsType =
             match TypeMapper.tryScalar model baseType with
@@ -265,7 +265,37 @@ module FidelityCodeGenerator =
         NonnullAnnotations: NonnullAnnotations option
         /// C++ class lookup map for sret return type analysis (empty for C-only libraries)
         KnownClasses: Map<string, CppParser.ClassDecl>
+        /// Explicit native substrate profile; default source uses CHandle and one-kind scalars.
+        NativePointerSurface: bool
+        Bindings: Map<string, BindingProjection>
+        ValueStructs: Set<string>
+        PhantomMarkers: Set<string>
     }
+
+    /// ABI carriers for native substrate bindings. Function pointers remain typed and carry
+    /// the complete callback signature; data pointers (including pointer-to-pointer) are addresses.
+    let rec mapCTypeToNativeSurface
+        (typedefMap: Map<string, string>) (model: PlatformABI)
+        (delegates: Map<string, CppParser.DelegateDecl>) (cType: string) : FsType =
+        let recur = mapCTypeToNativeSurface typedefMap model delegates
+        let callback ret args = Generic("FnPtr", FunctionType(List.map recur args, recur ret))
+        match splitFunctionPointer cType with
+        | Some (ret, args) -> callback ret args
+        | None ->
+            match Map.tryFind (TypeMapper.cleanTypeName cType) delegates with
+            | Some d -> callback d.ReturnType (List.map snd d.Parameters)
+            | None ->
+                match resolveCType typedefMap model Set.empty delegates Map.empty cType with
+                | Scalar r ->
+                    match r.Family with
+                    | TypeMapper.Signed -> Named $"int{r.Bits}"
+                    | TypeMapper.Unsigned -> Named $"uint{r.Bits}"
+                    | TypeMapper.Float -> Named (if r.Bits = 32 then "float32" else "float")
+                    | TypeMapper.Void -> Unit
+                    | TypeMapper.Bool -> Named "bool"
+                    | TypeMapper.Pointer -> Named "nativeint"
+                | DataPointer _ | OpaqueHandle _ -> Named "nativeint"
+                | _ -> mapCTypeToFidelityType typedefMap model Set.empty delegates cType
 
     /// Resolve a C type under the context.
     let private resolveIn (ctx: GenerationContext) (cType: string) : ResolvedCType =
@@ -299,6 +329,20 @@ module FidelityCodeGenerator =
     let isCDataPointer (cType: string) : bool =
         cType.Contains("*") && not (cType.Contains("(*)") || cType.Contains("(**)"))
 
+    /// Const applies to the immediate referenced object, not a deeper pointee:
+    /// const T** still exposes a writable pointer cell; T* const* does not.
+    let private referencePassing (projection: BindingProjection option) index (cType: string) =
+        let writable = projection |> Option.exists(fun p -> List.contains index p.ReferenceParameters)
+        let explicitReadOnly = projection |> Option.exists(fun p -> List.contains index p.ReadOnlyReferenceParameters)
+        let constPointee =
+            let star = cType.LastIndexOf('*')
+            if star < 0 then false else
+            let pointee = cType.Substring(0,star)
+            let topLevel = pointee.Substring(pointee.LastIndexOf('*') + 1)
+            topLevel.Split([|' ';'\t';'\r';'\n'|], System.StringSplitOptions.RemoveEmptyEntries) |> Array.contains "const"
+        let reference = writable || explicitReadOnly
+        reference, (reference && (explicitReadOnly || constPointee))
+
     let private quoteString (s: string) =
         "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
 
@@ -319,31 +363,41 @@ module FidelityCodeGenerator =
     let private generateDescriptorDecls (ctx: GenerationContext) (func: CppParser.FunctionDecl) : FsDecl list =
         let parameterInfos =
             func.Parameters
-            |> List.map (fun (name, cType) ->
-                let typeRef, provenance = abiClaim ctx cType
+            |> List.mapi (fun index (name, cType) ->
+                let reference, readOnly = referencePassing (ctx.Bindings |> Map.tryFind func.Name) index cType
+                let element = ctx.Bindings |> Map.tryFind func.Name |> Option.bind (fun b -> List.tryItem index b.ReferenceElements) |> Option.filter ((<>) "")
+                let represented = if reference then element |> Option.defaultWith (fun () -> cType.Substring(0, cType.LastIndexOf('*')).Trim()) else cType
+                let typeRef, provenance = abiClaim ctx represented
                 let clefName = (cleanParamName name).Replace("``", "")
                 Commented(
                     RecordConstruction [
                         "Name", Literal (quoteString clefName)
                         "Type", Literal typeRef
-                        "PassBy", Identifier "Value" ],
+                        "PassBy", Identifier (if readOnly then "ReadOnlyReference" elif reference then "Reference" else "Value") ],
                     provenance))
         let returnRef, returnProvenance = abiClaim ctx func.ReturnType
-        [ XmlDoc $"ABI descriptor of `{func.Name}` (Layer 2): each parameter's and the return's representation under {ctx.DataModel}, every width naming its stratum. The header declares no ownership; Borrowed is the inferred default until a pilot declaration says otherwise."
+        let ownership, ownershipNote =
+            match ctx.Bindings |> Map.tryFind func.Name |> Option.bind (fun binding -> binding.Ownership) with
+            | Some transfer -> string transfer, $"Ownership {transfer} is declared by the pilot."
+            | None -> "Borrowed", "The header declares no ownership; Borrowed is the inferred default until a pilot declaration says otherwise."
+        [ XmlDoc $"ABI descriptor of `{func.Name}` (Layer 2): each parameter's and the return's representation under {ctx.DataModel}, every width naming its stratum. {ownershipNote}"
           ValueBinding($"{func.Name}Descriptor", Generic("Expr", Named "FunctionDescriptor"),
               Quoted(RecordBlock [
-                  "CName", Literal (quoteString func.Name)
+                  "CName", Literal (quoteString (ctx.Bindings |> Map.tryFind func.Name |> Option.map (fun b -> b.Symbol) |> Option.defaultValue func.Name))
                   "Parameters", ArrayBlock parameterInfos
                   "ReturnType", Commented(Literal returnRef, returnProvenance)
                   "CallingConvention", Identifier "CDecl"
-                  "OwnershipTransfer", Identifier "Borrowed" ])) ]
+                  "OwnershipTransfer", Identifier ownership ])) ]
 
     /// Generate FsDecl list for a single function binding, followed by its descriptor.
     /// Pointer parameters are nullable (Option<>) by default unless proven non-null via:
     /// 1. Clang NonNullAttr — parameter indices explicitly marked non-null
     /// 2. Pilot TOML [annotations.nonnull] — developer-asserted non-null
-    let private generateFunctionDecls (ctx: GenerationContext) (libraryName: string) (func: CppParser.FunctionDecl) : FsDecl list =
-        let mapType = resolveIn ctx >> clefTypeOf
+    let generateFunctionDecls (ctx: GenerationContext) (libraryName: string) (func: CppParser.FunctionDecl) : FsDecl list =
+        let mapType =
+            if ctx.NativePointerSurface then mapCTypeToNativeSurface ctx.TypedefMap ctx.DataModel ctx.Delegates
+            else resolveIn ctx >> clefTypeOf
+        let projection = Map.tryFind func.Name ctx.Bindings
         let nonnullAnnotations = ctx.NonnullAnnotations
 
         // Collect proven-nonnull parameter indices from clang attributes
@@ -363,8 +417,37 @@ module FidelityCodeGenerator =
         let parameters =
             func.Parameters
             |> List.mapi (fun idx (name, cType) ->
-                let fsType = mapType cType
-                let isNullable = isCDataPointer cType && not (nonnullIndices.Contains idx)
+                let reference, _ = referencePassing projection idx cType
+                let element = projection |> Option.bind (fun b -> List.tryItem idx b.ReferenceElements) |> Option.filter ((<>) "")
+                let stringParameter = projection |> Option.exists (fun b -> List.contains idx b.StringParameters)
+                let callbackNonnull = projection |> Option.exists (fun b -> List.contains idx b.NonnullCallbacks)
+                let handle = projection |> Option.bind (fun b -> List.tryItem idx b.ParameterHandles) |> Option.filter ((<>) "")
+                let fsType =
+                    if reference then
+                        match cType with
+                        | ParsedCType info when info.PointerDepth = 1 ->
+                            match resolveIn ctx (element |> Option.defaultValue info.BaseType) with
+                            | Scalar r when r.Family = TypeMapper.Signed || r.Family = TypeMapper.Unsigned || r.Family = TypeMapper.Float -> Named (TypeMapper.clefSpelling r.Family + " array")
+                            | _ -> failwith $"{func.Name} parameter {idx}: Reference requires a scalar pointee"
+                        | ParsedCType info when info.PointerDepth = 2 ->
+                            let pointerType = cType.Substring(0, cType.LastIndexOf('*')).Trim()
+                            let element = resolveIn ctx pointerType |> clefTypeOf |> wrapOption
+                            Named (CodeRenderer.renderType element + " array")
+                        | _ -> failwith $"{func.Name} parameter {idx}: Reference requires a scalar cell or one opaque pointer cell"
+                    elif stringParameter then
+                        match cType with
+                        | ParsedCType info when info.PointerDepth = 1 && info.BaseType = "char" -> Named "string"
+                        | _ -> failwith $"{func.Name} parameter {idx}: string projection requires char pointer"
+                    elif handle.IsSome then
+                        if not (isCDataPointer cType) then failwith $"{func.Name} parameter {idx}: handle projection requires a C data pointer"
+                        Generic("CHandle", Named handle.Value)
+                    elif callbackNonnull then
+                        let strip = function Generic("option", inner) -> inner | ty -> ty
+                        match mapType cType with
+                        | Generic("FnPtr", FunctionType(args, ret)) -> Generic("FnPtr", FunctionType(List.map strip args, strip ret))
+                        | _ -> failwith $"{func.Name} parameter {idx}: nonnull_callbacks requires a C function pointer"
+                    else mapType cType
+                let isNullable = not ctx.NativePointerSurface && not reference && isCDataPointer cType && not (nonnullIndices.Contains idx)
                 let finalType = if isNullable then wrapOption fsType else fsType
                 { FsParam.Name = cleanParamName name; Type = finalType })
 
@@ -376,18 +459,42 @@ module FidelityCodeGenerator =
             |> Option.defaultValue false
         let hasReturnsNonnullAttr =
             func.Attributes |> List.exists (fun a -> a.Kind = "ReturnsNonNullAttr")
-        let returnType = mapType func.ReturnType
+        let returnType =
+            match projection |> Option.bind (fun b -> b.ReturnHandle) with
+            | Some name ->
+                if not (isCDataPointer func.ReturnType) then failwith $"{func.Name}: return_handle requires a C data pointer"
+                Generic("CHandle", Named name)
+            | None -> mapType func.ReturnType
         let finalReturnType =
-            if returnIsPointer && not returnNonnull && not hasReturnsNonnullAttr
+            if not ctx.NativePointerSurface && returnIsPointer && not returnNonnull && not hasReturnsNonnullAttr
             then wrapOption returnType
             else returnType
 
-        formatDocDecls func @
-        [
-            LetBinding(func.Name, parameters, finalReturnType, NativeZeroed,
-                      [$"FidelityExtern(\"{libraryName}\", \"{func.Name}\")"])
-        ] @
-        generateDescriptorDecls ctx func
+        let symbol = projection |> Option.map (fun b -> b.Symbol) |> Option.defaultValue func.Name
+        let constants = projection |> Option.map (fun p -> p.ConstantParameters) |> Option.defaultValue []
+        let fixedAt index = constants |> List.tryItem index |> Option.filter ((<>) "")
+        let projected = constants |> List.exists ((<>) "")
+        let nativeName = if projected then func.Name + "Native" else func.Name
+        let nativeFunction = { func with Name = nativeName }
+        let descriptorContext =
+            match projection with
+            | Some p when projected -> { ctx with Bindings = Map.add nativeName { p with Name = nativeName; ConstantParameters = [] } ctx.Bindings }
+            | _ -> ctx
+        let wrapper =
+            if not projected then [] else
+            let args = parameters |> List.mapi (fun index p ->
+                match fixedAt index with
+                | None -> Identifier p.Name
+                | Some value ->
+                    match System.Int64.TryParse value, p.Type with
+                    | (true, _), Named "int" -> Literal value
+                    | _ -> failwith $"{func.Name} parameter {index}: constant projection requires an integer literal and scalar integer parameter")
+            let publicParameters = parameters |> List.indexed |> List.choose (fun(i,p)->if (fixedAt i).IsSome then None else Some p)
+            [ LetBinding(func.Name, publicParameters, finalReturnType, FunctionCall("", nativeName, args), []) ]
+        formatDocDecls { func with Name = symbol } @
+        [ LetBinding(nativeName, parameters, finalReturnType, NativeZeroed,
+                     [$"FidelityExtern(\"{libraryName}\", \"{symbol}\")"]) ] @
+        generateDescriptorDecls descriptorContext nativeFunction @ wrapper
 
     /// Generate FsDecl list for an enum type.
     /// Automatically detects bitmask (flags) enums via value pattern analysis.
@@ -399,6 +506,17 @@ module FidelityCodeGenerator =
     /// Generate FsDecl list for a C struct: a layout module of literal offsets plus its
     /// BAREWire StructDescriptor (docs/14 §2), measured when the pilot measured it.
     let private generateStructDecl (ctx: GenerationContext) (s: CppParser.StructDecl) : FsDecl list =
+        // Measured synchronization unions are opaque storage. Their public
+        // extent/alignment is measured; overlapping implementation members are not fields
+        // consumers may access through a BAREWire struct view.
+        let s =
+            match s.IsUnion, Map.tryFind s.Name ctx.StructLayouts with
+            | true, Some layout ->
+                let storage : CppParser.FieldDecl =
+                    { Name = "Storage"; Type = "unsigned char"; IsConst = false; IsVolatile = false
+                      IsArray = true; ArraySize = Some (layout.SizeBits / 8); IsBitfield = false; BitWidth = None }
+                { s with Fields = [storage] }
+            | _ -> s
         let shape (cType: string) : DescriptorGenerator.FieldShape =
             match resolveIn ctx cType with
             | Unresolved name when ctx.Structs.ContainsKey name -> DescriptorGenerator.StructField name
@@ -407,7 +525,13 @@ module FidelityCodeGenerator =
                 match abiReprOf ctx.DataModel cType resolved with
                 | Some r -> DescriptorGenerator.ScalarField r
                 | None -> DescriptorGenerator.UnknownField cType
-        DescriptorGenerator.structDecls
+        let valueDecls =
+            if ctx.ValueStructs.Contains s.Name then
+                if s.IsUnion || s.Fields |> List.exists (fun field -> field.IsArray || field.IsBitfield) then
+                    failwith $"Value struct '{s.Name}' requires a plain record with scalar or pointer fields"
+                [ RecordType(s.Name, s.Fields |> List.map (fun field -> cleanParamName field.Name, (resolveIn ctx field.Type |> clefTypeOf)), s.Documentation, []) ]
+            else []
+        valueDecls @ DescriptorGenerator.structDecls
             { Structs = ctx.Structs; Layouts = ctx.StructLayouts; Model = ctx.DataModel; Shape = shape }
             s
 
@@ -708,7 +832,17 @@ module FidelityCodeGenerator =
         OnMacro = fun m ->
             let decls = generateMacroDeclIfNumeric m
             if decls.IsEmpty then GNone else GMacro decls
-        OnTypedef = fun _ -> GNone
+        OnTypedef = fun td ->
+            if not ctx.NativePointerSurface && ctx.Bindings.IsEmpty then GNone
+            else
+                match resolveIn ctx td.UnderlyingType with
+                | Scalar r when r.Bits > 0 ->
+                    let size = if r.Family = TypeMapper.Float && r.Bits = 80 then 16 else (r.Bits + 7) / 8
+                    GStruct [
+                        Comment $"/// Storage for C typedef `{td.Name}`; {DescriptorGenerator.widthProvenance ctx.DataModel r}."
+                        SubModule(td.Name, [LiteralBinding("Size", string size); LiteralBinding("Alignment", string size)])
+                        BlankLine ]
+                | _ -> GNone
         OnNamespace = fun _ -> GNone
         OnClass = fun c ->
             if c.Name = "" then GNone
@@ -756,6 +890,10 @@ module FidelityCodeGenerator =
           DataModel = model
           StructLayouts = structLayouts
           NonnullAnnotations = None
+          NativePointerSurface = false
+          Bindings = Map.empty
+          ValueStructs = Set.empty
+          PhantomMarkers = Set.empty
           KnownClasses = CppClassAnalysis.buildClassMap declarations }
 
     /// Generate a Clef module with explicit control over what gets emitted.
@@ -774,6 +912,16 @@ module FidelityCodeGenerator =
         : string =
 
         let opaqueHandleDecls = generateOpaqueHandleDecls handlesToDeclare
+        let markerDecls =
+            if ctx.NativePointerSurface then []
+            else
+                let declared =
+                    if ctx.Bindings.IsEmpty then []
+                    else declarations |> List.choose (function
+                        | CppParser.Declaration.Struct s when s.Name <> "" && not (ctx.ValueStructs.Contains s.Name) -> Some s.Name
+                        | _ -> None)
+                declared @ (if openModules.IsEmpty then Set.toList ctx.PhantomMarkers else [])
+                |> List.distinct |> List.filter (fun name -> not (ctx.ValueStructs.Contains name)) |> List.map OpaqueMarker
 
         let groups =
             DeclarationAlgebra.cataDeclarations (generationAlgebra ctx libraryName) declarations
@@ -803,8 +951,11 @@ module FidelityCodeGenerator =
             match (openModules @ vocabularyOpens) |> List.distinct with
             | [] -> []
             | opens -> (opens |> List.map OpenModule) @ [BlankLine]
-        let allDecls = openDecls @ opaqueHandleDecls @ enums @ structs @ functions @ macroSection @ cppSection
-        let moduleDecl = Module(namespace', comment, allDecls)
+        let allDecls = openDecls @ opaqueHandleDecls @ markerDecls @ enums @ structs @ functions @ macroSection @ cppSection
+        let surfaceComment =
+            if ctx.NativePointerSurface then comment + " — EXPERIMENTAL legacy ABI surface; not current Clef source"
+            else comment
+        let moduleDecl = Module(namespace', surfaceComment, allDecls)
 
         CodeRenderer.render moduleDecl
 

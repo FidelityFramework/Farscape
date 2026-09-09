@@ -577,6 +577,26 @@ module CppParser =
         let results = ResizeArray<Declaration>()
         let mutable currentFile: string option = None
 
+        // Clang emits anonymous typedef unions as a RecordDecl followed by a TypedefDecl
+        // whose RecordType points back to that declaration. Preserve the typedef's name
+        // so pthread_mutex_t/cond_t (and other public storage types) are not dropped.
+        let rec descendants node = seq {
+            yield node
+            for child in getArray node "inner" do yield! descendants child
+        }
+        let anonymousRecordNames =
+            descendants root
+            |> Seq.filter (fun node -> getStringOr node "kind" "" = "TypedefDecl")
+            |> Seq.collect (fun node ->
+                let name = getStringOr node "name" ""
+                descendants node |> Seq.choose (fun child ->
+                    if getStringOr child "kind" "" <> "RecordType" then None
+                    else
+                        getObject child "decl" |> Option.bind (fun decl ->
+                            if getStringOr decl "name" "" <> "" then None
+                            else getString decl "id" |> Option.map (fun id -> id, name))))
+            |> Map.ofSeq
+
         if verbose then
             match includeRoot with
             | Some root -> printfn "[CppParser] Include root scoping: %s" root
@@ -636,7 +656,11 @@ module CppParser =
 
                 | "RecordDecl" ->
                     match processRecordDecl node with
-                    | Some structDecl -> results.Add(Struct structDecl)
+                    | Some structDecl ->
+                        let name =
+                            if structDecl.Name <> "" then structDecl.Name
+                            else getString node "id" |> Option.bind (fun id -> Map.tryFind id anonymousRecordNames) |> Option.defaultValue ""
+                        results.Add(Struct { structDecl with Name = name })
                     | None -> ()
 
                 | "EnumDecl" ->
@@ -971,7 +995,7 @@ module CppParser =
             parser {
                 do! pSpaces
                 do! pstring "Type: " >>% ()
-                do! optional (pstring "struct " >>% ()) >>% ()
+                do! optional ((pstring "struct " <|> pstring "union ") >>% ()) >>% ()
                 let! name = many1Chars (satisfyL (fun c -> c <> '\n' && c <> '\r' && c <> ' ') "name char")
                 do! pSkipLine
                 return name
@@ -1007,6 +1031,7 @@ module CppParser =
         static let pLayoutBlock =
             parser {
                 let! name = pStructName
+                do! skipMany pNewline
                 do! pSkipLine // "Layout: <ASTRecordLayout" line
                 let! size = pIntField "Size:"
                 let! dataSize = pIntField "DataSize:"
@@ -1134,7 +1159,12 @@ module CppParser =
                 let includeDirective = $"#include \"{headerFile}\""
                 let sizeofRefs =
                     structNames
-                    |> List.mapi (fun i name -> $"void *_fs_layout_{i} = (void*)sizeof(struct {name});")
+                    |> List.mapi (fun i name ->
+                        let cType =
+                            if name.StartsWith("typedef ") then name.Substring(8)
+                            elif name.StartsWith("union ") || name.StartsWith("struct ") then name
+                            else $"struct {name}"
+                        $"void *_fs_layout_{i} = (void*)sizeof({cType});")
                     |> String.concat "\n"
                 File.WriteAllText(tempFile, $"{includeDirective}\n{sizeofRefs}\n")
 
@@ -1156,7 +1186,7 @@ module CppParser =
                     printfn "[CppParser] Layout extraction: clang %s" startInfo.Arguments
 
                 use proc = Process.Start(startInfo)
-                proc.StandardOutput.ReadToEnd() |> ignore
+                let stdout = proc.StandardOutput.ReadToEnd()
                 let stderr = proc.StandardError.ReadToEnd()
                 proc.WaitForExit()
 
@@ -1164,12 +1194,14 @@ module CppParser =
                     printfn "[CppParser] Layout stderr: %d bytes, exit code: %d" stderr.Length proc.ExitCode
 
                 // Parse layout data from stderr (clang may return non-zero due to unused variables)
-                let layouts = parseRecordLayouts stderr
+                let layouts = parseRecordLayouts (stdout + "\n" + stderr)
 
                 // Filter to only the requested struct names
                 let filtered =
                     structNames
-                    |> List.choose (fun name -> layouts |> Map.tryFind name |> Option.map (fun l -> (name, l)))
+                    |> List.choose (fun name ->
+                        let key = name.Replace("typedef ", "").Replace("struct ", "").Replace("union ", "")
+                        layouts |> Map.tryFind key |> Option.map (fun l -> (key, l)))
                     |> Map.ofList
 
                 Ok filtered

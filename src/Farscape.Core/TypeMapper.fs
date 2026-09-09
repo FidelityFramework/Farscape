@@ -179,7 +179,7 @@ module TypeMapper =
     let clefSpelling (family: Family) : string =
         match family with
         | Signed -> "int"
-        | Unsigned -> "uint"
+        | Unsigned -> "int"
         | Float -> "float"
         | Bool -> "bool"
         | Void -> "unit"

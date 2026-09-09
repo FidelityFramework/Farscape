@@ -114,6 +114,47 @@ module PilotSerializer =
             if opts.GenerateDescriptors then
                 TomlTable.add "generate_descriptors" (TomlValue.Boolean true) table
             else table
+        let table =
+            if opts.NativePointerSurface then
+                TomlTable.add "experimental_native_pointer_surface" (TomlValue.Boolean true) table
+            else table
+        let table =
+            if opts.CHeaderMode then TomlTable.add "c_header_mode" (TomlValue.Boolean true) table
+            else table
+        let bindings = opts.Bindings |> List.map (fun binding ->
+            TomlTable.empty
+            |> TomlTable.add "name" (TomlValue.String binding.Name)
+            |> TomlTable.add "symbol" (TomlValue.String binding.Symbol)
+            |> TomlTable.add "reference_parameters" (TomlValue.Array (binding.ReferenceParameters |> List.map (int64 >> TomlValue.Integer)))
+            |> TomlTable.add "read_only_reference_parameters" (TomlValue.Array (binding.ReadOnlyReferenceParameters |> List.map (int64 >> TomlValue.Integer)))
+            |> TomlTable.add "constant_parameters" (TomlValue.Array (binding.ConstantParameters |> List.map TomlValue.String))
+            |> TomlTable.add "reference_elements" (TomlValue.Array (binding.ReferenceElements |> List.map TomlValue.String))
+            |> TomlTable.add "string_parameters" (TomlValue.Array (binding.StringParameters |> List.map (int64 >> TomlValue.Integer)))
+            |> TomlTable.add "nonnull_callbacks" (TomlValue.Array (binding.NonnullCallbacks |> List.map (int64 >> TomlValue.Integer)))
+            |> TomlTable.add "parameter_handles" (TomlValue.Array (binding.ParameterHandles |> List.map TomlValue.String))
+            |> (fun t -> match binding.ReturnHandle with Some name -> TomlTable.add "return_handle" (TomlValue.String name) t | None -> t)
+            |> (fun t -> match binding.Ownership with
+                         | Some transfer ->
+                             let spelling = match transfer with CallerOwns -> "caller_owns" | CalleeOwns -> "callee_owns" | Borrowed -> "borrowed"
+                             TomlTable.add "ownership" (TomlValue.String spelling) t
+                         | None -> t)
+            |> TomlValue.Table)
+        let table = if bindings.IsEmpty then table else TomlTable.add "bindings" (TomlValue.Array bindings) table
+        let table = if opts.DescriptorOnlyDependencies then TomlTable.add "descriptor_only_dependencies" (TomlValue.Boolean true) table else table
+        let table = if opts.LinkLibraries then TomlTable.add "link_libraries" (TomlValue.Boolean true) table else table
+        let table = if opts.TypedProtocol then TomlTable.add "typed_protocol" (TomlValue.Boolean true) table else table
+        let table = if opts.ValueStructs.IsEmpty then table else TomlTable.add "value_structs" (TomlValue.Array (opts.ValueStructs |> List.map TomlValue.String)) table
+        let mappings = opts.MappedReturns |> List.map (fun m ->
+            [ "name", m.Name; "acquire", m.Acquire; "release", m.Release
+              "schema", m.Schema; "element", m.Element; "access", m.Access
+              "owner_parameter", m.OwnerParameter; "stride_parameter", m.StrideParameter
+              "rows_parameter", m.RowsParameter; "width_parameter", m.WidthParameter
+              "cookie_parameter", m.CookieParameter ]
+            |> List.fold (fun t (k, v) -> TomlTable.add k (TomlValue.String v) t) TomlTable.empty
+            |> TomlTable.add "alignment" (TomlValue.Integer (int64 m.Alignment))
+            |> TomlTable.add "failure_status" (TomlValue.Integer (int64 m.FailureStatus))
+            |> TomlValue.Table)
+        let table = if mappings.IsEmpty then table else TomlTable.add "mapped_returns" (TomlValue.Array mappings) table
         TomlValue.Table table
 
     /// Serialize a CallbackSpec to a TOML table value.
@@ -402,7 +443,58 @@ module PilotSerializer =
                 match TomlTable.tryFind "generate_descriptors" table with
                 | Some (TomlValue.Boolean b) -> b
                 | _ -> false
-            Some { AbiCriticalStructs = abiStructs; GenerateDescriptors = generateDescriptors }
+            let nativePointerSurface =
+                match TomlTable.tryFind "experimental_native_pointer_surface" table with
+                | Some (TomlValue.Boolean b) -> b
+                | _ -> false
+            let cHeaderMode =
+                match TomlTable.tryFind "c_header_mode" table with
+                | Some (TomlValue.Boolean b) -> b
+                | _ -> false
+            let bindings =
+                match TomlTable.tryFind "bindings" table with
+                | Some (TomlValue.Array items) -> items |> List.map (function
+                    | TomlValue.Table binding ->
+                        let name = optionalString "name" binding |> Option.defaultWith (fun () -> failwith "options.bindings requires name")
+                        let indices key = match TomlTable.tryFind key binding with
+                                          | Some (TomlValue.Array values) -> values |> List.map (function TomlValue.Integer i -> int i | _ -> failwith $"{key} requires integer indices")
+                                          | _ -> []
+                        let handles = match TomlTable.tryFind "parameter_handles" binding with
+                                      | Some (TomlValue.Array values) -> values |> List.map (function TomlValue.String name -> name | _ -> failwith "parameter_handles requires type names")
+                                      | _ -> []
+                        { Name = name; Symbol = optionalString "symbol" binding |> Option.defaultValue name
+                          ReferenceParameters = indices "reference_parameters"
+                          ReadOnlyReferenceParameters = indices "read_only_reference_parameters"
+                          ConstantParameters = match TomlTable.tryFind "constant_parameters" binding with Some (TomlValue.Array xs) -> xs |> List.map (function TomlValue.String x -> x | _ -> failwith "constant_parameters requires integer constants") | _ -> []
+                          ReferenceElements = match TomlTable.tryFind "reference_elements" binding with Some (TomlValue.Array xs) -> xs |> List.map (function TomlValue.String x -> x | _ -> failwith "reference_elements requires C element type names") | _ -> []
+                          StringParameters = indices "string_parameters"; NonnullCallbacks = indices "nonnull_callbacks"
+                          ParameterHandles = handles; ReturnHandle = optionalString "return_handle" binding
+                          Ownership = optionalString "ownership" binding |> Option.map (function
+                              | "caller_owns" -> CallerOwns | "callee_owns" -> CalleeOwns | "borrowed" -> Borrowed
+                              | other -> failwith $"Unknown binding ownership '{other}'") }
+                    | _ -> failwith "options.bindings requires tables")
+                | _ -> []
+            let descriptorOnly = TomlTable.tryFind "descriptor_only_dependencies" table = Some (TomlValue.Boolean true)
+            let mappedReturns =
+                match TomlTable.tryFind "mapped_returns" table with
+                | Some (TomlValue.Array items) -> items |> List.map (function
+                    | TomlValue.Table mapping ->
+                        let text key = optionalString key mapping |> Option.defaultWith (fun () -> failwith $"options.mapped_returns requires {key}")
+                        let number key = match TomlTable.tryFind key mapping with Some (TomlValue.Integer value) -> int value | _ -> failwith $"options.mapped_returns requires integer {key}"
+                        { Name = text "name"; Acquire = text "acquire"; Release = text "release"
+                          Schema = text "schema"; Element = text "element"; Alignment = number "alignment"; Access = text "access"
+                          OwnerParameter = text "owner_parameter"; StrideParameter = text "stride_parameter"
+                          RowsParameter = text "rows_parameter"; WidthParameter = text "width_parameter"
+                          CookieParameter = text "cookie_parameter"; FailureStatus = number "failure_status" }
+                    | _ -> failwith "options.mapped_returns requires tables")
+                | _ -> []
+            Some { AbiCriticalStructs = abiStructs; GenerateDescriptors = generateDescriptors
+                   NativePointerSurface = nativePointerSurface; CHeaderMode = cHeaderMode
+                   Bindings = bindings; DescriptorOnlyDependencies = descriptorOnly
+                   LinkLibraries = TomlTable.tryFind "link_libraries" table = Some (TomlValue.Boolean true)
+                   TypedProtocol = TomlTable.tryFind "typed_protocol" table = Some (TomlValue.Boolean true)
+                   MappedReturns = mappedReturns
+                   ValueStructs = match TomlTable.tryFind "value_structs" table with Some (TomlValue.Array values) -> values |> List.map (function TomlValue.String name -> name | _ -> failwith "value_structs requires type names") | _ -> [] }
         | _ -> None
 
     /// Deserialize the optional [callbacks] section.
@@ -570,7 +662,7 @@ module PilotSerializer =
                    Classes = classes }
 
     /// Deserialize a TomlDocument to a PilotProject.
-    let deserialize (doc: TomlDocument) : Result<PilotProject, string> =
+    let private deserializeCore (doc: TomlDocument) : Result<PilotProject, string> =
         match deserializeLibrary doc, deserializeOutput doc, deserializeNamespaces doc with
         | Ok lib, Ok output, Ok namespaces ->
             Ok { Library = lib
@@ -584,6 +676,11 @@ module PilotSerializer =
                  Layer3 = None
                  CppConfig = deserializeCppConfig doc }
         | Error e, _, _ | _, Error e, _ | _, _, Error e -> Error e
+
+    /// Invalid explicit projection annotations are reported as project errors.
+    let deserialize (doc: TomlDocument) : Result<PilotProject, string> =
+        try deserializeCore doc
+        with ex -> Error ex.Message
 
     // =========================================================================
     // File I/O

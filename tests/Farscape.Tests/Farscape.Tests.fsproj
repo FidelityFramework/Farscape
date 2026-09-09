@@ -27,6 +27,9 @@
     <Compile Include="OpaqueHandleTests.fs" />
     <Compile Include="PilotDiscoveryTests.fs" />
     <Compile Include="CallbackTests.fs" />
+    <Compile Include="PthreadBindingTests.fs" />
+    <Compile Include="TypedProtocolTests.fs" />
+    <Compile Include="MappedReturnTests.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

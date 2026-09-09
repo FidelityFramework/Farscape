@@ -263,6 +263,9 @@ module WrapperCodeGenerator =
 
     /// Generate FsDecl list for a single wrapper function.
     let private generateWrapperDecls
+        (sourceContext: FidelityCodeGenerator.GenerationContext option)
+        (nativePointerSurface: bool)
+        (passthroughFunctions: Set<string>)
         (typedefMap: Map<string, string>)
         (model: PlatformABI)
         (opaqueHandles: Set<string>)
@@ -272,7 +275,10 @@ module WrapperCodeGenerator =
         (func: CppParser.FunctionDecl)
         : FsDecl list =
 
-        let mapType = FidelityCodeGenerator.mapCTypeToFidelityType typedefMap model opaqueHandles Map.empty
+        let errorHandling = if passthroughFunctions.Contains func.Name then NoErrors else errorHandling
+        let mapType =
+            if nativePointerSurface then FidelityCodeGenerator.mapCTypeToNativeSurface typedefMap model Map.empty
+            else FidelityCodeGenerator.mapCTypeToFidelityType typedefMap model opaqueHandles Map.empty
         let pattern = WrapperPatternAnalyzer.analyze func typedefMap
 
         // Collect proven-nonnull parameter indices (same logic as FidelityCodeGenerator)
@@ -322,7 +328,7 @@ module WrapperCodeGenerator =
             |> List.mapi (fun idx (name, cType) ->
                 let fsType = mapType cType
                 let isPointer = FidelityCodeGenerator.isCDataPointer cType
-                let isNullable = isPointer && not (nonnullIndices.Contains idx)
+                let isNullable = not nativePointerSurface && isPointer && not (nonnullIndices.Contains idx)
                 let finalType = if isNullable then FidelityCodeGenerator.wrapOption fsType else fsType
                 { FsParam.Name = cleanParamName name; Type = finalType })
 
@@ -335,9 +341,15 @@ module WrapperCodeGenerator =
                 |> Option.defaultValue false
             let hasReturnsNonnullAttr =
                 func.Attributes |> List.exists (fun a -> a.Kind = "ReturnsNonNullAttr")
-            if returnIsPointer && not returnNonnull && not hasReturnsNonnullAttr
+            if not nativePointerSurface && returnIsPointer && not returnNonnull && not hasReturnsNonnullAttr
             then FidelityCodeGenerator.wrapOption baseRetType
             else baseRetType
+        let parameters, rawRetType =
+            match sourceContext with
+            | Some ctx ->
+                FidelityCodeGenerator.generateFunctionDecls ctx "" func
+                |> List.pick (function LetBinding(_, parameters, ret, _, _) -> Some (parameters, ret) | _ -> None)
+            | None -> parameters, rawRetType
         // For OpaqueHandleReturn: use the actual handle type if the return maps to a known opaque handle
         let resolvedHandleType =
             match baseRetType with
@@ -346,7 +358,10 @@ module WrapperCodeGenerator =
         let retType = wrapperReturnType semantic rawRetType errorHandling resolvedHandleType
 
         let paramNames = parameters |> List.map (fun p -> p.Name)
-        let body = generateBody bindingsModule func.Name paramNames semantic errorHandling func.ReturnType
+        let comparisonType =
+            if nativePointerSurface && baseRetType = Named "int32" then "int32_t"
+            else func.ReturnType
+        let body = generateBody bindingsModule func.Name paramNames semantic errorHandling comparisonType
 
         formatDocDecls func @
         [
@@ -377,7 +392,10 @@ module WrapperCodeGenerator =
     /// Generate a complete wrapper module from parsed declarations.
     /// Architecture: Catamorphism → WrapperPattern → FsExpr tree → FsDecl → CodeRenderer.render
     /// PlatformABI determines concrete widths for C int/long in NTU output.
-    let generate
+    let generateWithContext
+        (sourceContext: FidelityCodeGenerator.GenerationContext option)
+        (nativePointerSurface: bool)
+        (passthroughFunctions: Set<string>)
         (declarations: CppParser.Declaration list)
         (wrapperNamespace: string)
         (libraryName: string)
@@ -402,7 +420,7 @@ module WrapperCodeGenerator =
             groups
             |> List.choose (function WFunc f -> Some f | WNone -> None)
             |> List.distinctBy (fun f -> f.Name)
-            |> List.collect (generateWrapperDecls typedefMap model opaqueHandles bindingsModule errorHandling nonnullAnnotations)
+            |> List.collect (generateWrapperDecls sourceContext nativePointerSurface passthroughFunctions typedefMap model opaqueHandles bindingsModule errorHandling nonnullAnnotations)
 
         // Phase 4: Build typed FsDecl tree; wrapper module opens the bindings module
         let openDecl = Comment $"open {bindingsModule}"
@@ -441,14 +459,14 @@ module WrapperCodeGenerator =
                   captureErrorDecl; BlankLine ]
             | UseReturnCode (libPrefix, describeModuleName) ->
                 let openErrorModule = Comment $"open {describeModuleName}"
-                let openErrorSub = Comment $"open {describeModuleName}.ReturnCode"
+                // ReturnCode.clef defines describe directly in this module.
                 let captureErrorBody =
                     FunctionCall("", "describe", [Identifier "code"])
                 let captureErrorDecl =
                     LetBinding(captureReturnCodeName,
                         [ { Name = "code"; Type = Named "int" } ],
                         Named "string", captureErrorBody, [])
-                [ openErrorModule; openErrorSub; BlankLine
+                [ openErrorModule; BlankLine
                   XmlDoc $"Capture {libPrefix} return code as human-readable error string."
                   captureErrorDecl; BlankLine ]
             | UseNullWithReason reasonFn ->
@@ -459,8 +477,22 @@ module WrapperCodeGenerator =
                   BlankLine ]
             | NoErrors -> []
 
-        let allDecls = openDecl :: errorDecls @ BlankLine :: functions
+        let typeOpens =
+            if sourceContext.IsSome && bindingsModule.Contains('.') then
+                [ OpenModule (bindingsModule.Substring(0, bindingsModule.LastIndexOf('.')) + ".Types") ]
+            else []
+        let allDecls = typeOpens @ (openDecl :: errorDecls @ BlankLine :: functions)
         let moduleDecl = Module(wrapperNamespace, libraryName, allDecls)
 
         // Phase 5: Render to string (the ONLY StringBuilder, in CodeRenderer)
         CodeRenderer.render moduleDecl
+
+    let generateWithOverrides nativePointerSurface passthroughFunctions declarations wrapperNamespace libraryName bindingsModule errorHandling model nonnullAnnotations =
+        generateWithContext None nativePointerSurface passthroughFunctions declarations wrapperNamespace libraryName bindingsModule errorHandling model nonnullAnnotations
+
+    /// Default source surface remains unchanged for existing pilots.
+    let generateWithSurface nativePointerSurface declarations wrapperNamespace libraryName bindingsModule errorHandling model nonnullAnnotations =
+        generateWithOverrides nativePointerSurface Set.empty declarations wrapperNamespace libraryName bindingsModule errorHandling model nonnullAnnotations
+
+    let generate declarations wrapperNamespace libraryName bindingsModule errorHandling model nonnullAnnotations =
+        generateWithSurface false declarations wrapperNamespace libraryName bindingsModule errorHandling model nonnullAnnotations

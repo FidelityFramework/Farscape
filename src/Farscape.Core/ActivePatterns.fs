@@ -91,6 +91,10 @@ module ActivePatterns =
             if n.Length > 0 && System.Char.IsDigit(n.[0]) then $"_{n}"
             else n
 
+    /// Quote a declaration/call identifier without renaming exported C symbols.
+    let quoteIdentifier (name: string) =
+        if fsharpKeywords.Contains name then $"``{name}``" else name
+
     // =========================================================================
     // Opaque Handle Detection
     // =========================================================================

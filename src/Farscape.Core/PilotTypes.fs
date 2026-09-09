@@ -90,12 +90,60 @@ module PilotTypes =
         Overrides: Map<string, ErrorConvention>
     }
 
+    /// Ownership declared by a boundary profile, never guessed from pointer syntax.
+    type BindingOwnership = CallerOwns | CalleeOwns | Borrowed
+
+    /// Projections of parsed C declarations, including explicit scalar buffer element contracts.
+    type BindingProjection = {
+        Name: string
+        Symbol: string
+        ReferenceParameters: int list
+        ReadOnlyReferenceParameters: int list
+        /// Explicit element contract for a declared bounded foreign buffer (indexed by parameter).
+        ReferenceElements: string list
+        ConstantParameters: string list
+        StringParameters: int list
+        NonnullCallbacks: int list
+        ParameterHandles: string list
+        ReturnHandle: string option
+        Ownership: BindingOwnership option
+    }
+
+    /// A scoped projection of an actual native mapped-pointer result. Parameter
+    /// names refer to parsed declarations; no public handle reinterpretation exists.
+    type MappedReturnProjection = {
+        Name: string
+        Acquire: string
+        Release: string
+        Schema: string
+        Element: string
+        Alignment: int
+        Access: string
+        OwnerParameter: string
+        StrideParameter: string
+        RowsParameter: string
+        WidthParameter: string
+        CookieParameter: string
+        FailureStatus: int
+    }
+
     /// Generation options from [options] section of .pilot.toml
     type ProjectOptions = {
         /// Struct names requiring ABI-exact layout (e.g., ioctl args, DMA descriptors)
         AbiCriticalStructs: string list
         /// Whether to generate BAREWire StructDescriptor values
         GenerateDescriptors: bool
+        /// Experimental legacy ABI prototype only, not current Clef source policy.
+        /// Callback entries stay typed FnPtr values; descriptors retain the ABI contract.
+        NativePointerSurface: bool
+        /// Parse C ABI headers as C even when they contain guarded C++ conveniences.
+        CHeaderMode: bool
+        Bindings: BindingProjection list
+        DescriptorOnlyDependencies: bool
+        ValueStructs: string list
+        TypedProtocol: bool
+        LinkLibraries: bool
+        MappedReturns: MappedReturnProjection list
     }
 
     // =========================================================================
@@ -153,8 +201,8 @@ module PilotTypes =
 
     /// Annotations for pointer parameters/returns proven non-null by developer knowledge.
     /// Used to override the default nullable policy: unannotated C pointers are nullable
-    /// (Option<nativeptr<byte>> / Option<nativeint>), and NonNullAttr or these annotations
-    /// prove non-null (nativeptr<byte> / nativeint).
+    /// (`option<CHandle<'T>>`), and NonNullAttr or these annotations prove
+    /// a nonnull opaque `CHandle<'T>`.
     type NonnullAnnotations = {
         /// Function name → list of 0-based parameter indices that are proven non-null
         Parameters: Map<string, int list>

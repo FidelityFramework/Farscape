@@ -120,9 +120,9 @@ module LayoutModuleRendering =
             LiteralBinding("heightOffset", "0")
             ValueBinding("Descriptor", Named "StructDescriptor", RecordBlock [ "Name", Literal "\"drm_mode_create_dumb\"" ]) ])
         let output = CodeRenderer.render (Module("Test", "test", [decl]))
-        Assert.Contains("module drm_mode_create_dumb =\n        [<Literal>]\n        let Size = 32\n", output)
-        Assert.Contains("        let heightOffset = 0\n", output)
-        Assert.Contains("        let Descriptor : StructDescriptor =", output)
+        Assert.Contains("module drm_mode_create_dumb =\n    [<Literal>]\n    let Size = 32\n", output)
+        Assert.Contains("    let heightOffset = 0\n", output)
+        Assert.Contains("    let Descriptor : StructDescriptor =", output)
 
 // =========================================================================
 // FidelityCodeGenerator Tests (ABI-critical dispatch)
@@ -211,7 +211,7 @@ generate_descriptors = true
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
             ErrorConventions = None
-            Options = Some { AbiCriticalStructs = ["drm_mode_create_dumb"]; GenerateDescriptors = true }
+            Options = Some { AbiCriticalStructs = ["drm_mode_create_dumb"]; GenerateDescriptors = true; NativePointerSurface = false; CHeaderMode = false; Bindings = []; DescriptorOnlyDependencies = false; ValueStructs = []; TypedProtocol = false; LinkLibraries = false; MappedReturns = [] }
             Callbacks = None
             Nonnull = None
             ProtocolConfig = None

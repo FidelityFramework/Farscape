@@ -84,6 +84,14 @@ module BindingGenerator =
                 Advisories = []
             }
 
+    /// Locate a platform dependency when a pilot lives in a nested experimental tree.
+    let rec private findProjectAbove directory fileName =
+        let candidate = Path.Combine(directory, fileName)
+        if File.Exists candidate then Some candidate
+        else
+            let parent = Directory.GetParent directory
+            if isNull parent then None else findProjectAbove parent.FullName fileName
+
     /// Generate a canonical .fidproj file for the binding library.
     /// Fully automatic — derives everything from what Farscape already knows.
     let private generateFidproj
@@ -117,7 +125,11 @@ module BindingGenerator =
         sb.AppendLine("[package]") |> ignore
         sb.AppendLine($"name = \"{packageName}\"") |> ignore
         sb.AppendLine("version = \"0.1.0\"") |> ignore
-        sb.AppendLine($"description = \"Generated bindings for {project.Library.Name}.\"") |> ignore
+        let description =
+            if project.Options |> Option.exists (fun opts -> opts.NativePointerSurface) then
+                $"Experimental legacy {project.Library.Name} ABI surface; not current Clef source."
+            else $"Generated bindings for {project.Library.Name}."
+        sb.AppendLine($"description = \"{description}\"") |> ignore
         sb.AppendLine() |> ignore
         sb.AppendLine("[compilation]") |> ignore
         sb.AppendLine("target = \"cpu\"") |> ignore
@@ -129,6 +141,13 @@ module BindingGenerator =
             sb.AppendLine($"    \"{src}\",") |> ignore
         sb.AppendLine("]") |> ignore
         sb.AppendLine() |> ignore
+        if project.Options |> Option.exists (fun o -> o.LinkLibraries) then
+            let libraries = project.Namespaces |> List.map (fun n -> n.Library) |> List.filter ((<>) "c") |> List.distinct
+            if not libraries.IsEmpty then
+                sb.AppendLine("[link]") |> ignore
+                let values = libraries |> List.map (fun name -> "\"" + name + "\"") |> String.concat ", "
+                sb.AppendLine($"libraries = [{values}]") |> ignore
+                sb.AppendLine() |> ignore
         sb.AppendLine("[platform]") |> ignore
         sb.AppendLine("runtime_model = \"libc\"") |> ignore
         sb.AppendLine("os = \"linux\"") |> ignore
@@ -139,11 +158,11 @@ module BindingGenerator =
         // If Fidelity.Platform.fidproj exists in the same directory (e.g., sub-libraries within
         // Fidelity.Platform), reference it directly. Otherwise, compute relative path to the
         // sibling repo following the standard layout: <repo>/CPU/Linux/x86_64/
-        let platformFidprojLocal = Path.Combine(fidprojDir, "Fidelity.Platform.fidproj")
+        let platformFidprojLocal = findProjectAbove fidprojDir "Fidelity.Platform.fidproj"
         let platformDepPath =
-            if File.Exists(platformFidprojLocal) then
-                "Fidelity.Platform.fidproj"
-            else
+            match platformFidprojLocal with
+            | Some path -> Path.GetRelativePath(fidprojDir, path).Replace('\\', '/')
+            | None ->
                 // Standard sibling repo layout: go up to repos root, then into Fidelity.Platform
                 let reposDir = Path.GetFullPath(Path.Combine(fidprojDir, "../../../../"))
                 let targetFidproj = Path.Combine(reposDir, "Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Platform.fidproj")
@@ -152,11 +171,15 @@ module BindingGenerator =
                 else
                     // Absolute path as last resort
                     Path.GetFullPath(targetFidproj).Replace('\\', '/')
-        sb.AppendLine($"Fidelity.Platform = {{ path = \"{platformDepPath}\" }}") |> ignore
+        let descriptorOnly = project.Options |> Option.exists (fun opts -> opts.DescriptorOnlyDependencies)
+        if not descriptorOnly then
+            sb.AppendLine($"Fidelity.Platform = {{ path = \"{platformDepPath}\" }}") |> ignore
         // The descriptors reference BAREWire's Hardware and Descriptors vocabularies
         let bareWireDepPath =
-            let reposDir = Path.GetFullPath(Path.Combine(fidprojDir, "../../../../"))
-            let targetFidproj = Path.Combine(reposDir, "BAREWire/src/BAREWire.fidproj")
+            let platformDirectory = Path.GetDirectoryName(Path.GetFullPath(Path.Combine(fidprojDir, platformDepPath)))
+            let reposDir = Path.GetFullPath(Path.Combine(platformDirectory, "../../../../"))
+            let metadataProject = if descriptorOnly then "BAREWire.BindingMetadata.fidproj" else "BAREWire.fidproj"
+            let targetFidproj = Path.Combine(reposDir, "BAREWire/src", metadataProject)
             if File.Exists(targetFidproj) then
                 Path.GetRelativePath(fidprojDir, targetFidproj).Replace('\\', '/')
             else
@@ -221,7 +244,16 @@ module BindingGenerator =
                         |> List.tryFind (fun ip ->
                             let fullIp = Path.GetFullPath ip
                             fullPath.StartsWith fullIp)
-                    CppParser.parseWithIncludeRoot headerPath project.Library.IncludePaths project.Library.Defines includeRoot project.Library.MacroPrefixes verbose)
+                    if project.Options |> Option.exists (fun opts -> opts.NativePointerSurface || opts.CHeaderMode) then
+                        // Native carrier pilots bind the C ABI. pthread.h also contains guarded
+                        // C++ cleanup classes, which must not turn its public unions into C++ PODs.
+                        CppParser.parseHeader {
+                            HeaderFile = headerPath; IncludePaths = project.Library.IncludePaths
+                            Defines = project.Library.Defines; IncludeRoot = includeRoot
+                            MacroPrefixes = project.Library.MacroPrefixes; IncludeMacros = true
+                            Verbose = verbose; CppMode = false }
+                    else
+                        CppParser.parseWithIncludeRoot headerPath project.Library.IncludePaths project.Library.Defines includeRoot project.Library.MacroPrefixes verbose)
 
             let headerErrors = headerResults |> List.choose (function Error e -> Some e | _ -> None)
             if not headerErrors.IsEmpty then
@@ -257,10 +289,27 @@ module BindingGenerator =
                            InterfaceResolution = "dlsym"
                            DestroyFlag = 1u } : PilotTypes.ProtocolConfig)
 
-                let xmlTypeDecls = xmlProtocols |> List.map ProtocolParser.toTypeDeclarations
+                let typedProtocol = project.Options |> Option.exists (fun o -> o.TypedProtocol)
+                let xmlTypeDecls = if typedProtocol then [] else xmlProtocols |> List.map ProtocolParser.toTypeDeclarations
 
                 let allDeclLists = headerDeclLists @ xmlTypeDecls
                 let declarations = DeclarationAlgebra.mergeDeclarations allDeclLists
+                let projections = project.Options |> Option.map (fun opts -> opts.Bindings) |> Option.defaultValue []
+                let aliases = projections |> List.choose (fun binding ->
+                    let original = declarations |> List.tryPick (function CppParser.Declaration.Function f when f.Name = binding.Symbol -> Some f | _ -> None)
+                    match original with
+                    | None -> failwith $"Binding projection '{binding.Name}' requires C symbol '{binding.Symbol}' in the parsed headers"
+                    | Some original ->
+                        for index in binding.ReferenceParameters @ binding.ReadOnlyReferenceParameters @ binding.NonnullCallbacks @ binding.StringParameters do
+                            if index < 0 || index >= original.Parameters.Length then failwith $"Binding projection '{binding.Name}' has invalid parameter index {index}"
+                        if binding.ReferenceParameters |> List.exists (fun index -> List.contains index binding.ReadOnlyReferenceParameters) then
+                            failwith $"Binding projection '{binding.Name}' declares a parameter both writable and read-only"
+                        if binding.ConstantParameters.Length > original.Parameters.Length then failwith $"Binding projection '{binding.Name}' has too many constant parameters"
+                        if binding.ReferenceElements.Length > original.Parameters.Length then failwith $"Binding projection '{binding.Name}' has too many reference elements"
+                        if binding.ParameterHandles.Length > original.Parameters.Length then failwith $"Binding projection '{binding.Name}' has too many parameter handles"
+                        if binding.Name = binding.Symbol then None
+                        else Some (CppParser.Declaration.Function { original with Name = binding.Name }))
+                let declarations = declarations @ aliases
                 let sourceCount = project.Library.Headers.Length + project.Library.XmlProtocols.Length
                 logVerbose $"Merged {declarations.Length} declarations from {sourceCount} source(s)" verbose
 
@@ -300,11 +349,42 @@ module BindingGenerator =
 
                 let ctx =
                     let baseCtx = FidelityCodeGenerator.buildGenerationContext declarations dataModel structLayouts
-                    { baseCtx with NonnullAnnotations = project.Nonnull }
+                    match project.Options with
+                    | Some opts when opts.NativePointerSurface || opts.CHeaderMode ->
+                        for requested in opts.AbiCriticalStructs do
+                            let name = requested.Replace("typedef ", "").Replace("struct ", "").Replace("union ", "")
+                            if baseCtx.Structs.ContainsKey name then
+                                if not (structLayouts.ContainsKey name) then
+                                    failwithf "Native carrier storage '%s' requires a measured layout; header probe did not provide it." name
+                            else
+                                match FidelityCodeGenerator.resolveCType baseCtx.TypedefMap dataModel Set.empty baseCtx.Delegates baseCtx.Enums name with
+                                | FidelityCodeGenerator.Scalar r when r.Bits > 0 -> ()
+                                | _ -> failwithf "Native carrier storage '%s' has no known scalar or measured record representation." name
+                    | _ -> ()
+                    let selectedNames = project.Namespaces |> List.collect (fun n -> n.Functions) |> Set.ofList
+                    let rec markers = function
+                        | CodeAST.Generic("CHandle", CodeAST.Named n) when not (Set.contains n (Set.ofList ["unit"; "int"; "float"; "bool"; "string"])) -> [n]
+                        | CodeAST.Generic(_, t) -> markers t
+                        | CodeAST.FunctionType(args, ret) -> List.collect markers (ret :: args)
+                        | _ -> []
+                    let phantomMarkers =
+                        declarations |> List.collect (function
+                        | CppParser.Declaration.Function f when selectedNames.Contains f.Name ->
+                            (f.ReturnType :: (f.Parameters |> List.map snd)) |> List.collect (fun ty ->
+                                FidelityCodeGenerator.resolveCType baseCtx.TypedefMap dataModel baseCtx.OpaqueHandles baseCtx.Delegates baseCtx.Enums ty
+                                |> FidelityCodeGenerator.clefTypeOf |> markers)
+                        | _ -> [])
+                        |> Set.ofList
+                    { baseCtx with
+                        PhantomMarkers = if project.Options |> Option.exists (fun o -> o.CHeaderMode && not o.NativePointerSurface) then phantomMarkers else Set.empty
+                        NonnullAnnotations = project.Nonnull
+                        Bindings = projections |> List.map (fun binding -> binding.Name, binding) |> Map.ofList
+                        ValueStructs = project.Options |> Option.map (fun opts -> Set.ofList opts.ValueStructs) |> Option.defaultValue Set.empty
+                        NativePointerSurface = project.Options |> Option.exists (fun opts -> opts.NativePointerSurface) }
 
                 // Generate protocol request implementations AFTER ctx is built,
                 // so opaque handle types from XML interfaces are available for typed signatures
-                let xmlRequestDecls = xmlProtocols |> List.collect (fun p -> ProtocolParser.toRequestDecls p marshalConfig ctx.OpaqueHandles)
+                let xmlRequestDecls = (if typedProtocol then [] else xmlProtocols) |> List.collect (fun p -> ProtocolParser.toRequestDecls p marshalConfig ctx.OpaqueHandles)
                 if not xmlRequestDecls.IsEmpty then
                     logVerbose $"  {xmlRequestDecls.Length} protocol request implementations with typed handles" verbose
 
@@ -354,7 +434,25 @@ module BindingGenerator =
                     | None -> WrapperTypes.NoErrors
 
                 // Classify types across namespaces: shared vs local
-                let classification = PilotAnalyzer.classifyProjectTypes project.Namespaces declarations
+                let cHeaderMode = project.Options |> Option.exists (fun opts -> opts.CHeaderMode)
+                let classification =
+                    let classified = PilotAnalyzer.classifyProjectTypes project.Namespaces declarations
+                    // ABI-critical storage is a library contract even if only one function
+                    // namespace currently uses it. Keep its layout in the shared Types module.
+                    let storageNames = ctx.StructLayouts |> Map.toSeq |> Seq.map fst |> Set.ofSeq
+                    if ctx.NativePointerSurface || cHeaderMode then
+                        // Native pointers do not expose a pointee type. Emit the requested
+                        // storage contracts and public constants, avoiding unrelated libc internals.
+                        let constants = declarations |> List.choose (function CppParser.Declaration.Macro m -> Some m.Name | _ -> None) |> Set.ofList
+                        let requestedStorage =
+                            project.Options |> Option.map (fun opts ->
+                                opts.AbiCriticalStructs |> List.map (fun name -> name.Replace("typedef ", "").Replace("struct ", "").Replace("union ", "")) |> Set.ofList)
+                            |> Option.defaultValue Set.empty
+                        { classified with SharedTypes = Set.unionMany [constants; storageNames; requestedStorage]; LocalTypes = Map.empty }
+                    else
+                        { classified with
+                            SharedTypes = Set.union classified.SharedTypes storageNames
+                            LocalTypes = classified.LocalTypes |> Map.map (fun _ names -> Set.difference names storageNames) }
                 let sharedCount = classification.SharedTypes.Count
                 let localCounts = classification.LocalTypes |> Map.toList |> List.sumBy (fun (_, s) -> s.Count)
                 logVerbose $"Type classification: {sharedCount} shared, {localCounts} local across {project.Namespaces.Length} namespaces" verbose
@@ -368,6 +466,8 @@ module BindingGenerator =
                         sharedTypesNs project.Library.Name "Shared type definitions" []
                 let sharedTypesPath = Path.Combine(outputDir, "Types.clef")
                 File.WriteAllText(sharedTypesPath, sharedCode)
+                let viewMarkers = MappedReturnGenerator.markers project |> List.map CodeRenderer.render |> String.concat "\n"
+                if viewMarkers <> "" then File.AppendAllText(sharedTypesPath, "\n" + viewMarkers)
                 logVerbose $"Shared types module: {sharedTypesPath} ({classification.SharedTypes.Count} types)" verbose
 
                 // ── Error module ────────────────────────────────────────────
@@ -462,7 +562,7 @@ module BindingGenerator =
                         sb.AppendLine("    /// Describe a return code as a human-readable error string.") |> ignore
                         sb.AppendLine("    /// Override in an Overlay module for domain-specific error mapping.") |> ignore
                         sb.AppendLine("    let describe (code: int) : string =") |> ignore
-                        sb.AppendLine($"        $\"{libPrefix} error (code {{code}})\"") |> ignore
+                        sb.AppendLine($"        \"{libPrefix} error (code \" + Format.int code + \")\"") |> ignore
                         let output = sb.ToString()
                         let errorPath = Path.Combine(outputDir, "ReturnCode.clef")
                         File.WriteAllText(errorPath, output)
@@ -531,12 +631,20 @@ module BindingGenerator =
                             if localTypeNames.IsEmpty then [sharedTypesNs]
                             else [sharedTypesNs; localTypesNs]
                         let funcDecls =
-                            PilotAnalyzer.filterDeclarationsWithTypes ns Set.empty declarations
+                            if typedProtocol && not ns.XmlInterfaces.IsEmpty then []
+                            else PilotAnalyzer.filterDeclarationsWithTypes ns Set.empty declarations
                         let funcCount =
                             funcDecls |> List.filter (function CppParser.Declaration.Function _ -> true | _ -> false) |> List.length
                         let funcCode =
                             FidelityCodeGenerator.generateModule ctx Set.empty funcDecls
                                 ns.Name ns.Library $"{lastSegment} function declarations" funcOpenModules
+                        let mappedDecls = MappedReturnGenerator.generate project ctx declarations ns sharedTypesNs
+                        let funcCode =
+                            MappedReturnGenerator.mappings project
+                            |> List.filter (fun mapping -> ns.Functions |> List.contains mapping.Acquire)
+                            |> List.fold (fun (code: string) mapping ->
+                                code.Replace("\nlet " + mapping.Acquire + " (", "\nlet private " + mapping.Acquire + " (")) funcCode
+                        let funcCode = funcCode + "\n" + (mappedDecls |> List.map CodeRenderer.render |> String.concat "\n")
 
                         let funcPath = Path.Combine(nsDir, $"{lastSegment}.clef")
                         File.WriteAllText(funcPath, funcCode)
@@ -547,8 +655,13 @@ module BindingGenerator =
                             if generateWrappers then
                                 let allNsDecls = PilotAnalyzer.filterDeclarationsForNamespace ns declarations
                                 let wrapperNamespace = $"{ns.Name}.Api"
+                                let passthroughFunctions =
+                                    project.ErrorConventions
+                                    |> Option.map (fun spec -> spec.Overrides |> Map.toList |> List.choose (fun (name, convention) ->
+                                        if convention = PilotTypes.NoErrorConvention then Some name else None) |> Set.ofList)
+                                    |> Option.defaultValue Set.empty
                                 let wrapperCode =
-                                    WrapperCodeGenerator.generate allNsDecls wrapperNamespace ns.Library ns.Name errorHandling dataModel project.Nonnull
+                                    WrapperCodeGenerator.generateWithContext (Some ctx) ctx.NativePointerSurface passthroughFunctions allNsDecls wrapperNamespace ns.Library ns.Name errorHandling dataModel project.Nonnull
                                 let wrapperPath = Path.Combine(nsDir, $"{lastSegment}Api.clef")
                                 File.WriteAllText(wrapperPath, wrapperCode)
                                 logVerbose $"  {lastSegment}/{lastSegment}Api.clef" verbose
@@ -572,10 +685,11 @@ module BindingGenerator =
                         | None -> []
                     | _ -> []
 
-                let allFiles = [sharedTypesPath] @ errorModuleFiles @ nsFiles @ l2CallbackFiles
+                let typedProtocolFiles = if typedProtocol then TypedProtocolGenerator.generate project xmlProtocols declarations ctx outputDir else []
+                let allFiles = [sharedTypesPath] @ errorModuleFiles @ nsFiles @ l2CallbackFiles @ typedProtocolFiles
 
                 // Generate canonical fidproj for the binding library
-                let fidprojFile = generateFidproj project nsPrefix outputDir allFiles verbose
+                let fidprojFile = generateFidproj project (if typedProtocol then nsPrefix + ".Native" else nsPrefix) outputDir allFiles verbose
 
                 // ── Layer 2 Marshaling Bridge package ─────────────────────
                 let unpairedConstructors =
@@ -592,7 +706,7 @@ module BindingGenerator =
                         |> List.distinct
                     constructed |> List.filter (fun n -> not (Set.contains n withDestroy))
 
-                let layer3Req = PilotAnalyzer.analyzeLayer3Requirements project callbackSpec unpairedConstructors
+                let layer3Req = if typedProtocol then None else PilotAnalyzer.analyzeLayer3Requirements project callbackSpec unpairedConstructors
 
                 let layer3Files =
                     match layer3Req with
@@ -665,9 +779,17 @@ module BindingGenerator =
                                     |> List.map (fun reg -> resolveModule reg.Function)
                                     |> List.distinct
                                 let callbackOpens =
-                                    [l2CallbackModule; $"{nsPrefix}.Types"; "Fidelity.Libc.DynamicLink"] @ registrationModules
+                                    [ if not l2CallbackFiles.IsEmpty then l2CallbackModule
+                                      $"{nsPrefix}.Types"
+                                      if not ctx.NativePointerSurface && not cHeaderMode then "Fidelity.Libc.DynamicLink" ] @ registrationModules
                                     |> List.distinct
-                                match CallbackWrapperGenerator.generate spec declarations callbackNs dataModel callbackOpens l2CallbackModule with
+                                let generated =
+                                    if ctx.NativePointerSurface then
+                                        CallbackWrapperGenerator.generateNative spec declarations callbackNs dataModel callbackOpens
+                                    elif cHeaderMode then
+                                        CallbackWrapperGenerator.generateTyped spec declarations callbackNs ctx callbackOpens
+                                    else CallbackWrapperGenerator.generate spec declarations callbackNs dataModel callbackOpens l2CallbackModule
+                                match generated with
                                 | Some output ->
                                     let callbackPath = Path.Combine(bridgeDir, "Callbacks.clef")
                                     File.WriteAllText(callbackPath, output)
@@ -714,9 +836,9 @@ module BindingGenerator =
 
                             // Resolve dependency paths
                             let resolveDep name =
-                                let local = Path.Combine(fidprojDir, $"{name}.fidproj")
-                                if File.Exists(local) then $"{name}.fidproj"
-                                else
+                                match findProjectAbove fidprojDir $"{name}.fidproj" with
+                                | Some path -> Path.GetRelativePath(fidprojDir, path).Replace('\\', '/')
+                                | None ->
                                     let reposDir = Path.GetFullPath(Path.Combine(fidprojDir, "../../../../"))
                                     let target = Path.Combine(reposDir, $"Fidelity.Platform/CPU/Linux/x86_64/{name}.fidproj")
                                     if File.Exists(target) then Path.GetRelativePath(fidprojDir, target).Replace('\\', '/')
@@ -724,9 +846,11 @@ module BindingGenerator =
 
                             let platformDep = resolveDep "Fidelity.Platform"
                             let libDep = resolveDep nsPrefix
-                            sb.AppendLine($"Fidelity.Platform = {{ path = \"{platformDep}\" }}") |> ignore
+                            if not (project.Options |> Option.exists (fun opts -> opts.DescriptorOnlyDependencies)) then
+                                sb.AppendLine($"Fidelity.Platform = {{ path = \"{platformDep}\" }}") |> ignore
                             sb.AppendLine($"{nsPrefix} = {{ path = \"{libDep}\" }}") |> ignore
-                            if req.Dependencies |> List.exists (function LibcDynamicLink | LibcMemory -> true) && nsPrefix <> "Fidelity.Libc" then
+                            let usesLibcBridge = (not ctx.NativePointerSurface && not cHeaderMode) || req.HasProtocolDispatch
+                            if usesLibcBridge && (req.Dependencies |> List.exists (function LibcDynamicLink | LibcMemory -> true)) && nsPrefix <> "Fidelity.Libc" then
                                 let libcDep = resolveDep "Fidelity.Libc"
                                 sb.AppendLine($"Fidelity.Libc = {{ path = \"{libcDep}\" }}") |> ignore
 
@@ -777,11 +901,16 @@ module BindingGenerator =
                             report.AppendLine("## Notes") |> ignore
                             if req.Dependencies |> List.contains LibcMemory then
                                 report.AppendLine("- Protocol dispatch uses Fidelity.Libc.Memory for argument arrays (malloc/free)") |> ignore
-                            if req.Dependencies |> List.contains LibcDynamicLink then
+                            if usesLibcBridge && (req.Dependencies |> List.contains LibcDynamicLink) then
                                 report.AppendLine("- Interface globals resolved via Fidelity.Libc.DynamicLink.dlsym") |> ignore
-                            report.AppendLine("- NativeInterop.NativePtr used for argument array writes") |> ignore
+                            if ctx.NativePointerSurface || cHeaderMode then
+                                report.AppendLine("- Callback wrappers accept typed FnPtr entries and preserve explicit environment arguments.") |> ignore
+                            if req.HasProtocolDispatch then
+                                report.AppendLine("- NativeInterop.NativePtr used for argument array writes") |> ignore
 
-                            let reportPath = Path.Combine(fidprojDir, "LAYER3-REPORT.md")
+                            let reportPath =
+                                if ctx.NativePointerSurface || cHeaderMode then Path.Combine(bridgeDir, "REPORT.md")
+                                else Path.Combine(fidprojDir, "LAYER3-REPORT.md")
                             File.WriteAllText(reportPath, report.ToString())
                             logVerbose $"L2 marshaling report: {reportPath}" verbose
 

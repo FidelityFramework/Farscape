@@ -120,3 +120,22 @@ let ``render LetBinding with attributes produces attribute lines`` () =
     let result = render decl
     Assert.Contains("[<FidelityExtern(\"libc\", \"memcpy\")>]", result)
     Assert.Contains("let memcpy (dest: nativeint) (src: nativeint) (n: nativeint) : nativeint =", result)
+
+[<Fact>]
+let ``module scope resumes after nested module at consistent indentation`` () =
+    let source = render (Module("Test", "test", [
+        LetBinding("before", [], Unit, NativeZeroed, [])
+        SubModule("Storage", [LiteralBinding("Size", "40")])
+        LiteralBinding("AFTER", "1") ]))
+    Assert.Contains("\nlet before", source)
+    Assert.Contains("\nmodule Storage =\n    [<Literal>]\n    let Size", source)
+    Assert.Contains("\n[<Literal>]\nlet AFTER", source)
+
+[<Fact>]
+let ``C keyword symbols are quoted in declarations and calls`` () =
+    let source = render (Module("Test", "test", [
+        LetBinding("open", [], Named "int", FunctionCall("Fidelity.Libc.IO", "open", [Literal "0"]), [])
+        LetBinding("__errno_location", [], Named "nativeint", NativeZeroed, []) ]))
+    Assert.Contains("let ``open`` ()", source)
+    Assert.Contains("Fidelity.Libc.IO.``open`` 0", source)
+    Assert.Contains("let __errno_location", source)

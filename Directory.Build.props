@@ -31,7 +31,7 @@
     <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="FSharp.Core" Version="10.0.102" />
+    <PackageReference Include="FSharp.Core" Version="10.1.400" />
   </ItemGroup>
 
   <!-- SourceLink for GitHub -->

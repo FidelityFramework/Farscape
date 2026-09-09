@@ -278,7 +278,8 @@ let ``TOML nonnull annotations override nullable default`` () =
           DataModel = Types.LP64
           StructLayouts = Map.empty
           NonnullAnnotations = nonnull
-          KnownClasses = Map.empty }
+          KnownClasses = Map.empty
+          NativePointerSurface = false; Bindings = Map.empty; ValueStructs = Set.empty; PhantomMarkers = Set.empty }
     let result = FidelityCodeGenerator.generateModule ctx Set.empty decls "Test" "lib" "test" []
     // ctx (idx 0) is nonnull via TOML
     Assert.Contains("(ctx: CHandle<unit>)", result)
@@ -299,14 +300,15 @@ let ``TOML nonnull_returns prevents Option on return type`` () =
           DataModel = Types.LP64
           StructLayouts = Map.empty
           NonnullAnnotations = nonnull
-          KnownClasses = Map.empty }
+          KnownClasses = Map.empty
+          NativePointerSurface = false; Bindings = Map.empty; ValueStructs = Set.empty; PhantomMarkers = Set.empty }
     let result = FidelityCodeGenerator.generateModule ctx Set.empty decls "Test" "lib" "test" []
     // Return is nonnull via TOML
     Assert.Contains(": CHandle<unit> =", result)
     Assert.DoesNotContain("option<CHandle<unit>> =", result)
 
 // ─── One-kind signature tests (Dimensional_Range_Design.md, CS-12 rulings) ────
-// Every C integer is `int` or `uint` in the signature; the width is the ABI
+// Every C integer is `int` in the signature; the width is the ABI
 // representation the FunctionDescriptor quotation carries, never a Clef type.
 
 [<Fact>]
@@ -319,13 +321,14 @@ let ``C int maps to NTU int (dimensional), not int32 (fixed-width)`` () =
     Assert.DoesNotContain("int32", result)
 
 [<Fact>]
-let ``C unsigned int maps to NTU uint (dimensional), not uint32 (fixed-width)`` () =
+let ``C unsigned int maps to int with unsigned descriptor`` () =
     let decls = [
         CppParser.Declaration.Function (mkFunc "alarm" "unsigned int" [("seconds", "unsigned int")])
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "libc" Types.LP64 Map.empty
-    Assert.Contains(": uint =", result)
-    Assert.Contains("(seconds: uint)", result)
+    Assert.Contains(": int =", result)
+    Assert.Contains("(seconds: int)", result)
+    Assert.Contains("Integer (Unsigned, 32)", result)
     Assert.DoesNotContain("uint32", result)
 
 [<Fact>]

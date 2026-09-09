@@ -402,6 +402,57 @@ module CallbackWrapperGenerator =
     // Complete Module Generation
     // =========================================================================
 
+    /// Native carrier wrappers accept a compiler-owned function pointer and preserve its
+    /// environment argument. There is no dynamic symbol lookup or managed delegate lifetime.
+    let generateNative
+        (spec: CallbackSpec) (declarations: CppParser.Declaration list)
+        (namespace': string) (model: Types.PlatformABI) (openModules: string list) : string option =
+        let typedefMap = FidelityCodeGenerator.buildTypedefMap declarations
+        let delegates =
+            declarations |> List.choose (function CppParser.Declaration.Delegate d -> Some (d.Name, d) | _ -> None)
+            |> Map.ofList
+        let mapType = FidelityCodeGenerator.mapCTypeToNativeSurface typedefMap model delegates
+        let wrappers =
+            spec.Registrations |> List.collect (fun reg ->
+                match declarations |> List.tryPick (function
+                    | CppParser.Declaration.Function f when f.Name = reg.Function -> Some f
+                    | _ -> None) with
+                | None -> []
+                | Some f ->
+                    let parameters = f.Parameters |> List.map (fun (name, cType) ->
+                        { Name = cleanParamName name; Type = mapType cType })
+                    [ XmlDoc "Register a typed native entry, preserving every argument including its environment."
+                      LetBinding(toWrapperName f.Name, parameters, mapType f.ReturnType,
+                        FunctionCall("", f.Name, parameters |> List.map (fun p -> Identifier p.Name)), []) ])
+        if wrappers.IsEmpty then None
+        else
+            Some (CodeRenderer.render (Module(namespace', "EXPERIMENTAL legacy ABI callback wrappers — not current Clef source",
+                (openModules |> List.map OpenModule) @ wrappers)))
+
+    /// Current Clef C boundary: opaque nullable handles and a compiler-owned FnPtr.
+    /// Forward the explicit environment without exposing an address or doing symbol lookup.
+    let generateTyped
+        (spec: CallbackSpec) (declarations: CppParser.Declaration list)
+        (namespace': string) (ctx: FidelityCodeGenerator.GenerationContext)
+        (openModules: string list) : string option =
+        let wrappers =
+            spec.Registrations |> List.collect (fun reg ->
+                match declarations |> List.tryPick (function
+                    | CppParser.Declaration.Function f when f.Name = reg.Function -> Some f
+                    | _ -> None) with
+                | None -> []
+                | Some f ->
+                    FidelityCodeGenerator.generateFunctionDecls ctx "" f
+                    |> List.choose (function
+                        | LetBinding(_, parameters, returnType, _, _) ->
+                            Some (LetBinding(toWrapperName f.Name, parameters, returnType,
+                                FunctionCall("", f.Name, parameters |> List.map (fun p -> Identifier p.Name)), []))
+                        | _ -> None))
+        if wrappers.IsEmpty then None
+        else
+            Some (CodeRenderer.render (Module(namespace', "Typed callback wrappers — opaque handles and explicit environments",
+                (openModules |> List.map OpenModule) @ wrappers)))
+
     /// Collect delegate names from declarations for listener field type matching.
     let private collectDelegateNames (declarations: CppParser.Declaration list) =
         declarations |> List.choose (function

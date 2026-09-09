@@ -29,8 +29,9 @@ module CodeRenderer =
         | NativeZeroed -> "NativeDefault.zeroed ()"
         | FunctionCall (mod', name, args) ->
             let argStr = args |> List.map (renderArg indent) |> String.concat " "
-            if mod' = "" then $"{name} {argStr}"
-            else $"{mod'}.{name} {argStr}"
+            let safeName = quoteIdentifier name
+            if mod' = "" then $"{safeName} {argStr}"
+            else $"{mod'}.{safeName} {argStr}"
         | Identifier name -> name
         | TypeConversion (target, expr) -> $"{target} ({renderExpr indent expr})"
         | MethodCall (expr, method') -> $"{method'} ({renderExpr indent expr})"
@@ -115,7 +116,7 @@ module CodeRenderer =
                 renderDecl sb 0 d
 
         | XmlDoc text ->
-            sb.AppendLine($"{prefix}    /// {text}") |> ignore
+            sb.AppendLine(($"{prefix}/// {text}").TrimEnd()) |> ignore
 
         | Comment text ->
             sb.AppendLine($"{prefix}{text}") |> ignore
@@ -125,25 +126,30 @@ module CodeRenderer =
 
         | LetBinding (name, params', retType, body, attributes) ->
             for attr in attributes do
-                sb.AppendLine($"{prefix}    [<{attr}>]") |> ignore
+                sb.AppendLine($"{prefix}[<{attr}>]") |> ignore
             let paramStr =
                 if params'.IsEmpty then "()"
                 else params' |> List.map renderParam |> String.concat " "
-            sb.AppendLine($"{prefix}    let {name} {paramStr} : {renderType retType} =") |> ignore
-            let bodyIndent = $"{prefix}        "
+            sb.AppendLine($"{prefix}let {quoteIdentifier name} {paramStr} : {renderType retType} =") |> ignore
+            let bodyIndent = $"{prefix}    "
             sb.Append($"{bodyIndent}{renderExpr bodyIndent body}") |> ignore
             sb.AppendLine() |> ignore
             sb.AppendLine() |> ignore
 
         | LiteralBinding (name, value) ->
-            sb.AppendLine($"{prefix}    [<Literal>]") |> ignore
-            sb.AppendLine($"{prefix}    let {name} = {value}") |> ignore
+            sb.AppendLine($"{prefix}[<Literal>]") |> ignore
+            sb.AppendLine($"{prefix}let {quoteIdentifier name} = {value}") |> ignore
 
         | ValueBinding (name, type', body) ->
-            sb.AppendLine($"{prefix}    let {name} : {renderType type'} =") |> ignore
-            let bodyIndent = $"{prefix}        "
+            sb.AppendLine($"{prefix}let {quoteIdentifier name} : {renderType type'} =") |> ignore
+            let bodyIndent = $"{prefix}    "
             sb.Append($"{bodyIndent}{renderExpr bodyIndent body}") |> ignore
             sb.AppendLine() |> ignore
+            sb.AppendLine() |> ignore
+
+        | OpaqueMarker name ->
+            sb.AppendLine($"{prefix}/// Opaque boundary marker; storage belongs to its declared handle or view.") |> ignore
+            sb.AppendLine($"{prefix}type {name} = private | Opaque_{name}") |> ignore
             sb.AppendLine() |> ignore
 
         | RecordType (name, fields, doc, attributes) ->
