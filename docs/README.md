@@ -98,6 +98,22 @@ BAREWire provides hardware descriptor types (`PeripheralDescriptor`, `FieldDescr
 
 ## Roadmap
 
+Sequenced plans live in [`docs/roadmap/`](./roadmap/), numbered in phase order:
+
+| Doc | Scope |
+|---|---|
+| [00 Maturation Plan](./roadmap/00_farscape-maturation-plan.md) | Phases 0-3 through HelloWayland (shipped; status ledger at top; §9 regeneration horizon) |
+| [01 Phase 4: NPU](./roadmap/01_farscape-phase4-npu-xrt-binding.md) | amdxdna DRM UAPI and XRT bindings; three-processor DMA-BUF sharing |
+| [02 Phase 4C: PipeWire](./roadmap/02_farscape-phase4c-pipewire-audio.md) | Audio capture and playback binding |
+| [03 Phase 4D: ONNX Runtime](./roadmap/03_farscape-phase4d-onnxruntime.md) | Function-table binding; nullable error handle convention |
+| [04 Phase 5: MFEM](./roadmap/04_farscape-phase5-mfem-ingestion.md) | C++ class and template parsing; algorithmic ingestion |
+| [05 Toolchain Sovereignty](./roadmap/05_toolchain-sovereignty-and-native-assets.md) | Clang confined to Farscape; per-tuple archives; LLD-only Composer link; self-hosting horizons |
+| [06 TypeScript and OpenAPI](./roadmap/06_typescript-openapi-ingestion-roadmap.md) | Non-C frontends for Fidelity.CloudEdge |
+| [07 Type Provider Memo](./roadmap/07_type-provider-clef-fidelity.md) | Data-schema ingestion tiers |
+| [08 Composer Transcribe](./roadmap/08_composer-transcribe-vision.md) | Algorithmic port vision; Transpose and Transcribe |
+
+Standing items:
+
 - `farscape verify` — CCS-based library verification pipeline
 - BAREWire peripheral descriptor generation from header AST
 - CMSIS qualifier extraction (`__I`, `__O`, `__IO` → `AccessKind`)

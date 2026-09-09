@@ -101,6 +101,6 @@ Farscape is an interim tool. Its capabilities evolve into Composer features acce
 ## Related Documentation
 
 - Farscape: `docs/09_Library_Verification.md`
-- Farscape: `docs/roadmap/99_composer-transcribe-vision.md`
+- Farscape: `docs/roadmap/08_composer-transcribe-vision.md`
 - Composer: `docs/CCS_Architecture.md`
 - Atelier: `docs/08_tooling_integration.md`

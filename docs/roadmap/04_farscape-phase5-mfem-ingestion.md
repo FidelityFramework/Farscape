@@ -7,16 +7,6 @@
 
 ---
 
-> **Schema caveat (added 2026-08-03).** The example `.pilot.toml` recipes in this document
-> use section names the serializer does not read: `[sources]` (the real section is
-> `[library]`, with `headers`) and `[error_convention]` singular (the real section is
-> `[error_conventions]`). `PilotSerializer` performs no validation and silently drops
-> unrecognized sections, so copying a recipe from this document verbatim yields a project
-> with no headers and no error convention, and no warning. Several recipes also carry
-> `opaque_handles` and `flags_enums`, which have never been keys. See
-> `docs/07_Pilot_Project_Setup.md` for the authoritative schema and
-> `docs/14_Binding_Generation_Gaps.md` for why these went unnoticed.
-
 ## 1. Context
 
 Phases 0-4 of the Farscape Maturation Plan establish Farscape as a production-quality C binding generator:
@@ -64,7 +54,7 @@ MFEM exercises the full spectrum of C++ template patterns:
 - **CRTP patterns**: Static polymorphism in integrator dispatch
 - **Policy-based design**: Memory management and device dispatch via template parameters
 
-Successfully ingesting MFEM's template inventory validates Farscape's C++ understanding across the patterns most commonly encountered in production numerical libraries (BLAS, LAPACK, PETSc, FFTW, Eigen).
+Successfully ingesting MFEM's template inventory validates Farscape's C++ understanding across the patterns most commonly encountered in production numerical libraries (BLAS, LAPACK, PETSc, FFTW, Eigen). MFEM is the Kilimanjaro of that range: a serious summit, and the proving ground on the way to TMPL, the astrodynamics component library that is the Mt. Everest target of `05_toolchain-sovereignty-and-native-assets.md` §4.2.
 
 ### 2.3 Dimensional Type Payoff
 
@@ -101,8 +91,6 @@ These components are combinatorial or I/O-bound. They operate on integer topolog
 
 [library]
 name = "mfem"
-
-[sources]
 headers = [
     "/usr/include/mfem/mfem.hpp",
     "/usr/include/mfem/general/communication.hpp",
@@ -117,11 +105,13 @@ directory = "./bindings/mfem"
 
 [[namespace]]
 name = "Fidelity.MFEM.Mesh"
+description = "Mesh topology and refinement"
 library = "mfem"
 prefixes = ["Mesh"]
 
 [[namespace]]
 name = "Fidelity.MFEM.IO"
+description = "Mesh load, save, print"
 library = "mfem"
 functions = ["Mesh_Load", "Mesh_Save", "Mesh_Print"]
 ```
@@ -154,7 +144,7 @@ In Phases 0-4, Farscape targets C APIs and XML protocols; the target libraries (
 3. Enables virtual method dispatch bindings without requiring a C shim intermediary
 4. Preserves ABI metadata through the Composer compilation pipeline for LLVM LTO optimization
 
-For Pilot, this means a third enrichment path: C headers route to clang, XML protocols route to XParsec, and C++ headers route to clang + Plugify ABI Analysis. The same `Declaration` types flow downstream; the ABI engine adds the knowledge needed to generate correct vtable-aware bindings.
+For Pilot, this means a third enrichment path: C headers route to clang, XML protocols route to the protocol parser, and C++ headers route to clang plus ABI analysis. The same `Declaration` types flow downstream; the ABI engine adds the knowledge needed to generate correct vtable-aware bindings. `CppClassAnalysis.fs` (pimpl detection, triviality and `sret` classification) is the first shipped piece of that engine, built in-house; the template instantiation mechanism it needs is `05_toolchain-sovereignty-and-native-assets.md` §4.2.
 
 ### Phase 5C: Implementation Analysis
 
@@ -333,6 +323,6 @@ Composer integration
 
 ---
 
-*Companion documents: "Farscape Maturation Plan: Phases 0-3 Through HelloWayland" and "Farscape Phase 4: NPU Binding via XRT/XDNA"*
+*Companion documents: "Farscape Maturation Plan: Phases 0-3 Through HelloWayland", "Farscape Phase 4: NPU Binding via DRM UAPI + XRT", and "Farscape Horizon: Toolchain Sovereignty and Native Asset Production"*
 
 *SpeakEZ Technologies | Fidelity Framework*

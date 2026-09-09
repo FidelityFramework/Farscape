@@ -7,24 +7,6 @@
 
 ---
 
-> **Schema caveat (added 2026-08-03).** The example `.pilot.toml` recipes in this document
-> use section names the serializer does not read: `[sources]` (the real section is
-> `[library]`, with `headers`) and `[error_convention]` singular (the real section is
-> `[error_conventions]`). `PilotSerializer` performs no validation and silently drops
-> unrecognized sections, so copying a recipe from this document verbatim yields a project
-> with no headers and no error convention, and no warning. Several recipes also carry
-> `opaque_handles` and `flags_enums`, which have never been keys. See
-> `docs/07_Pilot_Project_Setup.md` for the authoritative schema and
-> `docs/14_Binding_Generation_Gaps.md` for why these went unnoticed.
-
-> **Handle-record caveat (added 2026-08-03).** Validation criteria in this document that
-> require opaque handles to emit as distinct wrapper structs rather than `nativeint` are
-> **inverted**. A single-word `{ Handle: nativeint }` record is memref-backed under the
-> current compiler and reaches a C callee as the address of a slot rather than as the
-> handle; `ofHandle` also allocates and leaks eight bytes per construction. Bare `nativeint`
-> is the correct Layer 1 output. These gates would pass while producing miscompiling code —
-> see `docs/14_Binding_Generation_Gaps.md` §3.
-
 > **Membrane note.** The pointer surface in this document is Layer 1/2 membrane plumbing whose confinement and exit are recorded in the exit banner of `docs/08_Nullable_Pointer_Architecture.md` and the Representation section of `docs/10_Boundary_Marshaling_Spec.md`.
 
 ## 1. Purpose
@@ -90,15 +72,15 @@ Key patterns relevant to Farscape:
 
 | C Type | Pattern | Farscape Mapping |
 |---|---|---|
-| `struct pw_main_loop *` | Opaque handle | `[<Struct>] type pw_main_loop = { Handle: nativeint }` |
-| `struct pw_context *` | Opaque handle | `[<Struct>] type pw_context = { Handle: nativeint }` |
-| `struct pw_core *` | Opaque handle | `[<Struct>] type pw_core = { Handle: nativeint }` |
-| `struct pw_stream *` | Opaque handle | `[<Struct>] type pw_stream = { Handle: nativeint }` |
-| `struct pw_filter *` | Opaque handle | `[<Struct>] type pw_filter = { Handle: nativeint }` |
-| `struct pw_proxy *` | Opaque handle | `[<Struct>] type pw_proxy = { Handle: nativeint }` |
-| `struct pw_properties *` | Opaque handle | `[<Struct>] type pw_properties = { Handle: nativeint }` |
-| `struct pw_buffer *` | Public struct (buffer pointer + metadata) | ABI-critical struct with explicit layout |
-| `struct pw_stream_events` | Callback struct (function pointers) | Struct with delegate fields |
+| `struct pw_main_loop *` | Opaque handle | `nativeint` (Layer 1; docs/14 §3) |
+| `struct pw_context *` | Opaque handle | `nativeint` (Layer 1; docs/14 §3) |
+| `struct pw_core *` | Opaque handle | `nativeint` (Layer 1; docs/14 §3) |
+| `struct pw_stream *` | Opaque handle | `nativeint` (Layer 1; docs/14 §3) |
+| `struct pw_filter *` | Opaque handle | `nativeint` (Layer 1; docs/14 §3) |
+| `struct pw_proxy *` | Opaque handle | `nativeint` (Layer 1; docs/14 §3) |
+| `struct pw_properties *` | Opaque handle | `nativeint` (Layer 1; docs/14 §3) |
+| `struct pw_buffer *` | Public struct (buffer pointer + metadata) | Layout module plus `StructDescriptor`; list it in `abi_critical_structs` |
+| `struct pw_stream_events` | Callback struct (function pointers) | Listener struct via `[callbacks] listener_structs`; fields resolved by symbol name (`dlsym` → `nativeint`); typed fields arrive with `FnPtr<'F>` (`00` §9) |
 | `enum pw_stream_state` | Standard enum | Standard enum |
 | `enum pw_stream_flags` | Bitmask enum | `[<Flags>]` enum |
 | `enum pw_direction` | Standard enum (INPUT=0, OUTPUT=1) | Standard enum |
@@ -145,7 +127,7 @@ struct pw_stream_events {
 };
 ```
 
-This is structurally identical to the Wayland listener pattern from Phase 1.5. Farscape emits delegate types for each callback and a struct with delegate fields. The `process` callback is the audio hot path — called once per audio quantum (typically every 5-10ms at 48kHz).
+This is structurally identical to the Wayland listener pattern. Farscape emits it through the `[callbacks] listener_structs` path: each field is resolved by symbol name via `dlsym` and carried as `nativeint` (`CallbackWrapperGenerator.fs`, Pattern B). Typed delegate fields arrive with the `FnPtr<'F>` primitive under the regeneration horizon of `00` §9. The `process` callback is the audio hot path — called once per audio quantum (typically every 5-10ms at 48kHz).
 
 ---
 
@@ -158,8 +140,6 @@ This is structurally identical to the Wayland listener pattern from Phase 1.5. F
 
 [library]
 name = "pipewire-0.3"
-
-[sources]
 headers = [
     "/usr/include/pipewire-0.3/pipewire/pipewire.h",
     "/usr/include/pipewire-0.3/pipewire/stream.h",
@@ -177,21 +157,24 @@ include_paths = [
 mode = "fidelity"
 directory = "./bindings/pipewire"
 
-[error_convention]
+[error_conventions]
 default = "errno"  # PipeWire functions return -errno on failure
 
-[options]
-opaque_handles = true
-flags_enums = true
+[callbacks]
+listener_structs = [
+  { name = "pw_stream_events", registration_function = "pw_stream_add_listener" }
+]
 
 [[namespace]]
 name = "Fidelity.PipeWire.Core"
+description = "Library init, deinit, version"
 library = "pipewire-0.3"
 prefixes = ["pw_init", "pw_deinit", "pw_get"]
 functions = ["pw_init", "pw_deinit", "pw_get_library_version"]
 
 [[namespace]]
 name = "Fidelity.PipeWire.MainLoop"
+description = "Main loop lifecycle"
 library = "pipewire-0.3"
 prefixes = ["pw_main_loop"]
 functions = [
@@ -202,6 +185,7 @@ functions = [
 
 [[namespace]]
 name = "Fidelity.PipeWire.Context"
+description = "Context creation and core connection"
 library = "pipewire-0.3"
 prefixes = ["pw_context"]
 functions = [
@@ -211,6 +195,7 @@ functions = [
 
 [[namespace]]
 name = "Fidelity.PipeWire.Stream"
+description = "Stream lifecycle, buffers, timing"
 library = "pipewire-0.3"
 prefixes = ["pw_stream"]
 functions = [
@@ -225,6 +210,7 @@ functions = [
 
 [[namespace]]
 name = "Fidelity.PipeWire.Properties"
+description = "Key-value property dictionaries"
 library = "pipewire-0.3"
 prefixes = ["pw_properties"]
 functions = [
@@ -281,8 +267,8 @@ Option 1 is sufficient for Phase 4C. Option 2 is a convenience refinement.
 
 ## 7. Validation Criteria
 
-- All opaque handles (`pw_main_loop`, `pw_context`, `pw_core`, `pw_stream`, `pw_properties`) emit as distinct wrapper structs
-- `pw_stream_events` emits as a struct with delegate fields for all callbacks
+- All opaque handles (`pw_main_loop`, `pw_context`, `pw_core`, `pw_stream`, `pw_properties`) emit as bare `nativeint` at Layer 1; distinct types are a Layer 3 deliverable under `00` §9
+- `pw_stream_events` emits through the listener-struct path with all eleven fields resolved by symbol name
 - `pw_stream_flags` emits with `[<Flags>]`
 - `pw_stream_state`, `pw_direction`, `spa_audio_format` emit as standard enums
 - Layer 3 wrapper can: initialize PipeWire, create a stream, connect to default sink, play a tone
@@ -301,7 +287,7 @@ Option 1 is sufficient for Phase 4C. Option 2 is a convenience refinement.
 
 ## 8. What Phase 4C Does NOT Require
 
-- No new code generator extensions (callback structs are covered by Phase 1.5's delegate pattern)
+- No new parser work. `pw_stream_events` goes through the shipped listener-struct path (`[callbacks] listener_structs`, `dlsym`-resolved `nativeint` fields). Typed function-pointer fields wait on the same `FnPtr<'F>` primitive as Phase 4D (`00` §9)
 - No PipeWire session manager integration (WirePlumber handles routing; the binding talks to PipeWire directly)
 - No JACK compatibility layer (PipeWire's native API is the target)
 - No video/screen capture (audio only for the voice agent)
@@ -311,7 +297,7 @@ Option 1 is sufficient for Phase 4C. Option 2 is a convenience refinement.
 ## 9. Dependency Graph
 
 ```
-Phase 1.5 (delegate/callback struct generation)
+Phase 1.5 + `[callbacks]` listener structs
     │
     ▼
 Phase 4C: PipeWire Audio Binding

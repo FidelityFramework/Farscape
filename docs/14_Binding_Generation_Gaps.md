@@ -69,8 +69,8 @@ manufacturing `FT_Face = { Handle: nativeint }`.
 
 **One predicate produces both symptoms.** The missing record and the handle standing in its
 place are the same failure, not two design choices. This matters because the handle looks
-deliberate, and `docs/roadmap/00_farscape-maturation-plan.md:237-258` documents a design
-that produces exactly that shape — so a reader concludes the opaque handle was intended
+deliberate, and `docs/roadmap/00_farscape-maturation-plan.md` §4.1 originally documented a design
+that produces exactly that shape (since corrected to bare `nativeint`) — so a reader concludes the opaque handle was intended
 when in fact it is debris.
 
 ### The control case
@@ -141,14 +141,14 @@ alone can fix this**, and the third property kills the nested cases regardless �
 `FT_FaceRec_` record could never place `glyph` correctly, because the `bbox` and `generic`
 fields ahead of it are memref descriptors rather than inline structs.
 
-The corpus currently plans in the opposite direction.
-`docs/roadmap/00_farscape-maturation-plan.md:376-413` specifies
-`[<StructLayout(LayoutKind.Explicit)>]` plus `[<FieldOffset(N)>]` output, and
+The corpus originally planned in the opposite direction.
+`docs/roadmap/00_farscape-maturation-plan.md` §4.4 specified
+`[<StructLayout(LayoutKind.Explicit)>]` plus `[<FieldOffset(N)>]` output (since rewritten to the
+layout-module form), and
 `docs/02_BAREWire_Integration.md:96-128` specifies natural-alignment layout arithmetic
 (`alignUp offset align`). Neither can be reproduced by an emitted record under the
-properties above. `docs/roadmap/01_threebody-wayland-architecture.md:329-341` and
-`docs/roadmap/02_farscape-phase4-npu-xrt-binding.md:141-145` both carry hand-annotated
-offset tables that are assertions rather than guarantees.
+properties above. `docs/roadmap/01_farscape-phase4-npu-xrt-binding.md` §5.1 carries a hand-annotated
+offset table that is an assertion rather than a guarantee.
 
 ### The correct output is a layout module, not a record
 
@@ -231,10 +231,10 @@ leaks eight bytes.
 Keep the nominal record and its `zero`/`isNull`/`ofHandle` companion in `Types.clef` for
 Layer 2 and Layer 3 to use, where it never crosses a call boundary.
 
-This inverts a validation criterion that several roadmap phases carry — for example
-`docs/roadmap/00_farscape-maturation-plan.md:562` ("emit as distinct wrapper structs, not
-`nativeint`") and `docs/roadmap/02_farscape-phase4-npu-xrt-binding.md:316-319`. Those gates
-would pass while producing miscompiling code.
+This inverted a validation criterion that several roadmap phases carried — for example
+`docs/roadmap/00_farscape-maturation-plan.md` §5.2 and
+`docs/roadmap/01_farscape-phase4-npu-xrt-binding.md` §6.2. Those gates would have passed while
+producing miscompiling code; the criteria now read bare `nativeint` at Layer 1.
 
 It also removes the motivating problem of `docs/11_Namespace_Scoped_PSG_Design.md:10-13`,
 whose headline complaint is that 28 handle records pollute `FieldLabels`. If the records are
@@ -341,8 +341,8 @@ claim against the section, not against this summary.
 use `FnPtr<'F>` resolved via `FnPtr.fromSymbol`. `FnPtr` appears in the source only in two
 comments (`FidelityCodeGenerator.fs:122, 171`) and is never emitted;
 `CallbackWrapperGenerator.fs:111-121` implements `dlsym` resolution passing `nativeint`.
-`docs/roadmap/06_farscape-phase4d-onnxruntime.md:87, 266` plans against the same
-non-existent primitive.
+`docs/roadmap/03_farscape-phase4d-onnxruntime.md` §3.2 and §5.1 plan against the same
+not-yet-built primitive and say so.
 
 ## 8. A nominated goal: provenance-ordered claims
 

@@ -44,7 +44,7 @@ transitive_headers = ["driver_types.h"]
 | `headers` | string array | yes | Absolute paths to C/C++ header files. Each is parsed independently via clang, then declarations are merged with deduplication. For single-header libraries, use a one-element array. |
 | `include_paths` | string array | no | Additional `-I` paths passed to clang. Required when headers reference other SDK directories. |
 | `defines` | string array | no | Preprocessor `-D` definitions passed to clang. Used for platform-conditional compilation (e.g., `__HIP_PLATFORM_AMD__`). |
-| `xml_protocols` | string array | no | Paths to XML protocol definition files (e.g., Wayland `.xml`). Parsed by `WaylandProtocolParser`, merged with C header declarations. |
+| `xml_protocols` | string array | no | Paths to XML protocol definition files (e.g., Wayland `.xml`). Parsed by `ProtocolParser`, merged with C header declarations. |
 | `transitive_headers` | string array | no | **Filenames** (not paths) of headers transitively included by the primary headers, whose declarations should also be extracted. See [Transitive Headers](#transitive-headers-for-multi-file-sdk-apis) below. |
 | `macro_prefixes` | string array | no | Name prefixes for macro constants to include (e.g., `["WL_", "WAYLAND_"]`). When set, only `#define` constants whose names start with a listed prefix are extracted. When omitted or empty, all user-defined macros pass through, which can pull in constants from system headers like `stdint.h` or `math.h`. Recommended for any library whose headers transitively include system headers with many `#define` constants. |
 
@@ -534,10 +534,6 @@ success_value = "hipSuccess"
 error_string_fn = "hipGetErrorString"
 error_name_fn = "hipGetErrorName"
 
-[options]
-opaque_handles = true
-flags_enums = true
-
 [[namespace]]
 name = "Fidelity.ROCm.Device"
 description = "Device management and properties"
@@ -604,9 +600,6 @@ xml_protocols = [
 mode = "fidelity"
 directory = "../Bindings"
 
-[options]
-opaque_handles = true
-
 [[namespace]]
 name = "Fidelity.Wayland.Core"
 description = "Display connection, proxy management, and event dispatch"
@@ -649,7 +642,7 @@ Notable differences from HIP:
 
 - **No `[error_conventions]`**: Wayland reports errors through `wl_display_get_error()`, an object-scoped query that does not fit the errno or enum-return patterns. Layer 2 wrappers are generated as direct passthrough, and the CLI emits an advisory directing the developer to add error handling in an Overlay module.
 - **`macro_prefixes`**: Without this filter, `wayland-client-core.h` pulls in hundreds of `#define` constants from system headers (`FP_INFINITE`, `INT8_MIN`, and so on). The `["WL_", "WAYLAND_"]` filter restricts extraction to Wayland-specific constants.
-- **`xml_protocols`**: Three XML protocol files are parsed by `WaylandProtocolParser` and merged with the C header declarations. Protocol namespaces use `xml_interfaces` to select by interface name rather than C function prefix.
+- **`xml_protocols`**: Three XML protocol files are parsed by `ProtocolParser` and merged with the C header declarations. Protocol namespaces use `xml_interfaces` to select by interface name rather than C function prefix.
 - **`transitive_headers`**: `wayland-util.h` defines core types (`wl_interface`, `wl_argument`, `wl_list`, `wl_array`) that `wayland-client-core.h` references but does not define itself.
 
 ## Case Study: Overlay Module for Object-Scoped Errors

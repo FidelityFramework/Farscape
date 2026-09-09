@@ -7,24 +7,6 @@
 
 ---
 
-> **Schema caveat (added 2026-08-03).** The example `.pilot.toml` recipes in this document
-> use section names the serializer does not read: `[sources]` (the real section is
-> `[library]`, with `headers`) and `[error_convention]` singular (the real section is
-> `[error_conventions]`). `PilotSerializer` performs no validation and silently drops
-> unrecognized sections, so copying a recipe from this document verbatim yields a project
-> with no headers and no error convention, and no warning. Several recipes also carry
-> `opaque_handles` and `flags_enums`, which have never been keys. See
-> `docs/07_Pilot_Project_Setup.md` for the authoritative schema and
-> `docs/14_Binding_Generation_Gaps.md` for why these went unnoticed.
-
-> **Handle-record caveat (added 2026-08-03).** Validation criteria in this document that
-> require opaque handles to emit as distinct wrapper structs rather than `nativeint` are
-> **inverted**. A single-word `{ Handle: nativeint }` record is memref-backed under the
-> current compiler and reaches a C callee as the address of a slot rather than as the
-> handle; `ofHandle` also allocates and leaks eight bytes per construction. Bare `nativeint`
-> is the correct Layer 1 output. These gates would pass while producing miscompiling code —
-> see `docs/14_Binding_Generation_Gaps.md` §3.
-
 > **Membrane note.** The pointer surface in this document is Layer 1/2 membrane plumbing whose confinement and exit are recorded in the exit banner of `docs/08_Nullable_Pointer_Architecture.md` and the Representation section of `docs/10_Boundary_Marshaling_Spec.md`.
 
 ## 1. Purpose
@@ -96,15 +78,15 @@ This is a meaningful Farscape extension, not a trivial application of existing p
 
 | C Type | Pattern | Farscape Mapping |
 |---|---|---|
-| `OrtEnv *` | Opaque handle | `[<Struct>] type OrtEnv = { Handle: nativeint }` |
-| `OrtSession *` | Opaque handle | `[<Struct>] type OrtSession = { Handle: nativeint }` |
-| `OrtSessionOptions *` | Opaque handle | `[<Struct>] type OrtSessionOptions = { Handle: nativeint }` |
-| `OrtRunOptions *` | Opaque handle | `[<Struct>] type OrtRunOptions = { Handle: nativeint }` |
-| `OrtValue *` | Opaque handle (tensor container) | `[<Struct>] type OrtValue = { Handle: nativeint }` |
-| `OrtMemoryInfo *` | Opaque handle | `[<Struct>] type OrtMemoryInfo = { Handle: nativeint }` |
-| `OrtAllocator *` | Opaque handle | `[<Struct>] type OrtAllocator = { Handle: nativeint }` |
+| `OrtEnv *` | Opaque handle | `nativeint` (Layer 1; docs/14 §3) |
+| `OrtSession *` | Opaque handle | `nativeint` (Layer 1; docs/14 §3) |
+| `OrtSessionOptions *` | Opaque handle | `nativeint` (Layer 1; docs/14 §3) |
+| `OrtRunOptions *` | Opaque handle | `nativeint` (Layer 1; docs/14 §3) |
+| `OrtValue *` | Opaque handle (tensor container) | `nativeint` (Layer 1; docs/14 §3) |
+| `OrtMemoryInfo *` | Opaque handle | `nativeint` (Layer 1; docs/14 §3) |
+| `OrtAllocator *` | Opaque handle | `nativeint` (Layer 1; docs/14 §3) |
 | `OrtStatus *` | Error handle (NULL = success) | Special: NULL-success pattern |
-| `OrtApi` | Function table struct (~388 fields) | Struct of `FnPtr<'F>` delegates |
+| `OrtApi` | Function table struct (~388 fields) | Struct of `FnPtr<'F>` fields; the primitive is not yet built (`00` §9) |
 | `ONNXTensorElementDataType` | Standard enum | Standard enum |
 | `OrtLoggingLevel` | Standard enum | Standard enum |
 | `OrtErrorCode` | Standard enum | Standard enum |
@@ -125,8 +107,8 @@ if (status != NULL) {
 This is a new error convention for Farscape — not errno, not enum return code, but a nullable error handle. The Pilot project needs a new `error_convention` variant:
 
 ```toml
-[error_convention]
-default = "nullable_error_handle"
+[error_conventions]
+default = "nullable_error_handle"      # proposed variant; not yet in ErrorConvention
 error_type = "OrtStatus"
 get_message_fn = "GetErrorMessage"     # via OrtApi table
 get_code_fn = "GetErrorCode"           # via OrtApi table
@@ -199,8 +181,6 @@ The full ONNX Runtime C API has ~388 functions. For the audio agent, the critica
 
 [library]
 name = "onnxruntime"
-
-[sources]
 headers = ["/usr/include/onnxruntime/onnxruntime_c_api.h"]
 include_paths = ["/usr/include/onnxruntime"]
 
@@ -208,24 +188,25 @@ include_paths = ["/usr/include/onnxruntime"]
 mode = "fidelity"
 directory = "./bindings/onnxruntime"
 
-[error_convention]
-default = "nullable_error_handle"
+[error_conventions]
+default = "nullable_error_handle"      # proposed variant; not yet in ErrorConvention
 error_type = "OrtStatus"
 get_message_fn = "GetErrorMessage"
 get_code_fn = "GetErrorCode"
 release_fn = "ReleaseStatus"
 
 [options]
-opaque_handles = true
-function_table = "OrtApi"  # NEW: tells Farscape to parse function table struct
+function_table = "OrtApi"  # proposed key; not yet read by the serializer
 
 [[namespace]]
 name = "Fidelity.OnnxRuntime.Core"
+description = "OrtGetApiBase, the only directly exported symbol"
 library = "onnxruntime"
 functions = ["OrtGetApiBase"]  # Only directly exported function
 
 [[namespace]]
 name = "Fidelity.OnnxRuntime.Environment"
+description = "Environment and session options"
 library = "onnxruntime"
 table = "OrtApi"
 prefixes = ["CreateEnv", "ReleaseEnv",
@@ -234,6 +215,7 @@ prefixes = ["CreateEnv", "ReleaseEnv",
 
 [[namespace]]
 name = "Fidelity.OnnxRuntime.Session"
+description = "Session creation, inference, I/O names"
 library = "onnxruntime"
 table = "OrtApi"
 prefixes = ["CreateSession", "ReleaseSession", "Run",
@@ -242,6 +224,7 @@ prefixes = ["CreateSession", "ReleaseSession", "Run",
 
 [[namespace]]
 name = "Fidelity.OnnxRuntime.Tensor"
+description = "Tensor creation, shape, data access"
 library = "onnxruntime"
 table = "OrtApi"
 prefixes = ["CreateTensor", "GetTensor", "ReleaseValue",
@@ -250,6 +233,7 @@ prefixes = ["CreateTensor", "GetTensor", "ReleaseValue",
 
 [[namespace]]
 name = "Fidelity.OnnxRuntime.Provider"
+description = "Execution provider selection"
 library = "onnxruntime"
 table = "OrtApi"
 prefixes = ["SessionOptionsAppendExecutionProvider",
@@ -257,6 +241,7 @@ prefixes = ["SessionOptionsAppendExecutionProvider",
 
 [[namespace]]
 name = "Fidelity.OnnxRuntime.Allocator"
+description = "Allocator access"
 library = "onnxruntime"
 table = "OrtApi"
 prefixes = ["GetAllocator", "Allocator"]
@@ -283,7 +268,7 @@ struct OrtApi {
 Farscape needs to:
 1. Identify `OrtApi` as a function table struct (via `[options].function_table` in pilot.toml)
 2. Parse each field's function pointer type signature
-3. Generate a Clef struct with `FnPtr<'F>` typed fields — **note: `FnPtr` does not exist. The implemented callback path is `dlsym` → `nativeint` (`CallbackWrapperGenerator.fs:111-121`); this step requires the primitive to be built first**
+3. Generate a Clef struct with `FnPtr<'F>` typed fields. `FnPtr<'F>` is not yet built; the implemented callback path is `dlsym` → `nativeint` (`CallbackWrapperGenerator.fs`), so this step is gated on the primitive arriving with the regeneration horizon of `00` §9
 4. Generate Layer 2 wrappers that call through the table (not direct P/Invoke)
 
 This is structurally similar to Wayland listener delegate generation (Phase 1.5), but:
@@ -302,7 +287,7 @@ Pattern:
 
 Module changes:
 - `PilotTypes.fs`: Add `NullableErrorHandle` to `ErrorConvention`
-- `ErrorModuleGenerator.fs`: Generate `OrtError` struct and capture pattern
+- `EnumErrorModuleGenerator.fs` (or a sibling for the nullable-handle convention): generate `OrtError` struct and capture pattern
 - `WrapperCodeGenerator.fs`: Generate null-check + error extraction + release pattern
 
 ---
@@ -318,7 +303,7 @@ These models run through the ONNX Runtime binding on the target system:
 | BitNet (1.58b) | Categorical routing | ONNX | DNNL (CPU) | CPU (L2-resident, sub-ms) |
 | MoE expert(s) | Domain inference | ONNX | MIGraphX (GPU) | VitisAI (NPU), DNNL (CPU) |
 
-**Substrate scheduling**: The Clef host orchestrator uses `Prefer`/`Require` affinity hints to route models to execution providers. CPU, GPU, and NPU are equal-opportunity targets — the same `SessionOptionsAppendExecutionProvider` call selects the substrate, the same `OrtApi.Run` executes inference. The BitNet router prefers CPU (L2-resident, sub-millisecond latency). Dense models prefer GPU via MIGraphX but can float to NPU when the Vitis AI EP is available. TTS can run on any substrate based on load. See `StrixHalo_Voice_Guided_Assistant.md` for the full scheduling model.
+**Substrate scheduling**: The Clef host orchestrator uses `Prefer`/`Require` affinity hints to route models to execution providers. CPU, GPU, and NPU are equal-opportunity targets — the same `SessionOptionsAppendExecutionProvider` call selects the substrate, the same `OrtApi.Run` executes inference. The BitNet router prefers CPU (L2-resident, sub-millisecond latency). Dense models prefer GPU via MIGraphX but can float to NPU when the Vitis AI EP is available. TTS can run on any substrate based on load. See `~/repos/Composer/docs/StrixHalo_Voice_Guided_Assistant.md` for the full scheduling model.
 
 ---
 
@@ -326,7 +311,7 @@ These models run through the ONNX Runtime binding on the target system:
 
 - `OrtGetApiBase` binds as a direct P/Invoke (the only directly exported function)
 - `OrtApi` struct emits with ~388 typed function pointer fields
-- All opaque handles (`OrtEnv`, `OrtSession`, `OrtValue`, etc.) emit as distinct wrapper structs
+- All opaque handles (`OrtEnv`, `OrtSession`, `OrtValue`, etc.) emit as bare `nativeint` at Layer 1; distinct types are a Layer 3 deliverable under `00` §9
 - `OrtErrorCode`, `ONNXTensorElementDataType`, `OrtLoggingLevel` emit as standard enums
 - Nullable error handle convention generates correct null-check + extract + release pattern
 - Layer 3 wrapper can: load a model, create input tensor, run inference, read output tensor

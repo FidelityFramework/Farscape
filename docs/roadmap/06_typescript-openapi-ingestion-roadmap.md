@@ -7,7 +7,7 @@
 
 Farscape generates typed Clef bindings from C/C++ headers. This document extends Farscape's mandate to cover two additional foreign type systems: TypeScript declarations and OpenAPI specifications. The goal is a unified binding generation tool that produces Clef source from any external API surface, replacing Glutinum, Hawaii, and the compensatory pre/post-processing infrastructure currently maintained in Fidelity.CloudEdge.
 
-This document is one half of the Horizon 2 plan. The companion document, *Composer JavaScript Backend*, describes how the Clef source produced here is compiled to deployable JavaScript. Both are required for Fidelity.CloudEdge to migrate from F#/Fable to native Clef.
+This document is one half of the Horizon 2 plan. The companion document, *Composer JavaScript Backend* (`~/repos/Composer/docs/JavaScript_Backend_Design.md`), describes how the Clef source produced here is compiled to deployable JavaScript. Both are required for Fidelity.CloudEdge to migrate from F#/Fable to native Clef.
 
 ### Horizon Context
 
@@ -122,13 +122,13 @@ Both pipelines follow the same three-phase self-hosting path:
 
 **Phase 1**: Clef implementation using external tooling (tsc for TypeScript semantics, JSON parsing for OpenAPI specs). Farscape's four patterns provide the structure.
 
-**Phase 2**: TypeScript parsing moves to XParsec (`.d.ts` files are a tractable subset: type declarations only, no expressions, no control flow). The tsc metadata pass becomes optional. OpenAPI parsing is already XParsec-tractable (JSON/YAML schema).
+**Phase 2**: TypeScript syntax moves to a tree-sitter grammar hosted by Farscape, with XParsec retained for type-expression decomposition and classification (`.d.ts` files are a tractable subset: type declarations only, no expressions, no control flow). The tsc metadata pass becomes optional. OpenAPI parsing is already XParsec-tractable (JSON/YAML schema). This is the same frontend model that Horizon 4.1 of `05_toolchain-sovereignty-and-native-assets.md` applies to Rust, Python, and Go.
 
 **Phase 3**: Entire pipeline self-hosted in Clef, running inside Composer. No Node.js, no external tooling. Distributed as Clef binaries.
 
 ### 2.6 Transition to Atelier Transpose
 
-Farscape's binding generation capability is the foundation of the Transpose feature in Atelier (the Clef IDE). Transpose reads foreign library interfaces and generates Clef binding types that carry the full Fidelity machinery: NTU type widths, BAREWire memory layout contracts, escape analysis across the FFI boundary. Farscape retires as a standalone tool; its work continues as the Transpose capability within Composer, accessible through Atelier's editor interface.
+Farscape's binding generation capability is the foundation of the Transpose feature in Atelier (the Clef IDE). Transpose reads foreign library interfaces and generates Clef binding types that carry the full Fidelity machinery: NTU type widths, BAREWire memory layout contracts, escape analysis across the FFI boundary. Farscape's Clef core is what Composer links to provide Transpose, accessible through Atelier's editor interface; the standalone CLI remains the package-author and CI entry point. The sequence is `05_toolchain-sovereignty-and-native-assets.md` §9.
 
 The per-component decision generalizes: Transpose the infrastructure (API bindings, library interop), Transcribe the computation (algorithms, data transformations) where the type system and precision requirements justify the deeper commitment.
 

@@ -7,23 +7,22 @@
 
 ---
 
-> **Schema caveat (added 2026-08-03).** The example `.pilot.toml` recipes in this document
-> use section names the serializer does not read: `[sources]` (the real section is
-> `[library]`, with `headers`) and `[error_convention]` singular (the real section is
-> `[error_conventions]`). `PilotSerializer` performs no validation and silently drops
-> unrecognized sections, so copying a recipe from this document verbatim yields a project
-> with no headers and no error convention, and no warning. Several recipes also carry
-> `opaque_handles` and `flags_enums`, which have never been keys. See
-> `docs/07_Pilot_Project_Setup.md` for the authoritative schema and
-> `docs/14_Binding_Generation_Gaps.md` for why these went unnoticed.
+## Status (2026-09-08)
 
-> **Handle-record caveat (added 2026-08-03).** Validation criteria in this document that
-> require opaque handles to emit as distinct wrapper structs rather than `nativeint` are
-> **inverted**. A single-word `{ Handle: nativeint }` record is memref-backed under the
-> current compiler and reaches a C callee as the address of a slot rather than as the
-> handle; `ofHandle` also allocates and leaks eight bytes per construction. Bare `nativeint`
-> is the correct Layer 1 output. These gates would pass while producing miscompiling code —
-> see `docs/14_Binding_Generation_Gaps.md` §3.
+This plan was written in February 2026. Everything it sequenced has shipped, in several cases in a different shape from the one specified below. The sections that follow are kept as the design record; the recipes have been brought onto the shipped `.pilot.toml` schema (`docs/07_Pilot_Project_Setup.md`), and §9 is the forward-looking part. The horizon that follows this plan is `05_toolchain-sovereignty-and-native-assets.md`.
+
+| Item | State | Where |
+|---|---|---|
+| Phase 0: Pilot rename | Shipped | `PilotTypes.fs`, `PilotAnalyzer.fs`, `PilotSerializer.fs`; `.pilot.toml`; `farscape pilot` |
+| 1.1 Opaque handles | Shipped, with the Layer 1 form corrected | Detection is unconditional (`FidelityCodeGenerator.detectOpaqueHandles`). Layer 1 emits bare `nativeint`; the single-word record originally specified miscompiles at the call boundary (`docs/14` §3). Typed distinction is a Layer 3 deliverable under §9 |
+| 1.2 Bitmask enums | Shipped, unconditional | `ActivePatterns.isBitmaskEnum` |
+| 1.3 `EnumErrorCode` with error text | Shipped | `EnumErrorModuleGenerator.fs`; `[error_conventions] default = "enum_error_code"` |
+| 1.4 Struct layout with descriptors | Shipped in a different shape | A C struct is never a Clef record. `DescriptorGenerator.fs` emits a layout module of literal offsets plus a `StructDescriptor`, each width fact naming its stratum (measured, declared, inferred). `abi_critical_structs` triggers the measured pass. See §4.4 |
+| 1.5 Protocol XML parser | Shipped as a generic protocol IR | `ProtocolParser.fs`; Wayland is the first XML format. `[library].xml_protocols`, `[[namespace]].xml_interfaces` |
+| 3.5 Discovery | Shipped | `PilotDiscovery.fs`; `farscape pilot discover` |
+| Phase 2: ROCm/HIP | Shipped | `~/repos/Fidelity.Platform/GPU/AMD/RDNA3_5/Fidelity.ROCm.fidproj`; `HelloWayland.GPU.fidproj` dispatches a compiled HIP kernel |
+| Phase 3: HelloWayland | Shipped and exceeded | `~/repos/HelloWayland` v0.2.0: CPU-rasterised 3D logo, GPU variant; Wayland, DRM, GBM, and resvg bindings reached through `Fidelity.Desktop` |
+| `[sources]` schema (§3.3) | Not adopted | `[library]` carries `headers`, `include_paths`, `defines`, `xml_protocols` |
 
 ## 1. Scope
 
@@ -38,13 +37,15 @@ Four tracks within this plan:
 3. **Library binding progression** (ROCm/HIP → libdrm/libgbm → Wayland)
 4. **Wayland protocol XML parser** (architectural capability, not shortcut)
 
-Subsequent phases (NPU binding via XRT/XDNA, MFEM algorithmic ingestion) are covered in companion documents.
+Subsequent phases (NPU via DRM UAPI and XRT, PipeWire, ONNX Runtime, MFEM algorithmic ingestion) and the toolchain horizon that follows them are the companion documents `01` through `05` in this folder.
 
 ---
 
-## 2. Current State
+## 2. State When This Plan Was Written (February 2026)
 
-### 2.1 What Farscape Can Do
+See the Status ledger above for what has shipped since.
+
+### 2.1 What Farscape Could Do
 
 - Parse C/C++ headers via clang two-pass (JSON AST + macro extraction)
 - Map C types to Clef types with platform ABI awareness (LP64/LLP64/ILP32/IP16)
@@ -55,7 +56,7 @@ Subsequent phases (NPU binding via XRT/XDNA, MFEM algorithmic ingestion) are cov
 - Moya project system with multi-header support, namespace scoping, declaration merging
 - Error convention support: Errno, ReturnCode
 
-### 2.2 What It Cannot Do Yet
+### 2.2 What It Could Not Do Yet
 
 - Distinguish opaque handle types from generic `nativeint` pointers
 - Emit `[<Flags>]` bitmask enums
@@ -97,19 +98,18 @@ farscape pilot --project lib.pilot.toml
 
 ### 3.3 Pilot Project Schema Extension
 
-The rename is an opportunity to extend the `.pilot.toml` schema with capabilities needed by subsequent phases:
+The rename extended the `.pilot.toml` schema with the capability subsequent phases need. The shipped form keeps `[library]` as the single source section and adds `xml_protocols` beside `headers`:
 
 ```toml
-# New top-level section for pre-process directives
-[sources]
+[library]
+name = "wayland-client"
 # C/C++ headers parsed via clang (existing path)
 headers = ["/usr/include/wayland-client.h"]
-# XML protocol definitions (new path, Phase 1.5)
+# XML protocol definitions (Phase 1.5)
 xml_protocols = ["/usr/share/wayland/wayland.xml"]
-# Future: Rust crate manifests, Python stubs, etc.
 ```
 
-This `[sources]` section replaces the current `[library].headers` field and opens the door for Pilot to route different source formats to different parsers within the same project. The architectural point: Pilot is a navigator across input formats, not a wrapper around a single clang invocation.
+A separate `[sources]` section was considered and not adopted: one section per library, carrying every input format that library needs, is simpler for the serializer and for discovery. The architectural point stands. Pilot routes different source formats to different parsers within one project; it is a navigator across input formats, not a wrapper around a single clang invocation.
 
 ### 3.4 Metaphor
 
@@ -135,7 +135,7 @@ Pilot walks the directory tree recursively and classifies files by what it can p
 |---|---|---|
 | `*.h` | C header candidate | CppParser (clang) |
 | `*.hpp`, `*.hxx`, `*.hh` | C++ header candidate | CppParser (clang, C++ mode) |
-| `*.xml` with `<protocol>` root | Wayland protocol XML | WaylandProtocolParser |
+| `*.xml` with `<protocol>` root | Wayland protocol XML | ProtocolParser |
 | `*.xml` with `<node>` root | D-Bus introspection XML | Future parser |
 | `*.xml` with `<registry>` root | Vulkan/OpenCL registry | Future parser |
 | `*.pc` | pkg-config metadata | Metadata extraction |
@@ -258,17 +258,7 @@ No new parser work for 4.1-4.4; the clang parser already extracts everything nee
 
 **Detection**: The typedef algebra already extracts `(name, underlyingType)` pairs. When the underlying type matches the pattern `struct i<n>_t*` or is a forward-declared struct pointer, classify it as an opaque handle.
 
-**Output**: Emit a zero-cost wrapper struct per opaque handle:
-
-```fsharp
-/// Opaque handle for HIP stream. Wraps a native pointer.
-[<Struct>]
-type hipStream_t = { Handle: nativeint }
-
-module hipStream_t =
-    let zero = { Handle = 0n }
-    let isNull (h: hipStream_t) = h.Handle = 0n
-```
+**Output**: Layer 1 emits the handle as bare `nativeint`. The zero-cost wrapper struct originally specified here, a single-word `{ Handle: nativeint }` record, is memref-backed under the current compiler and reaches the C callee as the address of a slot rather than as the handle (`docs/14_Binding_Generation_Gaps.md` §3), so it is not emitted. Detection still classifies the typedef, and the classification is carried forward to Layer 3, where the typed distinction is delivered under the regeneration horizon of §9.
 
 **Module changes**:
 - `ActivePatterns.fs`: Add `OpaqueHandleTypedef` active pattern
@@ -368,7 +358,7 @@ let streamCreate () : Result<hipStream_t, HipError> =
 #### 4.3.3 Pilot Project Configuration
 
 ```toml
-[error_convention]
+[error_conventions]
 default = "enum_error_code"
 error_type = "hipError_t"
 success_value = "hipSuccess"
@@ -381,7 +371,7 @@ error_name_fn = "hipGetErrorName"
 
 | Module | Change |
 |---|---|
-| `ErrnoModuleGenerator.fs` → `ErrorModuleGenerator.fs` | Generalize: factor the common pattern (extract constants → generate struct → generate describe → generate capture) so it works for both errno macros and error enums. The errno path remains a specialization of the general pattern. |
+| New: `EnumErrorModuleGenerator.fs` | Shipped as a parallel generator rather than a merge. It emits the error struct, the `describe` jump table, and the `capture` helper for enum error codes with the same zero-allocation architecture; `ErrnoModuleGenerator.fs` is untouched. |
 | `PilotTypes.fs` | Add `EnumErrorCode of errorType: string * successValue: string * errorStringFn: string option * errorNameFn: string option` to `ErrorConvention` |
 | `PilotSerializer.fs` | Parse `error_type`, `success_value`, `error_string_fn`, `error_name_fn` from TOML |
 | `WrapperTypes.fs` | Add `EnumReturnError of enumType: string` to `ReturnSemantic` |
@@ -397,38 +387,30 @@ The architectural point: the error text pipeline is not a feature bolted onto th
 
 **Detection**: Configured per-struct in the `.pilot.toml` via `abi_critical_structs`, or inferred when a struct is used in an ioctl-style call pattern.
 
-**Output**: When flagged as ABI-critical:
+**Output** (shipped 2026-09-05, `DescriptorGenerator.fs`): a C struct is never emitted as a Clef record. A packed record cannot overlay a C layout, and one that looks usable and reads the wrong bytes is the worst artifact the generator can produce (`docs/14_Binding_Generation_Gaps.md` §2). Each struct becomes a layout module of literal offsets with its BAREWire `StructDescriptor` inside, and every width fact names its stratum: `measured` when the record-layout pass ran for the struct, `declared` when computed by natural alignment from the declared field types, `inferred` when a field's representation is unknown. Abbreviated, the emitted form is:
 
 ```fsharp
-[<Struct; StructLayout(LayoutKind.Explicit, Size = 12)>]
-type drm_prime_handle =
-    [<FieldOffset(0)>] val handle: uint32
-    [<FieldOffset(4)>] val flags:  uint32
-    [<FieldOffset(8)>] val fd:     int32
+/// C struct `drm_prime_handle`: layout measured.
+module drm_prime_handle =
+    /// Offset of `handle` in bytes (measured).
+    let handleOffset = 0
+    /// Offset of `flags` in bytes (measured).
+    let flagsOffset = 4
+    /// Offset of `fd` in bytes (measured).
+    let fdOffset = 8
+    let Descriptor : StructDescriptor =
+        { Name = "drm_prime_handle"; Size = 12; Alignment = 4
+          Fields = [ (* handle U32 @0, flags U32 @4, fd I32 @8; each with its provenance note *) ] }
 ```
 
-Plus a BAREWire descriptor:
-
-```fsharp
-let drmPrimeHandleDescriptor = {
-    Name = "drm_prime_handle"
-    Size = 12u
-    Alignment = 4u
-    Fields = [
-        { Name = "handle"; Offset = 0u; Size = 4u; Type = U32 }
-        { Name = "flags";  Offset = 4u; Size = 4u; Type = U32 }
-        { Name = "fd";     Offset = 8u; Size = 4u; Type = I32 }
-    ]
-}
-```
+`abi_critical_structs` is what triggers the measured pass (`clang -Xclang -fdump-record-layouts-simple`); a struct outside that list is laid out at the `declared` stratum.
 
 The BAREWire descriptor matters beyond correctness verification. In the UMA pointer handoff pattern (CPU ↔ GPU ↔ NPU), BAREWire descriptors provide the contract that all processors agree on the memory layout. When a `drm_prime_handle` is passed to a kernel ioctl, the struct must match the kernel's layout. When body state buffers are shared between CPU integration, GPU rendering, and NPU acceleration, the BAREWire descriptor guarantees all three access the same field at the same offset. A naive initial approach (manual struct definitions, `memcpy` at boundaries) is acceptable for early work. But the BAREWire descriptor generated here for ioctl structs is the same mechanism that scales to zero-copy UMA exchange. Getting the descriptor infrastructure right for libdrm validates it for the simulation data path.
 
-**Module changes**:
-- `CodeAST.fs`: `RecordType` gains optional `ExplicitLayout` with field offsets
-- `CodeRenderer.fs`: Render `LayoutKind.Explicit` with `[<FieldOffset>]` when present
-- `FidelityCodeGenerator.fs`: Extract field offset information from clang AST (available in the JSON dump)
-- `DescriptorGenerator.fs`: Extended to emit BAREWire struct descriptors from parsed declarations
+**Module changes** (as shipped):
+- `CppParser.fs`: record-layout pass producing `StructLayoutInfo` with measured offsets, size, and alignment
+- `BindingGenerator.fs`: runs the layout pass when `abi_critical_structs` is non-empty
+- `DescriptorGenerator.fs`: layout modules and `StructDescriptor` emission, each width fact carrying its stratum
 
 ### 4.5 Wayland Protocol XML Parser
 
@@ -468,10 +450,10 @@ Each `<interface>` produces:
 
 The parser produces the same `Declaration` types that the clang path produces. Everything downstream (TypeMapper, CodeGenerator, CodeRenderer) remains unchanged. The only new module is the parser itself.
 
-**Pilot integration**:
+**Pilot integration** (on `[library]`, beside `headers`):
 
 ```toml
-[sources]
+[library]
 xml_protocols = [
     "/usr/share/wayland/wayland.xml",
     "/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml",
@@ -497,10 +479,12 @@ type wl_pointer_listener = {
 }
 ```
 
-**Module changes**:
-- New: `WaylandProtocolParser.fs` (XParsec-based XML parser producing `Declaration` list)
-- `PilotSerializer.fs`: Parse `[sources].xml_protocols` field
-- `BindingGenerator.fs`: Route XML protocols to `WaylandProtocolParser`, merge resulting declarations with header-sourced declarations via `DeclarationAlgebra.mergeDeclarations`
+The shipped form resolves each listener field by symbol name through `dlsym` and carries it as `nativeint` (`CallbackWrapperGenerator.fs`, Pattern B, driven by `[callbacks] listener_structs`). The typed delegate form above arrives with the `FnPtr<'F>` primitive under the regeneration horizon of §9.
+
+**Module changes** (as shipped):
+- New: `ProtocolParser.fs`. A generic protocol IR; Wayland XML is the first format. XML syntax is handled by Fidelity.Data.XML, protocol semantics here, producing a `Declaration` list
+- `PilotSerializer.fs`: parse `[library].xml_protocols` and `[[namespace]].xml_interfaces`
+- `BindingGenerator.fs`: route XML protocols to `ProtocolParser`, merge resulting declarations with header-sourced declarations via `DeclarationAlgebra.mergeDeclarations`
 
 ---
 
@@ -515,8 +499,6 @@ type wl_pointer_listener = {
 
 [library]
 name = "amdhip64"
-
-[sources]
 headers = ["/opt/rocm/include/hip/hip_runtime_api.h"]
 include_paths = ["/opt/rocm/include"]
 defines = ["__HIP_PLATFORM_AMD__"]
@@ -525,25 +507,23 @@ defines = ["__HIP_PLATFORM_AMD__"]
 mode = "fidelity"
 directory = "./bindings/rocm"
 
-[error_convention]
+[error_conventions]
 default = "enum_error_code"
 error_type = "hipError_t"
 success_value = "hipSuccess"
 error_string_fn = "hipGetErrorString"
 error_name_fn = "hipGetErrorName"
 
-[options]
-opaque_handles = true
-flags_enums = true
-
 [[namespace]]
 name = "Fidelity.ROCm.Device"
+description = "Device enumeration, attributes, driver and runtime version"
 library = "amdhip64"
 prefixes = ["hipDevice", "hipGetDevice"]
 functions = ["hipInit", "hipDriverGetVersion", "hipRuntimeGetVersion"]
 
 [[namespace]]
 name = "Fidelity.ROCm.Memory"
+description = "Host, device, and external (DMA-BUF) memory"
 library = "amdhip64"
 prefixes = ["hipMalloc", "hipFree", "hipMemcpy", "hipMemset"]
 functions = [
@@ -554,22 +534,26 @@ functions = [
 
 [[namespace]]
 name = "Fidelity.ROCm.Stream"
+description = "Stream creation and synchronization"
 library = "amdhip64"
 prefixes = ["hipStream"]
 
 [[namespace]]
 name = "Fidelity.ROCm.Event"
+description = "Event timing and synchronization"
 library = "amdhip64"
 prefixes = ["hipEvent"]
 
 [[namespace]]
 name = "Fidelity.ROCm.Module"
+description = "Code object loading and kernel launch"
 library = "amdhip64"
 prefixes = ["hipModule"]
 functions = ["hipLaunchKernel", "hipFuncGetAttributes"]
 
 [[namespace]]
 name = "Fidelity.ROCm.Error"
+description = "Error strings and last-error queries"
 library = "amdhip64"
 functions = ["hipGetErrorString", "hipGetErrorName",
              "hipGetLastError", "hipPeekAtLastError"]
@@ -577,7 +561,7 @@ functions = ["hipGetErrorString", "hipGetErrorName",
 
 ### 5.2 Validation Criteria
 
-- `hipStream_t`, `hipEvent_t`, `hipModule_t` emit as distinct wrapper structs, not `nativeint`
+- `hipStream_t`, `hipEvent_t`, `hipModule_t` emit as bare `nativeint` at Layer 1 (`docs/14` §3); the typed distinction is a Layer 3 deliverable under §9
 - `hipHostMallocFlags` emits with `[<Flags>]`
 - `hipError_t` emits as a standard enum with all values
 - `HipError` struct generated with `describe` jump table from header enum comments
@@ -611,8 +595,6 @@ Plus the HIP external memory import from Phase 2.
 # libdrm.pilot.toml
 [library]
 name = "drm"
-
-[sources]
 headers = ["/usr/include/xf86drm.h", "/usr/include/xf86drmMode.h"]
 include_paths = ["/usr/include/libdrm"]
 
@@ -625,6 +607,7 @@ abi_critical_structs = ["drm_prime_handle", "drm_mode_create_dumb"]
 
 [[namespace]]
 name = "Fidelity.DRM"
+description = "DRM device open and PRIME handle/fd exchange"
 library = "drm"
 functions = [
     "drmOpen", "drmClose",
@@ -640,19 +623,15 @@ functions = [
 # libgbm.pilot.toml
 [library]
 name = "gbm"
-
-[sources]
 headers = ["/usr/include/gbm.h"]
 
 [output]
 mode = "fidelity"
 directory = "./bindings/gbm"
 
-[options]
-opaque_handles = true
-
 [[namespace]]
 name = "Fidelity.GBM"
+description = "GBM device and buffer object allocation, DMA-BUF export"
 library = "gbm"
 functions = [
     "gbm_create_device", "gbm_device_destroy",
@@ -671,8 +650,6 @@ The Phase 1.5 XML parser pays off here. The Wayland binding is generated from pr
 # wayland.pilot.toml
 [library]
 name = "wayland-client"
-
-[sources]
 headers = ["/usr/include/wayland-client-core.h"]
 include_paths = ["/usr/include"]
 xml_protocols = [
@@ -685,11 +662,9 @@ xml_protocols = [
 mode = "fidelity"
 directory = "./bindings/wayland"
 
-[options]
-opaque_handles = true
-
 [[namespace]]
 name = "Fidelity.Wayland.Core"
+description = "Display connection, dispatch, and proxy primitives"
 library = "wayland-client"
 functions = [
     "wl_display_connect", "wl_display_disconnect",
@@ -701,22 +676,25 @@ functions = [
 
 [[namespace]]
 name = "Fidelity.Wayland.Protocol"
+description = "Core wayland.xml interfaces"
 library = "wayland-client"
 xml_interfaces = ["wl_compositor", "wl_surface", "wl_buffer",
                    "wl_registry", "wl_callback", "wl_shm"]
 
 [[namespace]]
 name = "Fidelity.Wayland.XdgShell"
+description = "xdg-shell toplevel and surface roles"
 library = "wayland-client"
 xml_interfaces = ["xdg_wm_base", "xdg_surface", "xdg_toplevel"]
 
 [[namespace]]
 name = "Fidelity.Wayland.DmaBuf"
+description = "linux-dmabuf buffer import"
 library = "wayland-client"
 xml_interfaces = ["zwp_linux_dmabuf_v1", "zwp_linux_buffer_params_v1"]
 ```
 
-The hybrid `[sources]` section demonstrates Pilot's routing: C headers for core library functions, XML protocols for interface definitions. Both produce `Declaration` lists that merge through the existing pipeline.
+The `[library]` section carrying both `headers` and `xml_protocols` demonstrates Pilot's routing: C headers for core library functions, XML protocols for interface definitions. Both produce `Declaration` lists that merge through the existing pipeline.
 
 ### 6.5 HelloWayland Milestone
 
@@ -783,19 +761,20 @@ binding          (libdrm + libgbm + Wayland XML)
 
 | Module | Phase | Change |
 |---|---|---|
-| `MoyaTypes.fs` → `PilotTypes.fs` | 0 | Rename; add `EnumErrorCode` to `ErrorConvention`; add `[sources]` schema |
+| `MoyaTypes.fs` → `PilotTypes.fs` | 0 | Rename; add `EnumErrorCode` to `ErrorConvention`; add `xml_protocols` to `[library]` |
 | `MoyaAnalyzer.fs` → `PilotAnalyzer.fs` | 0 | Rename |
 | `MoyaSerializer.fs` → `PilotSerializer.fs` | 0 | Rename; parse new fields |
 | `ActivePatterns.fs` | 1.1 | Add `OpaqueHandleTypedef` active pattern |
 | `TypeMapper.fs` | 1.1 | Register opaque handle names in type resolution |
-| `CodeAST.fs` | 1.2, 1.4 | `EnumType` gains `IsFlags`; `RecordType` gains optional `ExplicitLayout` |
-| `CodeRenderer.fs` | 1.2, 1.4 | Render `[<Flags>]`; render `LayoutKind.Explicit` with `[<FieldOffset>]` |
-| `FidelityCodeGenerator.fs` | 1.1, 1.2, 1.4 | Opaque handle emission; bitmask detection; field offset extraction |
-| `ErrnoModuleGenerator.fs` → `ErrorModuleGenerator.fs` | 1.3 | Generalize: common pattern for errno macros and error enums; errno path remains a specialization |
+| `CodeAST.fs` | 1.2 | `EnumType` gains `IsFlags` |
+| `CodeRenderer.fs` | 1.2 | Render `[<Flags>]` |
+| `FidelityCodeGenerator.fs` | 1.1, 1.2 | Opaque handle detection (Layer 1 emits `nativeint`); bitmask detection |
+| `DescriptorGenerator.fs`, `CppParser.fs` | 1.4 | Layout modules plus `StructDescriptor` with stratum; record-layout pass |
+| New: `EnumErrorModuleGenerator.fs` | 1.3 | Enum error code struct, `describe`, `capture`; parallel to `ErrnoModuleGenerator.fs` |
 | `WrapperTypes.fs` | 1.3 | Add `EnumReturnError of enumType: string` to `ReturnSemantic` |
 | `WrapperPatternAnalyzer.fs` | 1.3 | Detect `EnumErrorCode` return pattern |
 | `WrapperCodeGenerator.fs` | 1.3 | Generate `Result<T, ErrorStruct>` wrappers using `ErrorStruct.capture` |
-| New: `WaylandProtocolParser.fs` | 1.5 | XParsec-based XML parser producing `Declaration` list |
+| New: `ProtocolParser.fs` | 1.5 | Generic protocol IR from XML (Wayland first), producing `Declaration` list |
 | `BindingGenerator.fs` | 0, 1.5 | Use `PilotProject`; route XML protocols to new parser; merge declarations |
 | New: `PilotDiscovery.fs` | 0 | Generalized source asset discovery: directory → classified file list with diagnostics |
 | `Program.fs` (CLI) | 0 | `pilot` subcommand; accept `.pilot.toml`; `pilot discover` for asset discovery |
@@ -806,7 +785,7 @@ binding          (libdrm + libgbm + Wayland XML)
 
 Two commitments sit above the phase sequence and govern every binding this plan produces.
 
-**The regeneration horizon.** The bindings generated to date work, and they are trusted, at less-than-optimal structure. They were deliberately fitted inside the language support available when they were generated; certain pure functional forms were simply not available to emit, and the emitted shapes accommodate that absence. When the full expression of the language lands (dimensional types, the NTU as the numeric substrate, and the full syntax surface) every binding in the corpus will be re-generated against it. This is a planned, single, corpus-wide regeneration, not a rolling migration: one horizon keeps the direction steady, prevents per-library drift toward the interim shapes, and states plainly that the interim forms are not the target forms. Nothing about the current bindings' fitness for use is retracted by this; what is retracted in advance is any claim that their structure is final. The callback marshaling path shares a gate with this horizon: the typed function-pointer primitive that `docs/roadmap/06_farscape-phase4d-onnxruntime.md` §5 depends on (`FnPtr<'F>`, not yet built) arrives with the same language surface, so the regeneration and the ONNX Runtime function-table work draw on one prerequisite.
+**The regeneration horizon.** The bindings generated to date work, and they are trusted, at less-than-optimal structure. They were deliberately fitted inside the language support available when they were generated; certain pure functional forms were simply not available to emit, and the emitted shapes accommodate that absence. When the full expression of the language lands (dimensional types, the NTU as the numeric substrate, and the full syntax surface) every binding in the corpus will be re-generated against it. This is a planned, single, corpus-wide regeneration, not a rolling migration: one horizon keeps the direction steady, prevents per-library drift toward the interim shapes, and states plainly that the interim forms are not the target forms. Nothing about the current bindings' fitness for use is retracted by this; what is retracted in advance is any claim that their structure is final. The callback marshaling path shares a gate with this horizon: the typed function-pointer primitive that `docs/roadmap/03_farscape-phase4d-onnxruntime.md` §5 depends on (`FnPtr<'F>`, not yet built) arrives with the same language surface, so the regeneration and the ONNX Runtime function-table work draw on one prerequisite.
 
 **The Layer 3 commitment.** User-facing API quality is a deliverable, demonstrated per library, and never presumed from the generator's ML metaprogramming pedigree. Layer 3 is where the generator's full utility is shown, and this plan does not hand-wave it: a binding whose Layer 3 story is that a skilled developer could write a pleasant overlay has not shipped its Layer 3. Each library binding therefore carries Layer 3 validation criteria of its own, in the style of the per-phase criteria above:
 
@@ -818,6 +797,6 @@ Two commitments sit above the phase sequence and govern every binding this plan 
 
 ---
 
-*Companion documents: "Farscape Phase 4: NPU Binding via DRM UAPI + XRT", "Farscape Phase 4C: PipeWire Audio Binding", "Farscape Phase 4D: ONNX Runtime Binding", and "Farscape Phase 5+: MFEM Algorithmic Ingestion"*
+*Companion documents: "Farscape Phase 4: NPU Binding via DRM UAPI + XRT", "Farscape Phase 4C: PipeWire Audio Binding", "Farscape Phase 4D: ONNX Runtime Binding", "Farscape Phase 5+: MFEM Algorithmic Ingestion", and "Farscape Horizon: Toolchain Sovereignty and Native Asset Production"*
 
 *SpeakEZ Technologies | Fidelity Framework*

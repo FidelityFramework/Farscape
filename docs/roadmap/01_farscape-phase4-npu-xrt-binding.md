@@ -7,29 +7,11 @@
 
 ---
 
-> **Schema caveat (added 2026-08-03).** The example `.pilot.toml` recipes in this document
-> use section names the serializer does not read: `[sources]` (the real section is
-> `[library]`, with `headers`) and `[error_convention]` singular (the real section is
-> `[error_conventions]`). `PilotSerializer` performs no validation and silently drops
-> unrecognized sections, so copying a recipe from this document verbatim yields a project
-> with no headers and no error convention, and no warning. Several recipes also carry
-> `opaque_handles` and `flags_enums`, which have never been keys. See
-> `docs/07_Pilot_Project_Setup.md` for the authoritative schema and
-> `docs/14_Binding_Generation_Gaps.md` for why these went unnoticed.
-
-> **Handle-record caveat (added 2026-08-03).** Validation criteria in this document that
-> require opaque handles to emit as distinct wrapper structs rather than `nativeint` are
-> **inverted**. A single-word `{ Handle: nativeint }` record is memref-backed under the
-> current compiler and reaches a C callee as the address of a slot rather than as the
-> handle; `ofHandle` also allocates and leaks eight bytes per construction. Bare `nativeint`
-> is the correct Layer 1 output. These gates would pass while producing miscompiling code —
-> see `docs/14_Binding_Generation_Gaps.md` §3.
-
 > **Membrane note.** The pointer surface in this document is Layer 1/2 membrane plumbing whose confinement and exit are recorded in the exit banner of `docs/08_Nullable_Pointer_Architecture.md` and the Representation section of `docs/10_Boundary_Marshaling_Spec.md`.
 
 ## 1. Prerequisites
 
-This document assumes Phases 0-3 of the Farscape Maturation Plan are complete:
+This document assumes Phases 0-3 of the Farscape Maturation Plan are complete (they are; see the Status ledger in `00_farscape-maturation-plan.md`):
 
 - **Phase 0**: Pilot rename is done; `.pilot.toml` project files are the standard.
 - **Phase 1**: Opaque handle types, bitmask enums, `EnumErrorCode` with error text, struct layout with BAREWire descriptors, and the Wayland protocol XML parser are all in place.
@@ -158,7 +140,7 @@ The `amdxdna` DRM UAPI is the kernel-stable interface. It is:
 | `enum amdxdna_power_mode_type` | Standard enum (DEFAULT, LOW, MEDIUM, HIGH, TURBO) | Standard enum |
 | `enum amdxdna_drm_get_param` | Query parameter enum (22 values) | Standard enum |
 | `enum amdxdna_drm_set_param` | Set parameter enum | Standard enum |
-| `struct amdxdna_drm_create_hwctx` | ABI-critical ioctl struct | `[<Struct; StructLayout(Explicit)>]` with BAREWire descriptor |
+| `struct amdxdna_drm_create_hwctx` | ABI-critical ioctl struct | Layout module plus `StructDescriptor` at the `measured` stratum (`00` §4.4) |
 | `struct amdxdna_drm_create_bo` | ABI-critical ioctl struct | Same |
 | `struct amdxdna_drm_query_aie_metadata` | Nested struct with sub-structs | Same |
 
@@ -189,8 +171,6 @@ The `DRM_IOCTL_AMDXDNA_GET_INFO` ioctl is polymorphic — the `param` field sele
 
 [library]
 name = "drm"  # ioctl interface, linked via libdrm for DRM_IOCTL macros
-
-[sources]
 headers = ["/usr/include/drm/amdxdna_accel.h"]
 include_paths = ["/usr/include", "/usr/include/libdrm"]
 
@@ -198,7 +178,7 @@ include_paths = ["/usr/include", "/usr/include/libdrm"]
 mode = "fidelity"
 directory = "./bindings/amdxdna"
 
-[error_convention]
+[error_conventions]
 default = "errno"  # ioctl returns -1 + errno
 
 [options]
@@ -224,36 +204,41 @@ abi_critical_structs = [
 
 [[namespace]]
 name = "Fidelity.XDNA.Context"
+description = "Hardware context create, destroy, configure"
 library = "drm"
 prefixes = ["amdxdna_drm_create_hwctx", "amdxdna_drm_destroy_hwctx",
             "amdxdna_drm_config_hwctx"]
 
 [[namespace]]
 name = "Fidelity.XDNA.BufferObject"
+description = "Buffer object create, info, sync"
 library = "drm"
 prefixes = ["amdxdna_drm_create_bo", "amdxdna_drm_get_bo_info",
             "amdxdna_drm_sync_bo"]
 
 [[namespace]]
 name = "Fidelity.XDNA.Execution"
+description = "Command submission"
 library = "drm"
 prefixes = ["amdxdna_drm_exec_cmd"]
 
 [[namespace]]
 name = "Fidelity.XDNA.Query"
+description = "Device info and array queries"
 library = "drm"
 prefixes = ["amdxdna_drm_get_info", "amdxdna_drm_get_array",
             "amdxdna_drm_query"]
 
 [[namespace]]
 name = "Fidelity.XDNA.Config"
+description = "Device state and power mode"
 library = "drm"
 prefixes = ["amdxdna_drm_set_state", "amdxdna_power_mode"]
 ```
 
 ### 3.7 Layer 3 Wrapper Design
 
-The DRM UAPI is an ioctl interface, not a function library. Layer 2 emits the struct types and ioctl constants. Layer 3 (hand-written or annotated) provides the typed wrapper:
+The DRM UAPI is an ioctl interface, not a function library. Layer 2 emits the layout modules, descriptors, and ioctl constants. Layer 3 (hand-written or annotated) provides the typed wrapper:
 
 ```fsharp
 module Fidelity.XDNA.Api =
@@ -333,10 +318,10 @@ XRT is a C++ library (`xrt::device`, `xrt::bo`, `xrt::kernel`, `xrt::run`). For 
 
 | C Type | Pattern | Farscape Mapping |
 |---|---|---|
-| `xrt_device` | Opaque handle (forward-declared struct pointer) | `[<Struct>] type xrt_device = { Handle: nativeint }` |
-| `xrt_bo` | Opaque handle | `[<Struct>] type xrt_bo = { Handle: nativeint }` |
-| `xrt_kernel` | Opaque handle | `[<Struct>] type xrt_kernel = { Handle: nativeint }` |
-| `xrt_run` | Opaque handle | `[<Struct>] type xrt_run = { Handle: nativeint }` |
+| `xrt_device` | Opaque handle (forward-declared struct pointer) | `nativeint` (Layer 1; docs/14 §3) |
+| `xrt_bo` | Opaque handle | `nativeint` (Layer 1; docs/14 §3) |
+| `xrt_kernel` | Opaque handle | `nativeint` (Layer 1; docs/14 §3) |
+| `xrt_run` | Opaque handle | `nativeint` (Layer 1; docs/14 §3) |
 | `xrt_error_code` | Error enum (success = 0) | Standard enum + error text pipeline |
 | `xrt_bo_flags` | Bitmask enum | `[<Flags>]` enum |
 
@@ -351,8 +336,6 @@ Every type here matches a pattern that Phase 1 already handles. No new code gene
 
 [library]
 name = "xrt_coreutil"
-
-[sources]
 headers = [
     "/usr/include/xrt/xrt.h",
     "/usr/include/xrt/xrt_bo.h",
@@ -366,18 +349,15 @@ defines = ["XRT_API_SOURCE_C"]
 mode = "fidelity"
 directory = "./bindings/xrt"
 
-[error_convention]
+[error_conventions]
 default = "enum_error_code"
 error_type = "xrt_error_code"
 success_value = "XRT_SUCCESS"
 error_string_fn = "xrt_error_to_string"
 
-[options]
-opaque_handles = true
-flags_enums = true
-
 [[namespace]]
 name = "Fidelity.XRT.Device"
+description = "Device open, close, xclbin load"
 library = "xrt_coreutil"
 prefixes = ["xrt_device"]
 functions = ["xrt_device_open", "xrt_device_close",
@@ -385,6 +365,7 @@ functions = ["xrt_device_open", "xrt_device_close",
 
 [[namespace]]
 name = "Fidelity.XRT.BufferObject"
+description = "Buffer object alloc, map, sync, import, export"
 library = "xrt_coreutil"
 prefixes = ["xrt_bo"]
 functions = [
@@ -396,6 +377,7 @@ functions = [
 
 [[namespace]]
 name = "Fidelity.XRT.Kernel"
+description = "Kernel open, close, group id"
 library = "xrt_coreutil"
 prefixes = ["xrt_kernel"]
 functions = ["xrt_kernel_open", "xrt_kernel_close",
@@ -403,6 +385,7 @@ functions = ["xrt_kernel_open", "xrt_kernel_close",
 
 [[namespace]]
 name = "Fidelity.XRT.Run"
+description = "Run start, wait, state, arguments"
 library = "xrt_coreutil"
 prefixes = ["xrt_run"]
 functions = [
@@ -412,6 +395,7 @@ functions = [
 
 [[namespace]]
 name = "Fidelity.XRT.Error"
+description = "Error string conversion"
 library = "xrt_coreutil"
 functions = ["xrt_error_to_string"]
 ```
@@ -502,7 +486,7 @@ The initial binding (Layer 1 + Layer 2 from Farscape) provides the raw functions
 
 ### 6.1 Phase 4A (DRM UAPI)
 
-- All 10 ioctl argument structs emit with `[<StructLayout(Explicit)>]` and BAREWire descriptors
+- All 10 ioctl argument structs emit as layout modules with `StructDescriptor` at the `measured` stratum
 - All enums (`amdxdna_bo_type`, `amdxdna_cmd_type`, `amdxdna_power_mode_type`, `amdxdna_drm_get_param`) emit correctly
 - Nested query structs (`amdxdna_drm_query_aie_metadata` with sub-structs) emit with correct offsets
 - Layer 3 wrappers can open `/dev/accel/accel0`, query AIE metadata, and return verified results
@@ -510,7 +494,7 @@ The initial binding (Layer 1 + Layer 2 from Farscape) provides the raw functions
 
 ### 6.2 Phase 4B (XRT)
 
-- `xrt_device`, `xrt_bo`, `xrt_kernel`, `xrt_run` emit as distinct opaque handle wrapper structs
+- `xrt_device`, `xrt_bo`, `xrt_kernel`, `xrt_run` emit as bare `nativeint` at Layer 1; distinct types are a Layer 3 deliverable under `00` §9
 - `xrt_bo_flags` emits with `[<Flags>]`
 - `xrt_error_code` emits as standard enum; `XrtError` struct generated with describe jump table
 - All API functions return `Result<T, XrtError>` in Layer 2 wrappers
@@ -590,9 +574,10 @@ Phase 4 is part of a cluster of binding phases that extend Farscape's reach for 
 |---|---|---|
 | 4A | amdxdna DRM UAPI | This document |
 | 4B | XRT C API | This document |
-| 4C | PipeWire audio I/O | `05_farscape-phase4c-pipewire-audio.md` |
-| 4D | ONNX Runtime C API | `06_farscape-phase4d-onnxruntime.md` |
-| 5 | MFEM algorithmic ingestion | `03_farscape-phase5-mfem-ingestion.md` |
+| 4C | PipeWire audio I/O | `02_farscape-phase4c-pipewire-audio.md` |
+| 4D | ONNX Runtime C API | `03_farscape-phase4d-onnxruntime.md` |
+| 5 | MFEM algorithmic ingestion | `04_farscape-phase5-mfem-ingestion.md` |
+| Horizon | Toolchain sovereignty and native assets | `05_toolchain-sovereignty-and-native-assets.md` |
 
 ---
 

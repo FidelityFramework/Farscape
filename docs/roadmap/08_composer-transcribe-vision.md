@@ -445,7 +445,7 @@ The strategic position is significant: Fidelity does not need to build numerical
 
 Farscape was the right tool for its moment. It emerged from the practical need to generate F# bindings from C/C++ headers, and it deliberately avoided the type provider machinery of F# because it was unclear whether an equivalent mechanism would emerge in Clef. Farscape drew from other binding generator libraries (CppSharp, SWIG) that treat foreign library integration as a build-time code generation step: parse headers, emit glue code, link.
 
-That design served its purpose. It proved that Clef programs could access native C/C++ libraries with type safety. It established XParsec as the parsing infrastructure. It validated the Plugify integration path for C++ ABI intelligence. But Farscape as a standalone tool represents an intermediate stage, not a destination.
+That design served its purpose. It proved that Clef programs could access native C/C++ libraries with type safety. It established XParsec as the parsing infrastructure. It validated the Plugify integration path for C++ ABI intelligence. But Farscape as a .NET-hosted tool is an intermediate stage, not a destination; the native self-hosted core is what Composer eventually links.
 
 The destination is two complementary capabilities within Composer, both accessible through the Atelier editor:
 
@@ -462,7 +462,7 @@ The musical analogy extends naturally. Transcription rewrites the piece in a new
 - **Escape analysis across the FFI boundary**: Transpose tracks which foreign-allocated values escape the binding call, which are consumed, and which are borrowed. This informs Clef's lifetime inference for resources that straddle the native/foreign boundary.
 - **Platform-aware binding variants**: A Transpose binding to a library that provides both CPU and GPU implementations (as MFEM does) generates platform-parameterized bindings that resolve against the application's platform declaration. The binding is not locked to one target.
 
-Transpose subsumes everything Farscape does today, and extends it with the machinery that the Fidelity compilation pipeline makes possible. Farscape's XParsec parser, its C/C++ header analysis, its Plugify ABI integration: all of this folds into the Transpose capability within Composer. Farscape retires as a standalone tool; its work continues as the foundation of Transpose.
+Transpose subsumes everything Farscape does today, and extends it with the machinery that the Fidelity compilation pipeline makes possible. Farscape's XParsec parser, its C/C++ header analysis, its Plugify ABI integration: all of this folds into the Transpose capability within Composer. Farscape's Clef core is what Composer links to provide Transpose; the standalone CLI remains the package-author and CI entry point. The sequence is set out in `docs/roadmap/05_toolchain-sovereignty-and-native-assets.md` §9.
 
 The per-component decision for MFEM generalizes cleanly under this model: Transcribe the computation (element integrators, solver kernels), Transpose the infrastructure (mesh I/O, file format parsers, visualization hooks). Both operate within the same Atelier editing environment, share the same multi-pre-process analysis pipeline, and produce output that participates fully in Composer's declaration-dependent platform resolution.
 

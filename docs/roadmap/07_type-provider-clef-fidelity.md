@@ -9,7 +9,7 @@
 
 The F# ecosystem provides type providers through libraries like FSharp.Data, offering compile-time type generation from external data sources: JSON, XML, CSV, HTML, and others. Type providers infer schemas from sample documents and generate F# types that provide IntelliSense, type-checked field access, and serialization, all without manually defining record types or writing parsing code. Recent additions to this ecosystem include TOML support, contributed in part through work that originated from Fidelity.TOML development.
 
-Fidelity Framework's Composer toolchain introduces two capabilities for foreign code integration: **Transcribe** (full algorithmic port from C/C++/Rust/Python to Clef) and **Transpose** (typed dynamic binding that wraps foreign library interfaces with NTU type widths, BAREWire memory contracts, escape analysis, and lifetime inference). These subsume and eventually retire Farscape as a standalone binding generator.
+Fidelity Framework's Composer toolchain introduces two capabilities for foreign code integration: **Transcribe** (full algorithmic port from C/C++/Rust/Python to Clef) and **Transpose** (typed dynamic binding that wraps foreign library interfaces with NTU type widths, BAREWire memory contracts, escape analysis, and lifetime inference). These are the Farscape core hosted inside Composer at a later horizon (`05_toolchain-sovereignty-and-native-assets.md` §9); the standalone tool remains the package-author entry point.
 
 The question this memo addresses: **does Clef need a third capability, analogous to F#'s type providers, specifically for ingesting structured data formats?** Or does the Transcribe/Transpose architecture, combined with BAREWire's schema descriptor system, absorb this use case?
 

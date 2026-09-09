@@ -255,5 +255,6 @@ precision.
 | [Wrapper Generation](./05_Wrapper_Generation.md) | Layer 2 idiomatic wrapper details |
 | [Pilot Project Setup](./07_Pilot_Project_Setup.md) | Pilot TOML configuration |
 | [Maturation Plan](./roadmap/00_farscape-maturation-plan.md) | Phase 0-3 development sequence |
-| [Transcribe/Transpose Vision](./roadmap/99_composer-transcribe-vision.md) | Farscape → Composer evolution |
+| [Transcribe/Transpose Vision](./roadmap/08_composer-transcribe-vision.md) | Farscape → Composer evolution |
+| [Toolchain Sovereignty](./roadmap/05_toolchain-sovereignty-and-native-assets.md) | Native asset production; `[native]` archives beside source packages |
 | CCS Architecture | `~/repos/Composer/docs/CCS_Architecture.md` |
