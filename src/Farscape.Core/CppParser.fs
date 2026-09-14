@@ -577,9 +577,9 @@ module CppParser =
         let results = ResizeArray<Declaration>()
         let mutable currentFile: string option = None
 
-        // Clang emits anonymous typedef unions as a RecordDecl followed by a TypedefDecl
-        // whose RecordType points back to that declaration. Preserve the typedef's name
-        // so pthread_mutex_t/cond_t (and other public storage types) are not dropped.
+        // Clang emits an anonymous typedef union or enum as a RecordDecl or EnumDecl followed
+        // by a TypedefDecl whose RecordType or EnumType points back to that declaration.
+        // The typedef's name is the declaration's name (pthread_mutex_t, GtkWindowType).
         let rec descendants node = seq {
             yield node
             for child in getArray node "inner" do yield! descendants child
@@ -590,7 +590,8 @@ module CppParser =
             |> Seq.collect (fun node ->
                 let name = getStringOr node "name" ""
                 descendants node |> Seq.choose (fun child ->
-                    if getStringOr child "kind" "" <> "RecordType" then None
+                    let kind = getStringOr child "kind" ""
+                    if kind <> "RecordType" && kind <> "EnumType" then None
                     else
                         getObject child "decl" |> Option.bind (fun decl ->
                             if getStringOr decl "name" "" <> "" then None
@@ -665,7 +666,11 @@ module CppParser =
 
                 | "EnumDecl" ->
                     match processEnumDecl node with
-                    | Some enumDecl -> results.Add(Enum enumDecl)
+                    | Some enumDecl ->
+                        let name =
+                            if enumDecl.Name <> "" then enumDecl.Name
+                            else getString node "id" |> Option.bind (fun id -> Map.tryFind id anonymousRecordNames) |> Option.defaultValue ""
+                        results.Add(Enum { enumDecl with Name = name })
                     | None -> ()
 
                 | "TypedefDecl" ->

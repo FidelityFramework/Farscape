@@ -366,7 +366,7 @@ module PilotAnalyzer =
                   Library = libraryName
                   Prefixes = effectivePrefixes
                   Functions = explicitFunctions
-                  XmlInterfaces = [] })
+                  XmlInterfaces = []; Signals = [] })
         // Add catch-all namespace for ungrouped functions
         let catchAll =
             if result.Ungrouped.IsEmpty then []
@@ -376,11 +376,11 @@ module PilotAnalyzer =
                     Library = libraryName
                     Prefixes = []
                     Functions = result.Ungrouped
-                    XmlInterfaces = [] } ]
+                    XmlInterfaces = []; Signals = [] } ]
         { Library =
             { Name = libraryName
               Headers = headerFiles
-              XmlProtocols = []
+              XmlProtocols = []; Introspection = []
               IncludePaths = includePaths
               Defines = defines
               MacroPrefixes = []

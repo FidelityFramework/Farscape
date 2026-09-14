@@ -142,7 +142,8 @@ module BindingGenerator =
         sb.AppendLine("]") |> ignore
         sb.AppendLine() |> ignore
         if project.Options |> Option.exists (fun o -> o.LinkLibraries) then
-            let libraries = project.Namespaces |> List.map (fun n -> n.Library) |> List.filter ((<>) "c") |> List.distinct
+            let signalLibraries = if project.Namespaces |> List.exists (fun n -> not n.Signals.IsEmpty) then [ "gobject-2.0" ] else []
+            let libraries = (project.Namespaces |> List.map (fun n -> n.Library)) @ signalLibraries |> List.filter ((<>) "c") |> List.distinct
             if not libraries.IsEmpty then
                 sb.AppendLine("[link]") |> ignore
                 let values = libraries |> List.map (fun name -> "\"" + name + "\"") |> String.concat ", "
@@ -165,7 +166,7 @@ module BindingGenerator =
             | None ->
                 // Standard sibling repo layout: go up to repos root, then into Fidelity.Platform
                 let reposDir = Path.GetFullPath(Path.Combine(fidprojDir, "../../../../"))
-                let targetFidproj = Path.Combine(reposDir, "Fidelity.Platform/CPU/Linux/x86_64/Fidelity.Platform.fidproj")
+                let targetFidproj = Path.Combine(reposDir, "Fidelity.Platform/Environments/Linux/x86_64/Fidelity.Platform.fidproj")
                 if File.Exists(targetFidproj) then
                     Path.GetRelativePath(fidprojDir, targetFidproj).Replace('\\', '/')
                 else
@@ -275,6 +276,14 @@ module BindingGenerator =
 
                 let headerDeclLists = headerResults |> List.choose (function Ok d -> Some d | _ -> None)
                 let xmlProtocols = xmlResults |> List.choose (function Ok p -> Some p | _ -> None)
+
+                // GObject introspection data: the source of signal entry signatures (IntrospectionParser)
+                let introspection =
+                    if project.Library.Introspection.IsEmpty then None
+                    else
+                        match IntrospectionParser.load project.Library.Introspection with
+                        | Ok repo -> Some repo
+                        | Error e -> failwith e
 
                 // Split XML protocol output: type declarations flow through FidelityCodeGenerator,
                 // request implementations are FsDecl with marshal call bodies (injected later)
@@ -686,7 +695,16 @@ module BindingGenerator =
                     | _ -> []
 
                 let typedProtocolFiles = if typedProtocol then TypedProtocolGenerator.generate project xmlProtocols declarations ctx outputDir else []
-                let allFiles = [sharedTypesPath] @ errorModuleFiles @ nsFiles @ l2CallbackFiles @ typedProtocolFiles
+                let signalFiles =
+                    let selected = project.Namespaces |> List.collect (fun n -> n.Signals)
+                    if selected.IsEmpty then [] else
+                    match introspection with
+                    | None -> failwith "[[namespace]] signals require [library] introspection files"
+                    | Some repo ->
+                        match IntrospectionParser.select repo selected with
+                        | Ok signals -> TypedSignalGenerator.generate nsPrefix signals declarations ctx outputDir
+                        | Error e -> failwith e
+                let allFiles = [sharedTypesPath] @ errorModuleFiles @ nsFiles @ l2CallbackFiles @ typedProtocolFiles @ signalFiles
 
                 // Generate canonical fidproj for the binding library
                 let fidprojFile = generateFidproj project (if typedProtocol then nsPrefix + ".Native" else nsPrefix) outputDir allFiles verbose
@@ -840,7 +858,7 @@ module BindingGenerator =
                                 | Some path -> Path.GetRelativePath(fidprojDir, path).Replace('\\', '/')
                                 | None ->
                                     let reposDir = Path.GetFullPath(Path.Combine(fidprojDir, "../../../../"))
-                                    let target = Path.Combine(reposDir, $"Fidelity.Platform/CPU/Linux/x86_64/{name}.fidproj")
+                                    let target = Path.Combine(reposDir, $"Fidelity.Platform/Environments/Linux/x86_64/{name}.fidproj")
                                     if File.Exists(target) then Path.GetRelativePath(fidprojDir, target).Replace('\\', '/')
                                     else Path.GetFullPath(target).Replace('\\', '/')
 

@@ -28,7 +28,9 @@
     <Compile Include="FidelityCodeGenerator.fs" />
     <Compile Include="MappedReturnGenerator.fs" />
     <Compile Include="ProtocolParser.fs" />
+    <Compile Include="IntrospectionParser.fs" />
     <Compile Include="TypedProtocolGenerator.fs" />
+    <Compile Include="TypedSignalGenerator.fs" />
     <Compile Include="WrapperCodeGenerator.fs" />
     <Compile Include="ErrnoModuleGenerator.fs" />
     <Compile Include="EnumErrorModuleGenerator.fs" />

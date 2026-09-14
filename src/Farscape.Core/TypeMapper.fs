@@ -95,10 +95,14 @@ module TypeMapper =
         "unsigned int", Unsigned, IntWidth, Declared
         "long", Signed, LongWidth, Declared
         "long int", Signed, LongWidth, Declared
+        "signed long", Signed, LongWidth, Declared
+        "signed long int", Signed, LongWidth, Declared
         "unsigned long", Unsigned, LongWidth, Declared
         "unsigned long int", Unsigned, LongWidth, Declared
         "long long", Signed, Fixed 64, Declared
         "long long int", Signed, Fixed 64, Declared
+        "signed long long", Signed, Fixed 64, Declared
+        "signed long long int", Signed, Fixed 64, Declared
         "unsigned long long", Unsigned, Fixed 64, Declared
         "unsigned long long int", Unsigned, Fixed 64, Declared
         "float", Float, Fixed 32, Declared

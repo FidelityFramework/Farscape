@@ -30,6 +30,7 @@
     <Compile Include="PthreadBindingTests.fs" />
     <Compile Include="TypedProtocolTests.fs" />
     <Compile Include="MappedReturnTests.fs" />
+    <Compile Include="IntrospectionTests.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

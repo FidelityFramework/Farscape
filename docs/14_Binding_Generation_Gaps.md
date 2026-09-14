@@ -478,3 +478,24 @@ without pretending the recipes have been validated.
 | `docs/11_Namespace_Scoped_PSG_Design.md` | PSG scoping; its problem 1 is superseded by §3 here |
 | `docs/roadmap/00_farscape-maturation-plan.md` | §4.1 and §4.4 are the designs §2 and §3 here revise |
 | `~/repos/Composer/docs/NTU_Architecture.md` | Register-width dimensional types |
+
+## Addendum 2026-09-14: GLib-typed headers under the typed profile
+
+Verified against the current tree while generating the WREN surface (GTK 3, GObject, WebKitGTK 4.1) from `*.native.pilot.toml` profiles; WrenHello compiles and runs on the result.
+
+Fixed in this changeset:
+
+1. `string_parameters`, `parameter_handles` and `return_handle` tested the raw C spelling, so `const gchar *` and `gpointer` were rejected, and `gpointer` parameters and returns were never nullable. The checks now resolve typedefs (`FidelityCodeGenerator.isCharPointerIn`, `isDataPointerIn`).
+2. `typedef enum { … } Name;` lost its name: the anonymous `EnumDecl` stayed unnamed and the typedef resolved to itself, so `GtkWindowType` and `GConnectFlags` reached signatures as undeclared types with unknown widths. `CppParser` now names an anonymous enum after its typedef, as it already did for records.
+3. An enum-typed parameter was spelled by its enum name; the one-kind rule spells it `int`, the descriptor carrying the enum's representation.
+4. `signed long` and `signed long long` had no scalar rows (`gssize`, `gintptr`).
+5. `[callbacks]` registrations (docs/07) and the Tier A closure design (docs/10, userdata plus destroy hook) cover `g_signal_connect_data`'s lifetime plumbing; the handler's type comes from the header's callback typedef, and `GCallback` is `void (*)(void)`. The entry signature of a signal lives in GObject's introspection data, so `[library] introspection` and `[[namespace]] signals` (docs/07) now read it: `IntrospectionParser` resolves each selected signal's parameters and result to C spellings, and `TypedSignalGenerator` emits, per signal, a listener record, its `CallbackDescriptor` and a connect over `g_signal_connect_data` in `Bridge/Signals.clef`, in the Tier C form. WrenHello connects its two signals through that bridge with no declaration of its own.
+
+Open after this changeset:
+
+- Two registration findings: the inline-table spelling in docs/07's `[callbacks]` example is not read by the pilot parser (the `[[callbacks.registrations]]` form is), and auto-discovery skips `g_signal_connect_data` because it carries two function-pointer parameters (`c_handler` and `destroy_data`).
+- A signal entry's inputs are opaque handles even where GIR marks a parameter nullable: the compiler's callback reader admits scalars and opaque handles, so nullability of callback inputs is not yet expressed at the boundary. User data crosses the same way.
+- A signal connects undetailed; the `signal::detail` form is not projected.
+- Function-pointer parameters are never `option<FnPtr<_>>`; the compiler rejects a nullable function pointer at an extern boundary ("Nullable foreign arguments require an opaque handle or a string adapter"), so a nullable C callback (`GClosureNotify`, `GAsyncReadyCallback`) receives a real function.
+- With clang 22 the return type of `strlen` in `string.h` is read as `__size_t` from the function type string and does not resolve; `size_t` parameters resolve. The WREN pilots use `g_strlcpy` instead.
+- Declarations are kept only from files under the include root chosen for each header (the first `include_paths` entry prefixing it). GLib's generated `glibconfig.h` lives under `/usr/lib/glib-2.0/include` and cannot be listed directly (`#error`); listing `/usr` first in `include_paths` keeps every declaration under `/usr`. The WREN pilots do this.

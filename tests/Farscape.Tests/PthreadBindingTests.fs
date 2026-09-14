@@ -285,3 +285,22 @@ let ``explicit read only pointer cell projection remains typed`` () =
     let source = FidelityCodeGenerator.generateModule ctx Set.empty [fn] "Test.Buffer" "c" "test" []
     Assert.Contains("(cell: option<CHandle<unit>> array)", source)
     Assert.Contains("Type = Pointer 64; PassBy = ReadOnlyReference", source)
+
+[<Fact>]
+let ``string and handle projections follow typedefs to char and data pointers`` () =
+    let typedefs =
+        [ CppParser.Declaration.Typedef (mkTypedef "gchar" "char")
+          CppParser.Declaration.Typedef (mkTypedef "gpointer" "void *") ]
+    let connect =
+        CppParser.Declaration.Function
+            (mkFunc "g_signal_connect_data" "unsigned long"
+                [ "instance", "gpointer"; "detailed_signal", "const gchar *"; "data", "gpointer" ])
+    let ref' = CppParser.Declaration.Function (mkFunc "g_object_ref" "gpointer" ["object", "gpointer"])
+    let binding = { projection "g_signal_connect_data" "g_signal_connect_data" with StringParameters = [1]; ParameterHandles = ["unit"] }
+    let ctx = { FidelityCodeGenerator.buildGenerationContext (typedefs @ [connect; ref']) Types.LP64 Map.empty with
+                    Bindings = Map.ofList [binding.Name, binding]
+                    NonnullAnnotations = Some { Parameters = Map.ofList ["g_signal_connect_data", [0; 1]]; Returns = Set.empty } }
+    let source = FidelityCodeGenerator.generateModule ctx Set.empty [connect; ref'] "Test.GObject" "gobject-2.0" "test" []
+    Assert.Contains("(instance: CHandle<unit>) (detailed_signal: string) (data: option<CHandle<unit>>)", source)
+    Assert.Contains("let g_object_ref (object: option<CHandle<unit>>) : option<CHandle<unit>>", source)
+    Assert.Contains("ReturnType = Integer (Unsigned, 64)", source)

@@ -23,6 +23,7 @@ module PilotDiscovery =
         | WaylandProtocol
         | DBusIntrospection
         | VulkanRegistry
+        | GObjectIntrospection
 
     /// Metadata extracted from a pkg-config .pc file.
     type PkgConfigInfo = {
@@ -160,6 +161,7 @@ module PilotDiscovery =
             | Some "protocol" -> Some WaylandProtocol
             | Some "node" -> Some DBusIntrospection
             | Some "registry" -> Some VulkanRegistry
+            | Some "repository" -> Some GObjectIntrospection
             | _ -> None
         | Error _ -> None
 
@@ -426,6 +428,7 @@ module PilotDiscovery =
             Name = libraryName
             Headers = selectedHeaders
             XmlProtocols = xmlProtocols
+            Introspection = []
             IncludePaths = result.SuggestedIncludePaths
             Defines = []
             MacroPrefixes = []
@@ -438,7 +441,7 @@ module PilotDiscovery =
               Library = libraryName
               Prefixes = []
               Functions = []
-              XmlInterfaces = [] }
+              XmlInterfaces = []; Signals = [] }
           ]
           ErrorConventions = None
           Options = None

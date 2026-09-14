@@ -20,7 +20,7 @@ This plan was written in February 2026. Everything it sequenced has shipped, in 
 | 1.4 Struct layout with descriptors | Shipped in a different shape | A C struct is never a Clef record. `DescriptorGenerator.fs` emits a layout module of literal offsets plus a `StructDescriptor`, each width fact naming its stratum (measured, declared, inferred). `abi_critical_structs` triggers the measured pass. See §4.4 |
 | 1.5 Protocol XML parser | Shipped as a generic protocol IR | `ProtocolParser.fs`; Wayland is the first XML format. `[library].xml_protocols`, `[[namespace]].xml_interfaces` |
 | 3.5 Discovery | Shipped | `PilotDiscovery.fs`; `farscape pilot discover` |
-| Phase 2: ROCm/HIP | Shipped | `~/repos/Fidelity.Platform/GPU/AMD/RDNA3_5/Fidelity.ROCm.fidproj`; `HelloWayland.GPU.fidproj` dispatches a compiled HIP kernel |
+| Phase 2: ROCm/HIP | Shipped | `~/repos/Fidelity.Platform/Environments/Linux/x86_64/ROCm/Fidelity.ROCm.fidproj`; `HelloWayland.GPU.fidproj` dispatches a compiled HIP kernel |
 | Phase 3: HelloWayland | Shipped and exceeded | `~/repos/HelloWayland` v0.2.0: CPU-rasterised 3D logo, GPU variant; Wayland, DRM, GBM, and resvg bindings reached through `Fidelity.Desktop` |
 | `[sources]` schema (§3.3) | Not adopted | `[library]` carries `headers`, `include_paths`, `defines`, `xml_protocols` |
 

@@ -207,7 +207,7 @@ generate_descriptors = true
     [<Fact>]
     let ``round-trip options with generate_descriptors`` () =
         let project : PilotProject = {
-            Library = { Name = "drm"; Headers = ["xf86drm.h"]; XmlProtocols = []; IncludePaths = []; Defines = []; MacroPrefixes = []; PkgConfig = [] }
+            Library = { Name = "drm"; Headers = ["xf86drm.h"]; XmlProtocols = []; Introspection = []; IncludePaths = []; Defines = []; MacroPrefixes = []; PkgConfig = [] }
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
             ErrorConventions = None

@@ -228,7 +228,8 @@ module FidelityCodeGenerator =
         | Scalar r -> Named (TypeMapper.clefSpelling r.Family)
         | DataPointer pointee -> Generic("CHandle", pointee)
         | FunctionPointer (parameters, ret) -> Generic("FnPtr", FunctionType(parameters, ret))
-        | OpaqueHandle name | CEnum (name, _) | Unresolved name -> Named name
+        | CEnum (_, r) -> Named (TypeMapper.clefSpelling r.Family)
+        | OpaqueHandle name | Unresolved name -> Named name
 
     /// The ABI representation of a resolved C type, when the generator can claim one.
     let abiReprOf (model: PlatformABI) (cType: string) (resolved: ResolvedCType) : TypeMapper.AbiRepr option =
@@ -328,6 +329,22 @@ module FidelityCodeGenerator =
     /// and have different nullability semantics (use Option<FnPtr<'F>> instead).
     let isCDataPointer (cType: string) : bool =
         cType.Contains("*") && not (cType.Contains("(*)") || cType.Contains("(**)"))
+
+    /// A data pointer under the context: spelled with `*`, or a typedef standing for one (`gpointer`).
+    let private isDataPointerIn (ctx: GenerationContext) (cType: string) : bool =
+        isCDataPointer cType
+        || (not (cType.Contains "(*")
+            && (match resolveIn ctx cType with
+                | DataPointer _ -> true
+                | _ -> false))
+
+    /// A single-level pointer to `char` under the context, through typedefs (`const gchar *`).
+    let private isCharPointerIn (ctx: GenerationContext) (cType: string) : bool =
+        match cType with
+        | ParsedCType info when info.PointerDepth = 1 ->
+            let name = TypeMapper.cleanTypeName info.BaseType
+            TypeMapper.cleanTypeName (resolveType ctx.TypedefMap name) = "char"
+        | _ -> false
 
     /// Const applies to the immediate referenced object, not a deeper pointee:
     /// const T** still exposes a writable pointer cell; T* const* does not.
@@ -435,11 +452,10 @@ module FidelityCodeGenerator =
                             Named (CodeRenderer.renderType element + " array")
                         | _ -> failwith $"{func.Name} parameter {idx}: Reference requires a scalar cell or one opaque pointer cell"
                     elif stringParameter then
-                        match cType with
-                        | ParsedCType info when info.PointerDepth = 1 && info.BaseType = "char" -> Named "string"
-                        | _ -> failwith $"{func.Name} parameter {idx}: string projection requires char pointer"
+                        if isCharPointerIn ctx cType then Named "string"
+                        else failwith $"{func.Name} parameter {idx}: string projection requires char pointer"
                     elif handle.IsSome then
-                        if not (isCDataPointer cType) then failwith $"{func.Name} parameter {idx}: handle projection requires a C data pointer"
+                        if not (isDataPointerIn ctx cType) then failwith $"{func.Name} parameter {idx}: handle projection requires a C data pointer"
                         Generic("CHandle", Named handle.Value)
                     elif callbackNonnull then
                         let strip = function Generic("option", inner) -> inner | ty -> ty
@@ -447,12 +463,12 @@ module FidelityCodeGenerator =
                         | Generic("FnPtr", FunctionType(args, ret)) -> Generic("FnPtr", FunctionType(List.map strip args, strip ret))
                         | _ -> failwith $"{func.Name} parameter {idx}: nonnull_callbacks requires a C function pointer"
                     else mapType cType
-                let isNullable = not ctx.NativePointerSurface && not reference && isCDataPointer cType && not (nonnullIndices.Contains idx)
+                let isNullable = not ctx.NativePointerSurface && not reference && isDataPointerIn ctx cType && not (nonnullIndices.Contains idx)
                 let finalType = if isNullable then wrapOption fsType else fsType
                 { FsParam.Name = cleanParamName name; Type = finalType })
 
         // Return type: nullable unless proven nonnull
-        let returnIsPointer = isCDataPointer func.ReturnType
+        let returnIsPointer = isDataPointerIn ctx func.ReturnType
         let returnNonnull =
             nonnullAnnotations
             |> Option.map (fun a -> a.Returns.Contains func.Name)
@@ -462,7 +478,7 @@ module FidelityCodeGenerator =
         let returnType =
             match projection |> Option.bind (fun b -> b.ReturnHandle) with
             | Some name ->
-                if not (isCDataPointer func.ReturnType) then failwith $"{func.Name}: return_handle requires a C data pointer"
+                if not (isDataPointerIn ctx func.ReturnType) then failwith $"{func.Name}: return_handle requires a C data pointer"
                 Generic("CHandle", Named name)
             | None -> mapType func.ReturnType
         let finalReturnType =

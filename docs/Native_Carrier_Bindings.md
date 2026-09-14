@@ -57,7 +57,7 @@ indentation and keyword escaping. Missing requested record measurements reject
 generation. Scalar layout facts come from the parsed type and target ABI profile.
 
 The former raw-address pool and bindings remain only under
-`Fidelity.Platform/CPU/Linux/x86_64/Experimental/`. Their option is explicitly
+`Fidelity.Platform/Environments/Linux/x86_64/Experimental/`. Their option is explicitly
 `experimental_native_pointer_surface`; those files are legacy ABI experiments,
 not evidence of current Clef source acceptance. Current typed native acceptance
 must be established by compiling and running the separate Ariel native probes.
@@ -68,7 +68,7 @@ single-cell and opaque-handle projections.
 From the Farscape checkout, with sibling repositories:
 
 ```sh
-dotnet run --project src/Farscape.Cli -- project --project ../Fidelity.Platform/CPU/Linux/x86_64/pilot/pthread.pilot.toml
+dotnet run --project src/Farscape.Cli -- project --project ../Fidelity.Platform/Environments/Linux/x86_64/pilot/pthread.pilot.toml
 dotnet test tests/Farscape.Tests
 python ../Fidelity.Platform/tests/Pthread/verify_abi.py
 ```

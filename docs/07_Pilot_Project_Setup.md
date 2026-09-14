@@ -227,6 +227,24 @@ not read, including the planned keys below.
 > caveat above the serializer drops them silently; a pilot file carrying them is harmless
 > and does nothing until the keys land.
 
+### `[library] introspection` and `[[namespace]] signals`: GObject Signals
+
+GObject declares every signal handler as `GCallback`, `void (*)(void)`, so no C header states a signal's entry signature. The installed introspection data does (`/usr/share/gir-1.0/*.gir`): each `<glib:signal>` carries its parameters, its return and their C types. `introspection` lists the `.gir` files to read; a namespace's `signals` selects signals as `Class::signal-name` in GIR names. A parameter type from another namespace resolves only through a listed file.
+
+```toml
+[library]
+name = "webkit2gtk-4.1"
+headers = ["/usr/include/webkitgtk-4.1/webkit2/webkit2.h", "/usr/include/glib-2.0/glib-object.h"]
+introspection = ["/usr/share/gir-1.0/WebKit2-4.1.gir"]
+
+[[namespace]]
+name = "Fidelity.WebKit.Native"
+library = "webkit2gtk-4.1"
+signals = ["UserContentManager::script-message-received"]
+```
+
+For each selected signal the typed generator writes to `Bridge/Signals.clef`: a listener record with one field, named after the signal, whose `FnPtr` carries the entry (instance, the signal's parameters, user data) as opaque handles and one-kind scalars (every pointer input is an opaque handle: the compiler's callback reader admits scalars and opaque handles, so a nullable C input is not yet expressed); a `CallbackDescriptor` fixing the entry's C representations through the same resolver the externs use; and `connect<Class><Signal> instance listener data` over `g_signal_connect_data`, returning the handler id. The connection is undetailed. This is the Tier C form of `docs/10_Boundary_Marshaling_Spec.md`'s Representation section: the handler is a closed module function supplied through `FnPtr.ofFunction`, and the release slot carries a generated no-op until Composer's trampolines land. `glib-object.h` must be among the pilot's headers, and the generated manifest links `gobject-2.0`.
+
 ### `[protocol]`: Protocol Argument Marshalling
 
 Read by the serializer; not previously documented anywhere. Supplies

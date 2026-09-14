@@ -25,6 +25,8 @@ module PilotTypes =
         Functions: string list
         /// XML interface names to include (e.g. ["wl_surface"; "wl_compositor"])
         XmlInterfaces: string list
+        /// GObject signals to project, spelled `Class::signal-name` in GIR names
+        Signals: string list
     }
 
     /// Library-level metadata in a .pilot.toml [library] section.
@@ -35,6 +37,8 @@ module PilotTypes =
         Headers: string list
         /// Paths to XML protocol files (e.g. Wayland .xml), parsed separately from C headers
         XmlProtocols: string list
+        /// Paths to GObject introspection files (`*.gir`) whose signals a namespace may select
+        Introspection: string list
         /// Additional include paths for clang
         IncludePaths: string list
         /// Preprocessor defines

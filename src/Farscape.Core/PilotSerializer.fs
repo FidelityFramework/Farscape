@@ -29,6 +29,9 @@ module PilotSerializer =
             if lib.XmlProtocols.IsEmpty then table
             else TomlTable.add "xml_protocols" (TomlValue.Array (lib.XmlProtocols |> List.map TomlValue.String)) table
         let table =
+            if lib.Introspection.IsEmpty then table
+            else TomlTable.add "introspection" (TomlValue.Array (lib.Introspection |> List.map TomlValue.String)) table
+        let table =
             if lib.IncludePaths.IsEmpty then table
             else TomlTable.add "include_paths" (TomlValue.Array (lib.IncludePaths |> List.map TomlValue.String)) table
         let table =
@@ -63,6 +66,9 @@ module PilotSerializer =
         let table =
             if ns.XmlInterfaces.IsEmpty then table
             else TomlTable.add "xml_interfaces" (TomlValue.Array (ns.XmlInterfaces |> List.map TomlValue.String)) table
+        let table =
+            if ns.Signals.IsEmpty then table
+            else TomlTable.add "signals" (TomlValue.Array (ns.Signals |> List.map TomlValue.String)) table
         TomlValue.Table table
 
     /// Serialize an ErrorConvention to its TOML string value.
@@ -336,6 +342,7 @@ module PilotSerializer =
                 Ok { Name = name
                      Headers = headers
                      XmlProtocols = optionalStringArray "xml_protocols" table
+                     Introspection = optionalStringArray "introspection" table
                      IncludePaths = optionalStringArray "include_paths" table
                      Defines = optionalStringArray "defines" table
                      MacroPrefixes = optionalStringArray "macro_prefixes" table
@@ -363,7 +370,8 @@ module PilotSerializer =
                  Library = library
                  Prefixes = optionalStringArray "prefixes" table
                  Functions = optionalStringArray "functions" table
-                 XmlInterfaces = optionalStringArray "xml_interfaces" table }
+                 XmlInterfaces = optionalStringArray "xml_interfaces" table
+                 Signals = optionalStringArray "signals" table }
         | Error e, _, _ | _, Error e, _ | _, _, Error e -> Error e
 
     /// Parse the [[namespace]] array from a document.

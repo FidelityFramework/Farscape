@@ -100,7 +100,7 @@ let ``analyze produces correct AnalysisResult`` () =
 let ``filterDeclarationsForNamespace keeps functions matching prefix`` () =
     let spec : PilotTypes.NamespaceSpec =
         { Name = "Test.String"; Description = ""; Library = "libc"
-          Prefixes = ["str"]; Functions = []; XmlInterfaces = [] }
+          Prefixes = ["str"]; Functions = []; XmlInterfaces = []; Signals = [] }
     let decls = [
         CppParser.Declaration.Function (mkFunc "strlen" "unsigned long" [])
         CppParser.Declaration.Function (mkFunc "memcpy" "void *" [])
@@ -114,7 +114,7 @@ let ``filterDeclarationsForNamespace keeps functions matching prefix`` () =
 let ``filterDeclarationsForNamespace keeps explicitly listed functions`` () =
     let spec : PilotTypes.NamespaceSpec =
         { Name = "Test.Misc"; Description = ""; Library = "libc"
-          Prefixes = []; Functions = ["abort"; "exit"]; XmlInterfaces = [] }
+          Prefixes = []; Functions = ["abort"; "exit"]; XmlInterfaces = []; Signals = [] }
     let decls = [
         CppParser.Declaration.Function (mkFunc "abort" "void" [])
         CppParser.Declaration.Function (mkFunc "exit" "void" [])
@@ -130,7 +130,7 @@ let ``filterDeclarationsForNamespace keeps explicitly listed functions`` () =
 let ``filterDeclarationsForNamespace passes through non-function declarations`` () =
     let spec : PilotTypes.NamespaceSpec =
         { Name = "Test.String"; Description = ""; Library = "libc"
-          Prefixes = ["str"]; Functions = []; XmlInterfaces = [] }
+          Prefixes = ["str"]; Functions = []; XmlInterfaces = []; Signals = [] }
     let decls = [
         CppParser.Declaration.Struct (mkStructSimple "size_t")
         CppParser.Declaration.Enum (mkEnumSimple "Flags")
@@ -146,7 +146,7 @@ let ``filterDeclarationsForNamespace passes through non-function declarations`` 
 let ``filterDeclarationsForNamespace routes all declarations when unconstrained`` () =
     let spec : PilotTypes.NamespaceSpec =
         { Name = "Test.Core"; Description = ""; Library = "lib"
-          Prefixes = []; Functions = []; XmlInterfaces = [] }
+          Prefixes = []; Functions = []; XmlInterfaces = []; Signals = [] }
     let decls = [
         CppParser.Declaration.Function (mkFunc "xrtDeviceOpen" "int" [])
         CppParser.Declaration.Function (mkFunc "xrtBOAlloc" "int" [])
@@ -159,7 +159,7 @@ let ``filterDeclarationsForNamespace routes all declarations when unconstrained`
 let ``filterDeclarationsForNamespace still filters when prefixes are set`` () =
     let spec : PilotTypes.NamespaceSpec =
         { Name = "Test.Device"; Description = ""; Library = "lib"
-          Prefixes = ["xrtDevice"]; Functions = []; XmlInterfaces = [] }
+          Prefixes = ["xrtDevice"]; Functions = []; XmlInterfaces = []; Signals = [] }
     let decls = [
         CppParser.Declaration.Function (mkFunc "xrtDeviceOpen" "int" [])
         CppParser.Declaration.Function (mkFunc "xrtBOAlloc" "int" [])
@@ -173,7 +173,7 @@ let ``filterDeclarationsForNamespace still filters when prefixes are set`` () =
 let ``filterDeclarationsWithTypes routes all functions when unconstrained`` () =
     let spec : PilotTypes.NamespaceSpec =
         { Name = "Test.Core"; Description = ""; Library = "lib"
-          Prefixes = []; Functions = []; XmlInterfaces = [] }
+          Prefixes = []; Functions = []; XmlInterfaces = []; Signals = [] }
     let decls = [
         CppParser.Declaration.Function (mkFunc "xrtDeviceOpen" "int" [])
         CppParser.Declaration.Function (mkFunc "xrtBOAlloc" "int" [])
@@ -188,7 +188,7 @@ let ``filterDeclarationsWithTypes routes all functions when unconstrained`` () =
 let ``filterDeclarationsWithTypes excludes unlisted types even when unconstrained`` () =
     let spec : PilotTypes.NamespaceSpec =
         { Name = "Test.Core"; Description = ""; Library = "lib"
-          Prefixes = []; Functions = []; XmlInterfaces = [] }
+          Prefixes = []; Functions = []; XmlInterfaces = []; Signals = [] }
     let decls = [
         CppParser.Declaration.Function (mkFunc "foo" "int" [])
         CppParser.Declaration.Struct (mkStructSimple "unlisted_struct")

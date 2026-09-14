@@ -368,7 +368,7 @@ let ``PilotSerializer round-trips xml_protocols`` () =
         Library = {
             Name = "wayland"
             Headers = ["wayland-client.h"]
-            XmlProtocols = ["wayland.xml"; "xdg-shell.xml"]
+            XmlProtocols = ["wayland.xml"; "xdg-shell.xml"]; Introspection = []
             IncludePaths = []
             Defines = []
             MacroPrefixes = []
@@ -398,7 +398,7 @@ let ``PilotSerializer round-trips xml_interfaces`` () =
         Library = {
             Name = "wayland"
             Headers = ["wayland-client.h"]
-            XmlProtocols = []
+            XmlProtocols = []; Introspection = []
             IncludePaths = []
             Defines = []
             MacroPrefixes = []
@@ -411,7 +411,7 @@ let ``PilotSerializer round-trips xml_interfaces`` () =
             Library = "wayland"
             Prefixes = ["wl"]
             Functions = []
-            XmlInterfaces = ["wl_display"; "wl_registry"; "wl_surface"]
+            XmlInterfaces = ["wl_display"; "wl_registry"; "wl_surface"]; Signals = []
         }]
         ErrorConventions = None
         Options = None

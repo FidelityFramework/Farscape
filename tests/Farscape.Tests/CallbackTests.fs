@@ -212,7 +212,7 @@ module CallbackSerializerTests =
     [<Fact>]
     let ``callback registrations round-trip through TOML`` () =
         let project : PilotProject = {
-            Library = { Name = "gtk"; Headers = ["gtk.h"]; XmlProtocols = []; IncludePaths = []; Defines = []; MacroPrefixes = []; PkgConfig = [] }
+            Library = { Name = "gtk"; Headers = ["gtk.h"]; XmlProtocols = []; Introspection = []; IncludePaths = []; Defines = []; MacroPrefixes = []; PkgConfig = [] }
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
             ErrorConventions = None
@@ -252,7 +252,7 @@ module CallbackSerializerTests =
     [<Fact>]
     let ``listener structs round-trip through TOML`` () =
         let project : PilotProject = {
-            Library = { Name = "wayland"; Headers = ["wayland-client.h"]; XmlProtocols = []; IncludePaths = []; Defines = []; MacroPrefixes = []; PkgConfig = [] }
+            Library = { Name = "wayland"; Headers = ["wayland-client.h"]; XmlProtocols = []; Introspection = []; IncludePaths = []; Defines = []; MacroPrefixes = []; PkgConfig = [] }
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
             ErrorConventions = None
@@ -297,7 +297,7 @@ module CallbackSerializerTests =
     [<Fact>]
     let ``full callback spec with both registrations and listeners round-trips`` () =
         let project : PilotProject = {
-            Library = { Name = "gtk"; Headers = ["gtk.h"]; XmlProtocols = []; IncludePaths = []; Defines = []; MacroPrefixes = []; PkgConfig = [] }
+            Library = { Name = "gtk"; Headers = ["gtk.h"]; XmlProtocols = []; Introspection = []; IncludePaths = []; Defines = []; MacroPrefixes = []; PkgConfig = [] }
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
             ErrorConventions = None

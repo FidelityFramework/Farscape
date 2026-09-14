@@ -299,7 +299,7 @@ let pilotInitCommand =
             Library = {
                 Name = library
                 Headers = [if String.IsNullOrEmpty header then $"/usr/include/{library}.h" else header]
-                XmlProtocols = []
+                XmlProtocols = []; Introspection = []
                 IncludePaths = []
                 Defines = []
                 MacroPrefixes = []
@@ -312,7 +312,7 @@ let pilotInitCommand =
                   Library = library
                   Prefixes = []
                   Functions = []
-                  XmlInterfaces = [] }
+                  XmlInterfaces = []; Signals = [] }
             ]
             ErrorConventions = None
             Options = None

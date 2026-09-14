@@ -119,3 +119,26 @@ module DetectCppModeTests =
         let content = "#include <string_view>\n"
         withTempHeader ".h" content (fun path ->
             Assert.True(CppParser.detectCppMode path))
+
+// =========================================================================
+// Typedef naming of anonymous declarations
+// =========================================================================
+
+module AnonymousEnumNamingTests =
+
+    [<Fact>]
+    let ``anonymous enum takes the name of its typedef and binds as an integer`` () =
+        let path = Path.Combine(Path.GetTempPath(), $"farscape_enum_{System.Guid.NewGuid():N}.h")
+        File.WriteAllText(path, "typedef enum { WINDOW_TOPLEVEL, WINDOW_POPUP } WindowType;\nvoid make(WindowType kind);\n")
+        try
+            let options : CppParser.HeaderParserOptions = {
+                HeaderFile = path; IncludePaths = []; Defines = []; IncludeRoot = None
+                IncludeMacros = false; MacroPrefixes = []; Verbose = false; CppMode = false }
+            let declarations = match CppParser.parseHeader options with Ok ds -> ds | Error e -> failwith e
+            Assert.Contains(declarations, fun d -> match d with CppParser.Declaration.Enum e -> e.Name = "WindowType" | _ -> false)
+            let ctx = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
+            let source = FidelityCodeGenerator.generateModule ctx Set.empty declarations "Test.Window" "gtk-3" "test" []
+            Assert.Contains("let make (kind: int) : unit", source)
+            Assert.Contains("Type = Integer (Unsigned, 32); PassBy = Value", source)
+        finally
+            if File.Exists path then File.Delete path
