@@ -64,7 +64,8 @@ let ``production pthread bridge forwards nullable opaque handles and typed entri
     let ctx = FidelityCodeGenerator.buildGenerationContext decls Types.LP64 Map.empty
     let source = CallbackWrapperGenerator.generateTyped spec decls "Test.Callbacks" ctx ["Test.Thread"] |> Option.get
     Assert.Contains("(newthread: option<CHandle<int>>)", source)
-    Assert.Contains("FnPtr<option<CHandle<unit>> -> option<CHandle<unit>>>", source)
+    Assert.Contains("(start_routine: Callback_Test_002E_Thread_003A__003A_pthread_005F_create_003A__003A__005F__005F_start_005F_routineEntry)", source)
+    Assert.DoesNotContain("FnPtr<", source)
     Assert.Contains("(arg: option<CHandle<unit>>)", source)
     Assert.Contains("pthread_create newthread attr start_routine arg", source)
     Assert.DoesNotContain("nativeint", source)
@@ -99,6 +100,27 @@ let ``native pointer profile option round trips`` () =
         | Error e -> failwith e
     Assert.True(project.Options.Value.NativePointerSurface)
     Assert.Contains("experimental_native_pointer_surface = true", PilotSerializer.toTomlString project)
+
+[<Fact>]
+let ``documented inline callback tables round trip without losing entries`` () =
+    let toml = """
+[library]
+name = "test"
+headers = ["test.h"]
+[output]
+mode = "fidelity"
+directory = "out"
+[callbacks]
+registrations = [{ function = "register", callback_param = "handler", data_param = "data" }]
+listener_structs = [{ name = "listener", registration_function = "install" }]
+"""
+    let parse source = PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail source) |> function Ok project -> project | Error e -> failwith e
+    let project = parse toml
+    let expected : PilotTypes.CallbackSpec = {
+        Registrations = [{ Function = "register"; CallbackParam = "handler"; DataParam = Some "data" }]
+        ListenerStructs = [{ Name = "listener"; RegistrationFunction = Some "install" }] }
+    Assert.Equal(Some expected, project.Callbacks)
+    Assert.Equal(project.Callbacks, (PilotSerializer.toTomlString project |> parse).Callbacks)
 
 [<Fact>]
 let ``Linux x64 pthread storage comes from actual header unions and measured layouts`` () =
@@ -190,7 +212,7 @@ let ``projected wrapper signature matches the emitted extern contract`` () =
     let ctx = { FidelityCodeGenerator.buildGenerationContext decls Types.LP64 Map.empty with Bindings = Map.ofList [binding.Name, binding] }
     let source = WrapperCodeGenerator.generateWithContext (Some ctx) false Set.empty decls "Test.Api" "c" "Test.Thread" WrapperTypes.NoErrors Types.LP64 None
     Assert.Contains("(newthread: int array)", source)
-    Assert.Contains("FnPtr<CHandle<unit> -> CHandle<unit>>", source)
+    Assert.Contains("(start_routine: Callback_Test_002E_Thread_003A__003A_pthread_005F_create_003A__003A__005F__005F_start_005F_routineEntry)", source)
     Assert.Contains("Test.Thread.pthread_create newthread attr start_routine arg", source)
 
 [<Fact>]

@@ -160,7 +160,7 @@ module FidelityCodeGenerator =
               CType = $"enum {e.Name} without a declared underlying type" }
 
     /// Resolve a C type string once. Opaque handles keep their names; delegates and function
-    /// pointers become FnPtr signatures (pointer parameters nullable, ffi-boundary.md §1); data
+    /// pointers become FnPtr signatures with nonnull entry carriers; data
     /// pointers become CHandle of their pointee; scalars come from the one-kind table, through the
     /// typedef map when the spelling is not in it; enums carry their underlying representation.
     let rec resolveCType
@@ -170,12 +170,8 @@ module FidelityCodeGenerator =
         (cType: string) : ResolvedCType =
         let recur = resolveCType typedefMap model opaqueHandles delegates enums
         let cleaned = TypeMapper.cleanTypeName cType
-        let nullableClef (resolved: ResolvedCType) =
-            match resolved with
-            | DataPointer _ -> Generic("option", clefTypeOf resolved)
-            | _ -> clefTypeOf resolved
         let functionPointer (ret: string) (parameters: string list) =
-            FunctionPointer (parameters |> List.map (recur >> nullableClef), nullableClef (recur ret))
+            FunctionPointer (parameters |> List.map (recur >> clefTypeOf), clefTypeOf (recur ret))
         // A pointer's pointee: a scalar's spelling, a named type, or what a typedef stands for
         let pointee (baseType: string) : FsType =
             match TypeMapper.tryScalar model baseType with
@@ -511,6 +507,80 @@ module FidelityCodeGenerator =
         [ LetBinding(nativeName, parameters, finalReturnType, NativeZeroed,
                      [$"FidelityExtern(\"{libraryName}\", \"{symbol}\")"]) ] @
         generateDescriptorDecls descriptorContext nativeFunction @ wrapper
+
+    /// Escape punctuation reversibly: short record names must remain distinct across modules,
+    /// because the compiler can fall back from qualified lookup to a short record name.
+    let private callbackIdentifier (name: string) =
+        name |> Seq.map (fun c -> if System.Char.IsLetterOrDigit c then string c else $"_{int c:X4}_") |> String.concat ""
+
+    /// Recover the native signature, including scalar widths, rather than reconstructing it
+    /// from the one-kind Clef function type. Anonymous entries belong to their parameter site.
+    let private callbackEntries (ctx: GenerationContext) (namespace': string) (func: CppParser.FunctionDecl) =
+        let rec signature seen cType =
+            if Set.contains cType seen then None else
+            let seen = Set.add cType seen
+            match Map.tryFind (TypeMapper.cleanTypeName cType) ctx.Delegates with
+            | Some d -> Some (d.ReturnType, d.Parameters)
+            | None ->
+                match splitFunctionPointer cType with
+                | Some (ret, args) -> Some (ret, List.mapi (fun i t -> $"arg{i}", t) args)
+                | None -> Map.tryFind cType ctx.TypedefMap |> Option.bind (signature seen)
+        if ctx.NativePointerSurface then [] else
+        func.Parameters |> List.mapi (fun index (name, cType) ->
+            signature Set.empty cType |> Option.map (fun (ret, args) ->
+                let identity = if cType.Contains "(*)" then func.Name + "::" + name else cType
+                let recordName = "Callback_" + callbackIdentifier (namespace' + "::" + identity) + "Entry"
+                let parameterInfos = args |> List.map (fun (name, cType) ->
+                    let typeRef, provenance = abiClaim ctx cType
+                    Commented(RecordConstruction [
+                        "Name", Literal (quoteString ((cleanParamName name).Replace("``", "")))
+                        "Type", Literal typeRef
+                        "PassBy", Identifier "Value" ], provenance))
+                let returnRef, returnProvenance = abiClaim ctx ret
+                let entryType = resolveIn ctx cType |> clefTypeOf
+                let declarations = [
+                    RecordType(recordName, ["Invoke", entryType],
+                        Some "Layer 2 native entry contract. Construct its field with FnPtr.ofFunction on a closed module function.", [])
+                    ValueBinding(recordName + "Descriptor", Generic("Expr", Named "CallbackDescriptor"),
+                        Quoted(RecordBlock [
+                            "Record", Literal (quoteString recordName)
+                            "Field", Literal "\"Invoke\""
+                            "Signature", RecordBlock [
+                                "CName", Literal (quoteString (namespace' + "::" + identity))
+                                "Parameters", ArrayBlock parameterInfos
+                                "ReturnType", Commented(Literal returnRef, returnProvenance)
+                                "CallingConvention", Identifier "CDecl"
+                                "OwnershipTransfer", Identifier "Borrowed" ] ])) ]
+                index, recordName, declarations)) |> List.choose id
+
+    /// Keep the full native arity private while carrying declared entry provenance through a
+    /// record projection. This is membrane plumbing, not the application callback interface.
+    let generateDeclaredFunctionDecls (ctx: GenerationContext) libraryName namespace' (func: CppParser.FunctionDecl) =
+        let entries = callbackEntries ctx namespace' func
+        let raw = generateFunctionDecls ctx libraryName func
+        if entries.IsEmpty then raw else
+        let callbackTypes = entries |> List.map (fun (i, name, _) -> cleanParamName (fst func.Parameters.[i]), name) |> Map.ofList
+        let nativeName, nativeParameters, returnType =
+            raw |> List.pick (function LetBinding(name, parameters, ret, _, attrs) when not attrs.IsEmpty -> Some (name, parameters, ret) | _ -> None)
+        let privateName = if nativeName = func.Name then nativeName + "Native" else nativeName
+        let publicParameters, callArguments =
+            match raw |> List.tryPick (function
+                | LetBinding(name, parameters, _, FunctionCall(_, _, arguments), []) when name = func.Name -> Some (parameters, arguments)
+                | _ -> None) with
+            | Some wrapper -> wrapper
+            | None -> nativeParameters, (nativeParameters |> List.map (fun p -> Identifier p.Name))
+        let publicParameters = publicParameters |> List.map (fun p ->
+            match Map.tryFind p.Name callbackTypes with Some name -> { p with Type = Named name } | None -> p)
+        let callArguments = callArguments |> List.map (function
+            | Identifier name when callbackTypes.ContainsKey name -> Identifier (name + ".Invoke")
+            | arg -> arg)
+        let declarations = raw |> List.choose (function
+            | LetBinding(name, parameters, ret, body, attrs) when name = nativeName && not attrs.IsEmpty ->
+                Some (LetBinding("private " + privateName, parameters, ret, body, attrs))
+            | ValueBinding(name, ty, body) when name = nativeName + "Descriptor" -> Some (ValueBinding(privateName + "Descriptor", ty, body))
+            | LetBinding(name, _, _, _, []) when name = func.Name -> None
+            | declaration -> Some declaration)
+        declarations @ [ LetBinding(func.Name, publicParameters, returnType, FunctionCall("", privateName, callArguments), []) ]
 
     /// Generate FsDecl list for an enum type.
     /// Automatically detects bitmask (flags) enums via value pattern analysis.
@@ -944,11 +1014,15 @@ module FidelityCodeGenerator =
 
         let enums = groups |> List.collect (function GEnum d -> d | _ -> [])
         let structs = groups |> List.collect (function GStruct d -> d | _ -> [])
-        let functions =
+        let functionDeclarations =
             groups
             |> List.choose (function GFunc f -> Some f | _ -> None)
             |> List.distinctBy (fun f -> f.Name)
-            |> List.collect (generateFunctionDecls ctx libraryName)
+        let callbackDeclarations =
+            functionDeclarations |> List.collect (callbackEntries ctx namespace')
+            |> List.distinctBy (fun (_, name, _) -> name)
+            |> List.collect (fun (_, _, declarations) -> declarations)
+        let functions = functionDeclarations |> List.collect (generateDeclaredFunctionDecls ctx libraryName namespace')
         let macros = groups |> List.collect (function GMacro d -> d | _ -> [])
         let cppClasses = groups |> List.collect (function GCppClassBindings d -> d | _ -> [])
 
@@ -967,7 +1041,7 @@ module FidelityCodeGenerator =
             match (openModules @ vocabularyOpens) |> List.distinct with
             | [] -> []
             | opens -> (opens |> List.map OpenModule) @ [BlankLine]
-        let allDecls = openDecls @ opaqueHandleDecls @ markerDecls @ enums @ structs @ functions @ macroSection @ cppSection
+        let allDecls = openDecls @ opaqueHandleDecls @ markerDecls @ enums @ structs @ callbackDeclarations @ functions @ macroSection @ cppSection
         let surfaceComment =
             if ctx.NativePointerSurface then comment + " — EXPERIMENTAL legacy ABI surface; not current Clef source"
             else comment

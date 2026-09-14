@@ -505,7 +505,7 @@ module PilotSerializer =
                    ValueStructs = match TomlTable.tryFind "value_structs" table with Some (TomlValue.Array values) -> values |> List.map (function TomlValue.String name -> name | _ -> failwith "value_structs requires type names") | _ -> [] }
         | _ -> None
 
-    /// Deserialize the optional [callbacks] section.
+    /// Deserialize the optional [callbacks] section, including the documented inline tables.
     let private deserializeCallbacks (doc: TomlDocument) : CallbackSpec option =
         match Toml.getValue "callbacks" doc with
         | None -> None
@@ -515,7 +515,7 @@ module PilotSerializer =
                 | Some (TomlValue.Array items) ->
                     items |> List.choose (fun item ->
                         match item with
-                        | TomlValue.Table t ->
+                        | TomlValue.Table t | TomlValue.InlineTable t ->
                             match TomlTable.tryFind "function" t, TomlTable.tryFind "callback_param" t with
                             | Some (TomlValue.String fn), Some (TomlValue.String cb) ->
                                 let dp = optionalString "data_param" t
@@ -528,7 +528,7 @@ module PilotSerializer =
                 | Some (TomlValue.Array items) ->
                     items |> List.choose (fun item ->
                         match item with
-                        | TomlValue.Table t ->
+                        | TomlValue.Table t | TomlValue.InlineTable t ->
                             match TomlTable.tryFind "name" t with
                             | Some (TomlValue.String name) ->
                                 let regFn = optionalString "registration_function" t

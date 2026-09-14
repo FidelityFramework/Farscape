@@ -347,8 +347,8 @@ module WrapperCodeGenerator =
         let parameters, rawRetType =
             match sourceContext with
             | Some ctx ->
-                FidelityCodeGenerator.generateFunctionDecls ctx "" func
-                |> List.pick (function LetBinding(_, parameters, ret, _, _) -> Some (parameters, ret) | _ -> None)
+                FidelityCodeGenerator.generateDeclaredFunctionDecls ctx "" bindingsModule func
+                |> List.pick (function LetBinding(name, parameters, ret, _, _) when name = func.Name -> Some (parameters, ret) | _ -> None)
             | None -> parameters, rawRetType
         // For OpaqueHandleReturn: use the actual handle type if the return maps to a known opaque handle
         let resolvedHandleType =
@@ -411,6 +411,12 @@ module WrapperCodeGenerator =
         // Phase 1.5: Detect opaque handle typedefs (shared with FidelityCodeGenerator)
         let opaqueHandles = FidelityCodeGenerator.detectOpaqueHandles declarations
 
+        let signatureContext =
+            sourceContext |> Option.orElseWith (fun () ->
+                Some { FidelityCodeGenerator.buildGenerationContext declarations model Map.empty with
+                           NativePointerSurface = nativePointerSurface
+                           NonnullAnnotations = nonnullAnnotations })
+
         // Phase 2: Extract functions via catamorphism (ONE pass)
         let groups =
             DeclarationAlgebra.cataDeclarations wrapperAlgebra declarations
@@ -420,7 +426,7 @@ module WrapperCodeGenerator =
             groups
             |> List.choose (function WFunc f -> Some f | WNone -> None)
             |> List.distinctBy (fun f -> f.Name)
-            |> List.collect (generateWrapperDecls sourceContext nativePointerSurface passthroughFunctions typedefMap model opaqueHandles bindingsModule errorHandling nonnullAnnotations)
+            |> List.collect (generateWrapperDecls signatureContext nativePointerSurface passthroughFunctions typedefMap model opaqueHandles bindingsModule errorHandling nonnullAnnotations)
 
         // Phase 4: Build typed FsDecl tree; wrapper module opens the bindings module
         let openDecl = Comment $"open {bindingsModule}"

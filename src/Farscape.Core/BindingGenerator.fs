@@ -805,7 +805,7 @@ module BindingGenerator =
                                     if ctx.NativePointerSurface then
                                         CallbackWrapperGenerator.generateNative spec declarations callbackNs dataModel callbackOpens
                                     elif cHeaderMode then
-                                        CallbackWrapperGenerator.generateTyped spec declarations callbackNs ctx callbackOpens
+                                        CallbackWrapperGenerator.generateTypedWithModules spec declarations callbackNs ctx callbackOpens resolveModule
                                     else CallbackWrapperGenerator.generate spec declarations callbackNs dataModel callbackOpens l2CallbackModule
                                 match generated with
                                 | Some output ->

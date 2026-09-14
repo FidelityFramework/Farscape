@@ -229,7 +229,7 @@ not read, including the planned keys below.
 
 ### `[library] introspection` and `[[namespace]] signals`: GObject Signals
 
-GObject declares every signal handler as `GCallback`, `void (*)(void)`, so no C header states a signal's entry signature. The installed introspection data does (`/usr/share/gir-1.0/*.gir`): each `<glib:signal>` carries its parameters, its return and their C types. `introspection` lists the `.gir` files to read; a namespace's `signals` selects signals as `Class::signal-name` in GIR names. A parameter type from another namespace resolves only through a listed file.
+GObject declares every signal handler as `GCallback`, `void (*)(void)`, so no C header states a signal's entry signature. The installed introspection data does (`/usr/share/gir-1.0/*.gir`): each `<glib:signal>` carries its parameters, its return and their C types. `introspection` lists the `.gir` files to read; a namespace's `signals` selects `Namespace.Class::signal-name` in GIR names, or `Class::signal-name` when unambiguous among the listed namespaces. A parameter type from another namespace resolves only through a listed file.
 
 ```toml
 [library]
@@ -243,7 +243,13 @@ library = "webkit2gtk-4.1"
 signals = ["UserContentManager::script-message-received"]
 ```
 
-For each selected signal the typed generator writes to `Bridge/Signals.clef`: a listener record with one field, named after the signal, whose `FnPtr` carries the entry (instance, the signal's parameters, user data) as opaque handles and one-kind scalars (every pointer input is an opaque handle: the compiler's callback reader admits scalars and opaque handles, so a nullable C input is not yet expressed); a `CallbackDescriptor` fixing the entry's C representations through the same resolver the externs use; and `connect<Class><Signal> instance listener data` over `g_signal_connect_data`, returning the handler id. The connection is undetailed. This is the Tier C form of `docs/10_Boundary_Marshaling_Spec.md`'s Representation section: the handler is a closed module function supplied through `FnPtr.ofFunction`, and the release slot carries a generated no-op until Composer's trampolines land. `glib-object.h` must be among the pilot's headers, and the generated manifest links `gobject-2.0`.
+For each selected signal the typed generator writes a native listener record, its `CallbackDescriptor`, a descriptor-bound release entry, and `connect<Class><Signal> instance listener` into `Bridge/Signals.clef`. These are Layer 2 declarations: the native listener signature includes the instance, signal parameters and user data. The connect supplies the instance as nonnull user data and returns the handler id. Descriptor identities use `ClassCType::signal-name`, which cannot collide with C function symbols. The connection is undetailed. `glib-object.h` must be among the pilot's headers; the generated manifest links `gobject-2.0` when `[options] link_libraries = true`.
+
+Nullable signal inputs and results are rejected. Floating-point inputs and results are also rejected because the current callback declaration reader cannot establish their entry representation. Each rejection names the signal and affected parameter or result. These checks preserve the rule that null never enters an interior Clef handle or function pointer.
+
+The generator also emits `on<Class><Signal> instance handler`, a public inline wrapper over a `ClosedCallbackDescriptor` factory. Its handler receives only the signal payload (or `unit` for a signal without payload); the binding owns the native instance and userdata arguments. The compiler specializes immutable closed module handlers and requires the matching native callback descriptor. Captured handlers are rejected. This requires the compiler's closed-callback specialization pass and the corresponding BAREWire descriptor vocabulary.
+
+Both the native listener/connect API and an `on` helper whose payload contains native handles remain Layer 2 plumbing. Exposing those handles, context parameters, or native string ownership in an application violates `docs/10_Boundary_Marshaling_Spec.md`. An authored binding overlay converts payloads to domain values before invoking the application handler. Closed-handler adaptation is distinct from the captured-environment allocation and release contract in Composer C-01 §§6.7 and 10.8.
 
 ### `[protocol]`: Protocol Argument Marshalling
 

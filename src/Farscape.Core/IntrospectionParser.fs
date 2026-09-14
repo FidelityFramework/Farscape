@@ -32,6 +32,7 @@ module IntrospectionParser =
         Name: string
         Parameters: SignalParameter list
         Return: TypeRef
+        ReturnNullable: bool
         Documentation: string option
     }
 
@@ -58,11 +59,13 @@ module IntrospectionParser =
         Name: string
         Parameters: (string * string * bool) list
         ReturnCType: string
+        ReturnNullable: bool
         Documentation: string option
     }
 
     let private attr name node = XmlNode.attr name node |> Option.filter (fun v -> v <> "")
     let private attrOr name fallback node = attr name node |> Option.defaultValue fallback
+    let private nullable node = attr "nullable" node = Some "1" || attr "allow-none" node = Some "1"
 
     let private typeRefOf (node: XmlNode) : TypeRef option =
         match XmlNode.element "type" node, XmlNode.element "array" node with
@@ -89,13 +92,15 @@ module IntrospectionParser =
                     |> List.choose (fun p ->
                         typeRefOf p |> Option.map (fun t ->
                             { Name = attrOr "name" "" p; Type = t
-                              Nullable = attr "nullable" p = Some "1" || attr "allow-none" p = Some "1" }))
+                              Nullable = nullable p }))
                 let result =
-                    XmlNode.element "return-value" signal |> Option.bind typeRefOf
+                    XmlNode.element "return-value" signal
+                    |> Option.bind (fun node -> typeRefOf node |> Option.map (fun typ -> typ, nullable node))
                 match attr "name" signal, result with
-                | Some name, Some ret ->
+                | Some name, Some (ret, returnNullable) ->
                     Some { Class = className; ClassCType = cType; SymbolPrefix = nsSymbolPrefix + "_" + symbolPrefix
-                           Name = name; Parameters = parameters; Return = ret; Documentation = firstDocLine signal }
+                           Name = name; Parameters = parameters; Return = ret; ReturnNullable = returnNullable
+                           Documentation = firstDocLine signal }
                 | _ -> None)
         | _ -> []
 
@@ -172,18 +177,24 @@ module IntrospectionParser =
                     | Some c -> Ok c
                     | None -> Error $"type '{t.Name}' has no C spelling in the introspection data"
 
-    /// The selected signals, named `Class::signal-name` in GIR names, with resolved C types.
+    /// Resolves `Namespace.Class::signal-name`, or `Class::signal-name` when unambiguous.
     let select (repo: Repository) (selection: string list) : Result<SignalDecl list, string> =
         let resolveSignal (entry: string) : Result<SignalDecl, string> =
             match entry.Split([| "::" |], System.StringSplitOptions.None) with
-            | [| className; signalName |] ->
+            | [| owner; signalName |] when owner <> "" && signalName <> "" ->
+                let selectedNamespace, className =
+                    match owner.LastIndexOf '.' with
+                    | -1 -> None, owner
+                    | i -> Some (owner.Substring(0, i)), owner.Substring(i + 1)
                 let found =
-                    repo.Namespaces |> Map.toList |> List.tryPick (fun (nsName, ns) ->
-                        ns.Signals |> List.tryFind (fun s -> s.Class = className && s.Name = signalName)
-                        |> Option.map (fun s -> nsName, s))
+                    repo.Namespaces |> Map.toList |> List.collect (fun (nsName, ns) ->
+                        if selectedNamespace |> Option.exists ((<>) nsName) then []
+                        else
+                            ns.Signals |> List.filter (fun s -> s.Class = className && s.Name = signalName)
+                            |> List.map (fun s -> nsName, s))
                 match found with
-                | None -> Error $"signal '{entry}' is not declared in the listed introspection files"
-                | Some (nsName, s) ->
+                | [] -> Error $"signal '{entry}' is not declared in the listed introspection files"
+                | [ nsName, s ] ->
                     let parameters =
                         s.Parameters |> List.map (fun p ->
                             resolveType repo nsName p.Type
@@ -198,8 +209,11 @@ module IntrospectionParser =
                             { Namespace = nsName; Class = s.Class; ClassCType = s.ClassCType; SymbolPrefix = s.SymbolPrefix
                               Name = s.Name
                               Parameters = parameters |> List.choose (function Ok p -> Some p | Error _ -> None)
-                              ReturnCType = ret; Documentation = s.Documentation })
-            | _ -> Error $"signal selection '{entry}' must be spelled Class::signal-name"
+                              ReturnCType = ret; ReturnNullable = s.ReturnNullable; Documentation = s.Documentation })
+                | matches ->
+                    let choices = matches |> List.map (fun (nsName, _) -> $"{nsName}.{className}::{signalName}") |> String.concat ", "
+                    Error $"signal '{entry}' is ambiguous; select a namespace-qualified signal: {choices}"
+            | _ -> Error $"signal selection '{entry}' must be spelled Namespace.Class::signal-name or Class::signal-name"
         let resolved = selection |> List.map resolveSignal
         match resolved |> List.tryPick (function Error e -> Some e | Ok _ -> None) with
         | Some e -> Error e

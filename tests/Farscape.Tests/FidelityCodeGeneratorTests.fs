@@ -68,7 +68,51 @@ let ``generate resolves typedef to function pointer as FnPtr`` () =
         CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
-    Assert.Contains("(compar: FnPtr<option<CHandle<unit>> -> option<CHandle<unit>> -> int>)", result)
+    Assert.Contains("(compar: FnPtr<CHandle<unit> -> CHandle<unit> -> int>)", result)
+    Assert.DoesNotContain("FnPtr<option<", result)
+    Assert.Contains("Expr<CallbackDescriptor>", result)
+    Assert.Contains("compar.Invoke", result)
+
+[<Fact>]
+let ``direct callback typedef declares one entry and preserves native scalar representations`` () =
+    let declarations = [
+        CppParser.Declaration.Typedef (mkTypedef "Notify" "int (*)(unsigned int, int, void *)")
+        CppParser.Declaration.Function (mkFunc "register" "int" ["notify", "Notify"; "context", "void *"])
+        CppParser.Declaration.Function (mkFunc "replace" "void" ["notify", "Notify"]) ]
+    let source = FidelityCodeGenerator.generate declarations "Test.Native" "test" Types.LP64 Map.empty
+    let name = "Callback_Test_002E_Native_003A__003A_NotifyEntry"
+    Assert.Equal(2, source.Split("type " + name + " =").Length)
+    Assert.Equal(2, source.Split("let " + name + "Descriptor").Length)
+    Assert.Contains("Invoke: FnPtr<int -> int -> CHandle<unit> -> int>", source)
+    Assert.Contains("Record = \"" + name + "\"", source)
+    Assert.Contains("Type = Integer (Unsigned, 32)", source)
+    Assert.Contains("Type = Integer (Signed, 32)", source)
+    Assert.Contains("ReturnType = Integer (Signed, 32)", source)
+    Assert.Contains("CName = \"Test.Native::Notify\"", source)
+    Assert.Contains("let private registerNative (notify: FnPtr<", source)
+    Assert.Contains("registerNative notify.Invoke context", source)
+    Assert.Contains("replaceNative notify.Invoke", source)
+
+[<Fact>]
+let ``callback entry pointer results remain nonnull while extern pointer results convert absence`` () =
+    let declarations = [
+        CppParser.Declaration.Typedef (mkTypedef "Transform" "void *(*)(void *)")
+        CppParser.Declaration.Function (mkFunc "transform" "void *" ["callback", "Transform"]) ]
+    let source = FidelityCodeGenerator.generate declarations "Test.Native" "test" Types.LP64 Map.empty
+    Assert.Contains("Invoke: FnPtr<CHandle<unit> -> CHandle<unit>>", source)
+    Assert.Contains(") : option<CHandle<unit>> =", source)
+    Assert.DoesNotContain("FnPtr<option<", source)
+    Assert.DoesNotContain("-> option<CHandle<unit>>>", source)
+
+[<Fact>]
+let ``callback record identities distinguish namespace punctuation`` () =
+    let declarations = [
+        CppParser.Declaration.Typedef (mkTypedef "Notify" "void (*)(void)")
+        CppParser.Declaration.Function (mkFunc "register" "void" ["notify", "Notify"]) ]
+    let recordName ns =
+        let source = FidelityCodeGenerator.generate declarations ns "test" Types.LP64 Map.empty
+        source.Split('\n') |> Array.find (fun line -> line.StartsWith "type Callback_")
+    Assert.NotEqual<string>(recordName "Test.Native", recordName "Test_Native")
 
 [<Fact>]
 let ``generate maps wchar_t pointer as CHandle of int`` () =

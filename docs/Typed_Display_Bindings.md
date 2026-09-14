@@ -1,122 +1,31 @@
 # Typed Linux display boundary
 
-The explicit `*.native.pilot.toml` profiles under Fidelity.Platform's
-`CPU/Linux/x86_64/pilot` regenerate the narrow live CPU display surface from the
-installed Wayland, GBM, resvg, and libc headers. They emit ordinary Clef `int`,
-`float`, `CHandle`, `FnPtr`, records, and bounded arrays. ABI signedness and widths
-remain in descriptors, including resvg 0.48's 24-byte transform passed by value.
+The explicit `*.native.pilot.toml` profiles under Fidelity.Platform's `Environments/Linux/x86_64/pilot` regenerate the narrow live CPU display surface from the installed Wayland, GBM, resvg, and libc headers. They emit ordinary Clef `int`, `float`, `CHandle`, `FnPtr`, records, and bounded arrays. ABI signedness and widths remain in descriptors, including resvg 0.48's 24-byte transform passed by value.
 
-`reference_parameters` projects a C pointer as bounded caller storage.
-Const-qualified immediate pointees emit `PassBy.ReadOnlyReference`; an explicit
-`read_only_reference_parameters` profile entry can declare the same contract
-when the C signature lacks const (Wayland's input argument arrays). Ordinary
-`Reference` remains writable and must preserve C writes. Only a read-only record
-may use a temporary projection without copyback. Const on a deeper pointee,
-such as `const char**`, does not make the referenced pointer cell read-only.
-`reference_elements` supplies an explicit scalar element contract where a C
-buffer uses `void*` or plain `char*`: packed ABGR words use unsigned32 and resvg
-RGBA bytes use unsigned8. Pointer output cells become nullable opaque-handle
-arrays. `string_parameters` exposes a char pointer as a string input.
-The element contract describes C storage, not an interior Clef array width.
-When native elements are narrower, the compiler checks and packs the bounded
-array, copies writable results back with declared signedness, and releases the
-temporary after the call. A read-only projection omits copyback. Multiple scalar
-references that need conversion require an alias-preserving adapter.
-The display `mempcpyPixels` alias returns a borrowed cursor into the caller's
-destination; it is never an independently owned allocation.
-It is an interop operation, not the direct mapped rendering path.
-`constant_parameters` creates an ordinary wrapper around the full declared
-native call (the render-node open profile supplies O_RDWR); it never changes the
-native symbol's descriptor arity. `link_libraries` writes explicit native library
-identities into the generated package manifest for transitive static linking.
-`value_structs` emits a logical record paired
-with measured foreign layout, requiring the compiler to validate and realize
-that layout before crossing the boundary.
+`reference_parameters` projects a C pointer as bounded caller storage. Const-qualified immediate pointees emit `PassBy.ReadOnlyReference`; an explicit `read_only_reference_parameters` profile entry can declare the same contract when the C signature lacks const (Wayland's input argument arrays). Ordinary `Reference` remains writable and must preserve C writes. Only a read-only record may use a temporary projection without copyback. Const on a deeper pointee, such as `const char**`, does not make the referenced pointer cell read-only. `reference_elements` supplies an explicit scalar element contract where a C buffer uses `void*` or plain `char*`: packed ABGR words use unsigned32 and resvg RGBA bytes use unsigned8. Pointer output cells become nullable opaque-handle arrays. `string_parameters` exposes a char pointer as a string input. The element contract describes C storage, not an interior Clef array width. When native elements are narrower, the compiler checks and packs the bounded array, copies writable results back with declared signedness, and releases the temporary after the call. A read-only projection omits copyback. Multiple scalar references that need conversion require an alias-preserving adapter. The display `mempcpyPixels` alias returns a borrowed cursor into the caller's destination; it is never an independently owned allocation. It is an interop operation, not the direct mapped rendering path. `constant_parameters` creates an ordinary wrapper around the full declared native call (the render-node open profile supplies O_RDWR); it never changes the native symbol's descriptor arity. `link_libraries` writes explicit native library identities into the generated package manifest for transitive static linking. `value_structs` emits a logical record paired with measured foreign layout, requiring the compiler to validate and realize that layout before crossing the boundary.
 
-`typed_protocol` reads installed protocol XML and measured `wl_argument`,
-`wl_message`, and `wl_interface` layouts. Request records carry one measured
-union cell per wire argument. Listener records carry typed function pointers;
-each `CallbackDescriptor` connects a record field to the complete C entry
-signature so the compiler can propagate C widths to application callbacks.
-This profile currently accepts closed module functions through `FnPtr.ofFunction`.
-Its listener records have module lifetime in the application and contain no
-captured environment. It does not claim the general Tier B captured-closure
-registration and release loop specified in `10_Boundary_Marshaling_Spec.md`.
-Such a loop must retain and release the actual flat environment.
+`typed_protocol` reads installed protocol XML and measured `wl_argument`, `wl_message`, and `wl_interface` layouts. Request records carry one measured union cell per wire argument. Listener records carry typed function pointers; each `CallbackDescriptor` connects a record field to the complete C entry signature so the compiler can propagate C widths to the native callback. These native records, their `FnPtr.ofFunction` construction and their userdata belong to the binding's Layer 2, with storage lasting through native registration. The application-facing adapter must convert native payloads before calling an ordinary Clef handler. The current native entry form accepts closed module functions and retains no captured environment. It does not claim the general Tier B captured-closure registration and release loop specified in `10_Boundary_Marshaling_Spec.md`; that future loop must retain and release the actual environment.
 
-`ProtocolInterfaces.initialize()` allocates owned interface, message, interface
-pointer-table and string storage through generated libc declarations. All
-interface blocks are allocated first, then populated, so pointers to other
-projected interfaces are stable. Non-object arguments and object interfaces
-outside the selected boundary use null interface type entries. Per-message
-pointer tables are still allocated to the exact expanded argument count; a
-null table is used only for zero-argument messages. Interface records and table
-extents come from the installed header probe. Initialization failure cleans up
-owned allocations, and repeated initialization within a session is idempotent.
-Call `shutdown()` only after disconnecting the display and retiring every proxy.
-The owner serializes initialization, callback dispatch, and shutdown.
+`ProtocolInterfaces.initialize()` allocates owned interface, message, interface pointer-table and string storage through generated libc declarations. All interface blocks are allocated first, then populated, so pointers to other projected interfaces are stable. Non-object arguments and object interfaces outside the selected boundary use null interface type entries. Per-message pointer tables are still allocated to the exact expanded argument count; a null table is used only for zero-argument messages. Interface records and table extents come from the installed header probe. Initialization failure cleans up owned allocations, and repeated initialization within a session is idempotent. Call `shutdown()` only after disconnecting the display and retiring every proxy. The owner serializes initialization, callback dispatch, and shutdown.
 
-Clef retains its rich `Option` and container values. The compiler marshals C
-nullable words only at the actual foreign boundary: outgoing records and pointer
-cells use native temporaries when their logical layout differs; pointer output
-cells are converted back to `Option` after the call. A C-retained listener table
-must have a lifetime spanning registration, rather than point into a temporary
-marshaling buffer. No global null representation for interior values is assumed.
+Clef retains its rich `Option` and container values. The compiler marshals C nullable words only at the actual foreign boundary: outgoing records and pointer cells use native temporaries when their logical layout differs; pointer output cells are converted back to `Option` after the call. A C-retained listener table must have a lifetime spanning registration, rather than point into a temporary marshaling buffer. No global null representation for interior values is assumed.
 
-The GBM profile also declares `withMappedPixels bo x y width height flags work`.
-Its private native acquisition still has the eight parameters from `gbm.h`;
-`MappedReturnDescriptor` connects that function to `gbm_bo_unmap`, the original
-owner, the nullable output cookie, and the scoped callback. The compiler owns
-the two output cells. A successful acquisition supplies
-`BorrowedView<Fidelity.GBM.Native.Types.Abgr8888>` directly from the returned
-mapping. `ViewLayoutDescriptor` declares U32 elements, alignment 4, and write-only
-access independently of ordinary `int array` storage. The application requests
-GBM's write mapping flag and retains its existing ABGR8888 pixel format.
+The GBM profile also declares `withMappedPixels bo x y width height flags work`. Its private native acquisition still has the eight parameters from `gbm.h`; `MappedReturnDescriptor` connects that function to `gbm_bo_unmap`, the original owner, the nullable output cookie, and the scoped callback. The compiler owns the two output cells. A successful acquisition supplies `BorrowedView<Fidelity.GBM.Native.Types.Abgr8888>` directly from the returned mapping. `ViewLayoutDescriptor` declares U32 elements, alignment 4, and write-only access independently of ordinary `int array` storage. The application requests GBM's write mapping flag and retains its existing ABGR8888 pixel format.
 
-The returned stride and requested height establish the byte extent. The compiler
-must check multiplication, alignment, stride divisibility, and row width before
-admitting the view. `ScopedCallbackDescriptor` requires the callback and every
-synchronous child use to retire before release; a view or a closure capturing it
-cannot be returned or stored for later use. Native acquisition failure returns
-the declared negative adapter status without calling work or unmap. Every
-successful acquisition is paired with exactly one unmap, including rejection of
-an invalid mapped extent. The owner and cookie passed to unmap are the original
-acquisition values. There is no public handle-to-view conversion.
+The returned stride and requested height establish the byte extent. The compiler must check multiplication, alignment, stride divisibility, and row width before admitting the view. `ScopedCallbackDescriptor` requires the callback and every synchronous child use to retire before release; a view or a closure capturing it cannot be returned or stored for later use. Native acquisition failure returns the declared negative adapter status without calling work or unmap. Every successful acquisition is paired with exactly one unmap, including rejection of an invalid mapped extent. The owner and cookie passed to unmap are the original acquisition values. There is no public handle-to-view conversion.
 
-`ScopedCallbackDescriptor` is a trusted synchronous retirement promise made by
-the declaring library. The compiler validates supported aliases, captures and
-calls against that promise and rejects recognized escaping uses. It does not
-prove that an arbitrary implementation declaring the contract actually joins
-its children before returning. Ariel's carrier retirement protocol therefore
-needs its separate lifecycle tests and review; this is not a general proved
-borrow checker. Release on callback return also does not imply cleanup after
-process termination or a callback that never returns.
+`ScopedCallbackDescriptor` is a trusted synchronous retirement promise made by the declaring library. The compiler validates supported aliases, captures and calls against that promise and rejects recognized escaping uses. It does not prove that an arbitrary implementation declaring the contract actually joins its children before returning. Ariel's carrier retirement protocol therefore needs its separate lifecycle tests and review; this is not a general proved borrow checker. Release on callback return also does not imply cleanup after process termination or a callback that never returns.
 
-This path writes directly into GBM's returned mapping without a Clef staging
-pixel array or scanout copy. `gbm.h` states that a driver may itself stage a
-mapping; the declaration does not claim a physical driver memory path solely
-from the machine having unified memory. Native scope and mapping tests are the
-validation for the compiler realization, separate from generator tests.
+This path writes directly into GBM's returned mapping without a Clef staging pixel array or scanout copy. `gbm.h` states that a driver may itself stage a mapping; the declaration does not claim a physical driver memory path solely from the machine having unified memory. Native scope and mapping tests are the validation for the compiler realization, separate from generator tests.
 
-Each reachable mapped call also carries a graph-resident `mapped-element-span`
-obligation. Its source edges cite the mapping, view schema, native ABI, and call
-arguments. `MappedSpans` supplies the same element size, pointer limit and
-alignment facts to the guard emitter and the obligation recipe. The source
-SMT-LIB dispatch and Composer's SMT dialect dispatch preserve the same anchor.
+Each reachable mapped call also carries a graph-resident `mapped-element-span` obligation. Its source edges cite the mapping, view schema, native ABI, and call arguments. `MappedSpans` supplies the same element size, pointer limit and alignment facts to the guard emitter and the obligation recipe. The source SMT-LIB dispatch and Composer's SMT dialect dispatch preserve the same anchor.
 
-This bounded QF_LIA theorem starts after the mapping guards establish a positive
-byte extent, its element divisibility, an aligned base, and a nonwrapping end.
-From a checked element index it derives complete element containment and address
-alignment. The regression requires solver `unsat` for the claim and `sat` after
-removing the index, endpoint, or alignment guard. A timeout or `unknown` is a
-failure, not a discharged obligation. This is solver evidence, not an
-independently kernel-checked proof. Native allocation extent provenance and the
-variable `stride * height` arithmetic checks remain explicit premises outside
-this linear slice. Scoped lifetime validation and native carrier retirement
-tests are separate evidence; this span theorem does not establish worker
-disjointness, the driver's allocation contract, or a whole-memory theorem.
+This bounded QF_LIA theorem starts after the mapping guards establish a positive byte extent, its element divisibility, an aligned base, and a nonwrapping end. From a checked element index it derives complete element containment and address alignment. The regression requires solver `unsat` for the claim and `sat` after removing the index, endpoint, or alignment guard. A timeout or `unknown` is a failure, not a discharged obligation. This is solver evidence, not an independently kernel-checked proof. Native allocation extent provenance and the variable `stride * height` arithmetic checks remain explicit premises outside this linear slice. Scoped lifetime validation and native carrier retirement tests are separate evidence; this span theorem does not establish worker disjointness, the driver's allocation contract, or a whole-memory theorem.
 
-These profiles do not replace the wider existing Linux binding corpus. They do
-not emit a C shim or expose an address as a source integer. The compiler must
-support descriptor-backed record passing, nullable opaque handle storage,
-callback native-entry widths, and the target C aggregate calling convention.
+These profiles do not replace the wider existing Linux binding corpus. They do not emit a C shim or expose an address as a source integer. The compiler must support descriptor-backed record passing, nullable opaque handle storage, callback native-entry widths, and the target C aggregate calling convention.
+
+ Direct callback parameters use the same declared-entry discipline. For each emitted callback typedef, or anonymous callback parameter, the generator emits a native entry record with an `Invoke` field and a complete `CallbackDescriptor`. Record identities include the declaring namespace to distinguish identical typedef names in different packages. The full native extern is private; its wrapper accepts the declared record and extracts `Invoke` at the boundary. The entry contract includes all scalar widths and its native result, including `Void`, and rejects unsupported representations. Completion and release callbacks require declarations just as signal and listener callbacks do. Adopting regenerated bindings changes bare `FnPtr` arguments to declared entry records; that adaptation stays in Layer 2.
+
+An application-facing binding can declare `ClosedCallbackDescriptor { Binding; Adapter; Record; Field }` to specialize a native adapter for a known immutable module handler. `Binding` names the one-argument listener factory and `Adapter` names the binding-owned module function taking the handler followed by every native argument; both names are fully qualified. The factory and adapter are immutable closed module declarations, the listener has one typed function-pointer field, and its existing module-level `CallbackDescriptor` remains mandatory. The compiler specializes each reachable factory/handler pair into a closed native entry and ordinary listener construction. It allocates no captured environment and uses no callback registry.
+
+The closed adapter must still turn native handle payloads into bounded Clef values and perform native release and retirement inside Layer 2. An authored binding overlay can own that library-specific work while consuming generated declarations. Static specialization does not turn an opaque C payload into an application value automatically, and it does not establish future Tier A/B captured-environment retention or release. The sibling clef repository's `docs/fidelity/Closed_Native_Callback_Adapters.md` records the exact accepted declarations and diagnostics; `tests/native-callbacks/run.py` exercises the generated direct-callback route with native argument and result checks.

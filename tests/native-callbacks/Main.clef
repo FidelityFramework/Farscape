@@ -1,0 +1,8 @@
+module Landing.Acceptance.Main
+
+[<EntryPoint>]
+let main _ =
+    let result = Landing.Acceptance.Boundary.run ()
+    if result = 0 then Console.writeln "landing: scalar/void callback arguments and results passed"
+    else Console.writeln "landing: native entry failure"
+    result

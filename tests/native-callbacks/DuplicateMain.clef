@@ -1,0 +1,12 @@
+module Landing.Acceptance.Main
+
+[<EntryPoint>]
+let main _ =
+    let first = Landing.Acceptance.Boundary.run ()
+    let second = Landing.Acceptance.OtherBoundary.run ()
+    if first = 0 && second = 0 then
+        Console.writeln "landing: duplicate typedefs in different namespaces passed"
+        0
+    else
+        Console.writeln "landing: duplicate typedef entry failure"
+        11

@@ -1,0 +1,10 @@
+typedef struct LandingToken LandingToken;
+typedef int (*LandingCallback)(LandingToken *token, unsigned int value, void *data);
+typedef void (*LandingVoid)(LandingToken *token, void *data);
+LandingToken *landing_token(void);
+void *landing_data(void);
+int landing_read(LandingToken *token);
+int landing_read_data(void *data);
+int landing_invoke(LandingCallback callback, void *data);
+int landing_invoke_void(LandingVoid callback, void *data);
+void landing_record(int value);

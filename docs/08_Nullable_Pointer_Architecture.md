@@ -1,113 +1,49 @@
 # 08 — Nullable Pointer Architecture
 
-## Principled Default
+Null exists only at the foreign boundary. Interior `CHandle` and `FnPtr` values are nonnull; an `Option` is an ordinary Clef value whose absence is converted at the actual foreign call. A binding must never pass a raw native word to a callback parameter expecting an interior option value.
 
-C has no non-null guarantee unless explicitly annotated. Absence of proof is not proof of absence.
+## Data-pointer calls
 
-**Therefore: unannotated pointer parameters default to nullable (`Option<>`).**
+The current generator defaults unannotated data-pointer arguments and returns to `Option`. Clang nonnull attributes and explicit pilot declarations remove that wrapper when the native contract establishes nonnullability. This implementation policy differs from `clef-lang-spec/spec/ffi-boundary.md` §5.2, which specifies a nonnull default. Until that policy discrepancy is reconciled, migrated pilots declare the required contracts explicitly; missing annotations are not evidence that a C callback can safely receive null.
 
-`NonNullAttr` is the opt-in to proven non-null, not the other way around.
+| Native use | Typed Clef boundary surface |
+|---|---|
+| Nullable opaque object or data pointer | `option<CHandle<T>>` |
+| Proven nonnull opaque pointer | `CHandle<T>` |
+| Nullable text input with `string_parameters` | `option<string>` |
+| Proven nonnull text input with `string_parameters` | `string` |
+| Writable pointer output cell with a reference projection | `option<CHandle<T>> array`, with its native representation declared beside the extern |
+| Native callback entry pointer input or result | `CHandle<T>` under an explicit nonnull native contract |
 
-## Type Mappings
+Widths and C storage layouts belong to descriptors. Signatures use `int`, `float`, sanctioned handles and Clef containers. `nativeint`, `nativeptr`, pointer arithmetic and width-named numeric types are not source-language alternatives.
 
-| C Type | Default (unannotated) | With NonNullAttr |
-|---|---|---|
-| `const char *` | `Option<nativeptr<byte>>` | `nativeptr<byte>` |
-| `void *` | `Option<nativeint>` | `nativeint` |
-| `struct foo *` | `Option<nativeint>` | `nativeint` |
-| `int **` | `Option<nativeint>` | `nativeint` |
-| Opaque handle (e.g. `hipStream_t`) | `Option<nativeint>` | `nativeint` | See `docs/14_Binding_Generation_Gaps.md` §3 — a handle record is memref-backed and must not cross a call boundary; `Option<Record>` compounds it with a second indirection |
-| Function pointer `void (*)(...)` | `nativeint` | `nativeint` (not a data pointer) |
+## Nonnull evidence
 
-Return types follow the same rule: pointer returns are `Option<>` unless proven non-null.
-
-> **Exit strategy, noted 2026-08-16.** Every `nativeptr` and `nativeint` in the table above
-> is Layer 1/2 membrane surface, confined to generated code and counted as TCB, never an
-> application-facing type. The spec demotes `nativeptr` to internal `TNativePtr` plumbing
-> (`ffi-boundary.md`, `ntu-types.md`, `special-attributes-and-types.md`), and each mapping
-> is replaced by its use-class type (flat closure environments, branded handles,
-> length-carried memrefs) at the corpus-wide regeneration of
-> `docs/roadmap/00_farscape-maturation-plan.md` §9. The reasoning is the finiteness
-> doctrine: an unwitnessed cast is an open edge in the boundary of the provable region. See
-> `~/repos/Composer/docs/Closure_Nanopass_Architecture.md` ("Why Flat: the finiteness
-> lemma") and the Representation section of `docs/10_Boundary_Marshaling_Spec.md`.
-
-## Three Proof Sources for Non-Null
-
-### 1. Clang `NonNullAttr`
-
-Extracted from `clang -Xclang -ast-dump=json`. The attribute carries 0-based parameter indices:
-
-```json
-{ "kind": "NonNullAttr", "args": [0, 2] }
-```
-
-Parameters at indices 0 and 2 are proven non-null by the compiler.
-
-### 2. Clang `ReturnsNonNullAttr`
-
-For return values. If present, the return type emits without `Option<>`.
-
-### 3. Pilot TOML `[annotations.nonnull]`
-
-Developer-asserted non-null for parameters that clang cannot prove:
+Clang `NonNullAttr` supplies zero-based parameter indices, and `ReturnsNonNullAttr` establishes a nonnull result. Pilots can declare contracts that the header annotations omit:
 
 ```toml
 [annotations.nonnull]
-# Per-function: list of 0-based parameter indices proven non-null
 resvg_render = [0, 4]
 resvg_options_set_dpi = [0]
-
-# Return types proven non-null
 nonnull_returns = ["resvg_options_create"]
 ```
 
-Functions not listed: all pointer params are nullable (the default).
+These annotations are native-contract assertions. They do not turn a potentially null C value into a valid interior handle. Typedefs are resolved before deciding whether a parameter or result is a data pointer.
 
-## How It Works
+## Conversion and representation
 
-### Layer 1 (FidelityExtern declarations)
+For outgoing optional handles, the compiler converts `None` to `NULL` and `Some handle` to its native pointer. For nullable native results, it constructs the corresponding interior option. Optional text inputs use the string adapter. Reference arrays and records may require native temporaries and copyback according to their descriptors; see `Typed_Display_Bindings.md`.
 
-`FidelityCodeGenerator.generateFunctionDecls` collects non-null indices from both clang attributes
-and pilot TOML annotations into a combined set. Any pointer parameter NOT in this set gets
-`wrapOption` applied:
+No generated binding may assume that an interior option has the same layout as one C pointer word. The one-word wording in `ffi-boundary.md` §2.3 must be reconciled with the compiler's rich interior option representation; it is not an entry ABI contract. The conversion belongs at the boundary, independently of any interior representation optimization.
 
-```fsharp
-let isNullable = isPointer && not (nonnullIndices.Contains idx)
-let finalType = if isNullable then wrapOption fsType else fsType
-```
+## Callback entries
 
-### Layer 2 (Idiomatic wrappers)
+A callback's native signature is declared with a `CallbackDescriptor`, including every input and the result. The record field supplied through `FnPtr.ofFunction` names a closed module function. Native pointer inputs and results are nonnull handles; scalar widths come from the descriptor. Optional handles are not native callback parameters. A nullable incoming native value requires a real boundary adapter before admission to an interior handler; a signature change or ignored argument does not supply that conversion.
 
-`WrapperCodeGenerator.generateWrapperDecls` applies identical nullable logic. Wrapper parameters
-match Layer 1 signatures exactly, forwarding `Option<>` values directly to the underlying
-FidelityExtern call.
+GObject signal generation rejects nullable inputs and nullable results, and rejects floating-point entries that the current callback declaration reader cannot establish. Every rejection identifies the affected signal and value. Generated connection and release entries remain inside Layer 2.
 
-### What `isCDataPointer` excludes
+A nullable callback slot is a separate question from nullable callback inputs. The language specification requires `Option<FnPtr<F>>` for a nullable slot, while the September compiler rejects that shape as an extern argument. The current emitted typed surface requires a real declared callback. This is an implementation/specification discrepancy, not a claim that a function pointer lacks an absence type, and it never permits null in an interior entry.
 
-Function pointers (`(*)`, `(**)`) are NOT data pointers. They map to `nativeint` without
-nullable wrapping. Only actual data pointer types (detected by `*` in the C type string,
-excluding function pointer patterns) are subject to nullability.
+## Application boundary
 
-## Integration with Composer/Clef
-
-The Clef FFI null safety architecture (Composer memory `ffi_null_safety_architecture`) defines:
-
-- `nativeptr<'T>` is **non-nullable** within Clef code
-- `Option<nativeptr<'T>>` represents nullable pointers at the FFI boundary
-- `None` marshals to `NULL`, `NULL` marshals to `None`
-- Null exists ONLY at the FFI boundary — within Clef, pointers are never null
-
-Farscape generates the FFI boundary declarations. By defaulting to `Option<>`, Farscape
-correctly expresses that C pointers may be null unless proven otherwise. The Clef type system
-then enforces null checking at every use site.
-
-## NTU Type Path
-
-```
-nativeptr<byte> → TNativePtr(byte) → NTUKind.NTUptr → TIndex → MLIR index → LLVM i64
-Option<nativeptr<byte>> → same path, with None ↔ NULL at FFI boundary
-```
-
-The `Option<>` wrapping is resolved at the FFI boundary by CCS/Alex. No runtime overhead —
-it compiles to a null check at the call site.
+Native instance parameters, user data, string copying and native release belong to the binding. The application consumes the converted payload and domain operations. A descriptor that establishes a C calling signature alone does not establish that public adaptation; `10_Boundary_Marshaling_Spec.md` governs both containment and lifetime ownership.

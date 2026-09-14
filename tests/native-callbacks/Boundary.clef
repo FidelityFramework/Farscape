@@ -1,0 +1,30 @@
+/// Layer 2 native-entry acceptance; every callback argument affects the result.
+module Landing.Acceptance.Boundary
+
+open Landing.Boundary
+open Landing.Boundary.Types
+
+let private scalarEntry (token: CHandle<LandingToken>) (value: int) (data: CHandle<unit>) : int =
+    let tokenValue = landing_read token
+    let dataValue = landing_read_data data
+    if tokenValue = 173 && dataValue = 173 && value = 4294967295 then -7 else 9
+
+let private voidEntry (token: CHandle<LandingToken>) (data: CHandle<unit>) : unit =
+    let tokenValue = landing_read token
+    let dataValue = landing_read_data data
+    if tokenValue = 173 && dataValue = 173 then
+        landing_record 346
+    else
+        landing_record (-1)
+
+let private scalarListener: Callback_Landing_002E_Boundary_003A__003A_LandingCallbackEntry =
+    { Invoke = FnPtr.ofFunction scalarEntry }
+
+let private voidListener: Callback_Landing_002E_Boundary_003A__003A_LandingVoidEntry =
+    { Invoke = FnPtr.ofFunction voidEntry }
+
+let run () : int =
+    let data = landing_data ()
+    let scalarResult = landing_invoke scalarListener data
+    let voidResult = landing_invoke_void voidListener data
+    if scalarResult = 0 && voidResult = 0 then 0 else 10

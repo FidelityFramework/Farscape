@@ -429,12 +429,12 @@ module CallbackWrapperGenerator =
             Some (CodeRenderer.render (Module(namespace', "EXPERIMENTAL legacy ABI callback wrappers — not current Clef source",
                 (openModules |> List.map OpenModule) @ wrappers)))
 
-    /// Current Clef C boundary: opaque nullable handles and a compiler-owned FnPtr.
-    /// Forward the explicit environment without exposing an address or doing symbol lookup.
-    let generateTyped
+    /// Layer 2 forwarding aliases retain the declared entry record and environment contract.
+    /// The module resolver names the module that owns each generated entry declaration.
+    let generateTypedWithModules
         (spec: CallbackSpec) (declarations: CppParser.Declaration list)
         (namespace': string) (ctx: FidelityCodeGenerator.GenerationContext)
-        (openModules: string list) : string option =
+        (openModules: string list) (resolveModule: string -> string) : string option =
         let wrappers =
             spec.Registrations |> List.collect (fun reg ->
                 match declarations |> List.tryPick (function
@@ -442,16 +442,21 @@ module CallbackWrapperGenerator =
                     | _ -> None) with
                 | None -> []
                 | Some f ->
-                    FidelityCodeGenerator.generateFunctionDecls ctx "" f
+                    FidelityCodeGenerator.generateDeclaredFunctionDecls ctx "" (resolveModule f.Name) f
                     |> List.choose (function
-                        | LetBinding(_, parameters, returnType, _, _) ->
+                        | LetBinding(name, parameters, returnType, _, _) when name = f.Name ->
                             Some (LetBinding(toWrapperName f.Name, parameters, returnType,
                                 FunctionCall("", f.Name, parameters |> List.map (fun p -> Identifier p.Name)), []))
                         | _ -> None))
         if wrappers.IsEmpty then None
         else
-            Some (CodeRenderer.render (Module(namespace', "Typed callback wrappers — opaque handles and explicit environments",
+            Some (CodeRenderer.render (Module(namespace', "Layer 2 callback forwarding — declared entries and explicit environments",
                 (openModules |> List.map OpenModule) @ wrappers)))
+
+    /// Single-module callback forwarding; project generation supplies the per-function resolver.
+    let generateTyped spec declarations namespace' ctx openModules =
+        let sourceModule = openModules |> List.last
+        generateTypedWithModules spec declarations namespace' ctx openModules (fun _ -> sourceModule)
 
     /// Collect delegate names from declarations for listener field type matching.
     let private collectDelegateNames (declarations: CppParser.Declaration list) =
