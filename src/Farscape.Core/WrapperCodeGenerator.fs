@@ -22,18 +22,24 @@ open WrapperTypes
 ///   No DllImport, no Marshal, no BCL. Flows through PSG → MLIR.
 module WrapperCodeGenerator =
 
+    let private rejectErrno () =
+        failwith "errno wrappers require a declared native scalar errno accessor; CHandle<int> cannot be dereferenced in Clef source."
+
+    let private rejectNullWithReason reasonFn =
+        failwith $"null_with_reason wrappers require a declared reason return type, nullability, native text extent and ownership projection for '{reasonFn}'; an opaque CHandle cannot be treated as a reason string."
+
     // =========================================================================
     // Wrapper Return Type Computation
     // =========================================================================
 
     /// Compute the wrapper's F# return type from ReturnSemantic and the raw mapped return type.
-    /// For OpaqueHandleReturn, resolvedHandleType carries the actual handle struct type
-    /// when the C return type maps to a known opaque handle; otherwise the mapped CHandle stands.
+    /// Opaque C typedefs remain nominal CHandle carriers; a successful nullable result
+    /// unwraps to that same carrier rather than exposing native storage.
     let private wrapperReturnType (semantic: ReturnSemantic) (rawRetType: FsType) (errorHandling: ErrorHandling) (resolvedHandleType: FsType option) : FsType =
         let errorType =
             match errorHandling with
-            | UseErrno _ -> Named "string"
-            | UseNullWithReason _ -> Generic("CHandle", Named "int")
+            | UseErrno _ -> rejectErrno ()
+            | UseNullWithReason reasonFn -> rejectNullWithReason reasonFn
             | UseReturnCode _ -> Named "string"
             | _ -> Unit
         let hasErrors = match errorHandling with NoErrors -> false | _ -> true
@@ -80,34 +86,29 @@ module WrapperCodeGenerator =
     /// Build the error expression based on the error handling strategy.
     let private buildErrorExpr (errorHandling: ErrorHandling) (bindingsModule: string) (fallback: FsExpr) : FsExpr =
         match errorHandling with
-        | UseErrno _ -> FunctionCall("", "captureErrno", [Literal "()"])
-        | UseNullWithReason reasonFn -> FunctionCall(bindingsModule, reasonFn, [Literal "()"])
+        | UseErrno _ -> rejectErrno ()
+        | UseNullWithReason reasonFn -> rejectNullWithReason reasonFn
         | UseReturnCode _ -> FunctionCall("", "captureReturnCode", [TypeConversion("int", Identifier "result")])
         | _ -> fallback
 
     /// Generate wrapper body for CountOrError pattern (e.g., read, write).
     /// let result = Bindings.read fd buf count
-    /// if result >= 0n then Ok result
+    /// if result >= 0 then Ok result
     /// else Error (captureError ())
     let private countOrErrorBody (bindingsModule: string) (funcName: string) (paramNames: string list) (errorHandling: ErrorHandling) : FsExpr =
         let rawCall = buildRawCall bindingsModule funcName paramNames
         let errorExpr = buildErrorExpr errorHandling bindingsModule (Identifier "result")
         LetIn("result", rawCall,
             IfThenElse(
-                Comparison(Identifier "result", ">=", Literal "0n"),
+                Comparison(Identifier "result", ">=", Literal "0"),
                 ResultOk(Identifier "result"),
                 ResultError(errorExpr)))
 
-    /// Select the zero literal matching the C return type's NTU mapping.
-    /// C `int` → NTU `int` → literal `0`; C `int32_t` → NTU `int32` → literal `0l`.
-    let private zeroLiteralForReturnType (cReturnType: string) =
-        let trimmed = cReturnType.Replace("const ", "").Trim()
-        match trimmed with
-        | "int32_t" | "__int32_t" -> "0l"
-        | _ -> "0"
+    /// Width is an ABI descriptor fact; every source integer comparison uses `0`.
+    let private zeroLiteralForReturnType (_cReturnType: string) = "0"
 
     /// Generate wrapper body for ZeroSuccessOrError pattern (e.g., fclose, fseek).
-    /// if result = 0 then Ok ()  (or 0l for int32_t-returning functions)
+    /// if result = 0 then Ok ()
     let private zeroSuccessBody (bindingsModule: string) (funcName: string) (paramNames: string list) (errorHandling: ErrorHandling) (cReturnType: string) : FsExpr =
         let rawCall = buildRawCall bindingsModule funcName paramNames
         let errorExpr = buildErrorExpr errorHandling bindingsModule (Literal "()")
@@ -119,7 +120,7 @@ module WrapperCodeGenerator =
                 ResultError(errorExpr)))
 
     /// Generate wrapper body for IntValueOrError pattern (e.g., open, socket, dup, fork).
-    /// if result >= 0 then Ok result  (or 0l for int32_t-returning functions)
+    /// if result >= 0 then Ok result
     let private intValueOrErrorBody (bindingsModule: string) (funcName: string) (paramNames: string list) (errorHandling: ErrorHandling) (cReturnType: string) : FsExpr =
         let rawCall = buildRawCall bindingsModule funcName paramNames
         let errorExpr = buildErrorExpr errorHandling bindingsModule (Identifier "result")
@@ -131,7 +132,7 @@ module WrapperCodeGenerator =
                 ResultError(errorExpr)))
 
     /// Generate wrapper body for AllocatedPointer pattern (e.g., malloc, stbi_load).
-    /// L1 returns option<nativeint>; match to unwrap:
+    /// L1 returns option<CHandle<T>>; match to unwrap:
     /// match Bindings.malloc size with
     /// | Some result -> Ok result
     /// | None -> Error (captureReason ())
@@ -152,14 +153,8 @@ module WrapperCodeGenerator =
     let private opaqueHandleBody (bindingsModule: string) (funcName: string) (paramNames: string list) (errorHandling: ErrorHandling) : FsExpr =
         allocatedPointerBody bindingsModule funcName paramNames errorHandling
 
-    /// Select the integer literal suffix for an enum success value based on C return type.
-    /// Enum error functions may return the enum type directly or an integer type (e.g. int32_t).
-    let private enumSuccessLiteral (successIntValue: int64) (cReturnType: string) =
-        let trimmed = cReturnType.Replace("const ", "").Trim()
-        match trimmed with
-        | "int32_t" | "__int32_t" | "uint32_t" | "__uint32_t" -> $"{successIntValue}l"
-        | "int" | "unsigned int" -> $"{successIntValue}"
-        | _ -> $"{successIntValue}L"
+    /// A native enum's declared width does not change its Clef integer kind.
+    let private enumSuccessLiteral (successIntValue: int64) (_cReturnType: string) = string successIntValue
 
     /// Derive a unique capture function name from the C enum type.
     /// e.g., "resvg_error" → "captureResvgError", "hipError_t" → "captureHipError"
@@ -190,7 +185,7 @@ module WrapperCodeGenerator =
 
     /// Generate wrapper body for EnumReturnError pattern (e.g., HIP hipStreamCreate).
     /// let result = Bindings.hipStreamCreate stream
-    /// match result with | 0L -> Ok () | err -> Error (captureHipError err)
+    /// match result with | 0 -> Ok () | err -> Error (captureHipError err)
     /// Uses integer literal pattern because CCS does not yet register enum value bindings.
     /// When C return type differs from the enum type (e.g. int32_t vs resvg_error),
     /// inlines error construction to avoid type mismatch with the capture function.
@@ -264,7 +259,6 @@ module WrapperCodeGenerator =
     /// Generate FsDecl list for a single wrapper function.
     let private generateWrapperDecls
         (sourceContext: FidelityCodeGenerator.GenerationContext option)
-        (nativePointerSurface: bool)
         (passthroughFunctions: Set<string>)
         (typedefMap: Map<string, string>)
         (model: PlatformABI)
@@ -276,9 +270,7 @@ module WrapperCodeGenerator =
         : FsDecl list =
 
         let errorHandling = if passthroughFunctions.Contains func.Name then NoErrors else errorHandling
-        let mapType =
-            if nativePointerSurface then FidelityCodeGenerator.mapCTypeToNativeSurface typedefMap model Map.empty
-            else FidelityCodeGenerator.mapCTypeToFidelityType typedefMap model opaqueHandles Map.empty
+        let mapType = FidelityCodeGenerator.mapCTypeToFidelityType typedefMap model opaqueHandles Map.empty
         let pattern = WrapperPatternAnalyzer.analyze func typedefMap
 
         // Collect proven-nonnull parameter indices (same logic as FidelityCodeGenerator)
@@ -300,7 +292,6 @@ module WrapperCodeGenerator =
         // - EnumError: override return type when it matches the enum error type or a compatible integer type
         //   (C APIs often declare int/int32_t return type even when semantically returning an error enum)
         // - NoErrors: all semantics become direct passthrough (no null checks, no Result wrapping)
-        // - NullWithReason: pointer-returning functions keep their null check semantics
         // - Attribute-driven semantics (Pure/Const/NoReturn) always take precedence
         let isEnumCompatibleReturnType (cType: string) (enumType: string) =
             cType = enumType ||
@@ -328,7 +319,7 @@ module WrapperCodeGenerator =
             |> List.mapi (fun idx (name, cType) ->
                 let fsType = mapType cType
                 let isPointer = FidelityCodeGenerator.isCDataPointer cType
-                let isNullable = not nativePointerSurface && isPointer && not (nonnullIndices.Contains idx)
+                let isNullable = isPointer && not (nonnullIndices.Contains idx)
                 let finalType = if isNullable then FidelityCodeGenerator.wrapOption fsType else fsType
                 { FsParam.Name = cleanParamName name; Type = finalType })
 
@@ -341,7 +332,7 @@ module WrapperCodeGenerator =
                 |> Option.defaultValue false
             let hasReturnsNonnullAttr =
                 func.Attributes |> List.exists (fun a -> a.Kind = "ReturnsNonNullAttr")
-            if not nativePointerSurface && returnIsPointer && not returnNonnull && not hasReturnsNonnullAttr
+            if returnIsPointer && not returnNonnull && not hasReturnsNonnullAttr
             then FidelityCodeGenerator.wrapOption baseRetType
             else baseRetType
         let parameters, rawRetType =
@@ -353,14 +344,12 @@ module WrapperCodeGenerator =
         // For OpaqueHandleReturn: use the actual handle type if the return maps to a known opaque handle
         let resolvedHandleType =
             match baseRetType with
-            | Named name when opaqueHandles.Contains name -> Some (Named name)
+            | Generic("CHandle", Named name) when opaqueHandles.Contains name -> Some baseRetType
             | _ -> None
         let retType = wrapperReturnType semantic rawRetType errorHandling resolvedHandleType
 
         let paramNames = parameters |> List.map (fun p -> p.Name)
-        let comparisonType =
-            if nativePointerSurface && baseRetType = Named "int32" then "int32_t"
-            else func.ReturnType
+        let comparisonType = "int"
         let body = generateBody bindingsModule func.Name paramNames semantic errorHandling comparisonType
 
         formatDocDecls func @
@@ -405,6 +394,13 @@ module WrapperCodeGenerator =
         (nonnullAnnotations: PilotTypes.NonnullAnnotations option)
         : string =
 
+        if nativePointerSurface then
+            failwith "experimental_native_pointer_surface cannot emit Clef wrappers: raw address carriers violate the FFI boundary contract."
+        match errorHandling with
+        | UseErrno _ -> rejectErrno ()
+        | UseNullWithReason reasonFn -> rejectNullWithReason reasonFn
+        | _ -> ()
+
         // Phase 1: Build typedef resolution map (shared with FidelityCodeGenerator)
         let typedefMap = FidelityCodeGenerator.buildTypedefMap declarations
 
@@ -426,7 +422,7 @@ module WrapperCodeGenerator =
             groups
             |> List.choose (function WFunc f -> Some f | WNone -> None)
             |> List.distinctBy (fun f -> f.Name)
-            |> List.collect (generateWrapperDecls signatureContext nativePointerSurface passthroughFunctions typedefMap model opaqueHandles bindingsModule errorHandling nonnullAnnotations)
+            |> List.collect (generateWrapperDecls signatureContext passthroughFunctions typedefMap model opaqueHandles bindingsModule errorHandling nonnullAnnotations)
 
         // Phase 4: Build typed FsDecl tree; wrapper module opens the bindings module
         let openDecl = Comment $"open {bindingsModule}"
@@ -434,22 +430,7 @@ module WrapperCodeGenerator =
         // Error handling support: generate captureError helper based on strategy
         let errorDecls =
             match errorHandling with
-            | UseErrno errnoModuleName ->
-                let openErrno = Comment $"open {errnoModuleName}"
-                let openErrnoSub = Comment $"open {errnoModuleName}.Errno"
-                // captureErrno helper: reads thread-local errno and returns human-readable description string.
-                // NativePtr intrinsics are Clef builtins — no namespace import needed.
-                // __errno_location returns nativeint → cast to nativeptr<int> → NativePtr.read → describe
-                let captureErrorBody =
-                    FunctionCall("", "describe",
-                        [FunctionCall("NativePtr", "read",
-                            [FunctionCall("NativePtr", "ofNativeInt",
-                                [FunctionCall("", "__errno_location", [Literal "()"])])])])
-                let captureErrorDecl =
-                    LetBinding("captureErrno", [], Named "string", captureErrorBody, [])
-                [ openErrno; openErrnoSub; BlankLine
-                  XmlDoc "Capture errno as human-readable description string from header comments."
-                  captureErrorDecl; BlankLine ]
+            | UseErrno _ -> rejectErrno ()
             | UseEnumError (enumType, _, errorStructName, describeModuleName) ->
                 let openErrorModule = Comment $"open {describeModuleName}"
                 let openErrorSub = Comment $"open {describeModuleName}.{errorStructName}"
@@ -475,12 +456,7 @@ module WrapperCodeGenerator =
                 [ openErrorModule; BlankLine
                   XmlDoc $"Capture {libPrefix} return code as human-readable error string."
                   captureErrorDecl; BlankLine ]
-            | UseNullWithReason reasonFn ->
-                // NullWithReason: no helper needed — the reason function is called directly
-                // in the wrapper body via bindingsModule.reasonFn (). The error value is the
-                // raw nativeint pointer to the C string returned by the reason function.
-                [ Comment $"// Error handling: null returns call {reasonFn}() for reason string"
-                  BlankLine ]
+            | UseNullWithReason reasonFn -> rejectNullWithReason reasonFn
             | NoErrors -> []
 
         let typeOpens =

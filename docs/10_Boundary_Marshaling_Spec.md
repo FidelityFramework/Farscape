@@ -1,5 +1,10 @@
 # Boundary Marshaling Specification
 
+The [2026-10-03 checkpoint](handoff/2026-10-03-ffi-boundary-checkpoint.md)
+records current implementation and validation. The obligations below remain the
+boundary contract; declarations alone do not prove native callback ABI
+realization, foreign resource lifetimes or desktop library readiness.
+
 ## The Rule
 
 **No C idioms may appear in Layer 3 or application code.** Layer 2 is the membrane: it converts native representations and ownership into Clef values and operations before invoking application code. Moving a declaration into a binding package does not by itself discharge that conversion.
@@ -68,7 +73,13 @@ Some legacy bindings resolve exported data, such as Wayland interface symbols, t
 
 ## Closure Roadmap for Callbacks
 
-The implemented native callback path accepts named module functions without captures. `FnPtr.ofFunction` supplies the entry through a listener record whose `CallbackDescriptor` declares the complete C ABI. For application-facing callbacks, a binding can statically specialize a closed adapter using `ClosedCallbackDescriptor`, described below. Neither path allocates a captured environment or installs a runtime callback registry.
+The source callback path accepts named module functions without captures.
+`FnPtr.ofFunction` and the listener's `CallbackDescriptor` identify the logical
+entry and required C ABI. Native target ABI/adaptation publication in Baker/PSG
+is still incomplete, and Alex refuses missing realization. Closed adapter
+declarations use `ClosedCallbackDescriptor`, described below; they do not
+establish completed native execution. The closed form allocates no captured
+environment and installs no runtime callback registry.
 
 General captured callbacks require more: a typed environment, a lifetime spanning native registration and invocation, and a native trampoline that converts the C arguments before invoking the interior Clef callable. The closure's interior code pointer must not be substituted directly into a C callback slot merely because its environment is empty. Exact parameter and result representations remain a separate obligation.
 

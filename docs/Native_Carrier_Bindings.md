@@ -1,5 +1,13 @@
 # Typed pthread boundary and experimental ABI probe
 
+Current acceptance is recorded in the
+[2026-10-03 FFI checkpoint](handoff/2026-10-03-ffi-boundary-checkpoint.md).
+This profile description is historical: raw-address generation is now refused,
+and typed declarations or host ABI probes do not establish native Clef callback
+execution. General foreign lifetime and native FnPtr ABI publication remain
+incomplete. Regenerate into a review directory and validate each consumer before
+accepting a library update.
+
 Current Clef source exposes opaque, non-arithmetic `CHandle<'T>` values and
 compiler-owned `FnPtr<'F>` entries. Nullable C data pointers use `option<CHandle<_>>`.
 All C integers are spelled `int`; their sign and width live in each generated

@@ -82,7 +82,7 @@ let ``generate renders complete errno module with extern and SubModule`` () =
     let output = ErrnoModuleGenerator.generate macros "Fidelity.Errno" "c"
     // __errno_location extern
     Assert.Contains("[<FidelityExtern(\"c\", \"__errno_location\")>]", output)
-    Assert.Contains("let __errno_location () : nativeint =", output)
+    Assert.Contains("let __errno_location () : CHandle<int> =", output)
     Assert.Contains("NativeDefault.zeroed ()", output)
     // Errno submodule with constants and describe
     Assert.Contains("module Errno =", output)
@@ -99,7 +99,7 @@ let ``generate renders complete errno module with extern and SubModule`` () =
 let ``generate with empty macros still produces __errno_location and describe`` () =
     let output = ErrnoModuleGenerator.generate [] "Fidelity.Libc.Errno" "c"
     Assert.Contains("[<FidelityExtern(\"c\", \"__errno_location\")>]", output)
-    Assert.Contains("let __errno_location () : nativeint =", output)
+    Assert.Contains("let __errno_location () : CHandle<int> =", output)
     Assert.Contains("module Errno =", output)
     Assert.Contains("let describe (code: int) : string =", output)
     Assert.Contains("| other -> \"Unknown error\"", output)
@@ -121,7 +121,7 @@ let ``generate with live errno.h produces complete module`` () =
         let rendered = ErrnoModuleGenerator.generate result.Macros "Fidelity.Errno" "c"
         // Verify structural elements
         Assert.Contains("[<FidelityExtern(\"c\", \"__errno_location\")>]", rendered)
-        Assert.Contains("let __errno_location () : nativeint =", rendered)
+        Assert.Contains("let __errno_location () : CHandle<int> =", rendered)
         Assert.Contains("module Errno =", rendered)
         Assert.Contains("let describe (code: int) : string =", rendered)
         // Verify specific constants with descriptions
@@ -129,3 +129,18 @@ let ``generate with live errno.h produces complete module`` () =
         Assert.Contains("| EPERM -> \"Operation not permitted\"", rendered)
         Assert.Contains("let ENOENT = 2", rendered)
         Assert.Contains("| ENOENT -> \"No such file or directory\"", rendered)
+
+[<Theory>]
+[<InlineData("LP64", 64)>]
+[<InlineData("LLP64", 64)>]
+[<InlineData("ILP32", 32)>]
+[<InlineData("IP16", 16)>]
+let ``errno cell stays opaque and descriptor retains selected pointer width`` modelName bits =
+    let model = match modelName with "LP64" -> Types.LP64 | "LLP64" -> Types.LLP64 | "ILP32" -> Types.ILP32 | _ -> Types.IP16
+    let output = ErrnoModuleGenerator.generateWithModel [] "Test.Errno" "c" model
+    Assert.Contains("let __errno_location () : CHandle<int> =", output)
+    Assert.Contains($"ReturnType = Pointer {bits}", output)
+    Assert.Contains("OwnershipTransfer = Borrowed", output)
+    Assert.DoesNotContain("nativeint", output)
+    Assert.DoesNotContain("nativeptr", output)
+    Assert.DoesNotContain("NativePtr", output)

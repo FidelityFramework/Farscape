@@ -52,7 +52,10 @@ More text.</doc>
 </repository>"""
 
 let private headerDecls =
-    [ CppParser.Declaration.Typedef (mkTypedef "gpointer" "void *")
+    [ CppParser.Declaration.Struct (mkStruct "WebKitUserContentManager" [] None)
+      CppParser.Declaration.Struct (mkStruct "WebKitJavascriptResult" [] None)
+      CppParser.Declaration.Struct (mkStruct "GClosure" [] None)
+      CppParser.Declaration.Typedef (mkTypedef "gpointer" "void *")
       CppParser.Declaration.Typedef (mkTypedef "gchar" "char")
       CppParser.Declaration.Typedef (mkTypedef "gboolean" "int")
       CppParser.Declaration.Typedef (mkTypedef "gulong" "unsigned long")
@@ -66,6 +69,15 @@ let private headerDecls =
           (mkFunc "g_signal_connect_data" "gulong"
               [ "instance", "gpointer"; "detailed_signal", "const gchar *"; "c_handler", "GCallback"
                 "data", "gpointer"; "destroy_data", "GClosureNotify"; "connect_flags", "GConnectFlags" ]) ]
+
+let private signalContext model =
+    { FidelityCodeGenerator.buildGenerationContext headerDecls model Map.empty with
+        PhantomMarkers = Set.ofList ["WebKitUserContentManager"; "WebKitJavascriptResult"; "GClosure"] }
+
+let private selectedSignals document selections =
+    let ns = IntrospectionParser.parseDocument document |> function Ok ns -> ns | Error error -> failwith error
+    let repository : IntrospectionParser.Repository = { Namespaces = Map.ofList [ns.Name, ns] }
+    IntrospectionParser.select repository selections |> function Ok signals -> signals | Error error -> failwith error
 
 [<Fact>]
 let ``introspection data yields a signal's class, parameters and result with C spellings`` () =
@@ -95,32 +107,35 @@ let ``typed signal bridge declares the entry contract and a connect over g_signa
     let ns = match IntrospectionParser.parseDocument gir with Ok ns -> ns | Error e -> failwith e
     let repo : IntrospectionParser.Repository = { Namespaces = Map.ofList [ ns.Name, ns ] }
     let select names = match IntrospectionParser.select repo names with Ok s -> s | Error e -> failwith e
-    let ctx = FidelityCodeGenerator.buildGenerationContext headerDecls Types.LP64 Map.empty
+    let ctx = signalContext Types.LP64
     let dir = Path.Combine(Path.GetTempPath(), "farscape-signals-" + Guid.NewGuid().ToString("N"))
     try
         let files = TypedSignalGenerator.generate "Fidelity.WebKit.Native" (select [ "UserContentManager::script-message-received"; "UserContentManager::load-accepted" ]) headerDecls ctx dir
         let text = File.ReadAllText(Path.Combine(dir, "Bridge/Signals.clef"))
         Assert.Equal<string list>([ Path.Combine(dir, "Bridge/Signals.clef") ], files)
         Assert.Contains("module Fidelity.WebKit.Native.Bridge.Signals", text)
-        Assert.Contains("type UserContentManagerScriptMessageReceivedListener = { ScriptMessageReceived: FnPtr<CHandle<unit> -> CHandle<unit> -> CHandle<unit> -> unit> }", text)
+        Assert.Contains("type UserContentManagerScriptMessageReceivedListener = { ScriptMessageReceived: FnPtr<option<CHandle<WebKitUserContentManager>> -> option<CHandle<WebKitJavascriptResult>> -> option<CHandle<unit>> -> unit> }", text)
         Assert.Contains("Record = \"UserContentManagerScriptMessageReceivedListener\"; Field = \"ScriptMessageReceived\"; Signature = { CName = \"WebKitUserContentManager::script-message-received\"", text)
         Assert.Contains("{ Name = \"value\"; Type = Pointer 64; PassBy = Value }; { Name = \"user_data\"; Type = Pointer 64; PassBy = Value } |]; ReturnType = Void", text)
         Assert.Contains("[<FidelityExtern(\"gobject-2.0\", \"g_signal_connect_data\")>]", text)
-        Assert.Contains("let connectUserContentManagerScriptMessageReceived (instance: CHandle<unit>) (listener: UserContentManagerScriptMessageReceivedListener) : int =", text)
+        Assert.Contains("let connectUserContentManagerScriptMessageReceived (instance: CHandle<WebKitUserContentManager>) (listener: UserContentManagerScriptMessageReceivedListener) : int =", text)
         Assert.Contains("connectUserContentManagerScriptMessageReceivedNative instance \"script-message-received\" listener.ScriptMessageReceived instance releaseEntry.Release 0", text)
-        Assert.Contains("type private Fidelity_002E_WebKit_002E_Native_SignalReleaseEntry = { Release: FnPtr<CHandle<unit> -> CHandle<unit> -> unit> }", text)
+        Assert.Contains("type private Fidelity_002E_WebKit_002E_Native_SignalReleaseEntry = { Release: FnPtr<option<CHandle<unit>> -> option<CHandle<GClosure>> -> unit> }", text)
         Assert.Contains("Record = \"Fidelity_002E_WebKit_002E_Native_SignalReleaseEntry\"; Field = \"Release\"; Signature = { CName = \"Fidelity.WebKit.Native::GClosureNotify\"; Parameters = [| { Name = \"data\"; Type = Pointer 64; PassBy = Value }; { Name = \"closure\"; Type = Pointer 64; PassBy = Value } |]; ReturnType = Void", text)
         Assert.Contains("let private releaseEntry: Fidelity_002E_WebKit_002E_Native_SignalReleaseEntry = { Release = FnPtr.ofFunction releaseHandler }", text)
-        Assert.Contains("type UserContentManagerLoadAcceptedListener = { LoadAccepted: FnPtr<CHandle<unit> -> int -> int -> CHandle<unit> -> int> }", text)
+        Assert.Contains("type UserContentManagerLoadAcceptedListener = { LoadAccepted: FnPtr<option<CHandle<WebKitUserContentManager>> -> int -> int -> option<CHandle<unit>> -> int> }", text)
         Assert.Contains("{ Name = \"load_event\"; Type = Integer (Unsigned, 32); PassBy = Value }", text)
         Assert.Contains("{ Name = \"count\"; Type = Integer (Unsigned, 32); PassBy = Value }", text)
         Assert.Contains("ReturnType = Integer (Signed, 32)", text)
         Assert.Contains("ReturnType = Integer (Unsigned, 64)", text)
         Assert.DoesNotContain("nativeint", text)
-        Assert.DoesNotContain("option<", text)
-        // A nullable parameter has no interior representation at the entry: the signal is rejected, not projected.
-        let error = Assert.ThrowsAny<Exception>(fun () -> TypedSignalGenerator.generate "Fidelity.WebKit.Native" (select [ "UserContentManager::load-changed" ]) headerDecls ctx dir |> ignore)
-        Assert.Contains("'uri' is nullable", error.Message)
+        Assert.Contains("open Fidelity.WebKit.Native.Types", text)
+        Assert.Contains("no callback environment is allocated or retained", text)
+        Assert.DoesNotContain("module storage until", text)
+        TypedSignalGenerator.generate "Fidelity.WebKit.Native" (select [ "UserContentManager::load-changed"; "UserContentManager::pick-child" ]) headerDecls ctx dir |> ignore
+        let nullableText = File.ReadAllText(Path.Combine(dir, "Bridge/Signals.clef"))
+        Assert.Contains("FnPtr<option<CHandle<WebKitUserContentManager>> -> int -> option<CHandle<int>> -> option<CHandle<unit>> -> int>", nullableText)
+        Assert.Contains("FnPtr<option<CHandle<WebKitUserContentManager>> -> option<CHandle<unit>> -> option<CHandle<WebKitJavascriptResult>>>", nullableText)
     finally
         if Directory.Exists dir then Directory.Delete(dir, true)
 
@@ -131,18 +146,18 @@ let ``closed signal factories preserve payload arity and result while omitting n
     let signals =
         IntrospectionParser.select repo [ "UserContentManager::closed"; "UserContentManager::script-message-received"; "UserContentManager::load-accepted" ]
         |> function Ok s -> s | Error e -> failwith e
-    let ctx = FidelityCodeGenerator.buildGenerationContext headerDecls Types.LP64 Map.empty
+    let ctx = signalContext Types.LP64
     let dir = Path.Combine(Path.GetTempPath(), "farscape-signals-" + Guid.NewGuid().ToString("N"))
     try
         TypedSignalGenerator.generate "Fidelity.WebKit.Native" signals headerDecls ctx dir |> ignore
         let text = File.ReadAllText(Path.Combine(dir, "Bridge/Signals.clef"))
-        Assert.Contains("let inline onUserContentManagerClosed (instance: CHandle<unit>) (handler: (unit -> unit)) : int =", text)
+        Assert.Contains("let inline onUserContentManagerClosed (instance: CHandle<WebKitUserContentManager>) (handler: (unit -> unit)) : int =", text)
         Assert.Contains("let private makeUserContentManagerClosedEntry (handler: (unit -> unit)) : UserContentManagerClosedListener = NativeDefault.zeroed ()", text)
-        Assert.Contains("let private adaptUserContentManagerClosed (handler: (unit -> unit)) (_instance: CHandle<unit>)  (_data: CHandle<unit>) : unit = handler ()", text)
-        Assert.Contains("let inline onUserContentManagerScriptMessageReceived (instance: CHandle<unit>) (handler: (CHandle<unit> -> unit)) : int =", text)
-        Assert.Contains("let private adaptUserContentManagerScriptMessageReceived (handler: (CHandle<unit> -> unit)) (_instance: CHandle<unit>) (value0: CHandle<unit>) (_data: CHandle<unit>) : unit = handler value0", text)
-        Assert.Contains("let inline onUserContentManagerLoadAccepted (instance: CHandle<unit>) (handler: (int -> int -> int)) : int =", text)
-        Assert.Contains("let private adaptUserContentManagerLoadAccepted (handler: (int -> int -> int)) (_instance: CHandle<unit>) (value0: int) (value1: int) (_data: CHandle<unit>) : int = handler value0 value1", text)
+        Assert.Contains("let private adaptUserContentManagerClosed (handler: (unit -> unit)) (_instance: option<CHandle<WebKitUserContentManager>>)  (_data: option<CHandle<unit>>) : unit = handler ()", text)
+        Assert.Contains("let inline onUserContentManagerScriptMessageReceived (instance: CHandle<WebKitUserContentManager>) (handler: (option<CHandle<WebKitJavascriptResult>> -> unit)) : int =", text)
+        Assert.Contains("let private adaptUserContentManagerScriptMessageReceived (handler: (option<CHandle<WebKitJavascriptResult>> -> unit)) (_instance: option<CHandle<WebKitUserContentManager>>) (value0: option<CHandle<WebKitJavascriptResult>>) (_data: option<CHandle<unit>>) : unit = handler value0", text)
+        Assert.Contains("let inline onUserContentManagerLoadAccepted (instance: CHandle<WebKitUserContentManager>) (handler: (int -> int -> int)) : int =", text)
+        Assert.Contains("let private adaptUserContentManagerLoadAccepted (handler: (int -> int -> int)) (_instance: option<CHandle<WebKitUserContentManager>>) (value0: int) (value1: int) (_data: option<CHandle<unit>>) : int = handler value0 value1", text)
         for stem, field in [ "UserContentManagerClosed", "Closed"; "UserContentManagerScriptMessageReceived", "ScriptMessageReceived"; "UserContentManagerLoadAccepted", "LoadAccepted" ] do
             Assert.Contains($"Fidelity.WebKit.Native.Bridge.Signals.connect{stem} instance (Fidelity.WebKit.Native.Bridge.Signals.make{stem}Entry handler)", text)
             Assert.Contains($"Expr<ClosedCallbackDescriptor> = <@ {{ Binding = \"Fidelity.WebKit.Native.Bridge.Signals.make{stem}Entry\"; Adapter = \"Fidelity.WebKit.Native.Bridge.Signals.adapt{stem}\"; Record = \"{stem}Listener\"; Field = \"{field}\" }} @>", text)
@@ -159,12 +174,11 @@ let ``closed signal factories preserve payload arity and result while omitting n
 [<Theory>]
 [<InlineData("progress-changed", "parameter 'progress'", "floating-point")>]
 [<InlineData("measure", "result", "floating-point")>]
-[<InlineData("pick-child", "result", "nullable")>]
 let ``unsupported signal entry types identify the parameter or result`` signalName position reason =
     let ns = match IntrospectionParser.parseDocument gir with Ok ns -> ns | Error e -> failwith e
     let repo : IntrospectionParser.Repository = { Namespaces = Map.ofList [ ns.Name, ns ] }
     let signals = IntrospectionParser.select repo [ $"UserContentManager::{signalName}" ] |> function Ok s -> s | Error e -> failwith e
-    let ctx = FidelityCodeGenerator.buildGenerationContext headerDecls Types.LP64 Map.empty
+    let ctx = signalContext Types.LP64
     let dir = Path.Combine(Path.GetTempPath(), "farscape-signals-" + Guid.NewGuid().ToString("N"))
     try
         let error = Assert.ThrowsAny<Exception>(fun () -> TypedSignalGenerator.generate "Fidelity.WebKit.Native" signals headerDecls ctx dir |> ignore)
@@ -206,7 +220,7 @@ let ``signal selectors require a namespace when class and signal names are ambig
     match IntrospectionParser.select repo [ "Missing.UserContentManager::load-accepted" ] with
     | Error error -> Assert.Contains("not declared", error)
     | Ok _ -> failwith "a namespace qualifier must not fall back to another namespace"
-    let ctx = FidelityCodeGenerator.buildGenerationContext headerDecls Types.LP64 Map.empty
+    let ctx = signalContext Types.LP64
     let dir = Path.Combine(Path.GetTempPath(), "farscape-signals-" + Guid.NewGuid().ToString("N"))
     try
         TypedSignalGenerator.generate "Fidelity.WebKit.Native" selected headerDecls ctx dir |> ignore
@@ -240,3 +254,203 @@ signals = ["UserContentManager::script-message-received"]
     let text = PilotSerializer.toTomlString project
     Assert.Contains("introspection = [", text)
     Assert.Contains("signals = [", text)
+
+[<Theory>]
+[<InlineData("nullable")>]
+[<InlineData("allow-none")>]
+let ``explicit GIR nonnull evidence narrows only its native pointer value`` attribute =
+    let document = gir.Replace("<parameter name=\"value\" transfer-ownership=\"none\">", $"<parameter name=\"value\" transfer-ownership=\"none\" {attribute}=\"0\">")
+    let signals = selectedSignals document ["UserContentManager::script-message-received"]
+    Assert.Contains("value", signals.Head.NonnullParameters)
+    Assert.False(signals.Head.ReturnNonnull)
+    let source = TypedSignalGenerator.render "Fidelity.WebKit.Native" signals headerDecls (signalContext Types.LP64) |> Option.get
+    Assert.Contains("FnPtr<option<CHandle<WebKitUserContentManager>> -> CHandle<WebKitJavascriptResult> -> option<CHandle<unit>> -> unit>", source)
+    let unknown = selectedSignals gir ["UserContentManager::script-message-received"]
+    Assert.Empty(unknown.Head.NonnullParameters)
+    let unknownSource = TypedSignalGenerator.render "Fidelity.WebKit.Native" unknown headerDecls (signalContext Types.LP64) |> Option.get
+    Assert.Contains("FnPtr<option<CHandle<WebKitUserContentManager>> -> option<CHandle<WebKitJavascriptResult>> -> option<CHandle<unit>> -> unit>", unknownSource)
+
+[<Fact>]
+let ``native release callback typedef evidence survives into the generated entry`` () =
+    let declarations = headerDecls |> List.map (function
+        | CppParser.Declaration.Typedef typedef when typedef.Name = "GClosureNotify" ->
+            CppParser.Declaration.Typedef { typedef with UnderlyingType = "void (*)(gpointer _Nonnull, GClosure * _Nonnull)" }
+        | declaration -> declaration)
+    let context = { FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty with PhantomMarkers = (signalContext Types.LP64).PhantomMarkers }
+    let signals = selectedSignals gir ["UserContentManager::closed"]
+    let source = TypedSignalGenerator.render "Fidelity.WebKit.Native" signals declarations context |> Option.get
+    Assert.Contains("Release: FnPtr<CHandle<unit> -> CHandle<GClosure> -> unit>", source)
+    Assert.Contains("let private releaseHandler (_data: CHandle<unit>) (_closure: CHandle<GClosure>) : unit = ()", source)
+    Assert.Contains("no callback environment is allocated or retained", source)
+    Assert.DoesNotContain("module storage until", source)
+
+[<Fact>]
+let ``GIR cannot silently erase a missing native callback parameter type`` () =
+    let document = gir.Replace("<type name=\"JavascriptResult\"/>", "")
+    match IntrospectionParser.parseDocument document with
+    | Ok _ -> failwith "An incomplete GIR parameter must not shorten the emitted native callback signature"
+    | Error error ->
+        Assert.Contains("parameter 'value' has no declared type", error)
+        Assert.Contains("complete native callback arity", error)
+
+[<Fact>]
+let ``contradictory GIR nullability evidence is rejected`` () =
+    let document = gir.Replace("nullable=\"1\"", "nullable=\"1\" allow-none=\"0\"")
+    match IntrospectionParser.parseDocument document with
+    | Ok _ -> failwith "Contradictory GIR evidence must not select a convenient representation"
+    | Error error -> Assert.Contains("contradictory GIR nullability evidence", error)
+
+[<Fact>]
+let ``duplicate GIR participant names cannot transfer nonnull evidence to another input`` () =
+    let parameter = "<parameter name=\"value\" transfer-ownership=\"none\"><type name=\"JavascriptResult\"/></parameter>"
+    let document = gir.Replace(parameter, parameter + "<parameter name=\"value\" nullable=\"0\"><type name=\"JavascriptResult\"/></parameter>")
+    match IntrospectionParser.parseDocument document with
+    | Ok _ -> failwith "One parameter's nonnull evidence must not narrow a different input with the same name"
+    | Error error -> Assert.Contains("duplicate callback parameter names", error)
+    let signal = (selectedSignals gir ["UserContentManager::script-message-received"]).Head
+    let duplicate = { signal with Parameters = signal.Parameters @ signal.Parameters; NonnullParameters = Set.singleton "value" }
+    let error = Assert.ThrowsAny<Exception>(fun () ->
+        TypedSignalGenerator.render "Fidelity.WebKit.Native" [duplicate] headerDecls (signalContext Types.LP64) |> ignore)
+    Assert.Contains("present and unique for nullability admission", error.Message)
+
+[<Fact>]
+let ``signal descriptor widths follow each selected ABI without changing source integer kinds`` () =
+    let signals = selectedSignals gir ["UserContentManager::load-accepted"]
+    for model in [Types.LP64; Types.LLP64; Types.ILP32; Types.IP16] do
+        let source = TypedSignalGenerator.render "Fidelity.WebKit.Native" signals headerDecls (signalContext model) |> Option.get
+        let pointerBits = TypeMapper.pointerWidth model
+        let intBits = TypeMapper.intWidth model
+        let longBits = TypeMapper.longWidth model
+        Assert.Contains($"Type = Pointer {pointerBits}", source)
+        Assert.Contains($"ReturnType = Integer (Unsigned, {longBits})", source)
+        Assert.Contains($"Type = Integer (Unsigned, {intBits})", source)
+        Assert.Contains("(flags: int)", source)
+        if pointerBits <> 64 then Assert.DoesNotContain("Pointer 64", source)
+        Assert.DoesNotContain("nativeint", source)
+        Assert.DoesNotContain("NativePtr", source)
+
+[<Fact>]
+let ``required signal carriers come from headers and include the class payload and release closure`` () =
+    let signals = selectedSignals gir ["UserContentManager::script-message-received"]
+    let context = FidelityCodeGenerator.buildGenerationContext headerDecls Types.LP64 Map.empty
+    let required = TypedSignalGenerator.requiredTypes signals headerDecls context
+    Assert.Equal<Set<string>>(Set.ofList ["WebKitUserContentManager"; "WebKitJavascriptResult"; "GClosure"], required)
+    let unknownDocument = gir.Replace("<type name=\"JavascriptResult\"/>", "<type name=\"Unknown\" c:type=\"UnknownNative *\"/>")
+    let unknown = selectedSignals unknownDocument ["UserContentManager::script-message-received"]
+    let error = Assert.ThrowsAny<Exception>(fun () -> TypedSignalGenerator.requiredTypes unknown headerDecls context |> ignore)
+    Assert.Contains("UnknownNative", error.Message)
+    Assert.Contains("GIR alone cannot supply its carrier", error.Message)
+
+[<Fact>]
+let ``failed signal regeneration preserves existing output before header shape validation`` () =
+    let signals = selectedSignals gir ["UserContentManager::closed"]
+    let dir = Path.Combine(Path.GetTempPath(), "farscape-signal-sentinel-" + Guid.NewGuid().ToString("N"))
+    let bridge = Path.Combine(dir, "Bridge")
+    let output = Path.Combine(bridge, "Signals.clef")
+    try
+        Directory.CreateDirectory bridge |> ignore
+        File.WriteAllText(output, "// Existing signal consumer source\n")
+        let declarations = headerDecls |> List.map (function
+            | CppParser.Declaration.Function f when f.Name = "g_signal_connect_data" -> CppParser.Declaration.Function { f with Parameters = f.Parameters |> List.take 5 }
+            | declaration -> declaration)
+        let context = { FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty with PhantomMarkers = (signalContext Types.LP64).PhantomMarkers }
+        let error = Assert.ThrowsAny<Exception>(fun () -> TypedSignalGenerator.generate "Fidelity.WebKit.Native" signals declarations context dir |> ignore)
+        Assert.Contains("complete six-parameter native declaration", error.Message)
+        Assert.Equal("// Existing signal consumer source\n", File.ReadAllText output)
+        Assert.Equal<string array>([|output|], Directory.GetFiles(dir, "*", SearchOption.AllDirectories))
+    finally
+        if Directory.Exists dir then Directory.Delete(dir, true)
+
+[<Theory>]
+[<InlineData("destroy", "destroy_data")>]
+[<InlineData("handler", "handler")>]
+[<InlineData("text", "detailed_signal")>]
+[<InlineData("result", "result")>]
+[<InlineData("legacy", "experimental_native_pointer_surface")>]
+let ``unsupported signal header contracts fail before creating output`` defect fragment =
+    let declarations = headerDecls |> List.map (function
+        | CppParser.Declaration.Typedef typedef when defect = "destroy" && typedef.Name = "GClosureNotify" ->
+            CppParser.Declaration.Typedef { typedef with UnderlyingType = "int (*)(gpointer)" }
+        | CppParser.Declaration.Function f when f.Name = "g_signal_connect_data" ->
+            let parameters = f.Parameters |> List.mapi (fun index (name, typ) ->
+                if (defect = "handler" && index = 2) || (defect = "text" && index = 1) then name, "void *" else name, typ)
+            CppParser.Declaration.Function { f with Parameters = parameters; ReturnType = if defect = "result" then "void *" else f.ReturnType }
+        | declaration -> declaration)
+    let context =
+        { FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty with
+            PhantomMarkers = (signalContext Types.LP64).PhantomMarkers; NativePointerSurface = defect = "legacy" }
+    let signals = selectedSignals gir ["UserContentManager::closed"]
+    let dir = Path.Combine(Path.GetTempPath(), "farscape-signals-rejected-" + Guid.NewGuid().ToString("N"))
+    let error = Assert.ThrowsAny<Exception>(fun () -> TypedSignalGenerator.generate "Fidelity.WebKit.Native" signals declarations context dir |> ignore)
+    Assert.Contains(fragment, error.Message)
+    Assert.False(Directory.Exists dir)
+
+let private projectHeader = """
+typedef struct WebKitUserContentManager WebKitUserContentManager;
+typedef struct WebKitJavascriptResult WebKitJavascriptResult;
+typedef struct GClosure GClosure;
+typedef void *gpointer;
+typedef char gchar;
+typedef int gboolean;
+typedef unsigned long gulong;
+typedef void (*GCallback)(void);
+typedef void (*GClosureNotify)(gpointer, GClosure *);
+typedef enum { WEBKIT_LOAD_STARTED = 0 } WebKitLoadEvent;
+typedef enum { G_CONNECT_DEFAULT = 0 } GConnectFlags;
+gulong g_signal_connect_data(gpointer instance, const gchar *detailed_signal, GCallback c_handler,
+    gpointer data, GClosureNotify destroy_data, GConnectFlags connect_flags);
+"""
+
+let private signalProject (directory: string) (header: string) =
+    let headerPath = Path.Combine(directory, "signals.h")
+    let girPath = Path.Combine(directory, "signals.gir")
+    let output = Path.Combine(directory, "Bindings")
+    File.WriteAllText(headerPath, header)
+    File.WriteAllText(girPath, gir)
+    let project : PilotTypes.PilotProject =
+        { Library = { Name = "gobject-2.0"; Headers = [headerPath]; XmlProtocols = []; Introspection = [girPath]
+                      IncludePaths = [directory]; Defines = []; MacroPrefixes = []; PkgConfig = [] }
+          Output = { Mode = "fidelity"; Directory = output }
+          Namespaces = [ { Name = "Fidelity.WebKit.Native.Core"; Description = "Signal-only generation"; Library = "gobject-2.0"
+                           Prefixes = []; Functions = []; XmlInterfaces = []; Signals = ["UserContentManager::script-message-received"] } ]
+          ErrorConventions = None; Callbacks = None; Nonnull = None; ProtocolConfig = None; Layer3 = None; CppConfig = None
+          Options = Some { AbiCriticalStructs = []; GenerateDescriptors = true; NativePointerSurface = false; CHeaderMode = true
+                           Bindings = []; DescriptorOnlyDependencies = true; ValueStructs = []; TypedProtocol = false; LinkLibraries = false; MappedReturns = [] } }
+    let path = Path.Combine(directory, "signals.pilot.toml")
+    PilotSerializer.saveToFile path project |> function Ok _ -> () | Error error -> failwith error
+    path, output
+
+[<Fact>]
+let ``signal-only project emits each known nominal carrier in shared Types`` () =
+    let directory = Path.Combine(Path.GetTempPath(), "farscape-signal-project-" + Guid.NewGuid().ToString("N"))
+    try
+        Directory.CreateDirectory directory |> ignore
+        let pilot, output = signalProject directory projectHeader
+        let result = BindingGenerator.generateFromProject pilot false false Types.LP64 |> function Ok result -> result | Error error -> failwith error
+        let types = File.ReadAllText(Path.Combine(output, "Types.clef"))
+        let signals = File.ReadAllText(Path.Combine(output, "Bridge", "Signals.clef"))
+        for name in ["WebKitUserContentManager"; "WebKitJavascriptResult"; "GClosure"] do
+            Assert.Contains($"type {name} = private | Opaque_{name}", types)
+        Assert.Contains("module Fidelity.WebKit.Native.Core.Types", types)
+        Assert.Contains("open Fidelity.WebKit.Native.Core.Types", signals)
+        Assert.Contains("option<CHandle<WebKitJavascriptResult>>", signals)
+        Assert.Contains(Path.Combine(output, "Bridge", "Signals.clef"), result.OutputFiles)
+    finally
+        if Directory.Exists directory then Directory.Delete(directory, true)
+
+[<Fact>]
+let ``project signal preflight leaves every existing output intact on unsupported native callback shape`` () =
+    let directory = Path.Combine(Path.GetTempPath(), "farscape-signal-project-rejected-" + Guid.NewGuid().ToString("N"))
+    try
+        Directory.CreateDirectory directory |> ignore
+        let pilot, output = signalProject directory (projectHeader.Replace("GCallback c_handler", "gpointer c_handler"))
+        Directory.CreateDirectory output |> ignore
+        let sentinel = Path.Combine(output, "preserve-existing.clef")
+        File.WriteAllText(sentinel, "// Existing desktop bindings\n")
+        match BindingGenerator.generateFromProject pilot false false Types.LP64 with
+        | Ok _ -> failwith "An unsupported native signal callback contract must not regenerate bindings"
+        | Error error -> Assert.Contains("declared generic void callback slot", error)
+        Assert.Equal("// Existing desktop bindings\n", File.ReadAllText sentinel)
+        Assert.Equal<string array>([|sentinel|], Directory.GetFiles(output, "*", SearchOption.AllDirectories))
+    finally
+        if Directory.Exists directory then Directory.Delete(directory, true)

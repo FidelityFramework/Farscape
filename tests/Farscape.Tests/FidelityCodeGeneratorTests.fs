@@ -68,8 +68,7 @@ let ``generate resolves typedef to function pointer as FnPtr`` () =
         CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
-    Assert.Contains("(compar: FnPtr<CHandle<unit> -> CHandle<unit> -> int>)", result)
-    Assert.DoesNotContain("FnPtr<option<", result)
+    Assert.Contains("(compar: FnPtr<option<CHandle<unit>> -> option<CHandle<unit>> -> int>)", result)
     Assert.Contains("Expr<CallbackDescriptor>", result)
     Assert.Contains("compar.Invoke", result)
 
@@ -83,7 +82,7 @@ let ``direct callback typedef declares one entry and preserves native scalar rep
     let name = "Callback_Test_002E_Native_003A__003A_NotifyEntry"
     Assert.Equal(2, source.Split("type " + name + " =").Length)
     Assert.Equal(2, source.Split("let " + name + "Descriptor").Length)
-    Assert.Contains("Invoke: FnPtr<int -> int -> CHandle<unit> -> int>", source)
+    Assert.Contains("Invoke: FnPtr<int -> int -> option<CHandle<unit>> -> int>", source)
     Assert.Contains("Record = \"" + name + "\"", source)
     Assert.Contains("Type = Integer (Unsigned, 32)", source)
     Assert.Contains("Type = Integer (Signed, 32)", source)
@@ -94,15 +93,14 @@ let ``direct callback typedef declares one entry and preserves native scalar rep
     Assert.Contains("replaceNative notify.Invoke", source)
 
 [<Fact>]
-let ``callback entry pointer results remain nonnull while extern pointer results convert absence`` () =
+let ``callback data pointer arguments and results convert absence like extern results`` () =
     let declarations = [
         CppParser.Declaration.Typedef (mkTypedef "Transform" "void *(*)(void *)")
         CppParser.Declaration.Function (mkFunc "transform" "void *" ["callback", "Transform"]) ]
     let source = FidelityCodeGenerator.generate declarations "Test.Native" "test" Types.LP64 Map.empty
-    Assert.Contains("Invoke: FnPtr<CHandle<unit> -> CHandle<unit>>", source)
+    Assert.Contains("Invoke: FnPtr<option<CHandle<unit>> -> option<CHandle<unit>>>", source)
     Assert.Contains(") : option<CHandle<unit>> =", source)
-    Assert.DoesNotContain("FnPtr<option<", source)
-    Assert.DoesNotContain("-> option<CHandle<unit>>>", source)
+    Assert.Contains("ReturnType = Pointer 64", source)
 
 [<Fact>]
 let ``callback record identities distinguish namespace punctuation`` () =
@@ -302,11 +300,23 @@ let ``const char pointer param emits as option of CHandle`` () =
 [<Fact>]
 let ``function pointer param does NOT get Option wrapping`` () =
     let decls = [
-        CppParser.Declaration.Function (mkFunc "signal" "void (*)(int)" [("sig", "int"); ("handler", "void (*)(int)")])
+        CppParser.Declaration.Function (mkFunc "register_signal" "void" [("sig", "int"); ("handler", "void (*)(int)")])
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "libc" Types.LP64 Map.empty
     // function pointer → FnPtr<sig>, NOT option<FnPtr<sig>>
     Assert.Contains("(handler: FnPtr<int -> unit>)", result)
+
+[<Theory>]
+[<InlineData("void (* _Null_unspecified)(int)")>]
+[<InlineData("void (* _Nonnull)(int)")>]
+[<InlineData("void (* )(int)")>]
+let ``qualified callback slots cannot accidentally enter the data pointer conversion`` cType =
+    Assert.False(FidelityCodeGenerator.isCDataPointer cType)
+    let declarations = [CppParser.Declaration.Function (mkFunc "register" "void" [("handler", cType)])]
+    let source = FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty
+    Assert.Contains("(handler: FnPtr<int -> unit>)", source)
+    Assert.DoesNotContain("option<FnPtr", source)
+    Assert.Contains("Type = Pointer 64", source)
 
 [<Fact>]
 let ``TOML nonnull annotations override nullable default`` () =
@@ -422,6 +432,64 @@ let ``struct fields with C int are I32 at measured-or-declared offsets`` () =
     Assert.DoesNotContain("int32", result)
 
 [<Fact>]
+let ``native value record pointer fields use outer nullability through typedef chains`` () =
+    let path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "farscape-record-" + System.Guid.NewGuid().ToString("N") + ".h")
+    try
+        System.IO.File.WriteAllText(path, """
+typedef struct native_token *Token;
+typedef void * _Nonnull RequiredContext;
+typedef RequiredContext RequiredAlias;
+typedef void *OptionalContext;
+struct ValueFields {
+    Token nullableToken;
+    Token _Nonnull requiredToken;
+    RequiredAlias requiredAlias;
+    OptionalContext optionalAlias;
+    void * _Nullable annotatedOptional;
+    void * _Nonnull *nullableCell;
+    int count;
+};
+        """)
+        let options : CppParser.HeaderParserOptions =
+            { HeaderFile = path; IncludePaths = []; Defines = []; Verbose = false; IncludeMacros = false
+              MacroPrefixes = []; IncludeRoot = None; CppMode = false }
+        let declarations = CppParser.parseHeader options |> function Ok declarations -> declarations | Error error -> failwith error
+        let context = { FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty with ValueStructs = Set.singleton "ValueFields" }
+        let source = FidelityCodeGenerator.generateModule context context.OpaqueHandles declarations "Test.Fields" "test" "test" []
+        Assert.Contains("nullableToken: option<CHandle<Token>>", source)
+        Assert.Contains("requiredToken: CHandle<Token>", source)
+        Assert.Contains("requiredAlias: CHandle<unit>", source)
+        Assert.Contains("optionalAlias: option<CHandle<unit>>", source)
+        Assert.Contains("annotatedOptional: option<CHandle<unit>>", source)
+        Assert.Contains("nullableCell: option<CHandle<CHandle<unit>>>", source)
+        Assert.Contains("count: int", source)
+        Assert.DoesNotContain("nativeint", source)
+    finally
+        System.IO.File.Delete path
+
+[<Theory>]
+[<InlineData("void (*)(int)")>]
+[<InlineData("void (*)(void * _Nonnull)")>]
+[<InlineData("void (* _Nullable)(int)")>]
+let ``native callback record fields require evidence for the entry slot itself`` fieldType =
+    let declarations = [CppParser.Declaration.Struct (mkStruct "CallbackFields" [mkField "notify" fieldType] None)]
+    let context = { FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty with ValueStructs = Set.singleton "CallbackFields" }
+    let error = Assert.ThrowsAny<System.Exception>(fun () ->
+        FidelityCodeGenerator.generateModule context Set.empty declarations "Test.Fields" "test" "test" [] |> ignore)
+    Assert.Contains("supported boundary adapter", error.Message)
+
+[<Fact>]
+let ``nonnull callback field preserves nullable native callback data values`` () =
+    let declarations = [
+        CppParser.Declaration.Typedef (mkTypedef "Notify" "void (*)(void * _Nullable)")
+        CppParser.Declaration.Typedef (mkTypedef "RequiredNotify" "Notify _Nonnull")
+        CppParser.Declaration.Struct (mkStruct "CallbackFields" [mkField "notify" "RequiredNotify"] None) ]
+    let context = { FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty with ValueStructs = Set.singleton "CallbackFields" }
+    let source = FidelityCodeGenerator.generateModule context Set.empty declarations "Test.Fields" "test" "test" []
+    Assert.Contains("notify: FnPtr<option<CHandle<unit>> -> unit>", source)
+    Assert.Contains("Repr = Repr.Pointer", source)
+
+[<Fact>]
 let ``fieldless struct emits no record type (opaque, handled via typedef path)`` () =
     let decls = [
         CppParser.Declaration.Struct (mkStruct "wl_proxy" [] None)
@@ -439,28 +507,23 @@ let ``fieldless struct emits no record type (opaque, handled via typedef path)``
 // ─── C++ Class Binding Tests ────────────────────────────────────────
 
 [<Fact>]
-let ``generate emits pimpl class struct and destructor`` () =
+let ``rejects unsupported pimpl class struct and destructor`` () =
     let cls = mkClassPimpl "device" "device_impl"
     let cls = { cls with DestructorMangledName = Some "_ZN3xrt6deviceD1Ev" }
     let decls = [CppParser.Declaration.Class cls]
-    let result = FidelityCodeGenerator.generate decls "Fidelity.xrt.Core" "xrt_coreutil" Types.LP64 Map.empty
-    Assert.Contains("type device = {", result)
-    Assert.Contains("Handle: nativeint", result)
-    Assert.Contains("CppPimpl", result)
-    Assert.Contains("device_dtor", result)
-    Assert.Contains("_ZN3xrt6deviceD1Ev", result)
+    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Fidelity.xrt.Core" "xrt_coreutil" Types.LP64 Map.empty |> ignore)
+    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
 
 [<Fact>]
-let ``generate emits pimpl class constructor with mangled name`` () =
+let ``rejects unsupported pimpl class constructor with mangled name`` () =
     let ctor = { mkFunc "device" "void" [("id", "unsigned int")] with MangledName = Some "_ZN3xrt6deviceC1Ej" }
     let cls = mkClassWithCtors "device" [mkField "m_impl" "std::shared_ptr<device_impl>"] [ctor] true
     let decls = [CppParser.Declaration.Class cls]
-    let result = FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty
-    Assert.Contains("device_ctor", result)
-    Assert.Contains("_ZN3xrt6deviceC1Ej", result)
+    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty |> ignore)
+    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
 
 [<Fact>]
-let ``generate emits pimpl class method with sret when return type is non-trivial`` () =
+let ``rejects unsupported pimpl class method with sret when return type is non-trivial`` () =
     let uuidCls = mkClassValue "uuid" [mkField "data" "uint8_t"]
     let method = mkFunc "get_uuid" "uuid" []
     let deviceCls = mkClassWithMethods "device" [mkField "m_impl" "std::shared_ptr<device_impl>"] [method] true
@@ -468,98 +531,85 @@ let ``generate emits pimpl class method with sret when return type is non-trivia
         CppParser.Declaration.Class deviceCls
         CppParser.Declaration.Class uuidCls
     ]
-    let result = FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty
-    // Method should have sret parameter for uuid return
-    Assert.Contains("retStorage", result)
-    Assert.Contains("sret", result)
+    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty |> ignore)
+    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
 
 [<Fact>]
-let ``generate skips abstract classes`` () =
+let ``rejects unsupported abstract classes`` () =
     let cls = mkClassAbstract "IPlugin"
     let decls = [CppParser.Declaration.Class cls]
-    let result = FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty
-    Assert.DoesNotContain("type IPlugin", result)
+    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty |> ignore)
+    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
 
 [<Fact>]
-let ``generate skips opaque classes`` () =
+let ``rejects unsupported opaque classes`` () =
     let cls = mkClassEmpty "ForwardDeclared"
     let decls = [CppParser.Declaration.Class cls]
-    let result = FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty
-    Assert.DoesNotContain("type ForwardDeclared", result)
+    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty |> ignore)
+    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
 
 [<Fact>]
-let ``generate emits POD class as struct`` () =
+let ``rejects unsupported POD class as struct`` () =
     let fields = [mkField "x" "float"; mkField "y" "float"; mkField "z" "float"]
     let cls = mkClassPod "Vec3" fields
     let decls = [CppParser.Declaration.Class cls]
-    let result = FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty
-    Assert.Contains("type Vec3 = {", result)
-    Assert.Contains("POD type", result)
+    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty |> ignore)
+    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
 
 [<Fact>]
-let ``generate emits value class with sret annotation`` () =
+let ``rejects unsupported value class with sret annotation`` () =
     let fields = [mkField "data" "uint8_t"]
     let cls = mkClassValue "uuid" fields
     let decls = [CppParser.Declaration.Class cls]
-    let result = FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty
-    Assert.Contains("type uuid = {", result)
-    Assert.Contains("value type", result)
-    Assert.Contains("sret", result)
+    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty |> ignore)
+    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
 
 [<Fact>]
-let ``generate filters deprecated methods from C++ class`` () =
+let ``rejects a C++ class with deprecated methods before unsafe source emission`` () =
     let normalMethod = mkFunc "start" "void" []
     let deprecatedMethod = mkFuncWithAttrs "old_start" "void" [] [mkAttr "DeprecatedAttr" [] None]
     let cls = mkClassWithMethods "device" [mkField "m_impl" "std::shared_ptr<device_impl>"] [normalMethod; deprecatedMethod] true
     let decls = [CppParser.Declaration.Class cls]
-    let result = FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty
-    Assert.Contains("device_start", result)
-    Assert.DoesNotContain("device_old_start", result)
+    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty |> ignore)
+    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
 
 [<Fact>]
-let ``generate uses mangled name for C++ methods`` () =
+let ``mangled symbols do not admit unsupported C++ method carriers`` () =
     let method = { mkFunc "start" "void" [] with MangledName = Some "_ZN3xrt6device5startEv" }
     let cls = mkClassWithMethods "device" [mkField "m_impl" "std::shared_ptr<device_impl>"] [method] true
     let decls = [CppParser.Declaration.Class cls]
-    let result = FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty
-    Assert.Contains("_ZN3xrt6device5startEv", result)
+    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty |> ignore)
+    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
 
 [<Fact>]
-let ``generate emits unique_ptr pimpl with 8-byte size`` () =
+let ``rejects unsupported unique_ptr pimpl with 8-byte size`` () =
     let cls = mkClassPimplUnique "stream" "stream_impl"
     let decls = [CppParser.Declaration.Class cls]
-    let result = FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty
-    Assert.Contains("type stream = {", result)
-    Assert.Contains("pimpl", result.ToLowerInvariant())
-    Assert.Contains("8 bytes", result)
+    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty |> ignore)
+    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
 
 [<Fact>]
-let ``generate emits destructor for value class`` () =
+let ``rejects unsupported destructor for value class`` () =
     let fields = [mkField "data" "uint8_t"]
     let cls = { mkClassValue "uuid" fields with DestructorMangledName = Some "_ZN3xrt4uuidD1Ev" }
     let decls = [CppParser.Declaration.Class cls]
-    let result = FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty
-    Assert.Contains("uuid_dtor", result)
-    Assert.Contains("_ZN3xrt4uuidD1Ev", result)
+    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty |> ignore)
+    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
 
 [<Fact>]
-let ``generate emits pimpl bindings for inherited base-class pimpl`` () =
+let ``rejects unsupported pimpl bindings for inherited base-class pimpl`` () =
     let cls = mkClassPimplBase "hw_context" "xrt::detail::pimpl<xrt::hw_context_impl>"
     let decls = [CppParser.Declaration.Class cls]
-    let result = FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty
-    // Should generate as PimplClass (16 bytes), not ValueClass or OpaqueClass
-    Assert.Contains("type hw_context = {", result)
-    Assert.Contains("pimpl", result.ToLowerInvariant())
-    Assert.Contains("16 bytes", result)
+    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty |> ignore)
+    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
 
 [<Fact>]
-let ``generate emits pimpl struct for xclbin-like inherited pimpl with no dtor`` () =
+let ``rejects unsupported pimpl struct for xclbin-like inherited pimpl with no dtor`` () =
     // Simulates xclbin: inherits detail::pimpl<T>, has constructors, no user dtor
     let ctor = mkFunc "xclbin" "void" [("this", "xclbin *")]
     let cls =
         { mkClass "xclbin" [] [] [CppParser.Declaration.Function ctor] false false false false None with
             BaseClasses = ["xrt::detail::pimpl<xrt::xclbin_impl>"] }
     let decls = [CppParser.Declaration.Class cls]
-    let result = FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty
-    Assert.Contains("type xclbin = {", result)
-    Assert.Contains("16 bytes", result)
+    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty |> ignore)
+    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)

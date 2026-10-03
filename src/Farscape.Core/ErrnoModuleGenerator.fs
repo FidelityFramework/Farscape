@@ -83,25 +83,40 @@ module ErrnoModuleGenerator =
                 describeFunc ]
         [ SubModule("Errno", innerDecls) ]
 
-    /// Generate the __errno_location FidelityExtern declaration.
-    /// int *__errno_location(void) — returns pointer to thread-local errno.
-    let generateErrnoLocationExtern (cLibraryName: string) : FsDecl list =
-        [ XmlDoc "Returns pointer to thread-local errno value."
-          LetBinding("__errno_location", [], Named "nativeint", NativeZeroed,
-                     [$"FidelityExtern(\"{cLibraryName}\", \"__errno_location\")"]) ]
+    /// Declare the opaque thread-local errno cell. Reading it requires a native
+    /// scalar accessor; this declaration grants no interior dereference operation.
+    let generateErrnoLocationExternWithModel (model: Types.PlatformABI) (cLibraryName: string) : FsDecl list =
+        let pointer = TypeMapper.pointerRepr model "int *" |> DescriptorGenerator.typeRefSource
+        [ XmlDoc "Returns an opaque handle to the current thread's errno cell."
+          LetBinding("__errno_location", [], Generic("CHandle", Named "int"), NativeZeroed,
+                     [$"FidelityExtern(\"{cLibraryName}\", \"__errno_location\")"])
+          ValueBinding("__errno_locationDescriptor", Generic("Expr", Named "FunctionDescriptor"),
+              Quoted(RecordBlock [
+                  "CName", Literal "\"__errno_location\""
+                  "Parameters", ArrayBlock []
+                  "ReturnType", Literal pointer
+                  "CallingConvention", Identifier "CDecl"
+                  "OwnershipTransfer", Identifier "Borrowed" ])) ]
+
+    let generateErrnoLocationExtern cLibraryName =
+        generateErrnoLocationExternWithModel Types.LP64 cLibraryName
 
     /// Generate the complete errno infrastructure as a rendered source string.
     /// Produces: __errno_location extern + Errno submodule (constants + describe).
     /// Always generates output — __errno_location and describe are needed even without errno constants.
-    let generate
+    let generateWithModel
         (macros: CppParser.MacroDecl list)
         (namespace': string)
         (cLibraryName: string)
+        (model: Types.PlatformABI)
         : string =
 
         let constants = filterErrnoMacros macros
-        let externDecl = generateErrnoLocationExtern cLibraryName
+        let externDecl = generateErrnoLocationExternWithModel model cLibraryName
         let errnoDecls = generateErrnoDecls constants
-        let allDecls = externDecl @ [ BlankLine ] @ errnoDecls
+        let allDecls = [ OpenModule "BAREWire.Descriptors" ] @ externDecl @ [ BlankLine ] @ errnoDecls
         let moduleDecl = Module(namespace', $"Errno infrastructure for {cLibraryName}", allDecls)
         CodeRenderer.render moduleDecl
+
+    let generate macros namespace' cLibraryName =
+        generateWithModel macros namespace' cLibraryName Types.LP64

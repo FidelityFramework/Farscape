@@ -11,9 +11,11 @@ open XParsec.CharParsers
 
 /// C/C++ header parsing using native clang tooling.
 ///
-/// This module invokes clang directly for two-pass parsing:
+/// This module invokes clang directly for parsing:
 /// 1. `clang -Xclang -ast-dump=json` for structs, enums, typedefs, functions
 /// 2. `clang -E -dM` for preprocessor macro definitions
+/// NonNullAttr positions are recovered from clang's text AST when present: its JSON
+/// AST omits them, including positions supplied through native header macros.
 ///
 /// This approach works with any installed clang version without libclang
 /// version compatibility issues.
@@ -41,7 +43,7 @@ module CppParser =
     type AttributeData = {
         /// Clang AST node kind, e.g., "AllocSizeAttr", "NonNullAttr", "FormatAttr"
         Kind: string
-        /// Integer arguments (parameter indices for NonNull, AllocSize, etc.)
+        /// Integer arguments. NonNullAttr parameter positions are normalized to zero-based indices.
         Args: int list
         /// String argument (archetype for FormatAttr, label for AsmLabelAttr)
         StringArg: string option
@@ -1138,6 +1140,76 @@ module CppParser =
         let args = buildClangArgs options
         runClang args ["-Xclang"; "-ast-dump=json"; "-fsyntax-only"; "-fparse-all-comments"; options.HeaderFile] options.Verbose
 
+    /// Clang's JSON AST omits the arguments of NonNullAttr. Its text AST prints the
+    /// semantic positions after the source range, even for macro-expanded attributes.
+    /// Match the complete function type as well as the name so overloads cannot share evidence.
+    let private enrichNonNullAttributes (options: HeaderParserOptions) (declarations: Declaration list) =
+        let rec needsPositions = function
+            | Function f -> f.Attributes |> List.exists (fun a -> a.Kind = "NonNullAttr")
+            | Namespace n -> n.Declarations |> List.exists needsPositions
+            | Class c -> (c.Methods @ c.Constructors) |> List.exists needsPositions
+            | _ -> false
+        if not (declarations |> List.exists needsPositions) then declarations
+        else
+            let args = buildClangArgs options
+            let output =
+                match runClang args ["-Xclang"; "-ast-dump"; "-fsyntax-only"; options.HeaderFile] options.Verbose with
+                | Ok text -> text
+                | Error error -> failwith $"Cannot establish nonnull parameter evidence: {error}"
+            let normalize (signature: string) =
+                signature |> Seq.filter (not << Char.IsWhiteSpace) |> Seq.toArray |> String
+                |> fun signature -> signature.Replace(",...", "")
+            let nonnull =
+                output.Split('\n')
+                |> Array.fold (fun (current, evidence) (line: string) ->
+                    let functionKind =
+                        ["FunctionDecl "; "CXXMethodDecl "; "CXXConstructorDecl "]
+                        |> List.tryPick (fun kind -> let index = line.IndexOf(kind, StringComparison.Ordinal) in if index < 0 then None else Some index)
+                    match functionKind with
+                    | Some depth ->
+                        let quote = line.IndexOf('\'')
+                        let endQuote = if quote < 0 then -1 else line.IndexOf('\'', quote + 1)
+                        if endQuote < 0 then None, evidence else
+                        let name = line.Substring(0, quote).Trim().Split([|' '; '\t'|], StringSplitOptions.RemoveEmptyEntries) |> Array.last
+                        let signature = line.Substring(quote + 1, endQuote - quote - 1) |> normalize
+                        Some ((name, signature), depth), evidence
+                    | None ->
+                        let attribute = line.IndexOf("NonNullAttr ", StringComparison.Ordinal)
+                        match current with
+                        | Some (key, depth) when attribute = depth + 2 ->
+                            let rangeEnd = line.LastIndexOf('>')
+                            if rangeEnd < 0 then failwith "Clang NonNullAttr lacks a semantic source range"
+                            let positions =
+                                line.Substring(rangeEnd + 1).Split([|' '; '\t'; '\r'|], StringSplitOptions.RemoveEmptyEntries)
+                                |> Array.choose (fun token ->
+                                    match Int32.TryParse token with
+                                    | true, index when index > 0 -> Some (index - 1)
+                                    | _ when token = "Inherited" || token = "Implicit" -> None
+                                    | _ -> failwith $"Cannot read clang nonnull position '{token}'")
+                                |> Array.toList
+                            let previous = Map.tryFind key evidence |> Option.defaultValue []
+                            current, Map.add key (positions :: previous) evidence
+                        | _ -> current, evidence) (None, Map.empty)
+                |> snd
+            let rec enrich = function
+                | Function f when f.Attributes |> List.exists (fun a -> a.Kind = "NonNullAttr") ->
+                    let parameters = f.Parameters |> List.map snd |> String.concat ", "
+                    let signature = normalize (f.ReturnType + " (" + parameters + ")")
+                    let positions =
+                        Map.tryFind (f.Name, signature) nonnull
+                        |> Option.orElseWith (fun () -> if f.Parameters.IsEmpty then Map.tryFind (f.Name, normalize (f.ReturnType + " (void)")) nonnull else None)
+                        |> Option.defaultWith (fun () -> failwith $"Cannot recover clang nonnull parameter evidence for '{f.Name}'")
+                    let indices =
+                        if positions |> List.exists List.isEmpty then [0 .. f.Parameters.Length - 1]
+                        else positions |> List.collect id |> List.distinct |> List.sort
+                    if indices |> List.exists (fun index -> index < 0 || index >= f.Parameters.Length) then
+                        failwith $"Clang nonnull parameter evidence is out of range for '{f.Name}'"
+                    Function { f with Attributes = f.Attributes |> List.map (fun a -> if a.Kind = "NonNullAttr" then { a with Args = indices } else a) }
+                | Namespace n -> Namespace { n with Declarations = List.map enrich n.Declarations }
+                | Class c -> Class { c with Methods = List.map enrich c.Methods; Constructors = List.map enrich c.Constructors }
+                | declaration -> declaration
+            List.map enrich declarations
+
     /// Run clang preprocessor for macros
     let private runClangMacros (options: HeaderParserOptions) : Result<string, string> =
         let args = buildClangArgs options
@@ -1302,7 +1374,7 @@ module CppParser =
                     let root = JsonValue.Parse(jsonOutput)
                     let targetFile = Path.GetFileName(options.HeaderFile)
 
-                    let declarations = walkAst root targetFile options.IncludeRoot options.Verbose
+                    let declarations = walkAst root targetFile options.IncludeRoot options.Verbose |> enrichNonNullAttributes options
 
                     if options.Verbose then
                         printfn "[CppParser] Extracted %d AST declarations" (List.length declarations)

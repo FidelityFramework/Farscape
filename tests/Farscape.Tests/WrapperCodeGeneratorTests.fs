@@ -112,78 +112,18 @@ let ``multiple functions are deduplicated by name`` () =
 
 module ErrnoWrapperTests =
 
-    let private generateWithErrno name retType parms attrs =
-        let decls = [ mkDecl name retType parms attrs ]
-        WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" (UseErrno "Fidelity.Errno") Types.LP64 None
-
-    [<Fact>]
-    let ``errno-enabled wrapper uses Result<T, string> return type`` () =
-        let output = generateWithErrno "read" "ssize_t"
-                        [("fd", "int"); ("buf", "void *"); ("count", "size_t")]
-                        []
-        Assert.Contains("Result<int, string>", output)
-
-    [<Fact>]
-    let ``errno-enabled wrapper includes captureErrno helper`` () =
-        let output = generateWithErrno "read" "ssize_t"
-                        [("fd", "int"); ("buf", "void *"); ("count", "size_t")]
-                        []
-        Assert.Contains("let captureErrno", output)
-        Assert.Contains("NativePtr.read", output)
-        Assert.Contains("__errno_location", output)
-        Assert.Contains("describe", output)
-
-    [<Fact>]
-    let ``errno-enabled wrapper opens errno module and submodule`` () =
-        let output = generateWithErrno "read" "ssize_t"
-                        [("fd", "int"); ("buf", "void *"); ("count", "size_t")]
-                        []
-        Assert.Contains("open Fidelity.Errno", output)
-        Assert.Contains("open Fidelity.Errno.Errno", output)
-        // NativePtr.read is a Clef intrinsic — no Microsoft.FSharp.NativeInterop import needed
-        Assert.DoesNotContain("Microsoft.FSharp.NativeInterop", output)
-
-    [<Fact>]
-    let ``errno-enabled CountOrError calls captureErrno in error path`` () =
-        let output = generateWithErrno "read" "ssize_t"
-                        [("fd", "int"); ("buf", "void *"); ("count", "size_t")]
-                        []
-        Assert.Contains("Error (captureErrno ())", output)
-        Assert.Contains("Ok result", output)
-
-    [<Fact>]
-    let ``errno-enabled ZeroSuccessOrError calls captureErrno`` () =
-        let output = generateWithErrno "fclose" "int"
-                        [("stream", "void *")]
-                        []
-        Assert.Contains("Result<unit, string>", output)
-        Assert.Contains("Error (captureErrno ())", output)
-
-    [<Fact>]
-    let ``errno-enabled AllocatedPointer calls captureErrno`` () =
-        let output = generateWithErrno "malloc" "void *"
-                        [("size", "size_t")]
-                        [{ CppParser.AttributeData.Kind = "MallocAttr"; Args = []; StringArg = None }]
-        Assert.Contains("Result<CHandle<unit>, string>", output)
-        Assert.Contains("Error (captureErrno ())", output)
-
-    [<Fact>]
-    let ``errno-enabled captureErrno returns string via describe`` () =
-        let output = generateWithErrno "read" "ssize_t"
-                        [("fd", "int"); ("buf", "void *"); ("count", "size_t")]
-                        []
-        // captureErrno calls describe to return human-readable string (Errno submodule opened)
-        Assert.Contains("describe (NativePtr.read", output)
-        Assert.Contains("NativePtr.ofNativeInt", output)
-
-    [<Fact>]
-    let ``PureValue wrapper unchanged with errno enabled`` () =
-        let output = generateWithErrno "strlen" "size_t"
-                        [("s", "const char *")]
-                        [{ CppParser.AttributeData.Kind = "PureAttr"; Args = []; StringArg = None }]
-        // Pure functions don't use Result wrapping — direct delegation
-        Assert.Contains("let strlen", output)
-        Assert.DoesNotContain("Result<", output.Split("let strlen").[1])
+    [<Theory>]
+    [<InlineData("read", "ssize_t")>]
+    [<InlineData("fclose", "int")>]
+    [<InlineData("malloc", "void *")>]
+    [<InlineData("strlen", "size_t")>]
+    let ``errno wrapper emission requires a declared native scalar accessor`` name retType =
+        let declarations = [mkDecl name retType [] []]
+        let error = Assert.ThrowsAny<System.Exception>(fun () ->
+            WrapperCodeGenerator.generate declarations "Wrappers.Test" "testlib" "Platform.Bindings.Test"
+                (UseErrno "Fidelity.Errno") Types.LP64 None |> ignore)
+        Assert.Contains("native scalar errno accessor", error.Message)
+        Assert.Contains("cannot be dereferenced", error.Message)
 
 // =============================================================================
 // Enum Error Code Wrapper Generation Tests
@@ -202,7 +142,8 @@ module EnumErrorWrapperTests =
                         [("devPtr", "void **"); ("size", "size_t")]
                         []
         Assert.Contains("match result with", output)
-        Assert.Contains("| 0L ->", output)
+        Assert.Contains("| 0 ->", output)
+        Assert.DoesNotContain("0L", output)
 
     [<Fact>]
     let ``enum error wrapper uses string error type in return`` () =
@@ -240,14 +181,15 @@ module EnumErrorWrapperTests =
         Assert.Contains("Result<unit, string>", output)
 
     [<Fact>]
-    let ``enum error applies to int32_t-returning function with int32 literal`` () =
+    let ``enum error preserves an ordinary integer literal for fixed width native returns`` () =
         // resvg scenario: C function returns int32_t but semantically returns resvg_error enum
         let output = generateWithEnumError "hipMalloc" "int32_t"
                         [("devPtr", "void **"); ("size", "size_t")]
                         []
-        // Should use enum match pattern with int32-appropriate literal (l suffix)
+        // The descriptor carries the width; the source comparison stays an int.
         Assert.Contains("match result with", output)
-        Assert.Contains("| 0l ->", output)
+        Assert.Contains("| 0 ->", output)
+        Assert.DoesNotContain("0l", output)
         Assert.Contains("Result<unit, string>", output)
 
     [<Fact>]
@@ -265,59 +207,57 @@ module EnumErrorWrapperTests =
 
 module NullWithReasonWrapperTests =
 
-    let private generateWithNullReason name retType parms attrs =
-        let decls = [ mkDecl name retType parms attrs ]
-        WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test"
+    let private expectedReasonDiagnostic =
+        "null_with_reason wrappers require a declared reason return type, nullability, native text extent and ownership projection for 'stbi_failure_reason'; an opaque CHandle cannot be treated as a reason string."
+
+    let private allocation =
+        mkDecl "stbi_load" "void *"
+            [("filename", "const char *"); ("x", "int *"); ("y", "int *"); ("channels", "int *"); ("desired", "int")]
+            [mkAttr "MallocAttr" [] None]
+
+    let private assertRejected generate =
+        let error = Assert.ThrowsAny<System.Exception>(fun () -> generate () |> ignore)
+        Assert.Equal(expectedReasonDiagnostic, error.Message)
+
+    let private generate declarations =
+        WrapperCodeGenerator.generate declarations "Wrappers.Test" "testlib" "Platform.Bindings.Test"
             (UseNullWithReason "stbi_failure_reason") Types.LP64 None
 
     [<Fact>]
-    let ``null_with_reason AllocatedPointer uses Result<CHandle<unit>, CHandle<int>>`` () =
-        let output = generateWithNullReason "stbi_load" "void *"
-                        [("filename", "const char *"); ("x", "int *"); ("y", "int *"); ("channels", "int *"); ("desired", "int")]
-                        [{ CppParser.AttributeData.Kind = "MallocAttr"; Args = []; StringArg = None }]
-        Assert.Contains("Result<CHandle<unit>, CHandle<int>>", output)
+    let ``null reason convention cannot invent an undeclared reason return type`` () =
+        assertRejected (fun () -> generate [allocation])
 
     [<Fact>]
-    let ``null_with_reason calls reason function on null`` () =
-        let output = generateWithNullReason "stbi_load" "void *"
-                        [("filename", "const char *"); ("x", "int *"); ("y", "int *"); ("channels", "int *"); ("desired", "int")]
-                        [{ CppParser.AttributeData.Kind = "MallocAttr"; Args = []; StringArg = None }]
-        Assert.Contains("stbi_failure_reason", output)
-        Assert.Contains("Error", output)
-        Assert.Contains("Ok result", output)
+    let ``nullable native reason declaration requires a supported text projection`` () =
+        let reason = mkDecl "stbi_failure_reason" "const char *" [] []
+        assertRejected (fun () -> generate [allocation; reason])
 
     [<Fact>]
-    let ``null_with_reason includes null check`` () =
-        let output = generateWithNullReason "stbi_load" "void *"
-                        [("filename", "const char *"); ("x", "int *"); ("y", "int *"); ("channels", "int *"); ("desired", "int")]
-                        [{ CppParser.AttributeData.Kind = "MallocAttr"; Args = []; StringArg = None }]
-        Assert.Contains("| Some result ->", output)
-        Assert.Contains("| None ->", output)
+    let ``nonnull reason evidence does not prove text extent or ownership`` () =
+        let reason = mkDecl "stbi_failure_reason" "const char *" [] [mkAttr "ReturnsNonNullAttr" [] None]
+        assertRejected (fun () -> generate [allocation; reason])
 
     [<Fact>]
-    let ``null_with_reason does not generate captureError helper`` () =
-        let output = generateWithNullReason "stbi_load" "void *"
-                        [("filename", "const char *"); ("x", "int *"); ("y", "int *"); ("channels", "int *"); ("desired", "int")]
-                        [{ CppParser.AttributeData.Kind = "MallocAttr"; Args = []; StringArg = None }]
-        Assert.DoesNotContain("let captureErrno", output)
-        Assert.DoesNotContain("captureError", output)  // No capture*Error helper for null_with_reason
-        Assert.DoesNotContain("__errno_location", output)
+    let ``null reason rejection also covers the explicit generation context`` () =
+        let declarations = [allocation; mkDecl "stbi_failure_reason" "const char *" [] []]
+        let context = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
+        assertRejected (fun () ->
+            WrapperCodeGenerator.generateWithContext (Some context) false Set.empty declarations
+                "Wrappers.Test" "testlib" "Platform.Bindings.Test"
+                (UseNullWithReason "stbi_failure_reason") Types.LP64 None)
 
     [<Fact>]
-    let ``null_with_reason PureValue unchanged`` () =
-        let output = generateWithNullReason "stbi_is_hdr" "int"
-                        [("filename", "const char *")]
-                        [{ CppParser.AttributeData.Kind = "PureAttr"; Args = []; StringArg = None }]
-        Assert.Contains("let stbi_is_hdr", output)
-        Assert.DoesNotContain("Result<", output.Split("let stbi_is_hdr").[1])
+    let ``passthrough overrides do not silently discard an unsupported reason contract`` () =
+        assertRejected (fun () ->
+            WrapperCodeGenerator.generateWithOverrides false (Set.singleton "stbi_load") [allocation]
+                "Wrappers.Test" "testlib" "Platform.Bindings.Test"
+                (UseNullWithReason "stbi_failure_reason") Types.LP64 None)
 
-    [<Fact>]
-    let ``null_with_reason VoidReturn unchanged`` () =
-        let output = generateWithNullReason "stbi_image_free" "void"
-                        [("retval_from_stbi_load", "void *")]
-                        []
-        Assert.Contains("let stbi_image_free", output)
-        Assert.DoesNotContain("Result<", output.Split("let stbi_image_free").[1])
+    [<Theory>]
+    [<InlineData("stbi_is_hdr", "int")>]
+    [<InlineData("stbi_image_free", "void")>]
+    let ``unsupported null reason configuration fails even for scalar or void functions`` name returnType =
+        assertRejected (fun () -> generate [mkDecl name returnType [] []])
 
 // =============================================================================
 // Regression: zero-argument functions must emit () in raw call
@@ -329,28 +269,20 @@ let ``zero-arg function wrapper emits unit argument in raw call`` () =
     Assert.Contains("Platform.Bindings.Test.resvg_options_create ()", output)
 
 // =============================================================================
-// Regression: ZeroSuccessOrError with errno must use Error (captureError ()) not Error result
+// Returned error codes require no pointer reads.
 // =============================================================================
 
-let private generateWithErrno name retType parms attrs =
-    let decls = [ mkDecl name retType parms attrs ]
-    WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" (UseErrno "Platform.Bindings.Test.Errno") Types.LP64 None
-
-[<Fact>]
-let ``ZeroSuccessOrError with errno generates Error captureError not Error result`` () =
-    let output = generateWithErrno "fclose" "int"
-                    [("stream", "FILE *")]
-                    []
-    // Should use captureError in the error branch, not bare result
-    Assert.Contains("Error (captureErrno ())", output)
-    Assert.DoesNotContain("Error result", output)
+let private generateWithReturnedError name retType parms attrs =
+    let decls = [mkDecl name retType parms attrs]
+    WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test"
+        (UseReturnCode ("Test", "Fidelity.Test.ReturnCode")) Types.LP64 None
 
 // ─── NTU DTS Zero Literal Tests ─────────────────────────────────────
 // Wrappers must use `0` (NTU int), not `0l` (int32), for zero comparisons.
 
 [<Fact>]
 let ``ZeroSuccessOrError uses NTU int literal 0, not int32 literal 0l`` () =
-    let output = generateWithErrno "fclose" "int"
+    let output = generateWithReturnedError "fclose" "int"
                     [("stream", "FILE *")]
                     []
     Assert.Contains("= 0 then", output)
@@ -358,19 +290,19 @@ let ``ZeroSuccessOrError uses NTU int literal 0, not int32 literal 0l`` () =
 
 [<Fact>]
 let ``IntValueOrError uses NTU int literal 0, not int32 literal 0l`` () =
-    let output = generateWithErrno "open" "int"
+    let output = generateWithReturnedError "open" "int"
                     [("path", "const char *"); ("oflag", "int")]
                     []
     Assert.Contains(">= 0 then", output)
     Assert.DoesNotContain("0l", output)
 
 [<Fact>]
-let ``int32_t returning function uses int32 literal 0l for zero comparison`` () =
-    let output = generateWithErrno "resvg_parse" "int32_t"
+let ``fixed width C return comparisons use an ordinary Clef integer literal`` () =
+    let output = generateWithReturnedError "resvg_parse" "int32_t"
                     [("data", "const char *")]
                     []
-    Assert.Contains("= 0l then", output)
-    Assert.DoesNotContain("= 0 then", output)
+    Assert.Contains("= 0 then", output)
+    Assert.DoesNotContain("0l", output)
 
 // =============================================================================
 // ReturnCode Wrapper Generation Tests
@@ -462,7 +394,7 @@ module ReturnCodeWrapperTests =
 // =============================================================================
 
 [<Fact>]
-let ``wrapper returns Result<HandleType, string> for opaque handle return with errno`` () =
+let ``wrapper preserves nominal CHandle when unwrapping an opaque nullable return`` () =
     // Declaration with opaque handle typedef + function returning that type
     let decls = [
         CppParser.Declaration.Typedef
@@ -474,13 +406,14 @@ let ``wrapper returns Result<HandleType, string> for opaque handle return with e
               Documentation = None
               IsVirtual = false; IsStatic = false; IsInline = false; Attributes = []; MangledName = None }
     ]
-    let output = WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" (UseErrno "Fidelity.Errno") Types.LP64 None
-    // Return type should use the handle type, not nativeint
-    Assert.Contains("Result<hipStream_t, string>", output)
+    let output = WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" (UseReturnCode ("Test", "Fidelity.Test.ReturnCode")) Types.LP64 None
+    Assert.Contains("Result<CHandle<hipStream_t>, string>", output)
+    Assert.Contains("match Platform.Bindings.Test.hipStreamCreate flags with", output)
+    Assert.Contains("Some result -> Ok result", output)
     Assert.DoesNotContain("Result<nativeint, string>", output)
 
 [<Fact>]
-let ``wrapper returns Result<CHandle<unit>, string> for non-opaque pointer with errno`` () =
+let ``pointer allocation wrapper returns an opaque CHandle result`` () =
     // Regular void* return without opaque handle typedef
     let decls = [
         CppParser.Declaration.Function
@@ -490,6 +423,6 @@ let ``wrapper returns Result<CHandle<unit>, string> for non-opaque pointer with 
               Documentation = None
               IsVirtual = false; IsStatic = false; IsInline = false; Attributes = []; MangledName = None }
     ]
-    let output = WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" (UseErrno "Fidelity.Errno") Types.LP64 None
-    // void* should use nativeint, not a handle type
+    let output = WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" (UseReturnCode ("Test", "Fidelity.Test.ReturnCode")) Types.LP64 None
+    // A C void pointer stays opaque in Clef.
     Assert.Contains("Result<CHandle<unit>, string>", output)

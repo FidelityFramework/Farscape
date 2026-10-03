@@ -16,19 +16,18 @@ let private decls =
       CppParser.Declaration.Function (mkFunc "pthread_join" "int" ["__th", "pthread_t"; "__thread_return", "void **"]) ]
 
 [<Fact>]
-let ``native carrier profile keeps callback type and C ABI widths`` () =
+let ``legacy native pointer profile cannot emit Clef source`` () =
     let ctx = { FidelityCodeGenerator.buildGenerationContext decls Types.LP64 Map.empty with NativePointerSurface = true }
-    let source = FidelityCodeGenerator.generateModule ctx Set.empty decls "Test.Thread" "pthread" "test" []
-    Assert.Contains("(start_routine: FnPtr<nativeint -> nativeint>) (arg: nativeint) : int32", source)
-    Assert.Contains("(th: uint64) (thread_return: nativeint) : int32", source)
-    Assert.Contains("ReturnType = Integer (Signed, 32)", source)
-    Assert.Contains("Type = Integer (Unsigned, 64)", source)
-    Assert.Contains("Type = Pointer 64", source)
-    Assert.DoesNotContain("CHandle<", source)
+    let error = Assert.ThrowsAny<System.Exception>(fun () ->
+        FidelityCodeGenerator.generateModule ctx Set.empty decls "Test.Thread" "pthread" "test" [] |> ignore)
+    Assert.Contains("experimental_native_pointer_surface cannot emit Clef source", error.Message)
 
 [<Fact>]
 let ``pthread handle storage is derived from its scalar typedef`` () =
-    let ctx = { FidelityCodeGenerator.buildGenerationContext decls Types.LP64 Map.empty with NativePointerSurface = true }
+    let binding : PilotTypes.BindingProjection =
+        { Name = createDecl.Name; Symbol = createDecl.Name; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
+          ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None }
+    let ctx = { FidelityCodeGenerator.buildGenerationContext decls Types.LP64 Map.empty with Bindings = Map.ofList [createDecl.Name, binding] }
     let source = FidelityCodeGenerator.generateModule ctx Set.empty [List.head decls] "Test.Types" "pthread" "test" []
     Assert.Contains("module pthread_t =", source)
     Assert.Contains("let Size = 8", source)
@@ -36,25 +35,21 @@ let ``pthread handle storage is derived from its scalar typedef`` () =
     Assert.Contains("width declared", source)
 
 [<Fact>]
-let ``native callback nested pointer arguments are address carriers`` () =
-    let typ = FidelityCodeGenerator.mapCTypeToNativeSurface Map.empty Types.LP64 Map.empty "void *(*)(void **, void *)"
+let ``callback nested pointer arguments remain opaque and retain ABI pointer widths`` () =
+    let resolved = FidelityCodeGenerator.resolveCType Map.empty Types.LP64 Set.empty Map.empty Map.empty "void *(*)(void **, void *)"
     Assert.Equal<CodeAST.FsType>(CodeAST.Generic("FnPtr", CodeAST.FunctionType(
-        [CodeAST.Named "nativeint"; CodeAST.Named "nativeint"], CodeAST.Named "nativeint")), typ)
+        [CodeAST.Generic("option", CodeAST.Generic("CHandle", CodeAST.Generic("CHandle", CodeAST.Named "unit"))); CodeAST.Generic("option", CodeAST.Generic("CHandle", CodeAST.Named "unit"))],
+        CodeAST.Generic("option", CodeAST.Generic("CHandle", CodeAST.Named "unit")))), FidelityCodeGenerator.clefTypeOf resolved)
+    Assert.Equal(Some (TypeMapper.pointerRepr Types.LP64 "void *(*)(void **, void *)"), FidelityCodeGenerator.abiReprOf Types.LP64 "void *(*)(void **, void *)" resolved)
 
 [<Fact>]
-let ``native bridge binds cleaned arguments and preserves nonnull environment`` () =
+let ``legacy native callback emission cannot bypass the opaque boundary`` () =
     let spec : PilotTypes.CallbackSpec = {
         Registrations = [{ Function = "pthread_create"; CallbackParam = "__start_routine"; DataParam = Some "__arg" }]
         ListenerStructs = [] }
-    let source = CallbackWrapperGenerator.generateNative spec decls "Test.Callbacks" Types.LP64 ["Test.Thread"] |> Option.get
-    Assert.Contains("pthread_create newthread attr start_routine arg", source)
-    Assert.Contains("(arg: nativeint)", source)
-    Assert.Contains("FnPtr<nativeint -> nativeint>", source)
-    Assert.DoesNotContain("__newthread", source)
-    Assert.DoesNotContain("__attr", source)
-    Assert.DoesNotContain("dlsym", source)
-    Assert.DoesNotContain("0n", source)
-    Assert.DoesNotContain("GCHandle", source)
+    let error = Assert.ThrowsAny<System.Exception>(fun () ->
+        CallbackWrapperGenerator.generateNative spec decls "Test.Callbacks" Types.LP64 ["Test.Thread"] |> ignore)
+    Assert.Contains("violate the Clef FFI boundary", error.Message)
 
 [<Fact>]
 let ``production pthread bridge forwards nullable opaque handles and typed entries`` () =
@@ -74,20 +69,22 @@ let ``production pthread bridge forwards nullable opaque handles and typed entri
 
 [<Fact>]
 let ``pthread wrappers decode returned code and never inspect errno`` () =
-    let source = WrapperCodeGenerator.generateWithSurface true decls "Test.Thread.Api" "pthread" "Test.Thread"
+    let source = WrapperCodeGenerator.generateWithSurface false decls "Test.Thread.Api" "pthread" "Test.Thread"
                      (WrapperTypes.UseReturnCode ("pthread", "Test.ReturnCode")) Types.LP64 None
     Assert.Contains("captureReturnCode (int (result))", source)
     Assert.DoesNotContain("captureErrno", source)
     Assert.DoesNotContain("__errno_location", source)
     Assert.DoesNotContain("open Test.ReturnCode.ReturnCode", source)
-    Assert.Contains("if result = 0l then", source)
+    Assert.Contains("if result = 0 then", source)
+    Assert.DoesNotContain("0l", source)
 
 [<Fact>]
 let ``libc affinity status is not decoded as a pthread error`` () =
     let fn = CppParser.Declaration.Function (mkFunc "sched_getaffinity" "int" ["pid", "int"; "size", "size_t"; "mask", "void *"])
-    let source = WrapperCodeGenerator.generateWithOverrides true (Set.singleton "sched_getaffinity") [fn]
+    let source = WrapperCodeGenerator.generateWithOverrides false (Set.singleton "sched_getaffinity") [fn]
                      "Test.Affinity.Api" "c" "Test.Affinity" (WrapperTypes.UseReturnCode ("pthread", "Test.ReturnCode")) Types.LP64 None
-    Assert.Contains("(mask: nativeint) : int32", source)
+    Assert.Contains("(mask: option<CHandle<unit>>) : int", source)
+    Assert.DoesNotContain("nativeint", source)
     Assert.Contains("Test.Affinity.sched_getaffinity pid size mask", source)
     Assert.DoesNotContain("else Error", source)
 
@@ -144,7 +141,7 @@ let ``Linux x64 pthread storage comes from actual header unions and measured lay
             if name <> "cpu_set_t" then
                 Assert.True(structure.IsUnion)
                 Assert.Contains(structure.Fields, fun f -> f.IsArray && f.ArraySize = Some size)
-        let ctx = { FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 layouts with NativePointerSurface = true }
+        let ctx = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 layouts
         let contracts = declarations |> List.filter (function CppParser.Declaration.Struct s -> layouts.ContainsKey s.Name | _ -> false)
         let source = FidelityCodeGenerator.generateModule ctx Set.empty contracts "Test.Types" "pthread" "storage" []
         Assert.Contains("module pthread_mutex_t =", source)
@@ -167,7 +164,7 @@ let ``pthread output array declares scalar reference ABI and nonnull typed callb
     let source = FidelityCodeGenerator.generateModule ctx Set.empty decls "Test.Thread" "c" "test" []
     Assert.Contains("(newthread: int array)", source)
     Assert.Contains("(attr: option<CHandle<unit>>)", source)
-    Assert.Contains("FnPtr<CHandle<unit> -> CHandle<unit>>", source)
+    Assert.Contains("FnPtr<option<CHandle<unit>> -> option<CHandle<unit>>>", source)
     Assert.Contains("(arg: CHandle<unit>)", source)
     Assert.Contains("Type = Integer (Unsigned, 64); PassBy = Reference", source)
     Assert.Contains("ReturnType = Integer (Signed, 32)", source)

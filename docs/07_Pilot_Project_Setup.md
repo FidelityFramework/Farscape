@@ -469,13 +469,14 @@ The `--wrappers` flag (`-w`) enables Layer 2 wrapper generation. Without it, onl
 
 ### Re-generation
 
-Layer 1 and Layer 2 files are regenerated from scratch on every run. There is no incremental generation. To regenerate after changing the pilot TOML:
-
-```bash
-# Clean old output first (Farscape does not auto-clean)
-rm -rf Bindings/
-farscape project --project pilot/rocm-hip.pilot.toml --wrappers
-```
+Layer 1 and Layer 2 files are regenerated from scratch on every run. There is no
+incremental generation and Farscape does not remove stale files. Copy the pilot,
+set its `[output].directory` to a fresh review directory, and generate there.
+Review the new source/manifest file set and validate the actual consumer before
+replacing accepted package output. Keep authored Layer 2 overlays separately
+listed in that consumer. The [2026-10-03 FFI checkpoint](handoff/2026-10-03-ffi-boundary-checkpoint.md)
+records supported/refused contracts and the source/conformance commands; do not
+delete the old accepted output before investigating a generation refusal.
 
 ## fidproj Integration
 

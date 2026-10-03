@@ -44,9 +44,10 @@ let ``generates describe function with integer literal patterns`` () =
     let output = EnumErrorModuleGenerator.generate { Name = "hipError_t"; Values = hipValues; Documentation = None; UnderlyingType = None } config "Fidelity.HIP.Errors" ["Fidelity.HIP.Types"]
     let text = output.Value
     Assert.Contains("let describe (code: int) : string =", text)
-    Assert.Contains("| 0L ->", text)
+    Assert.Contains("| 0 ->", text)
+    Assert.DoesNotContain("0L", text)
     Assert.Contains("\"Successful completion\"", text)
-    Assert.Contains("| 1L ->", text)
+    Assert.Contains("| 1 ->", text)
     Assert.Contains("\"Invalid Value\"", text)
 
 [<Fact>]
@@ -55,7 +56,7 @@ let ``describe falls back to variant name when no doc comment`` () =
     let output = EnumErrorModuleGenerator.generate { Name = "hipError_t"; Values = hipValues; Documentation = None; UnderlyingType = None } config "Fidelity.HIP.Errors" ["Fidelity.HIP.Types"]
     let text = output.Value
     // hipErrorUnknown has no doc comment, should use the variant name
-    Assert.Contains("| 999L ->", text)
+    Assert.Contains("| 999 ->", text)
     Assert.Contains("\"hipErrorUnknown\"", text)
 
 [<Fact>]
@@ -101,3 +102,13 @@ let ``generate emits open directive for types module`` () =
     let output = EnumErrorModuleGenerator.generate { Name = "hipError_t"; Values = hipValues; Documentation = None; UnderlyingType = None } config "Fidelity.HIP.Errors" ["Fidelity.HIP.Types"]
     let text = output.Value
     Assert.Contains("open Fidelity.HIP.Types", text)
+
+[<Fact>]
+let ``native reason metadata does not emit an undeclared text projection`` () =
+    let config = EnumErrorModuleGenerator.makeConfig "hipError_t" "hipSuccess" (Some "hipGetErrorString") (Some "hipGetErrorName")
+    let output = EnumErrorModuleGenerator.generate { Name = "hipError_t"; Values = hipValues; Documentation = None; UnderlyingType = None } config "Fidelity.HIP.Errors" []
+    let text = output.Value
+    Assert.Contains("\"Successful completion\"", text)
+    Assert.DoesNotContain("hipGetErrorString", text)
+    Assert.DoesNotContain("hipGetErrorName", text)
+    Assert.DoesNotContain("CHandle", text)

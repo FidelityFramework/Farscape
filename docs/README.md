@@ -6,6 +6,13 @@ Farscape is the C header binding generator for the Fidelity native Clef compilat
 
 There is no P/Invoke in the Fidelity framework. Farscape generates `[<FidelityExtern>]` binding declarations for the native pipeline (CCS, Baker, Alex, MLIR, LLVM).
 
+Current status and regeneration guidance are recorded in the
+[2026-10-03 FFI checkpoint](handoff/2026-10-03-ffi-boundary-checkpoint.md): the
+pointer-surface correction passed **649/649** source tests and **17/17** durable
+conformance gates. Native callback ABI publication and general foreign ownership
+remain incomplete; unsupported contracts are refused. Earlier profile/design
+documents describe their historical scope rather than current desktop readiness.
+
 ## Table of Contents
 
 ### Architecture
@@ -17,7 +24,7 @@ There is no P/Invoke in the Fidelity framework. Farscape generates `[<FidelityEx
 5. [Wrapper Generation](./05_Wrapper_Generation.md): Layer 2 idiomatic Clef wrapper generation
 6. [libc Library Standardization](./06_libc_Library_Standardization.md): libc binding conventions
 7. [Pilot Project Setup](./07_Pilot_Project_Setup.md): Pilot TOML project system
-8. [Nullable Pointer Architecture](./08_Nullable_Pointer_Architecture.md): NullWithReason error convention
+8. [Nullable Pointer Architecture](./08_Nullable_Pointer_Architecture.md): Conservative data-pointer defaults and required boundary conversion
 9. [Library Verification](./09_Library_Verification.md): CCS-based verification pipeline, clefpak prerequisites, fidproj hierarchy
 10. [Boundary Marshaling Specification](./10_Boundary_Marshaling_Spec.md): Layer discipline at the C boundary
 11. [Namespace-Scoped PSG Loading](./11_Namespace_Scoped_PSG_Design.md): Demand-driven module loading in CCS
@@ -47,7 +54,9 @@ Farscape is one component of a closed-loop native compilation system. `[<Fidelit
 
 **Layer 1: Platform.Bindings** - `[<FidelityExtern>]` attributed binding declarations with `NativeDefault.zeroed ()` bodies. Core infrastructure.
 
-**Layer 2: Idiomatic Clef Wrappers** (implemented) - Safe functional APIs with Result types, null checking, error handling. Driven by 12 clang attribute types and 7 return semantic patterns.
+**Layer 2: Idiomatic Clef Wrappers** - Declared conversions and error handling.
+Supported returned-status patterns generate wrappers; errno dereference and
+undeclared native error-text patterns are refused until their contracts exist.
 
 ## Core Infrastructure Under Development
 
@@ -86,15 +95,15 @@ BAREWire provides hardware descriptor types (`PeripheralDescriptor`, `FieldDescr
 - Layer 2 wrapper generation (WrapperPatternAnalyzer + WrapperCodeGenerator)
 - Typedef chain resolution, macro constant extraction
 - Pilot namespace analysis and TOML project files
-- Errno module generation (CError struct, describe jump table, captureError helper)
+- Errno constants/header descriptions and opaque errno-cell declaration
 - Opaque handle type detection and wrapper generation
 - Bitmask enum detection with `[<System.Flags>]`
 - EnumErrorCode convention with pattern-matched error descriptions
 - Struct layout with explicit offsets from clang layout extraction
-- NullWithReason error convention (stb_image, SDL patterns)
-- Callback binding infrastructure (registration + listener patterns)
+- Explicit refusal of unsupported NullWithReason text projections
+- Typed callback declarations; retired raw listener builders are refused
 - Auto-generated fidproj library manifests
-- 389+ unit tests across 14+ test files
+- 649 source tests and 17 durable generator/compiler conformance gates
 
 ## Roadmap
 

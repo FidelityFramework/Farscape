@@ -20,9 +20,10 @@ module EnumErrorModuleGenerator =
         SuccessValue: string
         /// The derived error struct name, e.g. "HipError"
         ErrorStructName: string
-        /// Optional runtime error string function, e.g. "hipGetErrorString"
+        /// Retained native error string metadata, e.g. "hipGetErrorString".
+        /// Generation uses header descriptions until a native text projection is admitted.
         ErrorStringFn: string option
-        /// Optional runtime error name function, e.g. "hipGetErrorName"
+        /// Retained native error name metadata, e.g. "hipGetErrorName".
         ErrorNameFn: string option
     }
 
@@ -61,7 +62,7 @@ module EnumErrorModuleGenerator =
                     match v.Documentation with
                     | Some d -> d
                     | None -> v.Name
-                ($"{v.Value}L", Literal $"\"{description}\""))
+                (string v.Value, Literal $"\"{description}\""))
         let defaultCase = ("other", Literal $"\"Unknown {config.ErrorType} error\"")
         MatchExpr(Identifier "code", cases @ [ defaultCase ])
 

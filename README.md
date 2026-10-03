@@ -14,6 +14,14 @@ Under Active Development<br>
 
 Farscape automatically generates Clef bindings from C header files. It uses **clang** for robust header parsing and **XParsec** parser combinators for post-processing C type declarations and preprocessor macro values, producing type-safe Clef code that integrates with the Fidelity native compilation toolchain.
 
+The [2026-10-03 FFI checkpoint](docs/handoff/2026-10-03-ffi-boundary-checkpoint.md)
+records the completed pointer-surface correction, **649/649** source tests and
+**17/17** generator/compiler conformance gates. Generation uses nominal
+`CHandle` carriers, conservative nullability and typed `FnPtr` declarations.
+Native callback ABI publication and general foreign resource lifetimes remain
+incomplete; unsupported contracts are refused. Existing desktop libraries have
+not been regenerated or accepted wholesale by this checkpoint.
+
 The codebase is structured around four functional programming patterns that compose cleanly:
 
 - **XParsec Parser Combinators** (`CTypeParser.fs`): Monadic parsers decompose C type declarations (`const char *` → `{ BaseType = "char"; PointerDepth = 1 }`), classify preprocessor macro values, and parse numeric literals, replacing all Regex usage
@@ -54,15 +62,10 @@ static let pCType =
     }
 ```
 
-**Active pattern** classifies the parsed result:
-
-```fsharp
-// ActivePatterns.fs: structural decomposition via pattern matching
-match "const char *" with
-| ParsedCType (CharPointer) -> Generic("nativeptr", Named "byte")
-| ParsedCType (VoidPointer) -> Named "nativeint"
-| ParsedCType (ValueType t) -> Named (TypeMapper.getFSharpType model t)
-```
+**Active patterns** classify native spellings. Generation then resolves typedef
+identity and nullability before selecting a sanctioned Clef carrier. A native
+data pointer becomes `CHandle<T>` or `option<CHandle<T>>`; a declared text
+projection can expose Clef `string`. Native widths remain descriptor facts.
 
 **Catamorphism** folds an algebra over all declarations in one pass:
 
@@ -76,11 +79,12 @@ let groups = cataDeclarations (generationAlgebra typedefMap) declarations
 
 ```fsharp
 // CodeAST.fs: typed nodes, not strings
-LetBinding("memcpy",
-    [{ Name = "dest"; Type = Named "nativeint" }; ...],
-    Named "nativeint",
-    DefaultOf (Named "nativeint"))
-// CodeRenderer.fs renders to F# source (the ONLY StringBuilder)
+LetBinding("abs",
+    [{ Name = "value"; Type = Named "int" }],
+    Named "int",
+    NativeZeroed,
+    ["FidelityExtern(\"c\", \"abs\")"])
+// CodeRenderer.fs renders to Clef source (the ONLY StringBuilder)
 ```
 
 ### Core Modules
@@ -98,7 +102,7 @@ LetBinding("memcpy",
 | `FidelityCodeGenerator.fs` | Fidelity mode: catamorphism → FsDecl tree → rendered source |
 | `WrapperPatternAnalyzer.fs` | Layer 2: clang attribute analysis → return semantic + parameter role classification |
 | `WrapperCodeGenerator.fs` | Layer 2: idiomatic Clef wrapper generation with Result types |
-| `ErrnoModuleGenerator.fs` | Error text infrastructure: CError struct, describe jump table, captureError helper |
+| `ErrnoModuleGenerator.fs` | Header error constants/descriptions and opaque errno-cell declaration; dereference wrappers are refused |
 | `PilotAnalyzer.fs` | Namespace filtering and declaration scoping from project files |
 | `PilotSerializer.fs` | TOML project file parsing (`.pilot.toml`) |
 | `BindingGenerator.fs` | Pipeline orchestration for single-header and project-based generation |
@@ -106,31 +110,16 @@ LetBinding("memcpy",
 ## Usage
 
 ```bash
-# Generate Fidelity bindings from a standard library header
-farscape generate \
-    --header /usr/include/string.h \
-    -l libc \
-    -m fidelity \
-    -n Fidelity.libc.Memory \
-    -o ./output/
+# Generate from a curated Linux C pilot (the output path is relative to the pilot)
+farscape project --project path/to/library.pilot.toml --verbose
 
-# Generate Fidelity bindings with idiomatic Clef wrappers (Layer 2)
+# Generate declarations from a header containing: int abs(int value);
 farscape generate \
-    --header /usr/include/unistd.h \
-    -l libc \
-    -m fidelity-wrappers \
-    -n Fidelity.libc.IO \
-    -o ./output/
-
-# With include paths and defines (for CMSIS headers)
-farscape generate \
-    --header stm32l5xx_hal_gpio.h \
-    -l __cmsis \
+    --header ./scalar-only.h \
+    -l c \
     -m fidelity \
-    -i ./CMSIS/Core/Include,./STM32L5xx/Include \
-    -d STM32L552xx,USE_HAL_DRIVER \
-    -n Fidelity.CMSIS.GPIO \
-    -v
+    -n Fidelity.libc.Scalar \
+    -o ./output/
 
 Options:
       --header <header>         Path to C header file (required)
@@ -143,65 +132,67 @@ Options:
   -v, --verbose                 Verbose output
 ```
 
+The `project` command accepts `--project`, `--verbose` (`-v`) and optional
+`--wrappers` (`-w`). The CLI currently selects LP64 and project manifests declare
+Linux x86_64; there is no CLI `--data-model` option. Wrapper selection can be
+refused when errno access, native error text, a callback adapter or another
+required contract is missing. See the checkpoint for regeneration and validation.
+
 ## Output Modes
 
 ### Fidelity Mode (`--output-mode fidelity`)
 
-Generates `[<FidelityExtern>]` binding declarations that feed the Composer native compilation pipeline:
+Generates `[<FidelityExtern>]` declarations with companion ABI descriptors. The
+accepted scalar example uses ordinary Clef integers while declaring C's width:
 
 ```fsharp
-module Fidelity.libc.Memory
+module Fidelity.libc.Scalar
 
-// Generated by Farscape, Fidelity binding for libc
-// Composer type-checks and compiles to native via MLIR/LLVM.
+open BAREWire.Hardware
+open BAREWire.Descriptors
 
-    /// void * memcpy(void *restrict __dest, const void *restrict __src, size_t __n)
-    [<FidelityExtern("libc", "memcpy")>]
-    let memcpy (dest: nativeint) (src: nativeint) (n: unativeint) : nativeint =
-        NativeDefault.zeroed ()
+[<FidelityExtern("c", "abs")>]
+let abs (value: int) : int =
+    NativeDefault.zeroed ()
 
-    /// char * strcpy(char *restrict __dest, const char *restrict __src)
-    [<FidelityExtern("libc", "strcpy")>]
-    let strcpy (dest: nativeptr<byte>) (src: nativeptr<byte>) : nativeptr<byte> =
-        NativeDefault.zeroed ()>
+let absDescriptor : Expr<FunctionDescriptor> =
+    <@ { CName = "abs"
+         Parameters = [| { Name = "value"; Type = Integer (Signed, 32); PassBy = Value } |]
+         ReturnType = Integer (Signed, 32)
+         CallingConvention = CDecl
+         OwnershipTransfer = Borrowed } @>
 ```
 
 ## Type Mapping
 
-Type widths for `int` and `long` are resolved per PlatformABI (LP64, LLP64, ILP32, IP16). Fixed-width types (`int32_t`, `int64_t`) and pointer-width types (`size_t`, `intptr_t`) are platform-invariant. The `--data-model` CLI option selects the target ABI.
+Source signatures use Clef `int` and `float`. Native signedness, storage width,
+pointer width and calling convention belong to descriptors resolved from the
+selected ABI model. Analysis supports LP64, LLP64, ILP32 and IP16; current project
+generation accepts Linux x86_64 LP64 and refuses a different model before writes.
 
 | C Type | Clef Type | Notes |
 |--------|-----------|-------|
-| `int` | `int` | **NTU register-width dimensional, not `int32`.** Deliberate — see `.serena/memories/TYPE_MAPPING_ARCHITECTURE_ANALYSIS.md`. Correct for parameters; see `docs/14_Binding_Generation_Gaps.md` §2 for why it makes a record unable to overlay a C struct. |
-| `unsigned int` | `uint` | Register-width, as above |
-| `int32_t` | `int32` | Fixed width, platform-invariant |
-| `uint32_t` | `uint32` | Fixed width, platform-invariant |
-| `long` / `long int` | `int64` (LP64) / `int32` (LLP64, ILP32) | Platform-dependent via PlatformABI |
-| `unsigned long` | `uint64` (LP64) / `uint32` (LLP64, ILP32) | Platform-dependent via PlatformABI |
-| `long long` | `int64` | Always 64-bit |
-| `short` | `int16` | Signed 16-bit |
-| `float` | `single` | 32-bit float |
-| `double` | `double` | 64-bit float |
-| `char *` | `nativeptr<byte>` | Char pointer (active pattern: `CharPointer`) |
-| `void *` | `nativeint` | Void pointer (active pattern: `VoidPointer`) |
-| `T *` (other) | `option<nativeint>` | Typed pointer (active pattern: `TypedPointer`). **Wrapped in `option<>` by default** — absent clang `NonNullAttr` or an `[annotations.nonnull]` entry, every pointer parameter and return is nullable. See `docs/08_Nullable_Pointer_Architecture.md`. |
-| `void (*)(...)` | `nativeint` | Function pointer (detected by `(*)`) |
-| `size_t` / `uintptr_t` | `unativeint` | Pointer-width unsigned (NTU Resolved Pointer) |
-| `ssize_t` / `intptr_t` | `nativeint` | Pointer-width signed (NTU Resolved Pointer) |
+| C integer scalars and enums | `int` | Signedness and native width come from the descriptor |
+| `float` / `double` | `float` | Native floating representation comes from the descriptor |
+| Unannotated `T *` or opaque pointer typedef | `option<CHandle<T>>` | Nominal typedef identity is preserved; no pointer operations |
+| Explicitly nonnull data pointer | `CHandle<T>` | Nonnull is not a lifetime or validity proof |
+| `void *` | `option<CHandle<unit>>` by default | Typed user-data and release obligations remain at the boundary |
+| `char *` with a text-input projection | `option<string>` or `string` | Requires the declared text conversion contract |
+| Declared callback | `FnPtr<F>` in a typed entry record | Complete native signature and supported ABI realization required |
+| Nullable foreign callback result or nested slot | Refused when its adapter is unsupported | Absence must not be changed into a nonnull assertion |
+| Declared single-cell reference projection | Clef array with descriptor | Native representation, bounds, access and copyback remain obligations |
 
-Type mapping uses XParsec-backed active patterns (`ParsedCType`, `CharPointer`/`VoidPointer`/`TypedPointer`/`ValueType`) with typedef chain resolution. TypeMapper resolves C `int`/`long` widths per PlatformABI for NTU-correct Fidelity output.
+Type mapping uses XParsec-backed active patterns and typedef chain resolution.
+It does not expose a source integer address or an alternate raw pointer surface.
 
 ## Validated Output
 
-Farscape's Fidelity mode has been validated against three real libc headers:
-
-| Header | Output | Functions | Macros |
-|--------|--------|-----------|--------|
-| `/usr/include/unistd.h` | `IO.fs` | 80+ POSIX functions | File mode constants |
-| `/usr/include/string.h` | `Memory.fs` | 40+ string/memory functions | - |
-| `/usr/include/stdlib.h` | `Alloc.fs` | 70+ stdlib functions | EXIT_SUCCESS, EXIT_FAILURE, etc. |
-
-Output is byte-identical across runs (deterministic).
+The final source suite passed **649/649**. The durable
+[BoundaryConformance driver](tests/BoundaryConformance/README.md) passed **17/17**
+gates using actual parsed headers and current-source Clef. It checks reachable
+scalar admission, nominal/nullable generated contracts and exact unsupported
+boundary diagnostics. It performs no native execution. Accepted hashes and local
+evidence paths are recorded in the checkpoint.
 
 ## Testing
 
@@ -216,7 +207,7 @@ cd tests/Farscape.Tests && dotnet test
 #   - CodeRenderer: FsDecl → Clef source for all declaration types
 #   - FidelityCodeGenerator: End-to-end declaration → source generation
 #   - WrapperCodeGenerator: Layer 2 wrapper pattern generation
-#   - ErrnoModuleGenerator: Error text infrastructure (CError, describe, captureError)
+#   - ErrnoModuleGenerator: Header descriptions and opaque errno contract
 #   - PilotAnalyzer/PilotSerializer: Namespace analysis and TOML project round-trip
 #   - Platform ABI: LP64/LLP64/ILP32/IP16 type width resolution
 ```

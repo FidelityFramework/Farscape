@@ -327,494 +327,98 @@ module CallbackSerializerTests =
                 Assert.Equal(1, spec.ListenerStructs.Length)
 
 // =============================================================================
-// CallbackWrapperGenerator: Code Generation
+// Boundary-preserving callback generation
 // =============================================================================
 
-module CallbackWrapperGeneratorTests =
+module BoundaryGenerationTests =
 
     open PilotTypes
     open Farscape.Core.Types
 
-    [<Fact>]
-    let ``generates listener struct builder with dlsym calls`` () =
-        let spec : CallbackSpec = {
-            Registrations = []
-            ListenerStructs = [
-                { Name = "wl_pointer_listener"; RegistrationFunction = Some "wl_pointer_add_listener" }
-            ]
-        }
-        let decls = [
-            CppParser.Declaration.Struct (
-                mkStruct "wl_pointer_listener" [
-                    mkField "enter" "void (*)(void *, struct wl_pointer *)"
-                    mkField "leave" "void (*)(void *, struct wl_pointer *)"
-                    mkField "motion" "void (*)(void *, struct wl_pointer *, uint32_t, wl_fixed_t, wl_fixed_t)"
-                ] None)
-        ]
-        match CallbackWrapperGenerator.generate spec decls "Fidelity.Wayland.Bridge.Callbacks" LP64 [] "Fidelity.Wayland.Callbacks" with
-        | None -> Assert.Fail "Expected some generated output"
-        | Some code ->
-            Assert.Contains("dlsym", code)
-            Assert.Contains("enterSym", code)
-            Assert.Contains("leaveSym", code)
-            Assert.Contains("motionSym", code)
-            Assert.Contains("wl_pointer_listener", code)
+    let private registration : CallbackRegistration =
+        { Function = "register_event"; CallbackParam = "handler"; DataParam = Some "data" }
+    let private spec : CallbackSpec = { Registrations = [registration]; ListenerStructs = [] }
+    let private declarations =
+        [ CppParser.Declaration.Function (
+            mkFunc "register_event" "int" ["handler", "void (*)(unsigned int, void *)"; "data", "void *"]) ]
+    let private render model registrations =
+        let ctx = FidelityCodeGenerator.buildGenerationContext declarations model Map.empty
+        CallbackWrapperGenerator.generateTypedWithModules {spec with Registrations = registrations}
+            declarations "Test.Callbacks" ctx ["Test.Bindings"] (fun _ -> "Test.Bindings")
+        |> Option.get
+
+    [<Theory>]
+    [<InlineData("LP64")>]
+    [<InlineData("LLP64")>]
+    [<InlineData("ILP32")>]
+    [<InlineData("IP16")>]
+    let ``typed forwarding preserves environment without exposing an address`` modelName =
+        let model = match modelName with "LP64" -> LP64 | "LLP64" -> LLP64 | "ILP32" -> ILP32 | _ -> IP16
+        let output = render model [registration]
+        Assert.Contains("(handler: Callback_", output)
+        Assert.Contains("(data: option<CHandle<unit>>)", output)
+        Assert.Contains("Test.Bindings.register_event handler data", output)
+        for forbidden in ["nativeint"; "nativeptr"; "NativePtr"; "dlsym"; "GCHandle"; "Marshal"; "0n"; ".Pointer"] do
+            Assert.DoesNotContain(forbidden, output)
 
     [<Fact>]
-    let ``generates listener builder for delegate-typed fields`` () =
-        let spec : CallbackSpec = {
-            Registrations = []
-            ListenerStructs = [
-                { Name = "wl_pointer_listener"; RegistrationFunction = None }
-            ]
-        }
-        let decls = [
-            CppParser.Declaration.Delegate {
-                Name = "WlPointerEnterHandler"; Parameters = [("data", "void *")]; ReturnType = "void"; Documentation = None }
-            CppParser.Declaration.Delegate {
-                Name = "WlPointerLeaveHandler"; Parameters = [("data", "void *")]; ReturnType = "void"; Documentation = None }
-            CppParser.Declaration.Struct (
-                mkStruct "wl_pointer_listener" [
-                    mkField "enter" "WlPointerEnterHandler"
-                    mkField "leave" "WlPointerLeaveHandler"
-                ] None)
-        ]
-        match CallbackWrapperGenerator.generate spec decls "Fidelity.Wayland.Bridge.Callbacks" LP64 [] "Fidelity.Wayland.Callbacks" with
-        | None -> Assert.Fail "Expected some generated output"
-        | Some code ->
-            Assert.Contains("dlsym", code)
-            Assert.Contains("enterSym", code)
-            Assert.Contains("leaveSym", code)
-            Assert.Contains("buildWlPointerListener", code)
+    let ``registrations retain the owner of each callback contract`` () =
+        let second = {registration with Function = "other_event"}
+        let extra = CppParser.Declaration.Function (
+            mkFunc "other_event" "int" ["handler", "void (*)(unsigned int, void *)"; "data", "void *"])
+        let all = declarations @ [extra]
+        let ctx = FidelityCodeGenerator.buildGenerationContext all LP64 Map.empty
+        let output = CallbackWrapperGenerator.generateTypedWithModules
+                         {spec with Registrations = [registration; second]} all "Test.Callbacks" ctx []
+                         (fun name -> if name = "register_event" then "First.Bindings" else "Second.Bindings") |> Option.get
+        Assert.Contains("First.Bindings.register_event handler data", output)
+        Assert.Contains("Second.Bindings.other_event handler data", output)
+        Assert.Contains("Callback_First", output)
+        Assert.Contains("Callback_Second", output)
 
     [<Fact>]
-    let ``skips listener builder when struct not in declarations`` () =
-        let spec : CallbackSpec = {
-            Registrations = []
-            ListenerStructs = [
-                { Name = "missing_listener"; RegistrationFunction = None }
-            ]
-        }
-        // No struct found → no decls generated → None
-        let result = CallbackWrapperGenerator.generate spec [] "Fidelity.Test.Bridge.Callbacks" LP64 [] "Fidelity.Test.Callbacks"
-        Assert.True(result.IsNone)
+    let ``missing registration declaration is diagnosed instead of silently omitted`` () =
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> render LP64 [{registration with Function = "missing"}] |> ignore)
+        Assert.Contains("missing from the parsed declarations", error.Message)
+
+    [<Theory>]
+    [<InlineData("missing")>]
+    [<InlineData("data")>]
+    let ``callback parameter must exist and be a function pointer`` name =
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> render LP64 [{registration with CallbackParam = name}] |> ignore)
+        Assert.Contains("requires function-pointer parameter", error.Message)
+
+    [<Theory>]
+    [<InlineData("missing")>]
+    [<InlineData("handler")>]
+    let ``environment parameter must exist and be a data pointer`` name =
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> render LP64 [{registration with DataParam = Some name}] |> ignore)
+        Assert.Contains("requires data-pointer environment", error.Message)
 
     [<Fact>]
-    let ``empty callback spec produces None`` () =
-        let spec : CallbackSpec = { Registrations = []; ListenerStructs = [] }
-        let result = CallbackWrapperGenerator.generate spec [] "Ns.Bridge" LP64 [] "Ns"
-        Assert.True(result.IsNone)
+    let ``missing binding module cannot produce an unowned callback entry`` () =
+        let ctx = FidelityCodeGenerator.buildGenerationContext declarations LP64 Map.empty
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> CallbackWrapperGenerator.generateTyped spec declarations "Test.Callbacks" ctx [] |> ignore)
+        Assert.Contains("requires its source binding module", error.Message)
 
     [<Fact>]
-    let ``generates registration wrapper with real function body`` () =
-        let spec : CallbackSpec = {
-            Registrations = [
-                { Function = "g_idle_add"; CallbackParam = "function"; DataParam = Some "data" }
-            ]
-            ListenerStructs = []
-        }
-        let decls = [
-            CppParser.Declaration.Function (
-                mkFunc "g_idle_add" "unsigned int"
-                    [("function", "int (*)(void *)"); ("data", "void *")])
-        ]
-        match CallbackWrapperGenerator.generate spec decls "Fidelity.GTK.Bridge.Callbacks" LP64 [] "Fidelity.GTK.Callbacks" with
-        | None -> Assert.Fail "Expected some output"
-        | Some code ->
-            Assert.Contains("dlsym", code)
-            Assert.Contains("handlerSymbol", code)
-            Assert.Contains("handler", code)
-            Assert.Contains("g_idle_add", code)
-            Assert.Contains("0n", code)  // userdata = 0n
+    let ``legacy symbol and managed delegate bridge cannot emit Clef source`` () =
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> CallbackWrapperGenerator.generate spec declarations "Test.Callbacks" LP64 [] "Test.Listener" |> ignore)
+        Assert.Contains("not admitted Clef source", error.Message)
 
     [<Fact>]
-    let ``registration wrapper without userdata keeps all other params`` () =
-        let spec : CallbackSpec = {
-            Registrations = [
-                { Function = "signal"; CallbackParam = "handler"; DataParam = None }
-            ]
-            ListenerStructs = []
-        }
-        let decls = [
-            CppParser.Declaration.Function (
-                mkFunc "signal" "void (*)(int)"
-                    [("signum", "int"); ("handler", "void (*)(int)")])
-        ]
-        match CallbackWrapperGenerator.generate spec decls "Fidelity.Libc.Bridge.Callbacks" LP64 [] "Fidelity.Libc.Callbacks" with
-        | None -> Assert.Fail "Expected some output"
-        | Some code ->
-            Assert.Contains("signum", code)
-            Assert.Contains("handlerSymbol", code)
-            Assert.Contains("dlsym", code)
+    let ``legacy integer-address callbacks cannot emit Clef source`` () =
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> CallbackWrapperGenerator.generateNative spec declarations "Test.Callbacks" LP64 [] |> ignore)
+        Assert.Contains("violate the Clef FFI boundary", error.Message)
 
     [<Fact>]
-    let ``registration wrapper skipped when function not in declarations`` () =
-        let spec : CallbackSpec = {
-            Registrations = [
-                { Function = "missing_func"; CallbackParam = "cb"; DataParam = None }
-            ]
-            ListenerStructs = []
-        }
-        let result = CallbackWrapperGenerator.generate spec [] "Ns.Bridge" LP64 [] "Ns"
-        Assert.True(result.IsNone)
-
-// =============================================================================
-// CallbackWrapperGenerator: Managed Trampoline Generation (Pattern C)
-// =============================================================================
-
-module ManagedTrampolineTests =
-
-    open PilotTypes
-    open Farscape.Core.Types
+    let ``listener fields cannot be defaulted into foreign function addresses`` () =
+        let listeners : CallbackSpec = { Registrations = []; ListenerStructs = [{ Name = "listener"; RegistrationFunction = None }] }
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> CallbackWrapperGenerator.generateL2 listeners [] "Test.Listeners" [] |> ignore)
+        Assert.Contains("declared native entry records and initialized fields", error.Message)
 
     [<Fact>]
-    let ``generates delegate type for callback with userdata`` () =
-        let spec : CallbackSpec = {
-            Registrations = [
-                { Function = "xrtRunSetCallback"; CallbackParam = "callback"; DataParam = Some "data" }
-            ]
-            ListenerStructs = []
-        }
-        let decls = [
-            CppParser.Declaration.Function (
-                mkFunc "xrtRunSetCallback" "int"
-                    [("rhdl", "void *"); ("state", "int");
-                     ("callback", "void (*)(void *, int, void *)"); ("data", "void *")])
-        ]
-        match CallbackWrapperGenerator.generate spec decls "Fidelity.XRT.Bridge.Callbacks" LP64 [] "Fidelity.XRT.Callbacks" with
-        | None -> Assert.Fail "Expected some generated output"
-        | Some code ->
-            Assert.Contains("Delegate", code)
-            Assert.Contains("delegate of", code)
-
-    [<Fact>]
-    let ``trampoline wrapper accepts managed function parameter`` () =
-        let spec : CallbackSpec = {
-            Registrations = [
-                { Function = "xrtRunSetCallback"; CallbackParam = "callback"; DataParam = Some "data" }
-            ]
-            ListenerStructs = []
-        }
-        let decls = [
-            CppParser.Declaration.Function (
-                mkFunc "xrtRunSetCallback" "int"
-                    [("rhdl", "void *"); ("state", "int");
-                     ("callback", "void (*)(void *, int, void *)"); ("data", "void *")])
-        ]
-        match CallbackWrapperGenerator.generate spec decls "Fidelity.XRT.Bridge.Callbacks" LP64 [] "Fidelity.XRT.Callbacks" with
-        | None -> Assert.Fail "Expected some output"
-        | Some code ->
-            // Should have a Managed-suffixed wrapper
-            Assert.Contains("Managed", code)
-            // Should accept a handler function, not a string
-            Assert.Contains("handler", code)
-
-    [<Fact>]
-    let ``trampoline wrapper pins delegate via GCHandle`` () =
-        let spec : CallbackSpec = {
-            Registrations = [
-                { Function = "xrtRunSetCallback"; CallbackParam = "callback"; DataParam = Some "data" }
-            ]
-            ListenerStructs = []
-        }
-        let decls = [
-            CppParser.Declaration.Function (
-                mkFunc "xrtRunSetCallback" "int"
-                    [("rhdl", "void *"); ("state", "int");
-                     ("callback", "void (*)(void *, int, void *)"); ("data", "void *")])
-        ]
-        match CallbackWrapperGenerator.generate spec decls "Fidelity.XRT.Bridge.Callbacks" LP64 [] "Fidelity.XRT.Callbacks" with
-        | None -> Assert.Fail "Expected some output"
-        | Some code ->
-            Assert.Contains("GCHandle.Alloc", code)
-            Assert.Contains("GetFunctionPointerForDelegate", code)
-
-    [<Fact>]
-    let ``trampoline wrapper returns tuple of result and pin`` () =
-        let spec : CallbackSpec = {
-            Registrations = [
-                { Function = "xrtRunSetCallback"; CallbackParam = "callback"; DataParam = Some "data" }
-            ]
-            ListenerStructs = []
-        }
-        let decls = [
-            CppParser.Declaration.Function (
-                mkFunc "xrtRunSetCallback" "int"
-                    [("rhdl", "void *"); ("state", "int");
-                     ("callback", "void (*)(void *, int, void *)"); ("data", "void *")])
-        ]
-        match CallbackWrapperGenerator.generate spec decls "Fidelity.XRT.Bridge.Callbacks" LP64 [] "Fidelity.XRT.Callbacks" with
-        | None -> Assert.Fail "Expected some output"
-        | Some code ->
-            Assert.Contains("(result, pin)", code)
-            Assert.Contains("GCHandle)", code)
-
-    [<Fact>]
-    let ``trampoline strips userdata from managed function signature`` () =
-        let spec : CallbackSpec = {
-            Registrations = [
-                { Function = "xrtRunSetCallback"; CallbackParam = "callback"; DataParam = Some "data" }
-            ]
-            ListenerStructs = []
-        }
-        let decls = [
-            CppParser.Declaration.Function (
-                mkFunc "xrtRunSetCallback" "int"
-                    [("rhdl", "void *"); ("state", "int");
-                     ("callback", "void (*)(void *, int, void *)"); ("data", "void *")])
-        ]
-        match CallbackWrapperGenerator.generate spec decls "Fidelity.XRT.Bridge.Callbacks" LP64 [] "Fidelity.XRT.Callbacks" with
-        | None -> Assert.Fail "Expected some output"
-        | Some code ->
-            // Managed handler should have 2 params (void*, int), not 3 (userdata stripped)
-            Assert.Contains("nativeint -> int -> unit", code)
-
-    [<Fact>]
-    let ``trampoline passes 0n for userdata param`` () =
-        let spec : CallbackSpec = {
-            Registrations = [
-                { Function = "g_idle_add"; CallbackParam = "function"; DataParam = Some "data" }
-            ]
-            ListenerStructs = []
-        }
-        let decls = [
-            CppParser.Declaration.Function (
-                mkFunc "g_idle_add" "unsigned int"
-                    [("function", "int (*)(void *)"); ("data", "void *")])
-        ]
-        match CallbackWrapperGenerator.generate spec decls "Fidelity.GTK.Bridge.Callbacks" LP64 [] "Fidelity.GTK.Callbacks" with
-        | None -> Assert.Fail "Expected some output"
-        | Some code ->
-            // The L1 call should pass 0n for userdata
-            Assert.Contains("0n", code)
-
-    [<Fact>]
-    let ``trampoline not generated when function pointer type unparseable`` () =
-        // Typedef'd callback type cannot be parsed as function pointer
-        let spec : CallbackSpec = {
-            Registrations = [
-                { Function = "hipStreamAddCallback"; CallbackParam = "callback"; DataParam = Some "userData" }
-            ]
-            ListenerStructs = []
-        }
-        let decls = [
-            CppParser.Declaration.Function (
-                mkFunc "hipStreamAddCallback" "int"
-                    [("stream", "void *"); ("callback", "hipStreamCallback_t");
-                     ("userData", "void *"); ("flags", "unsigned int")])
-        ]
-        match CallbackWrapperGenerator.generate spec decls "Bridge.Callbacks" LP64 [] "Ns.Callbacks" with
-        | None -> Assert.Fail "Expected dlsym wrapper even without trampoline"
-        | Some code ->
-            // dlsym wrapper should still be generated (Pattern A)
-            Assert.Contains("dlsym", code)
-            // But trampoline should NOT be generated (can't parse typedef type)
-            Assert.DoesNotContain("GCHandle", code)
-            Assert.DoesNotContain("Delegate", code)
-
-    [<Fact>]
-    let ``both dlsym and trampoline wrappers generated for same registration`` () =
-        let spec : CallbackSpec = {
-            Registrations = [
-                { Function = "xrtRunSetCallback"; CallbackParam = "callback"; DataParam = Some "data" }
-            ]
-            ListenerStructs = []
-        }
-        let decls = [
-            CppParser.Declaration.Function (
-                mkFunc "xrtRunSetCallback" "int"
-                    [("rhdl", "void *"); ("state", "int");
-                     ("callback", "void (*)(void *, int, void *)"); ("data", "void *")])
-        ]
-        match CallbackWrapperGenerator.generate spec decls "Bridge.Callbacks" LP64 [] "Ns.Callbacks" with
-        | None -> Assert.Fail "Expected output"
-        | Some code ->
-            // Pattern A: dlsym wrapper
-            Assert.Contains("handlerSymbol", code)
-            Assert.Contains("dlsym", code)
-            // Pattern C: trampoline wrapper
-            Assert.Contains("GCHandle", code)
-            Assert.Contains("GetFunctionPointerForDelegate", code)
-
-// =============================================================================
-// L2 Direct Builder Generation (generateListenerDirectBuilder / generateL2)
-// =============================================================================
-
-module L2DirectBuilderTests =
-
-    open PilotTypes
-    open Farscape.Core.Types
-
-    let private listenerSpec name =
-        { Registrations = []; ListenerStructs = [{ Name = name; RegistrationFunction = None }] }
-
-    [<Fact>]
-    let ``L2 builder constructs record with nativeint params`` () =
-        let spec = listenerSpec "wl_registry_listener"
-        let decls = [
-            CppParser.Declaration.Struct (
-                mkStruct "wl_registry_listener" [
-                    mkField "global" "void (*)(void *, struct wl_registry *, uint32_t, const char *, uint32_t)"
-                    mkField "global_remove" "void (*)(void *, struct wl_registry *, uint32_t)"
-                ] None)
-        ]
-        match CallbackWrapperGenerator.generateL2 spec decls "Fidelity.Wayland.Callbacks" [] with
-        | None -> Assert.Fail "Expected L2 output"
-        | Some code ->
-            // Should have nativeint params, not string params
-            Assert.Contains("nativeint", code)
-            Assert.DoesNotContain("string", code)
-            Assert.DoesNotContain("dlsym", code)
-            // Should construct record directly
-            Assert.Contains("buildWlRegistryListener", code)
-            Assert.Contains("wl_registry_listener", code)
-
-    [<Fact>]
-    let ``L2 builder escapes keyword field names in parameters and identifiers`` () =
-        let spec = listenerSpec "wl_registry_listener"
-        let decls = [
-            CppParser.Declaration.Struct (
-                mkStruct "wl_registry_listener" [
-                    mkField "global" "void (*)(void *, struct wl_registry *, uint32_t, const char *, uint32_t)"
-                    mkField "global_remove" "void (*)(void *, struct wl_registry *, uint32_t)"
-                ] None)
-        ]
-        match CallbackWrapperGenerator.generateL2 spec decls "Fidelity.Wayland.Callbacks" [] with
-        | None -> Assert.Fail "Expected L2 output"
-        | Some code ->
-            // 'global' is an F# keyword — must be backtick-escaped in parameter and identifier
-            Assert.Contains("``global``", code)
-            // 'global_remove' is NOT a keyword — should appear unescaped
-            Assert.Contains("global_remove", code)
-            Assert.DoesNotContain("``global_remove``", code)
-
-    [<Fact>]
-    let ``L2 builder handles done keyword field`` () =
-        let spec = listenerSpec "wl_callback_listener"
-        let decls = [
-            CppParser.Declaration.Struct (
-                mkStruct "wl_callback_listener" [
-                    mkField "done" "void (*)(void *, struct wl_callback *, uint32_t)"
-                ] None)
-        ]
-        match CallbackWrapperGenerator.generateL2 spec decls "Fidelity.Wayland.Callbacks" [] with
-        | None -> Assert.Fail "Expected L2 output"
-        | Some code ->
-            // 'done' is an F# keyword — must be escaped
-            Assert.Contains("``done``", code)
-            Assert.Contains("buildWlCallbackListener", code)
-
-    [<Fact>]
-    let ``L2 builder zeroes non-callback fields`` () =
-        let spec = listenerSpec "my_listener"
-        let decls = [
-            CppParser.Declaration.Struct (
-                mkStruct "my_listener" [
-                    mkField "handler" "void (*)(void *)"
-                    mkField "reserved" "int"
-                ] None)
-        ]
-        match CallbackWrapperGenerator.generateL2 spec decls "My.Callbacks" [] with
-        | None -> Assert.Fail "Expected L2 output"
-        | Some code ->
-            // handler is a callback → nativeint param
-            Assert.Contains("handler", code)
-            // reserved is NOT a callback → NativeDefault.zeroed ()
-            Assert.Contains("NativeDefault.zeroed ()", code)
-
-    [<Fact>]
-    let ``L2 builder type-qualifies first field for CCS disambiguation`` () =
-        let spec = listenerSpec "wl_registry_listener"
-        let decls = [
-            CppParser.Declaration.Struct (
-                mkStruct "wl_registry_listener" [
-                    mkField "global" "void (*)(void *, struct wl_registry *, uint32_t, const char *, uint32_t)"
-                    mkField "global_remove" "void (*)(void *, struct wl_registry *, uint32_t)"
-                ] None)
-        ]
-        match CallbackWrapperGenerator.generateL2 spec decls "Fidelity.Wayland.Callbacks" [] with
-        | None -> Assert.Fail "Expected L2 output"
-        | Some code ->
-            // First field should be type-qualified: wl_registry_listener.``global``
-            Assert.Contains("wl_registry_listener.``global``", code)
-            // Second field should NOT be type-qualified
-            Assert.DoesNotContain("wl_registry_listener.global_remove", code)
-            Assert.Contains("global_remove", code)
-
-    [<Fact>]
-    let ``L2 builder returns empty for struct with no callback fields`` () =
-        let spec = listenerSpec "plain_struct"
-        let decls = [
-            CppParser.Declaration.Struct (
-                mkStruct "plain_struct" [
-                    mkField "x" "int"
-                    mkField "y" "int"
-                ] None)
-        ]
-        let result = CallbackWrapperGenerator.generateL2 spec decls "Ns.Callbacks" []
-        Assert.True(result.IsNone)
-
-    [<Fact>]
-    let ``L3 bridge builder delegates to L2 module`` () =
-        let spec = listenerSpec "wl_registry_listener"
-        let decls = [
-            CppParser.Declaration.Struct (
-                mkStruct "wl_registry_listener" [
-                    mkField "global" "void (*)(void *, struct wl_registry *, uint32_t, const char *, uint32_t)"
-                    mkField "global_remove" "void (*)(void *, struct wl_registry *, uint32_t)"
-                ] None)
-        ]
-        match CallbackWrapperGenerator.generate spec decls "Bridge.Callbacks" LP64 [] "Fidelity.Wayland.Callbacks" with
-        | None -> Assert.Fail "Expected L3 output"
-        | Some code ->
-            // L3 should reference L2 module
-            Assert.Contains("Fidelity.Wayland.Callbacks.buildWlRegistryListener", code)
-            // L3 should use dlsym for resolution
-            Assert.Contains("Fidelity.Libc.DynamicLink.dlsym", code)
-            // L3 should have string params (Sym suffix)
-            Assert.Contains("globalSym", code)
-            Assert.Contains("global_removeSym", code)
-
-    [<Fact>]
-    let ``L2 and L3 produce different builder signatures`` () =
-        let spec = listenerSpec "xdg_surface_listener"
-        let decls = [
-            CppParser.Declaration.Struct (
-                mkStruct "xdg_surface_listener" [
-                    mkField "configure" "void (*)(void *, struct xdg_surface *, uint32_t)"
-                ] None)
-        ]
-        let l2 =
-            match CallbackWrapperGenerator.generateL2 spec decls "Fidelity.Wayland.Callbacks" [] with
-            | Some c -> c | None -> failwith "no L2"
-        let l3 =
-            match CallbackWrapperGenerator.generate spec decls "Bridge.Callbacks" LP64 [] "Fidelity.Wayland.Callbacks" with
-            | Some c -> c | None -> failwith "no L3"
-        // L2: nativeint params, record construction
-        Assert.Contains("nativeint", l2)
-        Assert.DoesNotContain("string", l2)
-        Assert.DoesNotContain("dlsym", l2)
-        // L3: string params, dlsym delegation
-        Assert.Contains("string", l3)
-        Assert.Contains("dlsym", l3)
-        Assert.Contains("Fidelity.Wayland.Callbacks.buildXdgSurfaceListener", l3)
-
-    [<Fact>]
-    let ``L2 builder handles delegate-typed callback fields`` () =
-        let spec = listenerSpec "drm_listener"
-        let decls = [
-            CppParser.Declaration.Delegate {
-                Name = "DrmEventHandler"; Parameters = [("data", "void *")]; ReturnType = "void"; Documentation = None }
-            CppParser.Declaration.Struct (
-                mkStruct "drm_listener" [
-                    mkField "page_flip" "DrmEventHandler"
-                    mkField "vblank" "DrmEventHandler"
-                ] None)
-        ]
-        match CallbackWrapperGenerator.generateL2 spec decls "Fidelity.DRM.Callbacks" [] with
-        | None -> Assert.Fail "Expected L2 output"
-        | Some code ->
-            Assert.Contains("page_flip", code)
-            Assert.Contains("vblank", code)
-            Assert.Contains("nativeint", code)
-            Assert.Contains("buildDrmListener", code)
+    let ``empty callback configuration generates no bridge`` () =
+        let empty : CallbackSpec = { Registrations = []; ListenerStructs = [] }
+        Assert.True((CallbackWrapperGenerator.generate empty [] "Test.Callbacks" LP64 [] "Test.Listeners").IsNone)
+        Assert.True((CallbackWrapperGenerator.generateL2 empty [] "Test.Listeners" []).IsNone)

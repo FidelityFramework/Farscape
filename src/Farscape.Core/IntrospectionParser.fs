@@ -21,6 +21,8 @@ module IntrospectionParser =
         Name: string
         Type: TypeRef
         Nullable: bool
+        /// Explicit GIR nullable="0" / allow-none="0" evidence, never inferred from omission.
+        Nonnull: bool
     }
 
     /// A signal as its namespace declares it.
@@ -33,6 +35,7 @@ module IntrospectionParser =
         Parameters: SignalParameter list
         Return: TypeRef
         ReturnNullable: bool
+        ReturnNonnull: bool
         Documentation: string option
     }
 
@@ -58,14 +61,24 @@ module IntrospectionParser =
         SymbolPrefix: string
         Name: string
         Parameters: (string * string * bool) list
+        NonnullParameters: Set<string>
         ReturnCType: string
         ReturnNullable: bool
+        ReturnNonnull: bool
         Documentation: string option
     }
 
     let private attr name node = XmlNode.attr name node |> Option.filter (fun v -> v <> "")
     let private attrOr name fallback node = attr name node |> Option.defaultValue fallback
-    let private nullable node = attr "nullable" node = Some "1" || attr "allow-none" node = Some "1"
+    let private nullable node =
+        ["nullable"; "allow-none"] |> List.exists (fun name -> attr name node |> Option.exists (fun value -> value = "1" || value = "true"))
+    let private nonnull node =
+        ["nullable"; "allow-none"] |> List.exists (fun name -> attr name node |> Option.exists (fun value -> value = "0" || value = "false"))
+
+    let private collectResults results =
+        match results |> List.tryPick (function Error error -> Some error | Ok _ -> None) with
+        | Some error -> Error error
+        | None -> Ok (results |> List.choose (function Ok value -> Some value | Error _ -> None))
 
     let private typeRefOf (node: XmlNode) : TypeRef option =
         match XmlNode.element "type" node, XmlNode.element "array" node with
@@ -79,30 +92,43 @@ module IntrospectionParser =
         |> Option.map (fun text -> text.Trim().Split('\n').[0].Trim())
         |> Option.filter (fun line -> line <> "")
 
-    let private signalsOf (nsSymbolPrefix: string) (cls: XmlNode) : RawSignal list =
+    let private signalsOf (nsSymbolPrefix: string) (cls: XmlNode) : Result<RawSignal list, string> =
         match attr "name" cls, attr "c:type" cls with
         | Some className, Some cType ->
             let symbolPrefix = attrOr "c:symbol-prefix" (className.ToLowerInvariant()) cls
             XmlNode.elementsNamed "glib:signal" cls
-            |> List.choose (fun signal ->
+            |> List.map (fun signal ->
+                let signalName = attrOr "name" "" signal
                 let parameters =
                     XmlNode.element "parameters" signal
                     |> Option.map (XmlNode.elementsNamed "parameter")
                     |> Option.defaultValue []
-                    |> List.choose (fun p ->
-                        typeRefOf p |> Option.map (fun t ->
-                            { Name = attrOr "name" "" p; Type = t
-                              Nullable = nullable p }))
+                    |> List.map (fun p ->
+                        let name = attrOr "name" "" p
+                        match typeRefOf p with
+                        | _ when name = "" -> Error $"signal '{className}::{signalName}' has an unnamed callback parameter; nullability evidence requires a unique participant name"
+                        | None -> Error $"signal '{className}::{signalName}': parameter '{name}' has no declared type; the complete native callback arity cannot be established"
+                        | Some _ when nullable p && nonnull p -> Error $"signal '{className}::{signalName}': parameter '{name}' has contradictory GIR nullability evidence"
+                        | Some t -> Ok { Name = name; Type = t; Nullable = nullable p; Nonnull = nonnull p })
+                    |> collectResults
+                    |> Result.bind (fun parameters ->
+                        let names = parameters |> List.map (fun parameter -> parameter.Name)
+                        if (List.distinct names).Length <> names.Length then
+                            Error $"signal '{className}::{signalName}' has duplicate callback parameter names; nullability evidence requires unique participants"
+                        else Ok parameters)
                 let result =
                     XmlNode.element "return-value" signal
-                    |> Option.bind (fun node -> typeRefOf node |> Option.map (fun typ -> typ, nullable node))
-                match attr "name" signal, result with
-                | Some name, Some (ret, returnNullable) ->
-                    Some { Class = className; ClassCType = cType; SymbolPrefix = nsSymbolPrefix + "_" + symbolPrefix
-                           Name = name; Parameters = parameters; Return = ret; ReturnNullable = returnNullable
-                           Documentation = firstDocLine signal }
-                | _ -> None)
-        | _ -> []
+                    |> Option.bind (fun node -> typeRefOf node |> Option.map (fun typ -> typ, nullable node, nonnull node))
+                match attr "name" signal, result, parameters with
+                | _, _, Error error -> Error error
+                | Some name, Some (_, true, true), _ -> Error $"signal '{className}::{name}': result has contradictory GIR nullability evidence"
+                | Some name, Some (ret, returnNullable, returnNonnull), Ok parameters ->
+                    Ok { Class = className; ClassCType = cType; SymbolPrefix = nsSymbolPrefix + "_" + symbolPrefix
+                         Name = name; Parameters = parameters; Return = ret; ReturnNullable = returnNullable; ReturnNonnull = returnNonnull
+                         Documentation = firstDocLine signal }
+                | _ -> Error $"signal '{className}::{signalName}' has no name or declared result type")
+            |> collectResults
+        | _ -> Ok []
 
     /// Parse one introspection document.
     let parseDocument (content: string) : Result<Namespace, string> =
@@ -131,9 +157,12 @@ module IntrospectionParser =
                 let signals =
                     [ "class"; "interface" ]
                     |> List.collect (fun kind -> XmlNode.elementsNamed kind ns)
-                    |> List.collect (signalsOf symbolPrefix)
-                Ok { Name = name; SymbolPrefix = symbolPrefix
-                     Types = Map.ofList (pointerTypes @ valueTypes); Signals = signals }
+                    |> List.map (signalsOf symbolPrefix)
+                    |> collectResults
+                    |> Result.map List.concat
+                signals |> Result.map (fun signals ->
+                    { Name = name; SymbolPrefix = symbolPrefix
+                      Types = Map.ofList (pointerTypes @ valueTypes); Signals = signals })
 
     /// Load the listed introspection files.
     let load (paths: string list) : Result<Repository, string> =
@@ -209,7 +238,8 @@ module IntrospectionParser =
                             { Namespace = nsName; Class = s.Class; ClassCType = s.ClassCType; SymbolPrefix = s.SymbolPrefix
                               Name = s.Name
                               Parameters = parameters |> List.choose (function Ok p -> Some p | Error _ -> None)
-                              ReturnCType = ret; ReturnNullable = s.ReturnNullable; Documentation = s.Documentation })
+                              NonnullParameters = s.Parameters |> List.choose (fun p -> if p.Nonnull then Some p.Name else None) |> Set.ofList
+                              ReturnCType = ret; ReturnNullable = s.ReturnNullable; ReturnNonnull = s.ReturnNonnull; Documentation = s.Documentation })
                 | matches ->
                     let choices = matches |> List.map (fun (nsName, _) -> $"{nsName}.{className}::{signalName}") |> String.concat ", "
                     Error $"signal '{entry}' is ambiguous; select a namespace-qualified signal: {choices}"

@@ -40,7 +40,7 @@ module BindingGenerator =
 
     /// Generate Clef bindings from a C/C++ header file.
     /// Returns Result to enforce proper error handling - fails fast on parse errors.
-    let generateBindings (options: GenerationOptions) : Result<GenerationResult, string> =
+    let private generateBindingsCore (options: GenerationOptions) : Result<GenerationResult, string> =
         logVerbose $"Starting binding generation for {options.HeaderFile}" options.Verbose
         logVerbose $"Target library: {options.LibraryName}" options.Verbose
         logVerbose $"Output directory: {options.OutputDirectory}" options.Verbose
@@ -54,35 +54,37 @@ module BindingGenerator =
         | Ok declarations ->
             logVerbose $"Successfully parsed {declarations.Length} declarations" options.Verbose
 
-            Directory.CreateDirectory(options.OutputDirectory) |> ignore
-
             logVerbose "Generating Fidelity Clef source..." options.Verbose
             let generatedCode = FidelityCodeGenerator.generate declarations options.Namespace options.LibraryName options.DataModel Map.empty
 
             let lastSegment = options.Namespace.Split('.') |> Array.last
             let outputFileName = $"{lastSegment}.clef"
             let outputPath = Path.Combine(options.OutputDirectory, outputFileName)
-            File.WriteAllText(outputPath, generatedCode)
-
-            logVerbose $"Fidelity binding written to: {outputPath}" options.Verbose
-
-            let wrapperFiles =
+            let wrapperOutputs =
                 if options.GenerateWrappers then
                     logVerbose "Generating idiomatic wrappers..." options.Verbose
                     let wrapperNamespace = $"{options.Namespace}.Api"
                     let wrapperCode =
                         WrapperCodeGenerator.generate declarations wrapperNamespace options.LibraryName options.Namespace WrapperTypes.NoErrors options.DataModel None
                     let wrapperPath = Path.Combine(options.OutputDirectory, $"{lastSegment}Api.clef")
-                    File.WriteAllText(wrapperPath, wrapperCode)
-                    logVerbose $"Wrapper module written to: {wrapperPath}" options.Verbose
-                    [wrapperPath]
+                    [wrapperPath, wrapperCode]
                 else []
 
+            // Settle every source projection before replacing any generated file.
+            Directory.CreateDirectory(options.OutputDirectory) |> ignore
+            for path, code in (outputPath, generatedCode) :: wrapperOutputs do
+                File.WriteAllText(path, code)
+                logVerbose $"Binding module written to: {path}" options.Verbose
+
             Ok {
-                OutputFiles = outputPath :: wrapperFiles
+                OutputFiles = outputPath :: (wrapperOutputs |> List.map fst)
                 DeclarationCount = declarations.Length
                 Advisories = []
             }
+
+    let generateBindings options : Result<GenerationResult, string> =
+        try generateBindingsCore options
+        with ex -> Error $"Binding generation failed: {ex.Message}"
 
     /// Locate a platform dependency when a pilot lives in a nested experimental tree.
     let rec private findProjectAbove directory fileName =
@@ -91,6 +93,47 @@ module BindingGenerator =
         else
             let parent = Directory.GetParent directory
             if isNull parent then None else findProjectAbove parent.FullName fileName
+
+    /// Resolve actual dependencies from the pilot/output tree or the running generator.
+    /// Never publish a guessed path that cannot be loaded on regeneration.
+    let private resolveProjectDependency directory fileName siblingPath environmentVariable =
+        let overridePath = System.Environment.GetEnvironmentVariable environmentVariable
+        if not (System.String.IsNullOrWhiteSpace overridePath) then
+            let path = Path.GetFullPath overridePath
+            if File.Exists path then path
+            else invalidOp $"{environmentVariable} names a missing dependency: {path}"
+        else
+            match findProjectAbove directory fileName with
+            | Some path -> path
+            | None ->
+                let rec findSibling current =
+                    let candidate = Path.Combine(current, siblingPath)
+                    if File.Exists candidate then Some candidate
+                    else
+                        let parent = Directory.GetParent current
+                        if isNull parent then None else findSibling parent.FullName
+                [directory; Path.GetDirectoryName(typeof<GenerationOptions>.Assembly.Location)]
+                |> List.tryPick findSibling
+                |> Option.defaultWith (fun () ->
+                    invalidOp $"Cannot locate {fileName}. Set {environmentVariable} to an existing project before generating bindings.")
+
+    let private projectDirectoryForOutput outputDir =
+        let fullPath = Path.GetFullPath outputDir
+        let parent = Directory.GetParent fullPath
+        // Platform packages share the manifest directory above Bindings/<package>.
+        // Standalone generation must keep its manifest with its own output.
+        if not (isNull parent) && parent.Name = "Bindings" then parent.Parent.FullName
+        else fullPath
+
+    let private validateProjectDependencies (project: PilotProject) directory =
+        let descriptorOnly = project.Options |> Option.exists (fun opts -> opts.DescriptorOnlyDependencies)
+        if not descriptorOnly then
+            resolveProjectDependency directory "Fidelity.Platform.fidproj"
+                "Fidelity.Platform/Environments/Linux/x86_64/Fidelity.Platform.fidproj"
+                "FIDELITY_PLATFORM_PROJECT" |> ignore
+        let metadataProject = if descriptorOnly then "BAREWire.BindingMetadata.fidproj" else "BAREWire.fidproj"
+        resolveProjectDependency directory metadataProject
+            (Path.Combine("BAREWire", "src", metadataProject)) "BAREWIRE_METADATA_PROJECT" |> ignore
 
     /// Generate a canonical .fidproj file for the binding library.
     /// Fully automatic — derives everything from what Farscape already knows.
@@ -101,15 +144,7 @@ module BindingGenerator =
         (allFiles: string list)
         (verbose: bool) : string option =
         let packageName = nsPrefix
-        // fidproj sits two levels up from the output directory when nested in
-        // a platform tree (e.g. .../CPU/Linux/x86_64/Bindings/Gtk3 → .../CPU/Linux/x86_64/).
-        // For flat output directories (e.g. /tmp/farscape-xrt), use outputDir directly.
-        let fidprojDir =
-            let candidate = Path.GetDirectoryName(Path.GetDirectoryName(outputDir))
-            if System.String.IsNullOrEmpty(candidate) || candidate = "/" || candidate = Path.GetPathRoot(outputDir) then
-                outputDir
-            else
-                candidate
+        let fidprojDir = projectDirectoryForOutput outputDir
         let relativeSources =
             allFiles
             |> List.map (fun f ->
@@ -156,35 +191,19 @@ module BindingGenerator =
         sb.AppendLine("word_size = 64") |> ignore
         sb.AppendLine() |> ignore
         sb.AppendLine("[dependencies]") |> ignore
-        // If Fidelity.Platform.fidproj exists in the same directory (e.g., sub-libraries within
-        // Fidelity.Platform), reference it directly. Otherwise, compute relative path to the
-        // sibling repo following the standard layout: <repo>/CPU/Linux/x86_64/
-        let platformFidprojLocal = findProjectAbove fidprojDir "Fidelity.Platform.fidproj"
-        let platformDepPath =
-            match platformFidprojLocal with
-            | Some path -> Path.GetRelativePath(fidprojDir, path).Replace('\\', '/')
-            | None ->
-                // Standard sibling repo layout: go up to repos root, then into Fidelity.Platform
-                let reposDir = Path.GetFullPath(Path.Combine(fidprojDir, "../../../../"))
-                let targetFidproj = Path.Combine(reposDir, "Fidelity.Platform/Environments/Linux/x86_64/Fidelity.Platform.fidproj")
-                if File.Exists(targetFidproj) then
-                    Path.GetRelativePath(fidprojDir, targetFidproj).Replace('\\', '/')
-                else
-                    // Absolute path as last resort
-                    Path.GetFullPath(targetFidproj).Replace('\\', '/')
         let descriptorOnly = project.Options |> Option.exists (fun opts -> opts.DescriptorOnlyDependencies)
         if not descriptorOnly then
+            let platformPath = resolveProjectDependency fidprojDir "Fidelity.Platform.fidproj"
+                                   "Fidelity.Platform/Environments/Linux/x86_64/Fidelity.Platform.fidproj"
+                                   "FIDELITY_PLATFORM_PROJECT"
+            let platformDepPath = Path.GetRelativePath(fidprojDir, platformPath).Replace('\\', '/')
             sb.AppendLine($"Fidelity.Platform = {{ path = \"{platformDepPath}\" }}") |> ignore
         // The descriptors reference BAREWire's Hardware and Descriptors vocabularies
+        let metadataProject = if descriptorOnly then "BAREWire.BindingMetadata.fidproj" else "BAREWire.fidproj"
         let bareWireDepPath =
-            let platformDirectory = Path.GetDirectoryName(Path.GetFullPath(Path.Combine(fidprojDir, platformDepPath)))
-            let reposDir = Path.GetFullPath(Path.Combine(platformDirectory, "../../../../"))
-            let metadataProject = if descriptorOnly then "BAREWire.BindingMetadata.fidproj" else "BAREWire.fidproj"
-            let targetFidproj = Path.Combine(reposDir, "BAREWire/src", metadataProject)
-            if File.Exists(targetFidproj) then
-                Path.GetRelativePath(fidprojDir, targetFidproj).Replace('\\', '/')
-            else
-                Path.GetFullPath(targetFidproj).Replace('\\', '/')
+            let path = resolveProjectDependency fidprojDir metadataProject
+                           (Path.Combine("BAREWire", "src", metadataProject)) "BAREWIRE_METADATA_PROJECT"
+            Path.GetRelativePath(fidprojDir, path).Replace('\\', '/')
         sb.AppendLine($"BAREWire = {{ path = \"{bareWireDepPath}\" }}") |> ignore
 
         let content = sb.ToString()
@@ -231,9 +250,20 @@ module BindingGenerator =
     /// Shared types (referenced by 2+ namespaces) go into a root Types.clef.
     /// Supports multi-header projects: parses each header independently, merges with dedup.
     /// When generateWrappers is true, also generates Layer 2 idiomatic wrappers.
-    let generateFromProject (projectPath: string) (verbose: bool) (generateWrappers: bool) (dataModel: PlatformABI) : Result<GenerationResult, string> =
+    let private generateFromProjectCore (projectPath: string) (verbose: bool) (generateWrappers: bool) (dataModel: PlatformABI) : Result<GenerationResult, string> =
         match PilotSerializer.loadFromFile projectPath with
         | Error e -> Error $"Failed to load project: {e}"
+        | Ok _ when dataModel <> PlatformABI.LP64 ->
+            Error "Project generation currently declares a Linux x86_64 LP64 target. A different ABI requires an explicit target, header/sysroot and link contract; emitting it with the Linux manifest would be incorrect. No bindings were written."
+        | Ok project when project.Options |> Option.exists (fun opts -> opts.NativePointerSurface) ->
+            Error "experimental_native_pointer_surface exposes addresses in Clef source and violates the FFI boundary contract. Remove this option and declare CHandle, callback, reference and ownership projections in the pilot. No bindings were written."
+        | Ok project when not project.Library.XmlProtocols.IsEmpty
+                          && not (project.Options |> Option.exists (fun opts -> opts.TypedProtocol)) ->
+            Error "XML protocol generation requires options.typed_protocol = true. The legacy protocol generator exposes pointer operations in Clef source. No bindings were written."
+        | Ok project when generateWrappers && (project.ErrorConventions |> Option.exists (fun spec -> spec.Default = PilotTypes.Errno)) ->
+            Error "errno wrappers require a declared native scalar accessor; an opaque errno handle cannot be dereferenced in Clef. No bindings were written."
+        | Ok project when generateWrappers && (project.ErrorConventions |> Option.exists (fun spec -> match spec.Default with PilotTypes.NullWithReason _ -> true | _ -> false)) ->
+            Error "null_with_reason wrappers require the declared reason return type and a native text extent/ownership projection. An assumed error-text handle is not an admitted contract. No bindings were written."
         | Ok project ->
             // Parse C/C++ headers
             let headerResults =
@@ -285,24 +315,8 @@ module BindingGenerator =
                         | Ok repo -> Some repo
                         | Error e -> failwith e
 
-                // Split XML protocol output: type declarations flow through FidelityCodeGenerator,
-                // request implementations are FsDecl with marshal call bodies (injected later)
-                let marshalConfig =
-                    match project.ProtocolConfig with
-                    | Some cfg -> cfg
-                    | None ->
-                        // Default: Wayland-style marshal dispatch
-                        ({ MarshalFunction = "wl_proxy_marshal_array_flags"
-                           MarshalModule = "Fidelity.Wayland.Core"
-                           VersionFunction = "wl_proxy_get_version"
-                           InterfaceResolution = "dlsym"
-                           DestroyFlag = 1u } : PilotTypes.ProtocolConfig)
-
                 let typedProtocol = project.Options |> Option.exists (fun o -> o.TypedProtocol)
-                let xmlTypeDecls = if typedProtocol then [] else xmlProtocols |> List.map ProtocolParser.toTypeDeclarations
-
-                let allDeclLists = headerDeclLists @ xmlTypeDecls
-                let declarations = DeclarationAlgebra.mergeDeclarations allDeclLists
+                let declarations = DeclarationAlgebra.mergeDeclarations headerDeclLists
                 let projections = project.Options |> Option.map (fun opts -> opts.Bindings) |> Option.defaultValue []
                 let aliases = projections |> List.choose (fun binding ->
                     let original = declarations |> List.tryPick (function CppParser.Declaration.Function f when f.Name = binding.Symbol -> Some f | _ -> None)
@@ -319,6 +333,10 @@ module BindingGenerator =
                         if binding.Name = binding.Symbol then None
                         else Some (CppParser.Declaration.Function { original with Name = binding.Name }))
                 let declarations = declarations @ aliases
+                if generateWrappers then
+                    let callbacks = project.Callbacks |> Option.defaultWith (fun () -> PilotAnalyzer.discoverCallbacks declarations)
+                    if not callbacks.ListenerStructs.IsEmpty then
+                        failwith "Generic listener builders require declared native entry records and initialized fields. The legacy integer-address builder is not admitted; use typed protocol or signal projections. No bindings were written."
                 let sourceCount = project.Library.Headers.Length + project.Library.XmlProtocols.Length
                 logVerbose $"Merged {declarations.Length} declarations from {sourceCount} source(s)" verbose
 
@@ -337,7 +355,7 @@ module BindingGenerator =
                         project.Output.Directory
                     else
                         Path.GetFullPath(Path.Combine(projectDir, project.Output.Directory))
-                Directory.CreateDirectory(outputDir) |> ignore
+                validateProjectDependencies project (projectDirectoryForOutput outputDir)
 
                 // Build generation context once from the full declaration list
                 let structLayouts =
@@ -391,14 +409,24 @@ module BindingGenerator =
                         ValueStructs = project.Options |> Option.map (fun opts -> Set.ofList opts.ValueStructs) |> Option.defaultValue Set.empty
                         NativePointerSurface = project.Options |> Option.exists (fun opts -> opts.NativePointerSurface) }
 
-                // Generate protocol request implementations AFTER ctx is built,
-                // so opaque handle types from XML interfaces are available for typed signatures
-                let xmlRequestDecls = (if typedProtocol then [] else xmlProtocols) |> List.collect (fun p -> ProtocolParser.toRequestDecls p marshalConfig ctx.OpaqueHandles)
-                if not xmlRequestDecls.IsEmpty then
-                    logVerbose $"  {xmlRequestDecls.Length} protocol request implementations with typed handles" verbose
-
                 // Derive common namespace prefix for the project
                 let nsPrefix = deriveNamespacePrefix project
+
+                // Validate every selected signal before any regeneration write.
+                // GIR and the native header must establish the complete callback
+                // shape and carriers; an unsupported signal preserves prior output.
+                let signals =
+                    let selected = project.Namespaces |> List.collect (fun n -> n.Signals)
+                    if selected.IsEmpty then [] else
+                    match introspection with
+                    | None -> failwith "[[namespace]] signals require [library] introspection files"
+                    | Some repo ->
+                        match IntrospectionParser.select repo selected with
+                        | Ok signals -> signals
+                        | Error e -> failwith e
+                let signalTypes = TypedSignalGenerator.requiredTypes signals declarations ctx
+                let ctx = { ctx with PhantomMarkers = Set.union ctx.PhantomMarkers signalTypes }
+                let signalCode = TypedSignalGenerator.render nsPrefix signals declarations ctx
 
                 // Determine error handling strategy from convention configuration
                 let errorHandling =
@@ -457,16 +485,17 @@ module BindingGenerator =
                             project.Options |> Option.map (fun opts ->
                                 opts.AbiCriticalStructs |> List.map (fun name -> name.Replace("typedef ", "").Replace("struct ", "").Replace("union ", "")) |> Set.ofList)
                             |> Option.defaultValue Set.empty
-                        { classified with SharedTypes = Set.unionMany [constants; storageNames; requestedStorage]; LocalTypes = Map.empty }
+                        { classified with SharedTypes = Set.unionMany [constants; storageNames; requestedStorage; signalTypes]; LocalTypes = Map.empty }
                     else
                         { classified with
-                            SharedTypes = Set.union classified.SharedTypes storageNames
-                            LocalTypes = classified.LocalTypes |> Map.map (fun _ names -> Set.difference names storageNames) }
+                            SharedTypes = Set.unionMany [classified.SharedTypes; storageNames; signalTypes]
+                            LocalTypes = classified.LocalTypes |> Map.map (fun _ names -> Set.difference names (Set.union storageNames signalTypes)) }
                 let sharedCount = classification.SharedTypes.Count
                 let localCounts = classification.LocalTypes |> Map.toList |> List.sumBy (fun (_, s) -> s.Count)
                 logVerbose $"Type classification: {sharedCount} shared, {localCounts} local across {project.Namespaces.Length} namespaces" verbose
 
                 // ── Shared Types.clef (root level) ──────────────────────────
+                Directory.CreateDirectory(outputDir) |> ignore
                 let sharedTypesNs = $"{nsPrefix}.Types"
                 let sharedTypeDecls = PilotAnalyzer.filterTypesOnly classification.SharedTypes declarations
                 let sharedHandles = Set.intersect ctx.OpaqueHandles classification.SharedTypes
@@ -511,7 +540,7 @@ module BindingGenerator =
                                     logVerbose $"Warning: errno.h parse failed: {e}" verbose
                                     []
                         let errnoNs = $"{nsPrefix}.Errno"
-                        let output = ErrnoModuleGenerator.generate effectiveMacros errnoNs project.Library.Name
+                        let output = ErrnoModuleGenerator.generateWithModel effectiveMacros errnoNs project.Library.Name dataModel
                         let errorPath = Path.Combine(outputDir, "Errno.clef")
                         File.WriteAllText(errorPath, output)
                         logVerbose $"Errno module: {errorPath}" verbose
@@ -679,32 +708,17 @@ module BindingGenerator =
 
                         localTypeFiles @ [funcPath] @ wrapperFiles)
 
-                // ── L2 Listener Builders (in main package) ──────────────
-                let l2CallbackModule = $"{nsPrefix}.Callbacks"
-                let l2CallbackFiles =
-                    match callbackSpec with
-                    | Some spec when generateWrappers ->
-                        let l2Opens = [$"{nsPrefix}.Types"]
-                        match CallbackWrapperGenerator.generateL2 spec declarations l2CallbackModule l2Opens with
-                        | Some output ->
-                            let l2CallbackPath = Path.Combine(outputDir, "Callbacks.clef")
-                            File.WriteAllText(l2CallbackPath, output)
-                            logVerbose $"  Callbacks.clef (L2 listener builders)" verbose
-                            [l2CallbackPath]
-                        | None -> []
-                    | _ -> []
-
                 let typedProtocolFiles = if typedProtocol then TypedProtocolGenerator.generate project xmlProtocols declarations ctx outputDir else []
                 let signalFiles =
-                    let selected = project.Namespaces |> List.collect (fun n -> n.Signals)
-                    if selected.IsEmpty then [] else
-                    match introspection with
-                    | None -> failwith "[[namespace]] signals require [library] introspection files"
-                    | Some repo ->
-                        match IntrospectionParser.select repo selected with
-                        | Ok signals -> TypedSignalGenerator.generate nsPrefix signals declarations ctx outputDir
-                        | Error e -> failwith e
-                let allFiles = [sharedTypesPath] @ errorModuleFiles @ nsFiles @ l2CallbackFiles @ typedProtocolFiles @ signalFiles
+                    match signalCode with
+                    | None -> []
+                    | Some contents ->
+                        let dir = Path.Combine(outputDir, "Bridge")
+                        Directory.CreateDirectory(dir) |> ignore
+                        let path = Path.Combine(dir, "Signals.clef")
+                        File.WriteAllText(path, contents)
+                        [path]
+                let allFiles = [sharedTypesPath] @ errorModuleFiles @ nsFiles @ typedProtocolFiles @ signalFiles
 
                 // Generate canonical fidproj for the binding library
                 let fidprojFile = generateFidproj project (if typedProtocol then nsPrefix + ".Native" else nsPrefix) outputDir allFiles verbose
@@ -735,7 +749,7 @@ module BindingGenerator =
                         let bridgeDir = Path.Combine(Path.GetDirectoryName(outputDir), $"{libLastSegment}Bridge")
                         Directory.CreateDirectory(bridgeDir) |> ignore
 
-                        let fidprojDir = Path.GetDirectoryName(Path.GetDirectoryName(outputDir))
+                        let fidprojDir = fidprojFile |> Option.map Path.GetDirectoryName |> Option.defaultValue outputDir
 
                         // Build function-to-namespace resolver for callbacks
                         let functionToNs =
@@ -748,65 +762,21 @@ module BindingGenerator =
                         let resolveModule funcName =
                             functionToNs |> Map.tryFind funcName |> Option.defaultValue nsPrefix
 
-                        // Protocol dispatch files — one per namespace with XML interfaces
-                        let dispatchFiles =
-                            if req.HasProtocolDispatch then
-                                project.Namespaces |> List.collect (fun ns ->
-                                    if ns.XmlInterfaces.IsEmpty then []
-                                    else
-                                        let nsRequestDecls =
-                                            xmlRequestDecls |> List.filter (fun decl ->
-                                                match decl with
-                                                | CodeAST.LetBinding(name, _, _, _, _) ->
-                                                    ns.XmlInterfaces |> List.exists (fun iface ->
-                                                        name.StartsWith(iface + "_"))
-                                                | _ -> false)
-                                        if nsRequestDecls.IsEmpty then []
-                                        else
-                                            let lastSeg = ns.Name.Split('.') |> Array.last
-                                            let dispatchNs = $"{bridgeName}.{lastSeg}"
-                                            // NativePtr.ofNativeInt/set are Clef intrinsics — no namespace import needed
-                                            let openModules =
-                                                [ $"{nsPrefix}.Types"
-                                                  "Fidelity.Libc.DynamicLink"
-                                                  "Fidelity.Libc.Memory"
-                                                  match project.ProtocolConfig with
-                                                  | Some cfg -> cfg.MarshalModule
-                                                  | None -> () ]
-                                            let moduleDecl =
-                                                CodeAST.Module(dispatchNs,
-                                                    $"{lastSeg} protocol dispatch — Layer 2 protocol marshaling",
-                                                    [ for m in openModules -> CodeAST.OpenModule m ]
-                                                    @ [CodeAST.BlankLine]
-                                                    @ nsRequestDecls)
-                                            let code = CodeRenderer.render moduleDecl
-                                            let dispatchPath = Path.Combine(bridgeDir, $"{lastSeg}Dispatch.clef")
-                                            File.WriteAllText(dispatchPath, code)
-                                            logVerbose $"  L2 marshaling: {lastSeg}Dispatch.clef ({nsRequestDecls.Length} protocol requests)" verbose
-                                            [dispatchPath])
-                            else []
-
                         // Callback wrappers file
                         let callbackFiles =
                             match req.HasCallbackWrappers, callbackSpec with
                             | true, Some spec ->
                                 let callbackNs = $"{bridgeName}.Callbacks"
-                                // Open types module + Libc.DynamicLink (dlsym) + all bindings modules used by registrations
+                                // Forward typed entries through the binding module that owns each declaration.
                                 let registrationModules =
                                     spec.Registrations
                                     |> List.map (fun reg -> resolveModule reg.Function)
                                     |> List.distinct
                                 let callbackOpens =
-                                    [ if not l2CallbackFiles.IsEmpty then l2CallbackModule
-                                      $"{nsPrefix}.Types"
-                                      if not ctx.NativePointerSurface && not cHeaderMode then "Fidelity.Libc.DynamicLink" ] @ registrationModules
+                                    [ $"{nsPrefix}.Types" ] @ registrationModules
                                     |> List.distinct
                                 let generated =
-                                    if ctx.NativePointerSurface then
-                                        CallbackWrapperGenerator.generateNative spec declarations callbackNs dataModel callbackOpens
-                                    elif cHeaderMode then
-                                        CallbackWrapperGenerator.generateTypedWithModules spec declarations callbackNs ctx callbackOpens resolveModule
-                                    else CallbackWrapperGenerator.generate spec declarations callbackNs dataModel callbackOpens l2CallbackModule
+                                    CallbackWrapperGenerator.generateTypedWithModules spec declarations callbackNs ctx callbackOpens resolveModule
                                 match generated with
                                 | Some output ->
                                     let callbackPath = Path.Combine(bridgeDir, "Callbacks.clef")
@@ -816,7 +786,7 @@ module BindingGenerator =
                                 | None -> []
                             | _ -> []
 
-                        let bridgeFiles = dispatchFiles @ callbackFiles
+                        let bridgeFiles = callbackFiles
 
                         // Generate Bridge fidproj
                         if not bridgeFiles.IsEmpty then
@@ -852,25 +822,19 @@ module BindingGenerator =
                             sb.AppendLine() |> ignore
                             sb.AppendLine("[dependencies]") |> ignore
 
-                            // Resolve dependency paths
+                            // Every dependency must name an existing project.
                             let resolveDep name =
-                                match findProjectAbove fidprojDir $"{name}.fidproj" with
-                                | Some path -> Path.GetRelativePath(fidprojDir, path).Replace('\\', '/')
-                                | None ->
-                                    let reposDir = Path.GetFullPath(Path.Combine(fidprojDir, "../../../../"))
-                                    let target = Path.Combine(reposDir, $"Fidelity.Platform/Environments/Linux/x86_64/{name}.fidproj")
-                                    if File.Exists(target) then Path.GetRelativePath(fidprojDir, target).Replace('\\', '/')
-                                    else Path.GetFullPath(target).Replace('\\', '/')
+                                let path = resolveProjectDependency fidprojDir $"{name}.fidproj"
+                                               $"Fidelity.Platform/Environments/Linux/x86_64/{name}.fidproj"
+                                               "FIDELITY_PLATFORM_PROJECT"
+                                Path.GetRelativePath(fidprojDir, path).Replace('\\', '/')
 
-                            let platformDep = resolveDep "Fidelity.Platform"
-                            let libDep = resolveDep nsPrefix
                             if not (project.Options |> Option.exists (fun opts -> opts.DescriptorOnlyDependencies)) then
+                                let platformDep = resolveDep "Fidelity.Platform"
                                 sb.AppendLine($"Fidelity.Platform = {{ path = \"{platformDep}\" }}") |> ignore
+                            let libDep = fidprojFile |> Option.defaultWith (fun () -> invalidOp "Callback bridge requires its generated binding project")
+                                         |> fun path -> Path.GetRelativePath(fidprojDir, path).Replace('\\', '/')
                             sb.AppendLine($"{nsPrefix} = {{ path = \"{libDep}\" }}") |> ignore
-                            let usesLibcBridge = (not ctx.NativePointerSurface && not cHeaderMode) || req.HasProtocolDispatch
-                            if usesLibcBridge && (req.Dependencies |> List.exists (function LibcDynamicLink | LibcMemory -> true)) && nsPrefix <> "Fidelity.Libc" then
-                                let libcDep = resolveDep "Fidelity.Libc"
-                                sb.AppendLine($"Fidelity.Libc = {{ path = \"{libcDep}\" }}") |> ignore
 
                             let bridgeFidprojPath = Path.Combine(fidprojDir, $"{bridgeName}.fidproj")
                             File.WriteAllText(bridgeFidprojPath, sb.ToString())
@@ -882,23 +846,6 @@ module BindingGenerator =
                             report.AppendLine() |> ignore
                             report.AppendLine("## Generated") |> ignore
                             report.AppendLine() |> ignore
-                            if req.HasProtocolDispatch then
-                                let totalRequests = xmlRequestDecls.Length
-                                let destructorCount =
-                                    xmlProtocols |> List.sumBy (fun p ->
-                                        p.Interfaces |> List.sumBy (fun i ->
-                                            i.Requests |> List.filter (fun r -> r.IsDestructor) |> List.length))
-                                let constructorCount =
-                                    xmlProtocols |> List.sumBy (fun p ->
-                                        p.Interfaces |> List.sumBy (fun i ->
-                                            i.Requests |> List.filter (fun r ->
-                                                r.Args |> List.exists (fun a -> a.Type = ProtocolParser.NewId)) |> List.length))
-                                let voidCount = totalRequests - destructorCount - constructorCount
-                                report.AppendLine($"### Protocol Dispatch ({totalRequests} requests)") |> ignore
-                                report.AppendLine($"- Constructors: {constructorCount}") |> ignore
-                                report.AppendLine($"- Destructors: {destructorCount}") |> ignore
-                                report.AppendLine($"- Void requests: {voidCount}") |> ignore
-                                report.AppendLine() |> ignore
                             if req.HasCallbackWrappers then
                                 match callbackSpec with
                                 | Some spec ->
@@ -917,14 +864,7 @@ module BindingGenerator =
                                     report.AppendLine($"- `{name}`") |> ignore
                                 report.AppendLine() |> ignore
                             report.AppendLine("## Notes") |> ignore
-                            if req.Dependencies |> List.contains LibcMemory then
-                                report.AppendLine("- Protocol dispatch uses Fidelity.Libc.Memory for argument arrays (malloc/free)") |> ignore
-                            if usesLibcBridge && (req.Dependencies |> List.contains LibcDynamicLink) then
-                                report.AppendLine("- Interface globals resolved via Fidelity.Libc.DynamicLink.dlsym") |> ignore
-                            if ctx.NativePointerSurface || cHeaderMode then
-                                report.AppendLine("- Callback wrappers accept typed FnPtr entries and preserve explicit environment arguments.") |> ignore
-                            if req.HasProtocolDispatch then
-                                report.AppendLine("- NativeInterop.NativePtr used for argument array writes") |> ignore
+                            report.AppendLine("- Callback wrappers preserve declared entry records and explicit environment arguments.") |> ignore
 
                             let reportPath =
                                 if ctx.NativePointerSurface || cHeaderMode then Path.Combine(bridgeDir, "REPORT.md")
@@ -940,7 +880,7 @@ module BindingGenerator =
                     | WrapperTypes.NoErrors, true ->
                         [$"No [error_conventions] defined for '{project.Library.Name}'. Layer 2 wrappers use direct passthrough. If this library reports errors through a query function, out-parameter, or other mechanism, add error handling in an Overlay module."]
                     | WrapperTypes.UseNullWithReason reasonFn, true ->
-                        [$"Using null_with_reason convention for '{project.Library.Name}'. Functions returning pointers will call {reasonFn}() on null and wrap in Result<nativeint, nativeint>."]
+                        [$"Using null_with_reason convention for '{project.Library.Name}'. Functions returning nullable handles call {reasonFn}() on absence; the reason result retains its declared boundary type."]
                     | _ -> []
 
                 let allOutputFiles =
@@ -955,3 +895,8 @@ module BindingGenerator =
                     DeclarationCount = declarations.Length
                     Advisories = advisories
                 }
+
+    /// Surface-contract failures are generation diagnostics, not uncaught tooling exceptions.
+    let generateFromProject projectPath verbose generateWrappers dataModel =
+        try generateFromProjectCore projectPath verbose generateWrappers dataModel
+        with ex -> Error $"Binding generation failed: {ex.Message}"

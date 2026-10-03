@@ -154,10 +154,10 @@ let ``parseProtocolXml parses bitfield enum`` () =
 // =============================================================================
 
 [<Fact>]
-let ``toDeclarations produces typedef for interface handle`` () =
+let ``toTypeDeclarations produces typedef for interface handle`` () =
     match ProtocolParser.parseProtocolXml simpleProtocol with
     | Ok proto ->
-        let decls = ProtocolParser.toDeclarations proto
+        let decls = ProtocolParser.toTypeDeclarations proto
         let typedefs =
             decls |> List.choose (function
                 | CppParser.Declaration.Typedef t -> Some t
@@ -170,10 +170,10 @@ let ``toDeclarations produces typedef for interface handle`` () =
     | Error e -> failwith e
 
 [<Fact>]
-let ``toDeclarations produces delegate for each event`` () =
+let ``toTypeDeclarations produces delegate for each event`` () =
     match ProtocolParser.parseProtocolXml simpleProtocol with
     | Ok proto ->
-        let decls = ProtocolParser.toDeclarations proto
+        let decls = ProtocolParser.toTypeDeclarations proto
         let delegates =
             decls |> List.choose (function
                 | CppParser.Declaration.Delegate d -> Some d
@@ -186,10 +186,10 @@ let ``toDeclarations produces delegate for each event`` () =
     | Error e -> failwith e
 
 [<Fact>]
-let ``toDeclarations delegate has data and self parameters`` () =
+let ``toTypeDeclarations delegate has data and self parameters`` () =
     match ProtocolParser.parseProtocolXml simpleProtocol with
     | Ok proto ->
-        let decls = ProtocolParser.toDeclarations proto
+        let decls = ProtocolParser.toTypeDeclarations proto
         let errorDelegate =
             decls |> List.pick (function
                 | CppParser.Declaration.Delegate d when d.Name = "WlDisplayErrorHandler" -> Some d
@@ -202,10 +202,10 @@ let ``toDeclarations delegate has data and self parameters`` () =
     | Error e -> failwith e
 
 [<Fact>]
-let ``toDeclarations produces listener struct with delegate fields`` () =
+let ``toTypeDeclarations produces listener struct with delegate fields`` () =
     match ProtocolParser.parseProtocolXml simpleProtocol with
     | Ok proto ->
-        let decls = ProtocolParser.toDeclarations proto
+        let decls = ProtocolParser.toTypeDeclarations proto
         let listeners =
             decls |> List.choose (function
                 | CppParser.Declaration.Struct s when s.Name.EndsWith("_listener") -> Some s
@@ -221,10 +221,10 @@ let ``toDeclarations produces listener struct with delegate fields`` () =
     | Error e -> failwith e
 
 [<Fact>]
-let ``toDeclarations produces enum with values`` () =
+let ``toTypeDeclarations produces enum with values`` () =
     match ProtocolParser.parseProtocolXml simpleProtocol with
     | Ok proto ->
-        let decls = ProtocolParser.toDeclarations proto
+        let decls = ProtocolParser.toTypeDeclarations proto
         let enums =
             decls |> List.choose (function
                 | CppParser.Declaration.Enum e -> Some e
@@ -239,52 +239,7 @@ let ``toDeclarations produces enum with values`` () =
     | Error e -> failwith e
 
 [<Fact>]
-let ``toDeclarations produces request functions with typed parameters`` () =
-    match ProtocolParser.parseProtocolXml simpleProtocol with
-    | Ok proto ->
-        let decls = ProtocolParser.toDeclarations proto
-        let funcs =
-            decls |> List.choose (function
-                | CppParser.Declaration.Function f -> Some f
-                | _ -> None)
-        let syncFunc = funcs |> List.find (fun f -> f.Name = "wl_display_sync")
-        // sync has new_id arg → return type is wl_callback*
-        // parameters: just self (new_id is the return, not a param)
-        Assert.Equal("wl_callback *", syncFunc.ReturnType)
-        Assert.Equal(1, syncFunc.Parameters.Length)
-        Assert.Equal(("self", "wl_display *"), syncFunc.Parameters.[0])
-    | Error e -> failwith e
-
-[<Fact>]
-let ``toDeclarations request without new_id returns void`` () =
-    // Build a simple protocol with a request that has no new_id
-    let xml = """<?xml version="1.0"?>
-<protocol name="test">
-  <interface name="wl_surface" version="1">
-    <request name="attach">
-      <arg name="buffer" type="object" interface="wl_buffer"/>
-      <arg name="x" type="int"/>
-      <arg name="y" type="int"/>
-    </request>
-  </interface>
-</protocol>"""
-    match ProtocolParser.parseProtocolXml xml with
-    | Ok proto ->
-        let decls = ProtocolParser.toDeclarations proto
-        let attach =
-            decls |> List.pick (function
-                | CppParser.Declaration.Function f when f.Name = "wl_surface_attach" -> Some f
-                | _ -> None)
-        Assert.Equal("void", attach.ReturnType)
-        // Parameters: self, buffer, x, y
-        Assert.Equal(4, attach.Parameters.Length)
-        Assert.Equal(("self", "wl_surface *"), attach.Parameters.[0])
-        Assert.Equal(("buffer", "wl_buffer *"), attach.Parameters.[1])
-        Assert.Equal(("x", "int32_t"), attach.Parameters.[2])
-    | Error e -> failwith e
-
-[<Fact>]
-let ``toDeclarations hex enum values are parsed correctly`` () =
+let ``toTypeDeclarations hex enum values are parsed correctly`` () =
     let xml = """<?xml version="1.0"?>
 <protocol name="test">
   <interface name="wl_shm" version="1">
@@ -297,7 +252,7 @@ let ``toDeclarations hex enum values are parsed correctly`` () =
 </protocol>"""
     match ProtocolParser.parseProtocolXml xml with
     | Ok proto ->
-        let decls = ProtocolParser.toDeclarations proto
+        let decls = ProtocolParser.toTypeDeclarations proto
         let formatEnum =
             decls |> List.pick (function
                 | CppParser.Declaration.Enum e when e.Name = "wl_shm_format" -> Some e
@@ -308,11 +263,11 @@ let ``toDeclarations hex enum values are parsed correctly`` () =
     | Error e -> failwith e
 
 [<Fact>]
-let ``interfaceToDeclarations produces declarations in correct order`` () =
+let ``interfaceTypeDeclarations preserves type metadata order without synthetic request symbols`` () =
     match ProtocolParser.parseProtocolXml simpleProtocol with
     | Ok proto ->
-        let displayDecls = ProtocolParser.interfaceToDeclarations proto.Interfaces.[0]
-        // Order: typedef, enums, delegates, listener struct, request functions
+        let displayDecls = ProtocolParser.interfaceTypeDeclarations proto.Interfaces.[0]
+        // Order: typedef, enums, delegates, listener struct; requests remain in the IR.
         match displayDecls.[0] with
         | CppParser.Declaration.Typedef _ -> ()
         | other -> failwith $"Expected Typedef first, got {other}"
@@ -322,9 +277,9 @@ let ``interfaceToDeclarations produces declarations in correct order`` () =
         // delegates follow enums
         let delegateIdx = displayDecls |> List.tryFindIndex (function CppParser.Declaration.Delegate _ -> true | _ -> false)
         let structIdx = displayDecls |> List.tryFindIndex (function CppParser.Declaration.Struct _ -> true | _ -> false)
-        let funcIdx = displayDecls |> List.tryFindIndex (function CppParser.Declaration.Function _ -> true | _ -> false)
         Assert.True(delegateIdx.Value < structIdx.Value, "Delegates should come before listener struct")
-        Assert.True(structIdx.Value < funcIdx.Value, "Listener struct should come before request functions")
+        Assert.DoesNotContain(displayDecls, fun declaration ->
+            match declaration with CppParser.Declaration.Function _ -> true | _ -> false)
     | Error e -> failwith e
 
 [<Fact>]
@@ -337,7 +292,7 @@ let ``interface with no events produces no listener struct`` () =
 </protocol>"""
     match ProtocolParser.parseProtocolXml xml with
     | Ok proto ->
-        let decls = ProtocolParser.toDeclarations proto
+        let decls = ProtocolParser.toTypeDeclarations proto
         let structs =
             decls |> List.choose (function
                 | CppParser.Declaration.Struct _ -> Some true
@@ -436,16 +391,15 @@ let ``PilotSerializer round-trips xml_interfaces`` () =
 [<Fact>]
 let ``render DelegateType produces delegate syntax`` () =
     let decl = CodeAST.DelegateType(
-        "WlDisplayErrorHandler",
-        [("data", CodeAST.FsType.Named "nativeint")
-         ("display", CodeAST.FsType.Named "nativeint")
-         ("code", CodeAST.FsType.Named "uint32")],
+        "ScalarHandler",
+        [("value", CodeAST.FsType.Named "int")
+         ("code", CodeAST.FsType.Named "uint")],
         CodeAST.FsType.Named "unit",
         None)
     let output = CodeRenderer.render decl
-    Assert.Contains("type WlDisplayErrorHandler =", output)
+    Assert.Contains("type ScalarHandler =", output)
     Assert.Contains("delegate of", output)
-    Assert.Contains("data: nativeint", output)
+    Assert.Contains("value: int", output)
     Assert.Contains("-> unit", output)
 
 [<Fact>]
@@ -460,7 +414,7 @@ let ``render DelegateType with documentation`` () =
     Assert.Contains("type TestHandler =", output)
 
 // =============================================================================
-// Request Code Generation Tests
+// Retired Request Projection Contract Tests
 // =============================================================================
 
 let private marshalConfig : ProtocolParser.MarshalConfig = {
@@ -471,158 +425,123 @@ let private marshalConfig : ProtocolParser.MarshalConfig = {
     DestroyFlag = 1u
 }
 
-let private requestWithArgs = """<?xml version="1.0"?>
-<protocol name="test">
-  <interface name="wl_surface" version="6">
-    <request name="attach">
-      <arg name="buffer" type="object" interface="wl_buffer" allow-null="true"/>
-      <arg name="x" type="int"/>
-      <arg name="y" type="int"/>
-    </request>
-    <request name="destroy" type="destructor"/>
+let private parseOrFail xml =
+    match ProtocolParser.parseProtocolXml xml with
+    | Ok protocol -> protocol
+    | Error error -> failwith error
+
+let private requestProtocol requestKind =
+    let request =
+        match requestKind with
+        | "constructor" -> """<request name="create_surface"><arg name="id" type="new_id" interface="wl_surface"/></request>"""
+        | "nullable-object" -> """<request name="attach"><arg name="buffer" type="object" interface="wl_buffer" allow-null="true"/><arg name="x" type="int"/><arg name="y" type="int"/></request>"""
+        | "destructor" -> """<request name="destroy" type="destructor"/>"""
+        | "untyped-constructor" -> """<request name="bind"><arg name="id" type="new_id"/></request>"""
+        | "scalar" -> """<request name="set_scale"><arg name="scale" type="int"/></request>"""
+        | _ -> failwith $"Unknown request fixture {requestKind}"
+    // A request-free interface precedes the requesting one. Aggregate APIs must
+    // inspect the entire protocol before returning either output stream.
+    parseOrFail $"""<protocol name="boundary">
+  <interface name="wl_callback" version="1">
+    <event name="done"><arg name="serial" type="uint"/></event>
   </interface>
+  <interface name="wl_surface" version="6">{request}</interface>
 </protocol>"""
 
-[<Fact>]
-let ``request with args unwraps malloc Option`` () =
-    match ProtocolParser.parseProtocolXml requestWithArgs with
-    | Ok proto ->
-        let iface = proto.Interfaces.[0]
-        let decls = ProtocolParser.interfaceRequestDecls iface marshalConfig Set.empty
-        let output = decls |> List.map CodeRenderer.render |> String.concat "\n"
-        // malloc returns Option<nativeint> — must be unwrapped via match
-        Assert.Contains("match Fidelity.Libc.Memory.malloc", output)
-        Assert.Contains("| Some v -> v", output)
-        Assert.Contains("| None -> 0n", output)
-        // Must NOT use raw malloc result directly as nativeint
-        Assert.DoesNotContain("let argsRaw = malloc", output)
-    | Error e -> failwith e
+let private knownHandles = Set.ofList ["wl_callback"; "wl_surface"; "wl_buffer"]
+
+let private invokeRetiredProjection entryPoint (protocol: ProtocolParser.Protocol) =
+    let iface = protocol.Interfaces |> List.find (fun item -> not item.Requests.IsEmpty)
+    match entryPoint with
+    | "interfaceRequestDecls" -> ProtocolParser.interfaceRequestDecls iface marshalConfig knownHandles |> ignore
+    | "toRequestDecls" -> ProtocolParser.toRequestDecls protocol marshalConfig knownHandles |> ignore
+    | "protocolToOutput" -> ProtocolParser.protocolToOutput protocol marshalConfig knownHandles |> ignore
+    | "interfaceToDeclarations" -> ProtocolParser.interfaceToDeclarations iface |> ignore
+    | "toDeclarations" -> ProtocolParser.toDeclarations protocol |> ignore
+    | _ -> failwith $"Unknown projection entry point {entryPoint}"
+
+[<Theory>]
+[<InlineData("interfaceRequestDecls", "constructor")>]
+[<InlineData("interfaceRequestDecls", "nullable-object")>]
+[<InlineData("interfaceRequestDecls", "destructor")>]
+[<InlineData("interfaceRequestDecls", "untyped-constructor")>]
+[<InlineData("interfaceRequestDecls", "scalar")>]
+[<InlineData("toRequestDecls", "constructor")>]
+[<InlineData("toRequestDecls", "nullable-object")>]
+[<InlineData("toRequestDecls", "destructor")>]
+[<InlineData("toRequestDecls", "untyped-constructor")>]
+[<InlineData("toRequestDecls", "scalar")>]
+[<InlineData("protocolToOutput", "constructor")>]
+[<InlineData("protocolToOutput", "nullable-object")>]
+[<InlineData("protocolToOutput", "destructor")>]
+[<InlineData("protocolToOutput", "untyped-constructor")>]
+[<InlineData("protocolToOutput", "scalar")>]
+[<InlineData("interfaceToDeclarations", "constructor")>]
+[<InlineData("interfaceToDeclarations", "nullable-object")>]
+[<InlineData("interfaceToDeclarations", "destructor")>]
+[<InlineData("interfaceToDeclarations", "untyped-constructor")>]
+[<InlineData("interfaceToDeclarations", "scalar")>]
+[<InlineData("toDeclarations", "constructor")>]
+[<InlineData("toDeclarations", "nullable-object")>]
+[<InlineData("toDeclarations", "destructor")>]
+[<InlineData("toDeclarations", "untyped-constructor")>]
+[<InlineData("toDeclarations", "scalar")>]
+let ``public legacy request projections refuse before returning any AST`` entryPoint requestKind =
+    let protocol = requestProtocol requestKind
+    let iface = protocol.Interfaces.[1]
+    let request = iface.Requests.Head
+    let mutable returnedAst = false
+    let error = Assert.Throws<System.InvalidOperationException>(fun () ->
+        invokeRetiredProjection entryPoint protocol
+        returnedAst <- true)
+    Assert.False(returnedAst, "A rejected public API must not return any marshal or extern AST")
+    Assert.Equal(
+        $"ProtocolParser.{entryPoint} cannot generate XML request '{iface.Name}.{request.Name}': legacy marshal and synthetic extern projection is retired. Use TypedProtocolGenerator with an admitted typed protocol dispatch contract, or toTypeDeclarations for protocol type metadata.",
+        error.Message)
 
 [<Fact>]
-let ``destructor request does not use malloc`` () =
-    match ProtocolParser.parseProtocolXml requestWithArgs with
-    | Ok proto ->
-        let iface = proto.Interfaces.[0]
-        let decls = ProtocolParser.interfaceRequestDecls iface marshalConfig Set.empty
-        let output = decls |> List.map CodeRenderer.render |> String.concat "\n"
-        let destroySection = output.Split("let wl_surface_destroy").[1].Split("let wl_surface_").[0]
-        // Destructor with no args should not use malloc
-        Assert.DoesNotContain("malloc", destroySection)
-    | Error e -> failwith e
-
-// =============================================================================
-// Typed Opaque Handle Tests (protocol dispatch signatures)
-// =============================================================================
-
-let private typedHandleProtocol = """<?xml version="1.0"?>
-<protocol name="test">
-  <interface name="wl_compositor" version="6">
-    <request name="create_surface">
-      <arg name="id" type="new_id" interface="wl_surface"/>
-    </request>
-    <request name="create_region">
-      <arg name="id" type="new_id" interface="wl_region"/>
-    </request>
-  </interface>
-  <interface name="wl_surface" version="6">
-    <request name="attach">
-      <arg name="buffer" type="object" interface="wl_buffer" allow-null="true"/>
-      <arg name="x" type="int"/>
-      <arg name="y" type="int"/>
-    </request>
-    <request name="destroy" type="destructor"/>
-    <request name="set_opaque_region">
-      <arg name="region" type="object" interface="wl_region"/>
-    </request>
-  </interface>
-  <interface name="wl_region" version="1"/>
-  <interface name="wl_buffer" version="1"/>
-</protocol>"""
-
-let private knownHandles = Set.ofList ["wl_compositor"; "wl_surface"; "wl_region"; "wl_buffer"]
+let ``type metadata remains available for a refused request-bearing protocol`` () =
+    let protocol = requestProtocol "nullable-object"
+    let declarations = ProtocolParser.toTypeDeclarations protocol
+    Assert.Equal(2, declarations |> List.sumBy (function CppParser.Declaration.Typedef _ -> 1 | _ -> 0))
+    Assert.Contains(declarations, fun declaration ->
+        match declaration with
+        | CppParser.Declaration.Delegate handler -> handler.Name = "WlCallbackDoneHandler"
+        | _ -> false)
+    Assert.Contains(declarations, fun declaration ->
+        match declaration with
+        | CppParser.Declaration.Struct listener -> listener.Name = "wl_callback_listener"
+        | _ -> false)
+    Assert.DoesNotContain(declarations, fun declaration ->
+        match declaration with CppParser.Declaration.Function _ -> true | _ -> false)
+    // Retaining semantic input is distinct from claiming a native request ABI.
+    Assert.True(protocol.Interfaces.[1].Requests.Head.Args.Head.AllowNull)
 
 [<Fact>]
-let ``typed handle: self parameter uses nativeint (CCS FieldLabels workaround)`` () =
-    match ProtocolParser.parseProtocolXml typedHandleProtocol with
-    | Ok proto ->
-        let compositor = proto.Interfaces.[0]
-        let decls = ProtocolParser.interfaceRequestDecls compositor marshalConfig knownHandles
-        let output = decls |> List.map CodeRenderer.render |> String.concat "\n"
-        Assert.Contains("(self: nativeint)", output)
-    | Error e -> failwith e
-
-[<Fact>]
-let ``typed handle: constructor returns option nativeint (CCS FieldLabels workaround)`` () =
-    match ProtocolParser.parseProtocolXml typedHandleProtocol with
-    | Ok proto ->
-        let compositor = proto.Interfaces.[0]
-        let decls = ProtocolParser.interfaceRequestDecls compositor marshalConfig knownHandles
-        let output = decls |> List.map CodeRenderer.render |> String.concat "\n"
-        // All constructors return option<nativeint> (CCS FieldLabels workaround)
-        Assert.Contains(": option<nativeint> =", output)
-    | Error e -> failwith e
-
-[<Fact>]
-let ``typed handle: object arg with interface uses nativeint (CCS FieldLabels workaround)`` () =
-    match ProtocolParser.parseProtocolXml typedHandleProtocol with
-    | Ok proto ->
-        let surface = proto.Interfaces.[1]
-        let decls = ProtocolParser.interfaceRequestDecls surface marshalConfig knownHandles
-        let output = decls |> List.map CodeRenderer.render |> String.concat "\n"
-        // All handles are nativeint in protocol dispatch (CCS FieldLabels workaround)
-        Assert.Contains("(region: nativeint)", output)
-    | Error e -> failwith e
-
-[<Fact>]
-let ``typed handle: self passed directly as nativeint (no Handle unwrap)`` () =
-    match ProtocolParser.parseProtocolXml typedHandleProtocol with
-    | Ok proto ->
-        let compositor = proto.Interfaces.[0]
-        let decls = ProtocolParser.interfaceRequestDecls compositor marshalConfig knownHandles
-        let output = decls |> List.map CodeRenderer.render |> String.concat "\n"
-        // Body passes self directly (no .Handle unwrap needed — self is nativeint)
-        Assert.DoesNotContain("self.Handle", output)
-        Assert.Contains("(Some self)", output)
-    | Error e -> failwith e
-
-[<Fact>]
-let ``typed handle: constructor passes through nativeint (no ofHandle)`` () =
-    match ProtocolParser.parseProtocolXml typedHandleProtocol with
-    | Ok proto ->
-        let compositor = proto.Interfaces.[0]
-        let decls = ProtocolParser.interfaceRequestDecls compositor marshalConfig knownHandles
-        let output = decls |> List.map CodeRenderer.render |> String.concat "\n"
-        // No ofHandle call — returns option<nativeint> directly (CCS FieldLabels workaround)
-        Assert.DoesNotContain("ofHandle", output)
-        Assert.Contains("| Some v -> Some v", output)
-        Assert.Contains("| None -> None", output)
-    | Error e -> failwith e
-
-[<Fact>]
-let ``typed handle: untyped object args remain nativeint`` () =
-    let untypedProtocol = """<?xml version="1.0"?>
-<protocol name="test">
-  <interface name="wl_foo" version="1">
-    <request name="do_thing">
-      <arg name="target" type="object"/>
-    </request>
+let ``legacy entry points retain metadata and empty bodies for request-free protocols`` () =
+    let protocol = parseOrFail """<protocol name="metadata">
+  <interface name="wl_output" version="1">
+    <enum name="transform"><entry name="normal" value="0"/></enum>
+    <event name="done"><arg name="serial" type="uint"/></event>
   </interface>
 </protocol>"""
-    match ProtocolParser.parseProtocolXml untypedProtocol with
-    | Ok proto ->
-        let iface = proto.Interfaces.[0]
-        let decls = ProtocolParser.interfaceRequestDecls iface marshalConfig Set.empty
-        let output = decls |> List.map CodeRenderer.render |> String.concat "\n"
-        Assert.Contains("(target: nativeint)", output)
-    | Error e -> failwith e
+    let iface = protocol.Interfaces.Head
+    let expected = ProtocolParser.toTypeDeclarations protocol
+    Assert.Empty(ProtocolParser.interfaceRequestDecls iface marshalConfig knownHandles)
+    Assert.Empty(ProtocolParser.toRequestDecls protocol marshalConfig knownHandles)
+    let types, bodies = ProtocolParser.protocolToOutput protocol marshalConfig knownHandles
+    Assert.Equal<CppParser.Declaration list>(expected, types)
+    Assert.Empty(bodies)
+    Assert.Equal<CppParser.Declaration list>(expected, ProtocolParser.interfaceToDeclarations iface)
+    Assert.Equal<CppParser.Declaration list>(expected, ProtocolParser.toDeclarations protocol)
+    Assert.DoesNotContain(types, fun declaration ->
+        match declaration with CppParser.Declaration.Function _ -> true | _ -> false)
 
 [<Fact>]
-let ``typed handle: without opaqueHandles set, self remains nativeint`` () =
-    match ProtocolParser.parseProtocolXml typedHandleProtocol with
-    | Ok proto ->
-        let compositor = proto.Interfaces.[0]
-        let decls = ProtocolParser.interfaceRequestDecls compositor marshalConfig Set.empty
-        let output = decls |> List.map CodeRenderer.render |> String.concat "\n"
-        Assert.Contains("(self: nativeint)", output)
-        Assert.DoesNotContain("(self: wl_compositor)", output)
-    | Error e -> failwith e
+let ``retired aggregate projections preserve empty protocol metadata`` () =
+    let protocol = parseOrFail """<protocol name="empty"/>"""
+    Assert.Empty(ProtocolParser.toRequestDecls protocol marshalConfig Set.empty)
+    let types, bodies = ProtocolParser.protocolToOutput protocol marshalConfig Set.empty
+    Assert.Empty(types)
+    Assert.Empty(bodies)
+    Assert.Empty(ProtocolParser.toDeclarations protocol)

@@ -1,0 +1,37 @@
+[library]
+name = "c"
+headers = ["@HEADER@"]
+include_paths = ["@INCLUDE@"]
+
+[output]
+mode = "fidelity"
+directory = "@OUTPUT@"
+
+[options]
+c_header_mode = true
+opaque_handles = true
+descriptor_only_dependencies = true
+
+[[options.bindings]]
+name = "token_open"
+ownership = "caller_owns"
+
+[[options.bindings]]
+name = "token_release"
+ownership = "callee_owns"
+
+[[options.bindings]]
+name = "token_visit"
+nonnull_callbacks = [1]
+
+[annotations.nonnull]
+nonnull_returns = ["token_nonnull", "token_environment"]
+token_read = [0]
+token_release = [0]
+token_visit = [0, 2]
+
+[[namespace]]
+name = "Conformance.Native"
+description = "Generated boundary contracts: source admission is checked separately"
+library = "c"
+functions = ["abs", "token_open", "token_nonnull", "token_read", "token_release", "token_environment", "token_visit"]

@@ -2,21 +2,15 @@ namespace Farscape.Core
 
 open Fidelity.Data.XML
 
-/// Parses XML protocol definitions into the Farscape pipeline.
+/// Parses XML protocol definitions into protocol metadata.
 ///
-/// Libraries that define their API surface via XML protocol schemas (message-passing
-/// over a core dispatch ABI) use this module. The XML carries semantic information —
-/// which args are object creation, which are file descriptor passing, event/request
-/// directionality — that the code generator uses to produce implementation bodies
-/// calling the core marshal function.
+/// Fidelity.Data.XML handles XML syntax; this module retains argument kinds,
+/// event and request direction, interface names, and enum metadata. Type-only
+/// declarations remain available for the typed boundary pipeline.
 ///
-/// The protocol IR is generic. XML format parsing can be format-specific (e.g. Wayland
-/// protocol XML), but the IR and code generation are library-agnostic.
-///
-/// Architecture: Fidelity.Data.XML handles XML syntax. This module handles protocol
-/// semantics and produces two outputs:
-///   1. CppParser.Declaration list — types, enums, delegates, listener structs (→ FidelityCodeGenerator)
-///   2. CodeAST.FsDecl list — request implementation bodies calling core marshal function
+/// Request implementations require an admitted typed protocol dispatch contract.
+/// The legacy raw marshal and synthetic extern projections are diagnostic-only;
+/// typed implementations belong to TypedProtocolGenerator.
 module ProtocolParser =
 
     // =========================================================================
@@ -211,8 +205,8 @@ module ProtocolParser =
         | Array -> "struct wl_array *"
 
     /// Generate the opaque handle typedef for an interface.
-    /// Uses "struct {name}_opaque *" so isOpaqueHandleTypedef detects it:
-    /// pointer to struct not in defined struct set → opaque handle record type.
+    /// A pointer to an undeclared struct is recognized as an opaque nominal
+    /// marker by FidelityCodeGenerator; the boundary carrier is CHandle<marker>.
     let private interfaceHandleTypedef (iface: ProtocolInterface) : CppParser.Declaration =
         CppParser.Declaration.Typedef {
             Name = iface.Name
@@ -297,356 +291,57 @@ module ProtocolParser =
         protocol.Interfaces |> List.collect interfaceTypeDeclarations
 
     // =========================================================================
-    // Request Implementation Code Generation (Protocol IR → FsDecl list)
-    // These are NOT extern declarations. They are implementation bodies that
-    // call the core marshal function with the correct opcode and arguments.
+    // Retired Request Projection Entry Points
     // =========================================================================
 
-    open Farscape.Core.CodeAST
+    // The former generator and synthetic extern projection have been removed;
+    // neither retired representation admits a typed protocol dispatch contract.
 
-    /// Map a protocol arg type to the Clef FsType used in the generated function signature.
-    /// All handles are nativeint in protocol dispatch (CCS FieldLabels workaround).
-    let private argToFsType (_opaqueHandles: Set<string>) (arg: ProtocolArg) : FsType =
-        match arg.Type with
-        | Int -> Named "int"
-        | Uint -> Named "uint"
-        | Fixed -> Named "int"  // wl_fixed_t: a 24.8 fixed-point integer, i32 at the ABI
-        | String -> Named "nativeint"  // string pointer, passed as nativeint in arg array
-        | Object -> Named "nativeint"  // all handles nativeint (CCS FieldLabels workaround)
-        | NewId -> Named "nativeint"
-        | Fd -> Named "int"
-        | Array -> Named "nativeint"  // wl_array pointer
+    let private requireTypeOnly (entryPoint: string) (interfaces: ProtocolInterface list) =
+        match interfaces |> List.tryPick (fun iface ->
+            iface.Requests |> List.tryHead |> Option.map (fun request -> iface.Name, request.Name)) with
+        | Some (interfaceName, requestName) ->
+            invalidOp
+                $"ProtocolParser.{entryPoint} cannot generate XML request '{interfaceName}.{requestName}': legacy marshal and synthetic extern projection is retired. Use TypedProtocolGenerator with an admitted typed protocol dispatch contract, or toTypeDeclarations for protocol type metadata."
+        | None -> ()
 
-    /// Convert a protocol arg value to nativeint for the argument array.
-    let private argToNativeint (_opaqueHandles: Set<string>) (arg: ProtocolArg) : FsExpr =
-        match arg.Type with
-        | Int | Uint | Fixed | Fd ->
-            TypeConversion("nativeint", Identifier arg.Name)
-        | String | Array ->
-            Identifier arg.Name
-        | Object ->
-            // All handles are nativeint in protocol dispatch (CCS FieldLabels workaround)
-            Identifier arg.Name
-        | NewId ->
-            // NewId in the args array: value 0n (the C function assigns the real ID).
-            // wl_closure_marshal reads args[i] for new_id but overwrites with allocated ID.
-            Literal "0n"
+    /// Retired request implementation projection. Request-bearing interfaces
+    /// fail before returning an AST; request-free interfaces have no bodies.
+    let interfaceRequestDecls (iface: ProtocolInterface) (_config: MarshalConfig) (_opaqueHandles: Set<string>) : CodeAST.FsDecl list =
+        requireTypeOnly "interfaceRequestDecls" [ iface ]
+        []
 
-    /// Generate FsDecl for a single protocol request.
-    /// opcode = index of the request within the interface's request list.
-    let private generateRequestDecl (iface: ProtocolInterface) (opcode: int) (request: ProtocolMessage) (config: MarshalConfig) (opaqueHandles: Set<string>) : FsDecl list =
-        let funcName = $"{iface.Name}_{request.Name}"
-        let interfaceSymbol = $"{iface.Name}_interface"
+    /// Retired request implementation projection. Validate the entire protocol
+    /// before returning any AST, including protocols whose first interface is request-free.
+    let toRequestDecls (protocol: Protocol) (_config: MarshalConfig) (_opaqueHandles: Set<string>) : CodeAST.FsDecl list =
+        requireTypeOnly "toRequestDecls" protocol.Interfaces
+        []
 
-        // Determine if this is a constructor (has new_id arg)
-        let newIdArg = request.Args |> List.tryFind (fun a -> a.Type = NewId)
-        let isConstructor = newIdArg.IsSome
-        let isUntypedNewId =
-            match newIdArg with
-            | Some a -> a.Interface.IsNone
-            | None -> false
+    /// Retired combined projection. Request-free protocols retain their type
+    /// metadata; request-bearing protocols require the typed dispatch generator.
+    let protocolToOutput (protocol: Protocol) (_config: MarshalConfig) (_opaqueHandles: Set<string>)
+        : CppParser.Declaration list * CodeAST.FsDecl list =
+        requireTypeOnly "protocolToOutput" protocol.Interfaces
+        (toTypeDeclarations protocol, [])
 
-        // Build parameters: self + non-new_id args (+ interface/version for untyped new_id)
-        // NOTE: All handles are nativeint in protocol dispatch to avoid CCS FieldLabels
-        // pollution (28 records with { Handle: nativeint } cause "last definition wins"
-        // inference cascade). Type safety is provided by function names + return types.
-        // This will be reverted when .clefi signature-based loading lands.
-        let selfType = Named "nativeint"
-        let selfParam = { Name = "self"; Type = selfType }
-        let regularArgs = request.Args |> List.filter (fun a -> a.Type <> NewId)
-        let regularParams = regularArgs |> List.map (fun a -> { Name = a.Name; Type = argToFsType opaqueHandles a })
-
-        let extraParams =
-            if isUntypedNewId then
-                // wl_registry_bind pattern: caller provides interface + version
-                [ { Name = "``interface``"; Type = Named "nativeint" }
-                  { Name = "version"; Type = Named "uint" } ]
-            else []
-
-        let allParams = selfParam :: regularParams @ extraParams
-
-        // Return type: all constructors return option<nativeint> (CCS FieldLabels workaround)
-        let returnType =
-            if isConstructor then Generic("option", Named "nativeint")
-            else Named "unit"
-
-        // Build the body
-        let flags =
-            if request.IsDestructor then TypeConversion("uint", Literal $"{config.DestroyFlag}")
-            else TypeConversion("uint", Literal "0")
-
-        let opcodeExpr = TypeConversion("uint", Literal $"{opcode}")
-
-        // Interface pointer: resolve via dlsym for typed new_id, or use caller-provided for untyped
-        let interfaceExpr =
-            if isConstructor && not isUntypedNewId then
-                match newIdArg with
-                | Some a ->
-                    let targetIface = a.Interface |> Option.defaultValue iface.Name
-                    MatchExpr(
-                        FunctionCall("Fidelity.Libc.DynamicLink", "dlsym",
-                            [FunctionCall("", "Some", [Literal "0n"])
-                             FunctionCall("", "Some", [Literal $"\"{targetIface}_interface\".Pointer"])]),
-                        [("Some v", Identifier "v"); ("None", Literal "0n")])
-                | None -> Literal "0n"
-            elif isUntypedNewId then
-                Identifier "``interface``"
-            else
-                Literal "0n"
-
-        // Self is always nativeint in protocol dispatch (no .Handle unwrap needed)
-        let selfRaw = Identifier "self"
-
-        // Version: get from proxy for normal requests, from caller for untyped new_id
-        let versionExpr =
-            if isUntypedNewId then
-                Identifier "version"
-            else
-                FunctionCall("", config.VersionFunction, [FunctionCall("", "Some", [selfRaw])])
-
-        // Build the args array from ALL args in their original positions.
-        // wl_closure_marshal reads args[i] for every argument type including new_id,
-        // so NewId entries must be present (value 0n — the C function assigns the real ID).
-        // Only truly argument-less requests (no args at all) can pass None.
-        let marshalArgs = request.Args
-
-        // Constructor result expression: all return option<nativeint> (CCS FieldLabels workaround)
-        let constructorResultExpr =
-            MatchExpr(Identifier "result",
-                [ ("Some v", FunctionCall("", "Some", [Identifier "v"]))
-                  ("None", Identifier "None") ])
-
-        let body =
-            if marshalArgs.IsEmpty then
-                // Truly no arguments (no regular args, no new_id): pass None for args array
-                let marshalCall =
-                    FunctionCall("", config.MarshalFunction,
-                        [ FunctionCall("", "Some", [selfRaw])
-                          opcodeExpr
-                          FunctionCall("", "Some", [interfaceExpr])
-                          versionExpr
-                          flags
-                          Identifier "None" ])
-                if isConstructor then
-                    LetIn("result", marshalCall, constructorResultExpr)
-                else
-                    // Void: call and ignore result
-                    LetIn("_", marshalCall, Literal "()")
-            elif isUntypedNewId then
-                // Special: untyped new_id (e.g. wl_registry_bind)
-                // libwayland internally prepends 3 extra args for untyped new_id:
-                //   args[0..N-1] = regular args (e.g. 'name' for bind)
-                //   args[N]     = interface_name (string pointer)
-                //   args[N+1]   = interface_version (uint)
-                //   args[N+2]   = 0 (new_id placeholder)
-                let totalArgCount = regularArgs.Length + 3
-                let allocSize = $"{totalArgCount * 8}"
-
-                let writeRegularArgs =
-                    regularArgs |> List.mapi (fun i arg ->
-                        (i, FunctionCall("NativePtr", "set",
-                            [ Identifier "argsPtr"; Literal $"{i}"; argToNativeint opaqueHandles arg ])))
-
-                let baseIdx = regularArgs.Length
-                // interface_name: cast interface pointer to get name string
-                let writeIfaceName =
-                    (baseIdx, FunctionCall("NativePtr", "set",
-                        [ Identifier "argsPtr"; Literal $"{baseIdx}"; Identifier "``interface``" ]))
-                // interface_version
-                let writeIfaceVersion =
-                    (baseIdx + 1, FunctionCall("NativePtr", "set",
-                        [ Identifier "argsPtr"; Literal $"{baseIdx + 1}";
-                          TypeConversion("nativeint", Identifier "version") ]))
-                // new_id placeholder
-                let writeNewId =
-                    (baseIdx + 2, FunctionCall("NativePtr", "set",
-                        [ Identifier "argsPtr"; Literal $"{baseIdx + 2}"; Literal "0n" ]))
-
-                let allWrites = writeRegularArgs @ [ writeIfaceName; writeIfaceVersion; writeNewId ]
-
-                let mallocCall =
-                    FunctionCall("Fidelity.Libc.Memory", "malloc",
-                        [ TypeConversion("unativeint", Literal allocSize) ])
-                let allocExpr =
-                    MatchExpr(mallocCall,
-                        [ ("Some v", Identifier "v")
-                          ("None", Literal "0n") ])
-                let castExpr =
-                    FunctionCall("NativePtr", "ofNativeInt",
-                        [ Identifier "argsRaw" ])
-
-                let marshalCall =
-                    FunctionCall("", config.MarshalFunction,
-                        [ FunctionCall("", "Some", [selfRaw])
-                          opcodeExpr
-                          FunctionCall("", "Some", [Identifier "``interface``"])
-                          Identifier "version"
-                          flags
-                          FunctionCall("", "Some", [Identifier "argsRaw"]) ])
-
-                let freeCall =
-                    FunctionCall("Fidelity.Libc.Memory", "free",
-                        [ FunctionCall("", "Some", [Identifier "argsRaw"]) ])
-
-                let innerBody =
-                    LetIn("result", marshalCall,
-                        LetIn("_", freeCall, constructorResultExpr))
-
-                let withWrites =
-                    List.foldBack (fun (_, writeExpr) body ->
-                        LetIn("_", writeExpr, body)) allWrites innerBody
-
-                LetIn("argsRaw", allocExpr,
-                    LetIn("argsPtr", castExpr, withWrites))
-            else
-                // Has arguments: need to construct wl_argument array
-                // Each wl_argument is 8 bytes on LP64, all args fit in nativeint
-                let argCount = marshalArgs.Length
-                let allocSize = $"{argCount * 8}"
-                // malloc → write each arg → marshal → free
-                let writeArgs =
-                    marshalArgs |> List.mapi (fun i arg ->
-                        let offset = i * 8
-                        // NativePtr.set on the buffer cast to nativeptr<nativeint>
-                        let writeExpr =
-                            FunctionCall("NativePtr", "set",
-                                [ Identifier "argsPtr"; Literal $"{i}"; argToNativeint opaqueHandles arg ])
-                        (i, writeExpr))
-
-                // Build the sequential expression: alloc, write args, marshal, free
-                // L1 malloc returns Option<nativeint> — unwrap for internal use
-                let mallocCall =
-                    FunctionCall("Fidelity.Libc.Memory", "malloc",
-                        [ TypeConversion("unativeint", Literal allocSize) ])
-                let allocExpr =
-                    MatchExpr(mallocCall,
-                        [ ("Some v", Identifier "v")
-                          ("None", Literal "0n") ])
-                let castExpr =
-                    FunctionCall("NativePtr", "ofNativeInt",
-                        [ Identifier "argsRaw" ])
-
-                // Chain: let argsRaw = malloc(...) in let argsPtr = cast in write0; write1; ... marshal; free
-                let marshalCall =
-                    FunctionCall("", config.MarshalFunction,
-                        [ FunctionCall("", "Some", [selfRaw])
-                          opcodeExpr
-                          FunctionCall("", "Some", [interfaceExpr])
-                          versionExpr
-                          flags
-                          FunctionCall("", "Some", [Identifier "argsRaw"]) ])
-
-                let freeCall =
-                    FunctionCall("Fidelity.Libc.Memory", "free",
-                        [ FunctionCall("", "Some", [Identifier "argsRaw"]) ])
-
-                // Build nested let expressions for arg writes, then marshal + free
-                let innerBody =
-                    if isConstructor then
-                        LetIn("result", marshalCall,
-                            LetIn("_", freeCall, constructorResultExpr))
-                    else
-                        LetIn("_", marshalCall,
-                            LetIn("_", freeCall, Literal "()"))
-
-                // Wrap with arg writes
-                let withWrites =
-                    List.foldBack (fun (_, writeExpr) body ->
-                        LetIn("_", writeExpr, body)) writeArgs innerBody
-
-                // Wrap with cast and alloc
-                LetIn("argsRaw", allocExpr,
-                    LetIn("argsPtr", castExpr, withWrites))
-
-        // Documentation
-        let doc =
-            let docText =
-                match request.Documentation with
-                | Some d -> d
-                | None -> $"{iface.Name} request: {request.Name}"
-            [ XmlDoc docText ]
-
-        doc @ [ LetBinding(funcName, allParams, returnType, body, []) ]
-
-    /// Generate all request implementation FsDecl for an interface.
-    let interfaceRequestDecls (iface: ProtocolInterface) (config: MarshalConfig) (opaqueHandles: Set<string>) : FsDecl list =
-        iface.Requests |> List.mapi (fun opcode request ->
-            generateRequestDecl iface opcode request config opaqueHandles)
-        |> List.concat
-
-    /// Generate all request implementations for a protocol.
-    let toRequestDecls (protocol: Protocol) (config: MarshalConfig) (opaqueHandles: Set<string>) : FsDecl list =
-        protocol.Interfaces |> List.collect (fun iface ->
-            interfaceRequestDecls iface config opaqueHandles)
-
-    // =========================================================================
-    // Combined Output
-    // =========================================================================
-
-    /// Produce both streams from a protocol:
-    /// 1. Type declarations (→ CppParser.Declaration pipeline → FidelityCodeGenerator)
-    /// 2. Request implementations (→ FsDecl directly, with marshal call bodies)
-    let protocolToOutput (protocol: Protocol) (config: MarshalConfig) (opaqueHandles: Set<string>)
-        : CppParser.Declaration list * FsDecl list =
-        let typeDecls = toTypeDeclarations protocol
-        let requestDecls = toRequestDecls protocol config opaqueHandles
-        (typeDecls, requestDecls)
-
-    // =========================================================================
-    // Backward Compatibility (used by existing tests and toDeclarations callers)
-    // =========================================================================
-
-    /// Generate request function declarations for an interface.
-    /// DEPRECATED: produces CppParser.Declaration.Function that becomes incorrect FidelityExtern.
-    /// Use interfaceRequestDecls + MarshalConfig instead for correct output.
-    let private requestFunctions (iface: ProtocolInterface) : CppParser.Declaration list =
-        iface.Requests |> List.map (fun request ->
-            let funcName = $"{iface.Name}_{request.Name}"
-            let selfParam = ("self", $"{iface.Name} *")
-            let newIdArg = request.Args |> List.tryFind (fun a -> a.Type = NewId)
-            let returnType, otherArgs =
-                match newIdArg with
-                | Some a ->
-                    let retType =
-                        match a.Interface with
-                        | Some iface -> $"{iface} *"
-                        | None -> "void *"
-                    retType, request.Args |> List.filter (fun arg -> arg.Type <> NewId)
-                | None ->
-                    "void", request.Args
-            let parameters =
-                selfParam :: (otherArgs |> List.map (fun a -> (a.Name, argTypeToC a)))
-            CppParser.Declaration.Function {
-                Name = funcName
-                ReturnType = returnType
-                Parameters = parameters
-                Documentation = request.Documentation
-                IsVirtual = false; IsStatic = false; IsInline = false
-                Attributes = []; MangledName = None
-            })
-
-    /// Convert a single interface to its complete set of declarations (types + request functions).
-    /// DEPRECATED: request functions will produce incorrect FidelityExtern declarations.
-    /// Use protocolToOutput with MarshalConfig for correct output.
+    /// Retired synthetic request extern projection. Request-free interfaces
+    /// retain metadata; XML request names must not be invented as native symbols.
     let interfaceToDeclarations (iface: ProtocolInterface) : CppParser.Declaration list =
-        let handle = [ interfaceHandleTypedef iface ]
-        let enums = interfaceEnums iface
-        let delegates = eventDelegates iface
-        let listener = listenerStruct iface |> Option.toList
-        let requests = requestFunctions iface
-        handle @ enums @ delegates @ listener @ requests
+        requireTypeOnly "interfaceToDeclarations" [ iface ]
+        interfaceTypeDeclarations iface
 
-    /// Convert a complete protocol to Declaration list.
-    /// DEPRECATED: see interfaceToDeclarations note.
+    /// Retired synthetic request extern projection. Validate every interface
+    /// before returning metadata; use toTypeDeclarations for request-bearing XML.
     let toDeclarations (protocol: Protocol) : CppParser.Declaration list =
-        protocol.Interfaces |> List.collect interfaceToDeclarations
+        requireTypeOnly "toDeclarations" protocol.Interfaces
+        toTypeDeclarations protocol
 
     // =========================================================================
     // File Entry Point
     // =========================================================================
 
     /// Parse a protocol XML file and return the Protocol IR.
-    /// Callers use protocolToOutput to get both type declarations and request implementations.
+    /// Callers retain the IR or extract type metadata with toTypeDeclarations.
     let parseFile (xmlPath: string) : Result<Protocol, string> =
         try
             let content = System.IO.File.ReadAllText(xmlPath)
