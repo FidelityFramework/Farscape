@@ -5,6 +5,57 @@ open Farscape.Core
 open TestHelpers
 
 [<Theory>]
+[<InlineData("void (*)(void)")>]
+[<InlineData("Notify")>]
+[<InlineData("Notify _Nullable")>]
+let ``unannotated callback parameters refuse with a located boundary reason`` cType =
+  let declarations = [
+    CppParser.Declaration.Typedef (mkTypedef "Notify" "void (*)(void)")
+    CppParser.Declaration.Function (mkFunc "register" "void" ["notify", cType]) ]
+  let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate declarations "Test.Native" "test" Types.LP64 Map.empty |> ignore)
+  Assert.Contains("register parameter 0", error.Message)
+  Assert.Contains("requires explicit nonnull evidence", error.Message)
+  Assert.Contains("nullable callback parameters require a supported boundary adapter", error.Message)
+
+[<Theory>]
+[<InlineData("header")>]
+[<InlineData("type")>]
+[<InlineData("annotations")>]
+[<InlineData("callbacks")>]
+let ``each explicit callback nonnull source preserves its hypothesis provenance`` evidence =
+  let callbackType = if evidence = "type" then "Notify _Nonnull" else "Notify"
+  let func = mkFuncWithAttrs "register" "void" ["notify", callbackType] (if evidence = "header" then [mkAttr "NonNullAttr" [0] None] else [])
+  let declarations = [CppParser.Declaration.Typedef (mkTypedef "Notify" "void (*)(void)"); CppParser.Declaration.Function func]
+  let projection : PilotTypes.BindingProjection =
+    { Name = func.Name; Symbol = func.Name; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None }
+  let ctx = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
+  let ctx =
+    { ctx with
+        Bindings = if evidence = "callbacks" then Map.ofList [func.Name, projection] else Map.empty
+        NonnullAnnotations = if evidence = "annotations" then Some { Parameters = Map.ofList [func.Name, [0]]; Returns = Set.empty } else None }
+  let source = FidelityCodeGenerator.generateModule ctx Set.empty declarations "Test.Native" "test" "test" []
+  Assert.Contains("Invoke: FnPtr<unit -> unit>", source)
+  Assert.Contains("external execution hypothesis", source)
+  Assert.Contains((match evidence with "header" -> "header nonnull attribute" | "type" -> "native _Nonnull type" | "annotations" -> "pilot annotations.nonnull" | _ -> "pilot nonnull_callbacks"), source)
+  Assert.Contains("OwnershipTransfer = Undeclared", source)
+  if evidence = "callbacks" || evidence = "annotations" then
+    let withdrawn = { ctx with Bindings = Map.empty; NonnullAnnotations = None }
+    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generateModule withdrawn Set.empty declarations "Test.Native" "test" "test" [] |> ignore)
+    Assert.Contains("requires explicit nonnull evidence", error.Message)
+
+[<Fact>]
+let ``pilot callback nonnull cannot override native nullable evidence`` () =
+  let func = mkFunc "register" "void" ["notify", "Notify _Nullable"]
+  let declarations = [CppParser.Declaration.Typedef (mkTypedef "Notify" "void (*)(void)"); CppParser.Declaration.Function func]
+  let projection : PilotTypes.BindingProjection =
+    { Name = func.Name; Symbol = func.Name; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None }
+  let ctx = { FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty with Bindings = Map.ofList [func.Name, projection] }
+  let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generateFunctionDecls ctx "test" func |> ignore)
+  Assert.Contains("register parameter 0: nullable native type conflicts with a nonnull contract", error.Message)
+
+[<Theory>]
 [<InlineData("int", "int")>]
 [<InlineData("void *", "void *")>]
 [<InlineData("const char *", "const char *")>]
@@ -40,7 +91,7 @@ let ``explicit ownership hypotheses survive generation and withdrawal removes au
 let ``callback descriptor does not invent borrowed ownership from its typedef`` () =
   let declarations = [
     CppParser.Declaration.Typedef (mkTypedef "Notify" "void (*)(void *)")
-    CppParser.Declaration.Function (mkFunc "register" "void" ["notify", "Notify"]) ]
+    CppParser.Declaration.Function (mkFuncWithAttrs "register" "void" ["notify", "Notify"] [mkAttr "NonNullAttr" [0] None]) ]
   let source = FidelityCodeGenerator.generate declarations "Test.Native" "test" Types.LP64 Map.empty
   Assert.Contains("Expr<CallbackDescriptor>", source)
   Assert.Contains("OwnershipTransfer = Undeclared", source)
@@ -94,7 +145,7 @@ let ``generate maps void pointer params to option<CHandle<unit>> (nullable by de
 [<Fact>]
 let ``generate handles function pointer params as FnPtr`` () =
     let decls = [
-        CppParser.Declaration.Function (mkFunc "atexit" "int" [("__func", "void (*)(void)")])
+        CppParser.Declaration.Function (mkFuncWithAttrs "atexit" "int" [("__func", "void (*)(void)")] [mkAttr "NonNullAttr" [0] None])
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
     Assert.Contains("(func: FnPtr<unit -> unit>)", result)
@@ -103,10 +154,10 @@ let ``generate handles function pointer params as FnPtr`` () =
 let ``generate resolves typedef to function pointer as FnPtr`` () =
     let decls = [
         CppParser.Declaration.Typedef (mkTypedef "__compar_fn_t" "int (*)(const void *, const void *)")
-        CppParser.Declaration.Function (mkFunc "qsort" "void" [
+        CppParser.Declaration.Function (mkFuncWithAttrs "qsort" "void" [
             ("__base", "void *"); ("__nmemb", "size_t")
             ("__size", "size_t"); ("__compar", "__compar_fn_t")
-        ])
+        ] [mkAttr "NonNullAttr" [3] None])
         CppParser.Declaration.Typedef (mkTypedef "size_t" "unsigned long")
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
@@ -118,8 +169,8 @@ let ``generate resolves typedef to function pointer as FnPtr`` () =
 let ``direct callback typedef declares one entry and preserves native scalar representations`` () =
     let declarations = [
         CppParser.Declaration.Typedef (mkTypedef "Notify" "int (*)(unsigned int, int, void *)")
-        CppParser.Declaration.Function (mkFunc "register" "int" ["notify", "Notify"; "context", "void *"])
-        CppParser.Declaration.Function (mkFunc "replace" "void" ["notify", "Notify"]) ]
+        CppParser.Declaration.Function (mkFuncWithAttrs "register" "int" ["notify", "Notify"; "context", "void *"] [mkAttr "NonNullAttr" [0] None])
+        CppParser.Declaration.Function (mkFuncWithAttrs "replace" "void" ["notify", "Notify"] [mkAttr "NonNullAttr" [0] None]) ]
     let source = FidelityCodeGenerator.generate declarations "Test.Native" "test" Types.LP64 Map.empty
     let name = "Callback_Test_002E_Native_003A__003A_NotifyEntry"
     Assert.Equal(2, source.Split("type " + name + " =").Length)
@@ -138,7 +189,7 @@ let ``direct callback typedef declares one entry and preserves native scalar rep
 let ``callback data pointer arguments and results convert absence like extern results`` () =
     let declarations = [
         CppParser.Declaration.Typedef (mkTypedef "Transform" "void *(*)(void *)")
-        CppParser.Declaration.Function (mkFunc "transform" "void *" ["callback", "Transform"]) ]
+        CppParser.Declaration.Function (mkFuncWithAttrs "transform" "void *" ["callback", "Transform"] [mkAttr "NonNullAttr" [0] None]) ]
     let source = FidelityCodeGenerator.generate declarations "Test.Native" "test" Types.LP64 Map.empty
     Assert.Contains("Invoke: FnPtr<option<CHandle<unit>> -> option<CHandle<unit>>>", source)
     Assert.Contains(") : option<CHandle<unit>> =", source)
@@ -148,7 +199,7 @@ let ``callback data pointer arguments and results convert absence like extern re
 let ``callback record identities distinguish namespace punctuation`` () =
     let declarations = [
         CppParser.Declaration.Typedef (mkTypedef "Notify" "void (*)(void)")
-        CppParser.Declaration.Function (mkFunc "register" "void" ["notify", "Notify"]) ]
+        CppParser.Declaration.Function (mkFuncWithAttrs "register" "void" ["notify", "Notify"] [mkAttr "NonNullAttr" [0] None]) ]
     let recordName ns =
         let source = FidelityCodeGenerator.generate declarations ns "test" Types.LP64 Map.empty
         source.Split('\n') |> Array.find (fun line -> line.StartsWith "type Callback_")
@@ -342,7 +393,7 @@ let ``const char pointer param emits as option of CHandle`` () =
 [<Fact>]
 let ``function pointer param does NOT get Option wrapping`` () =
     let decls = [
-        CppParser.Declaration.Function (mkFunc "register_signal" "void" [("sig", "int"); ("handler", "void (*)(int)")])
+        CppParser.Declaration.Function (mkFuncWithAttrs "register_signal" "void" [("sig", "int"); ("handler", "void (*)(int)")] [mkAttr "NonNullAttr" [1] None])
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "libc" Types.LP64 Map.empty
     // function pointer → FnPtr<sig>, NOT option<FnPtr<sig>>
@@ -354,7 +405,7 @@ let ``function pointer param does NOT get Option wrapping`` () =
 [<InlineData("void (* )(int)")>]
 let ``qualified callback slots cannot accidentally enter the data pointer conversion`` cType =
     Assert.False(FidelityCodeGenerator.isCDataPointer cType)
-    let declarations = [CppParser.Declaration.Function (mkFunc "register" "void" [("handler", cType)])]
+    let declarations = [CppParser.Declaration.Function (mkFuncWithAttrs "register" "void" [("handler", cType)] [mkAttr "NonNullAttr" [0] None])]
     let source = FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty
     Assert.Contains("(handler: FnPtr<int -> unit>)", source)
     Assert.DoesNotContain("option<FnPtr", source)

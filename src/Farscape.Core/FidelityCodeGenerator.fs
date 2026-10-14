@@ -461,6 +461,13 @@ module FidelityCodeGenerator =
                 let stringParameter = projection |> Option.exists (fun b -> List.contains idx b.StringParameters)
                 let callbackNonnull = projection |> Option.exists (fun b -> List.contains idx b.NonnullCallbacks)
                 let handle = projection |> Option.bind (fun b -> List.tryItem idx b.ParameterHandles) |> Option.filter ((<>) "")
+                let provenNonnull = nonnullIndices.Contains idx || outerNullabilityIn ctx "_Nonnull" cType || callbackNonnull
+                if provenNonnull && outerNullabilityIn ctx "_Nullable" cType then
+                    failwith $"{func.Name} parameter {idx}: nullable native type conflicts with a nonnull contract"
+                match resolveIn ctx cType with
+                | FunctionPointer _ when not provenNonnull ->
+                    failwith $"{func.Name} parameter {idx}: a native function-pointer parameter requires explicit nonnull evidence; nullable callback parameters require a supported boundary adapter."
+                | _ -> ()
                 let fsType =
                     if reference then
                         match cType with
@@ -488,9 +495,6 @@ module FidelityCodeGenerator =
                         | Generic("FnPtr", _) as ty -> ty
                         | _ -> failwith $"{func.Name} parameter {idx}: nonnull_callbacks requires a C function pointer"
                     else mapType cType
-                let provenNonnull = nonnullIndices.Contains idx || outerNullabilityIn ctx "_Nonnull" cType
-                if provenNonnull && outerNullabilityIn ctx "_Nullable" cType then
-                    failwith $"{func.Name} parameter {idx}: nullable native type conflicts with a nonnull contract"
                 let isNullable = not reference && isDataPointerIn ctx cType && not provenNonnull
                 let finalType = if isNullable then wrapOption fsType else fsType
                 { FsParam.Name = cleanParamName name; Type = finalType })
@@ -542,7 +546,19 @@ module FidelityCodeGenerator =
                     | _ -> failwith $"{func.Name} parameter {index}: constant projection requires an integer literal and scalar integer parameter")
             let publicParameters = parameters |> List.indexed |> List.choose (fun(i,p)->if (fixedAt i).IsSome then None else Some p)
             [ LetBinding(func.Name, publicParameters, finalReturnType, FunctionCall("", nativeName, args), []) ]
-        formatDocDecls { func with Name = symbol } @
+        let callbackNotes =
+            func.Parameters |> List.mapi (fun idx (name, cType) ->
+                match resolveIn ctx cType with
+                | FunctionPointer _ ->
+                    let evidence =
+                        [ if clangNonnull.Contains idx then "header nonnull attribute"
+                          if tomlNonnull.Contains idx then "pilot annotations.nonnull"
+                          if outerNullabilityIn ctx "_Nonnull" cType then "native _Nonnull type"
+                          if projection |> Option.exists (fun b -> List.contains idx b.NonnullCallbacks) then "pilot nonnull_callbacks" ]
+                        |> String.concat ", "
+                    Some (XmlDoc $"Callback parameter `{name}` nonnull is an external execution hypothesis from {evidence}; it is not a proof of foreign behavior.")
+                | _ -> None) |> List.choose id
+        formatDocDecls { func with Name = symbol } @ callbackNotes @
         [ LetBinding(nativeName, parameters, finalReturnType, NativeZeroed,
                      [$"FidelityExtern(\"{libraryName}\", \"{symbol}\")"]) ] @
         generateDescriptorDecls descriptorContext nativeFunction @ wrapper

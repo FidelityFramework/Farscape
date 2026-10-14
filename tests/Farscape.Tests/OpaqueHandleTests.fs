@@ -243,7 +243,7 @@ module IntegrationTests =
 
     [<Fact>]
     let ``callback and output cell signatures retain the opaque typedef marker`` () =
-        let callback = mkFunc "registerStream" "void" [("notify", "void (*)(hipStream_t)")]
+        let callback = mkFuncWithAttrs "registerStream" "void" [("notify", "void (*)(hipStream_t)")] [mkAttr "NonNullAttr" [0] None]
         let output = mkFunc "createStream" "int" [("stream", "hipStream_t *")]
         let declarations = [mkOpaqueTypedef "hipStream_t" "ihipStream_t"; CppParser.Declaration.Function callback; CppParser.Declaration.Function output]
         let ctx = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
@@ -318,8 +318,8 @@ typedef Token _Nullable OptionalToken;
 typedef OptionalToken OptionalAlias;
 typedef Token (*Transform)(Token, OptionalAlias, RequiredAlias);
 typedef RequiredAlias (*RequiredTransform)(RequiredAlias);
-void register_transform(Transform transform);
-void register_required(RequiredTransform transform);
+void register_transform(Transform _Nonnull transform);
+void register_required(RequiredTransform _Nonnull transform);
             """)
             let options : CppParser.HeaderParserOptions =
                 { HeaderFile = path; IncludePaths = []; Defines = []; Verbose = false; IncludeMacros = false
@@ -345,7 +345,7 @@ void register_required(RequiredTransform transform);
 
     [<Fact>]
     let ``nonnull nested function pointer values retain their exact native signature`` () =
-        let declarations = [CppParser.Declaration.Function (mkFunc "register" "void" [("callback", "void (*)(void (* _Nonnull)(int))")])]
+        let declarations = [CppParser.Declaration.Function (mkFuncWithAttrs "register" "void" [("callback", "void (*)(void (* _Nonnull)(int))")] [mkAttr "NonNullAttr" [0] None])]
         let source = FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty
         Assert.Contains("FnPtr<FnPtr<int -> unit> -> unit>", source)
         Assert.Contains("Type = Pointer 64", source)

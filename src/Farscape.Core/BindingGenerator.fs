@@ -494,15 +494,55 @@ module BindingGenerator =
                 let localCounts = classification.LocalTypes |> Map.toList |> List.sumBy (fun (_, s) -> s.Count)
                 logVerbose $"Type classification: {sharedCount} shared, {localCounts} local across {project.Namespaces.Length} namespaces" verbose
 
-                // ── Shared Types.clef (root level) ──────────────────────────
-                Directory.CreateDirectory(outputDir) |> ignore
                 let sharedTypesNs = $"{nsPrefix}.Types"
+                // Complete native declaration rendering before any output write.
+                // Retain these same results for emission; preflight must not be a
+                // second, weaker source of boundary-contract decisions.
+                let namespaceCode =
+                    project.Namespaces |> List.map (fun ns ->
+                        let lastSegment = ns.Name.Split('.') |> Array.last
+                        let localTypeNames = Map.tryFind ns.Name classification.LocalTypes |> Option.defaultValue Set.empty
+                        let localTypesNs = $"{ns.Name}.Types"
+                        let localCode =
+                            if localTypeNames.IsEmpty then None else
+                            let localTypeDecls = PilotAnalyzer.filterTypesOnly localTypeNames declarations
+                            let localHandles = Set.intersect ctx.OpaqueHandles localTypeNames
+                            Some (FidelityCodeGenerator.generateModule ctx localHandles localTypeDecls
+                                      localTypesNs ns.Library "Local type definitions" [sharedTypesNs])
+                        let funcOpenModules = if localTypeNames.IsEmpty then [sharedTypesNs] else [sharedTypesNs; localTypesNs]
+                        let funcDecls =
+                            if typedProtocol && not ns.XmlInterfaces.IsEmpty then []
+                            else PilotAnalyzer.filterDeclarationsWithTypes ns Set.empty declarations
+                        let funcCount = funcDecls |> List.filter (function CppParser.Declaration.Function _ -> true | _ -> false) |> List.length
+                        let funcCode = FidelityCodeGenerator.generateModule ctx Set.empty funcDecls
+                                           ns.Name ns.Library $"{lastSegment} function declarations" funcOpenModules
+                        let mappedDecls = MappedReturnGenerator.generate project ctx declarations ns sharedTypesNs
+                        let funcCode =
+                            MappedReturnGenerator.mappings project
+                            |> List.filter (fun mapping -> ns.Functions |> List.contains mapping.Acquire)
+                            |> List.fold (fun (code: string) mapping ->
+                                code.Replace("\nlet " + mapping.Acquire + " (", "\nlet private " + mapping.Acquire + " (")) funcCode
+                        let funcCode = funcCode + "\n" + (mappedDecls |> List.map CodeRenderer.render |> String.concat "\n")
+                        let wrapperCode =
+                            if not generateWrappers then None else
+                            let allNsDecls = PilotAnalyzer.filterDeclarationsForNamespace ns declarations
+                            let passthroughFunctions =
+                                project.ErrorConventions
+                                |> Option.map (fun spec -> spec.Overrides |> Map.toList |> List.choose (fun (name, convention) ->
+                                    if convention = PilotTypes.NoErrorConvention then Some name else None) |> Set.ofList)
+                                |> Option.defaultValue Set.empty
+                            Some (WrapperCodeGenerator.generateWithContext (Some ctx) ctx.NativePointerSurface passthroughFunctions
+                                      allNsDecls $"{ns.Name}.Api" ns.Library ns.Name errorHandling dataModel project.Nonnull)
+                        ns, localTypeNames.Count, localCode, funcCount, funcCode, wrapperCode)
+
+                // ── Shared Types.clef (root level) ──────────────────────────
                 let sharedTypeDecls = PilotAnalyzer.filterTypesOnly classification.SharedTypes declarations
                 let sharedHandles = Set.intersect ctx.OpaqueHandles classification.SharedTypes
                 let sharedCode =
                     FidelityCodeGenerator.generateModule ctx sharedHandles sharedTypeDecls
                         sharedTypesNs project.Library.Name "Shared type definitions" []
                 let sharedTypesPath = Path.Combine(outputDir, "Types.clef")
+                Directory.CreateDirectory(outputDir) |> ignore
                 File.WriteAllText(sharedTypesPath, sharedCode)
                 let viewMarkers = MappedReturnGenerator.markers project |> List.map CodeRenderer.render |> String.concat "\n"
                 if viewMarkers <> "" then File.AppendAllText(sharedTypesPath, "\n" + viewMarkers)
@@ -639,72 +679,35 @@ module BindingGenerator =
 
                 // ── Namespace subfolders ─────────────────────────────────────
                 let nsFiles =
-                    project.Namespaces |> List.collect (fun ns ->
+                    namespaceCode |> List.collect (fun (ns, localTypeCount, localCode, funcCount, funcCode, wrapperCode) ->
                         let lastSegment = ns.Name.Split('.') |> Array.last
                         let nsDir = Path.Combine(outputDir, lastSegment)
                         Directory.CreateDirectory(nsDir) |> ignore
 
-                        let localTypeNames =
-                            match Map.tryFind ns.Name classification.LocalTypes with
-                            | Some names -> names
-                            | None -> Set.empty
-
                         // ── Local Types.clef (if namespace has local types) ──
-                        let localTypesNs = $"{ns.Name}.Types"
                         let localTypeFiles =
-                            if localTypeNames.IsEmpty then []
-                            else
-                                let localTypeDecls = PilotAnalyzer.filterTypesOnly localTypeNames declarations
-                                let localHandles = Set.intersect ctx.OpaqueHandles localTypeNames
-                                let localCode =
-                                    FidelityCodeGenerator.generateModule ctx localHandles localTypeDecls
-                                        localTypesNs ns.Library "Local type definitions" [sharedTypesNs]
+                            match localCode with
+                            | None -> []
+                            | Some localCode ->
                                 let localTypesPath = Path.Combine(nsDir, "Types.clef")
                                 File.WriteAllText(localTypesPath, localCode)
-                                logVerbose $"  {lastSegment}/Types.clef ({localTypeNames.Count} types)" verbose
+                                logVerbose $"  {lastSegment}/Types.clef ({localTypeCount} types)" verbose
                                 [localTypesPath]
 
                         // ── Functions .clef ──────────────────────────────────
-                        let funcOpenModules =
-                            if localTypeNames.IsEmpty then [sharedTypesNs]
-                            else [sharedTypesNs; localTypesNs]
-                        let funcDecls =
-                            if typedProtocol && not ns.XmlInterfaces.IsEmpty then []
-                            else PilotAnalyzer.filterDeclarationsWithTypes ns Set.empty declarations
-                        let funcCount =
-                            funcDecls |> List.filter (function CppParser.Declaration.Function _ -> true | _ -> false) |> List.length
-                        let funcCode =
-                            FidelityCodeGenerator.generateModule ctx Set.empty funcDecls
-                                ns.Name ns.Library $"{lastSegment} function declarations" funcOpenModules
-                        let mappedDecls = MappedReturnGenerator.generate project ctx declarations ns sharedTypesNs
-                        let funcCode =
-                            MappedReturnGenerator.mappings project
-                            |> List.filter (fun mapping -> ns.Functions |> List.contains mapping.Acquire)
-                            |> List.fold (fun (code: string) mapping ->
-                                code.Replace("\nlet " + mapping.Acquire + " (", "\nlet private " + mapping.Acquire + " (")) funcCode
-                        let funcCode = funcCode + "\n" + (mappedDecls |> List.map CodeRenderer.render |> String.concat "\n")
-
                         let funcPath = Path.Combine(nsDir, $"{lastSegment}.clef")
                         File.WriteAllText(funcPath, funcCode)
                         logVerbose $"  {lastSegment}/{lastSegment}.clef ({funcCount} functions)" verbose
 
                         // ── Wrappers (optional) ─────────────────────────────
                         let wrapperFiles =
-                            if generateWrappers then
-                                let allNsDecls = PilotAnalyzer.filterDeclarationsForNamespace ns declarations
-                                let wrapperNamespace = $"{ns.Name}.Api"
-                                let passthroughFunctions =
-                                    project.ErrorConventions
-                                    |> Option.map (fun spec -> spec.Overrides |> Map.toList |> List.choose (fun (name, convention) ->
-                                        if convention = PilotTypes.NoErrorConvention then Some name else None) |> Set.ofList)
-                                    |> Option.defaultValue Set.empty
-                                let wrapperCode =
-                                    WrapperCodeGenerator.generateWithContext (Some ctx) ctx.NativePointerSurface passthroughFunctions allNsDecls wrapperNamespace ns.Library ns.Name errorHandling dataModel project.Nonnull
+                            match wrapperCode with
+                            | Some wrapperCode ->
                                 let wrapperPath = Path.Combine(nsDir, $"{lastSegment}Api.clef")
                                 File.WriteAllText(wrapperPath, wrapperCode)
                                 logVerbose $"  {lastSegment}/{lastSegment}Api.clef" verbose
                                 [wrapperPath]
-                            else []
+                            | None -> []
 
                         localTypeFiles @ [funcPath] @ wrapperFiles)
 

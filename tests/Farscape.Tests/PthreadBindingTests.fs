@@ -6,9 +6,9 @@ open Farscape.Core
 open TestHelpers
 
 let private createDecl =
-    mkFunc "pthread_create" "int"
+    mkFuncWithAttrs "pthread_create" "int"
         [ "__newthread", "pthread_t *"; "__attr", "const pthread_attr_t *"
-          "__start_routine", "void *(*)(void *)"; "__arg", "void *" ]
+          "__start_routine", "void *(*)(void *)"; "__arg", "void *" ] [mkAttr "NonNullAttr" [2] None]
 
 let private decls =
     [ CppParser.Declaration.Typedef (mkTypedef "pthread_t" "unsigned long")

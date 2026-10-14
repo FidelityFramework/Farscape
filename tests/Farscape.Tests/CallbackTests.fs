@@ -340,7 +340,7 @@ module BoundaryGenerationTests =
     let private spec : CallbackSpec = { Registrations = [registration]; ListenerStructs = [] }
     let private declarations =
         [ CppParser.Declaration.Function (
-            mkFunc "register_event" "int" ["handler", "void (*)(unsigned int, void *)"; "data", "void *"]) ]
+            mkFuncWithAttrs "register_event" "int" ["handler", "void (*)(unsigned int, void *)"; "data", "void *"] [mkAttr "NonNullAttr" [0] None]) ]
     let private render model registrations =
         let ctx = FidelityCodeGenerator.buildGenerationContext declarations model Map.empty
         CallbackWrapperGenerator.generateTypedWithModules {spec with Registrations = registrations}
@@ -365,7 +365,7 @@ module BoundaryGenerationTests =
     let ``registrations retain the owner of each callback contract`` () =
         let second = {registration with Function = "other_event"}
         let extra = CppParser.Declaration.Function (
-            mkFunc "other_event" "int" ["handler", "void (*)(unsigned int, void *)"; "data", "void *"])
+            mkFuncWithAttrs "other_event" "int" ["handler", "void (*)(unsigned int, void *)"; "data", "void *"] [mkAttr "NonNullAttr" [0] None])
         let all = declarations @ [extra]
         let ctx = FidelityCodeGenerator.buildGenerationContext all LP64 Map.empty
         let output = CallbackWrapperGenerator.generateTypedWithModules

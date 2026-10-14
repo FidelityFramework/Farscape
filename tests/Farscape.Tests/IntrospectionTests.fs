@@ -415,12 +415,39 @@ let private signalProject (directory: string) (header: string) =
           Output = { Mode = "fidelity"; Directory = output }
           Namespaces = [ { Name = "Fidelity.WebKit.Native.Core"; Description = "Signal-only generation"; Library = "gobject-2.0"
                            Prefixes = []; Functions = []; XmlInterfaces = []; Signals = ["UserContentManager::script-message-received"] } ]
-          ErrorConventions = None; Callbacks = None; Nonnull = None; ProtocolConfig = None; Layer3 = None; CppConfig = None
+          ErrorConventions = None; Callbacks = None
+          // This synthetic profile supplies both entries; it asserts neither nullable slot is used.
+          Nonnull = Some { Parameters = Map.ofList ["g_signal_connect_data", [2; 4]]; Returns = Set.empty }
+          ProtocolConfig = None; Layer3 = None; CppConfig = None
           Options = Some { AbiCriticalStructs = []; GenerateDescriptors = true; NativePointerSurface = false; CHeaderMode = true
                            Bindings = []; DescriptorOnlyDependencies = true; ValueStructs = []; TypedProtocol = false; LinkLibraries = false; MappedReturns = [] } }
     let path = Path.Combine(directory, "signals.pilot.toml")
     PilotSerializer.saveToFile path project |> function Ok _ -> () | Error error -> failwith error
     path, output
+
+[<Fact>]
+let ``withdrawn signal project callback hypothesis preserves existing output`` () =
+  let directory = Path.Combine(Path.GetTempPath(), "farscape-signal-project-unknown-" + Guid.NewGuid().ToString("N"))
+  try
+    Directory.CreateDirectory directory |> ignore
+    let pilot, output = signalProject directory projectHeader
+    let project =
+      PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail (File.ReadAllText pilot))
+      |> function Ok project -> project | Error error -> failwith error
+    PilotSerializer.saveToFile pilot { project with Nonnull = None } |> function Ok () -> () | Error error -> failwith error
+    Directory.CreateDirectory output |> ignore
+    let sentinel = Path.Combine(output, "preserve-existing.clef")
+    File.WriteAllText(sentinel, "// Retained binding\n")
+    let result = BindingGenerator.generateFromProject pilot false false Types.LP64
+    match result with
+    | Ok _ -> failwith "Omitted callback nonnull contract must refuse before output"
+    | Error error ->
+      Assert.Contains("g_signal_connect_data parameter 2", error)
+      Assert.Contains("requires explicit nonnull evidence", error)
+    Assert.Equal("// Retained binding\n", File.ReadAllText sentinel)
+    Assert.Single(Directory.GetFiles(output, "*", SearchOption.AllDirectories)) |> ignore
+  finally
+    if Directory.Exists directory then Directory.Delete(directory, true)
 
 [<Fact>]
 let ``signal-only project emits each known nominal carrier in shared Types`` () =
