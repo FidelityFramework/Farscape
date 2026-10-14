@@ -18,7 +18,9 @@ module TypedSignalGenerator =
     let private line xs = String.concat "\n" xs + "\n"
     let private parameter (name, typ) = $"{{ Name = {q name}; Type = {typ}; PassBy = Value }}"
     let private functionRecord symbol parameters ret =
-        "{ CName = " + q symbol + "; Parameters = [| " + (parameters |> List.map parameter |> String.concat "; ") + " |]; ReturnType = " + ret + "; CallingConvention = CDecl; OwnershipTransfer = Borrowed }"
+        // The current GIR reader carries signature/nullability, not transfer-ownership.
+        // Missing ownership evidence must not become a borrowing hypothesis.
+        "{ CName = " + q symbol + "; Parameters = [| " + (parameters |> List.map parameter |> String.concat "; ") + " |]; ReturnType = " + ret + "; CallingConvention = CDecl; OwnershipTransfer = Undeclared }"
 
     type private Carrier = { Clef: string; Ref: string; Type: FsType }
 

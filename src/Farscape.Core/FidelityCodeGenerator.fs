@@ -417,8 +417,8 @@ module FidelityCodeGenerator =
         let returnRef, returnProvenance = abiClaim ctx func.ReturnType
         let ownership, ownershipNote =
             match ctx.Bindings |> Map.tryFind func.Name |> Option.bind (fun binding -> binding.Ownership) with
-            | Some transfer -> string transfer, $"Ownership {transfer} is declared by the pilot."
-            | None -> "Borrowed", "The header declares no ownership; Borrowed is the inferred default until a pilot declaration says otherwise."
+            | Some transfer -> string transfer, $"Ownership {transfer} is declared by the pilot as an external execution hypothesis."
+            | None -> "Undeclared", "No ownership hypothesis is declared; Undeclared grants no lifetime or transfer authority."
         [ XmlDoc $"ABI descriptor of `{func.Name}` (Layer 2): each parameter's and the return's representation under {ctx.DataModel}, every width naming its stratum. {ownershipNote}"
           ValueBinding($"{func.Name}Descriptor", Generic("Expr", Named "FunctionDescriptor"),
               Quoted(RecordBlock [
@@ -593,7 +593,7 @@ module FidelityCodeGenerator =
                                 "Parameters", ArrayBlock parameterInfos
                                 "ReturnType", Commented(Literal returnRef, returnProvenance)
                                 "CallingConvention", Identifier "CDecl"
-                                "OwnershipTransfer", Identifier "Borrowed" ] ])) ]
+                                "OwnershipTransfer", Identifier "Undeclared" ] ])) ]
                 index, recordName, declarations)) |> List.choose id
 
     /// Keep the full native arity private while carrying declared entry provenance through a

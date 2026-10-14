@@ -128,6 +128,8 @@ let ``typed signal bridge declares the entry contract and a connect over g_signa
         Assert.Contains("{ Name = \"count\"; Type = Integer (Unsigned, 32); PassBy = Value }", text)
         Assert.Contains("ReturnType = Integer (Signed, 32)", text)
         Assert.Contains("ReturnType = Integer (Unsigned, 64)", text)
+        Assert.Contains("OwnershipTransfer = Undeclared", text)
+        Assert.DoesNotContain("OwnershipTransfer = Borrowed", text)
         Assert.DoesNotContain("nativeint", text)
         Assert.Contains("open Fidelity.WebKit.Native.Types", text)
         Assert.Contains("no callback environment is allocated or retained", text)

@@ -4,6 +4,48 @@ open Xunit
 open Farscape.Core
 open TestHelpers
 
+[<Theory>]
+[<InlineData("int", "int")>]
+[<InlineData("void *", "void *")>]
+[<InlineData("const char *", "const char *")>]
+let ``missing ownership remains undeclared for scalar pointer and text signatures`` returnType parameterType =
+  let declarations = [CppParser.Declaration.Function (mkFunc "inspect" returnType ["value", parameterType])]
+  let source = FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty
+  Assert.Contains("OwnershipTransfer = Undeclared", source)
+  Assert.Contains("No ownership hypothesis is declared", source)
+  Assert.DoesNotContain("OwnershipTransfer = Borrowed", source)
+  Assert.DoesNotContain("inferred default", source)
+
+[<Fact>]
+let ``explicit ownership hypotheses survive generation and withdrawal removes authority`` () =
+  let func = mkFunc "acquire" "void *" ["context", "void *"]
+  let ctx = FidelityCodeGenerator.buildGenerationContext [CppParser.Declaration.Function func] Types.LP64 Map.empty
+  let projection : PilotTypes.BindingProjection =
+    { Name = func.Name; Symbol = "native_acquire"; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None }
+  let emit ownership =
+    let current = { ctx with Bindings = Map.ofList [func.Name, { projection with Ownership = ownership }] }
+    FidelityCodeGenerator.generateFunctionDecls current "test" func |> List.map CodeRenderer.render |> String.concat "\n"
+  for transfer in [PilotTypes.CallerOwns; PilotTypes.CalleeOwns; PilotTypes.Borrowed] do
+    let source = emit (Some transfer)
+    Assert.Contains($"OwnershipTransfer = {transfer}", source)
+    Assert.Contains("is declared by the pilot as an external execution hypothesis", source)
+    Assert.Contains("CName = \"native_acquire\"", source)
+    Assert.DoesNotContain("OwnershipTransfer = Undeclared", source)
+  let withdrawn = emit None
+  Assert.Contains("OwnershipTransfer = Undeclared", withdrawn)
+  Assert.DoesNotContain("OwnershipTransfer = Borrowed", withdrawn)
+
+[<Fact>]
+let ``callback descriptor does not invent borrowed ownership from its typedef`` () =
+  let declarations = [
+    CppParser.Declaration.Typedef (mkTypedef "Notify" "void (*)(void *)")
+    CppParser.Declaration.Function (mkFunc "register" "void" ["notify", "Notify"]) ]
+  let source = FidelityCodeGenerator.generate declarations "Test.Native" "test" Types.LP64 Map.empty
+  Assert.Contains("Expr<CallbackDescriptor>", source)
+  Assert.Contains("OwnershipTransfer = Undeclared", source)
+  Assert.DoesNotContain("OwnershipTransfer = Borrowed", source)
+
 [<Fact>]
 let ``buildTypedefMap resolves simple typedefs`` () =
     let decls = [
