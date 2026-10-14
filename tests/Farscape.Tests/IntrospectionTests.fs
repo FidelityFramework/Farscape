@@ -500,6 +500,10 @@ let ``project signal preflight leaves every existing output intact on unsupporte
 [<InlineData("missing", false)>]
 [<InlineData("selected", true)>]
 [<InlineData("missing", true)>]
+[<InlineData("uncommitted", false)>]
+[<InlineData("malformed", false)>]
+[<InlineData("malformed", true)>]
+[<InlineData("invalid-description", false)>]
 let ``descriptor-only project preserves explicit platform selection before writing`` selection callbacks =
   let checkout = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "../.."))
   let directory = Path.Combine(checkout, "artifacts", "ffi-contract-20261013", "platform-selection-" + Guid.NewGuid().ToString("N"))
@@ -514,29 +518,45 @@ let ``descriptor-only project preserves explicit platform selection before writi
       PilotSerializer.saveToFile pilot callbackProject |> function Ok () -> () | Error error -> failwith error
     let selected = Path.Combine(directory, "Selected.Platform.fidproj")
     if selection = "selected" then
-      File.WriteAllText(selected, "[package]\nname = \"Selected.Platform\"\n[build]\nsources = []\n")
+      File.WriteAllText(selected, "[package]\nname = \"Selected.Platform\"\n[platform]\ndescription = \"Selected.Target.description\"\n[build]\nsources = []\n")
+    elif selection = "uncommitted" then
+      File.WriteAllText(selected, "[package]\nname = \"Uncommitted.Platform\"\n[build]\nsources = []\n")
+    elif selection = "malformed" then File.WriteAllText(selected, "[platform\n")
+    elif selection = "invalid-description" then File.WriteAllText(selected, "[platform]\ndescription = 64\n")
     Environment.SetEnvironmentVariable("FIDELITY_PLATFORM_PROJECT", if selection = "absent" then null else selected)
     Directory.CreateDirectory output |> ignore
     let sentinel = Path.Combine(output, "preserve-existing.clef")
     File.WriteAllText(sentinel, "// Retained binding\n")
     match BindingGenerator.generateFromProject pilot false callbacks Types.LP64 with
-    | Error error when selection = "missing" ->
-      Assert.Contains($"FIDELITY_PLATFORM_PROJECT names a missing dependency: {selected}", error)
+    | Error error when selection = "missing" || selection = "malformed" || selection = "invalid-description" ->
+      let reason =
+        match selection with
+        | "missing" -> $"FIDELITY_PLATFORM_PROJECT names a missing dependency: {selected}"
+        | "malformed" -> $"FIDELITY_PLATFORM_PROJECT has invalid TOML: {selected}"
+        | _ -> $"FIDELITY_PLATFORM_PROJECT platform.description must be a nonempty string: {selected}"
+      Assert.Contains(reason, error)
       Assert.Equal("// Retained binding\n", File.ReadAllText sentinel)
       Assert.Equal<string array>([|sentinel|], Directory.GetFiles(output, "*", SearchOption.AllDirectories))
     | Error error -> failwith error
-    | Ok _ when selection = "missing" -> failwith "An invalid explicit platform selection must refuse before output"
+    | Ok _ when selection = "missing" || selection = "malformed" || selection = "invalid-description" -> failwith "An invalid explicit platform selection must refuse before output"
     | Ok result ->
       let manifests = result.OutputFiles |> List.filter(fun path -> path.EndsWith ".fidproj")
       Assert.NotEmpty manifests
       if callbacks then Assert.Equal(2, manifests.Length)
       for path in manifests do
         let contents = File.ReadAllText path
+        let document = Fidelity.Data.TOML.Toml.parseOrFail contents
+        Assert.Equal((if selection = "selected" then Some "Selected.Target.description" else None), Fidelity.Data.TOML.Toml.getString "platform.description" document)
         Assert.DoesNotContain("word_size", contents)
         if selection = "absent" then Assert.DoesNotContain("Fidelity.Platform", contents)
         else
           let relative = Path.GetRelativePath(Path.GetDirectoryName path, selected).Replace('\\', '/')
           Assert.Contains($"\"Fidelity.Platform\" = {{ path = \"{relative}\" }}", contents)
+          let dependencies = Fidelity.Data.TOML.Toml.getTable "dependencies" document |> Option.get
+          match Map.tryFind "Fidelity.Platform" dependencies with
+          | Some (Fidelity.Data.TOML.TomlValue.InlineTable dependency) ->
+            Assert.Equal(Some (Fidelity.Data.TOML.TomlValue.String relative), Map.tryFind "path" dependency)
+          | value -> failwithf "Dotted dependency key was not preserved as one package: %A" value
         if path.Contains ".Bridge.fidproj" then
           Assert.Contains("\"Fidelity.WebKit.Native.Core\" = { path =", contents)
       let native = manifests |> List.find(fun path -> not (path.Contains ".Bridge.fidproj")) |> File.ReadAllText

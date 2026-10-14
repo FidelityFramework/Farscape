@@ -136,11 +136,26 @@ module BindingGenerator =
                 resolveProjectDependency directory "Fidelity.Platform.fidproj"
                     "Fidelity.Platform/Environments/Linux/x86_64/Fidelity.Platform.fidproj"
                     "FIDELITY_PLATFORM_PROJECT" platformOverride |> Some
+        // The dependency is not a platform selection by itself. Copy only the
+        // description explicitly supplied by the selected project's manifest.
+        let platformDescription =
+            if System.String.IsNullOrWhiteSpace platformOverride then None
+            else
+                let path = platformPath |> Option.get
+                let document =
+                    Fidelity.Data.TOML.Toml.parse (File.ReadAllText path)
+                    |> function
+                        | Ok document -> document
+                        | Error reason -> invalidOp $"FIDELITY_PLATFORM_PROJECT has invalid TOML: {path}: {reason}"
+                match Fidelity.Data.TOML.Toml.getValue "platform.description" document with
+                | None -> None
+                | Some (Fidelity.Data.TOML.TomlValue.String description) when not (System.String.IsNullOrWhiteSpace description) -> Some description
+                | Some _ -> invalidOp $"FIDELITY_PLATFORM_PROJECT platform.description must be a nonempty string: {path}"
         let metadataProject = if descriptorOnly then "BAREWire.BindingMetadata.fidproj" else "BAREWire.fidproj"
         let metadataPath =
             resolveProjectDependency directory metadataProject
                 (Path.Combine("BAREWire", "src", metadataProject)) "BAREWIRE_METADATA_PROJECT" metadataOverride
-        platformPath, metadataPath
+        platformPath, platformDescription, metadataPath
 
     /// Generate a canonical .fidproj file for the binding library.
     /// Fully automatic — derives everything from what Farscape already knows.
@@ -148,10 +163,11 @@ module BindingGenerator =
         (project: PilotProject)
         (nsPrefix: string)
         (outputDir: string)
-        (dependencies: string option * string)
+        (dependencies: string option * string option * string)
         (allFiles: string list)
         (verbose: bool) : string option =
         let packageName = nsPrefix
+        let platformPath, platformDescription, metadataPath = dependencies
         let fidprojDir = projectDirectoryForOutput outputDir
         let relativeSources =
             allFiles
@@ -193,12 +209,14 @@ module BindingGenerator =
                 sb.AppendLine($"libraries = [{values}]") |> ignore
                 sb.AppendLine() |> ignore
         sb.AppendLine("[platform]") |> ignore
+        platformDescription |> Option.iter (fun description ->
+            let value = Fidelity.Data.TOML.Toml.serializeValue (Fidelity.Data.TOML.TomlValue.String description)
+            sb.AppendLine($"description = {value}") |> ignore)
         sb.AppendLine("runtime_model = \"libc\"") |> ignore
         sb.AppendLine("os = \"linux\"") |> ignore
         sb.AppendLine("arch = \"x86_64\"") |> ignore
         sb.AppendLine() |> ignore
         sb.AppendLine("[dependencies]") |> ignore
-        let platformPath, metadataPath = dependencies
         match platformPath with
         | Some platformPath ->
             let platformDepPath = Path.GetRelativePath(fidprojDir, platformPath).Replace('\\', '/')
@@ -816,6 +834,10 @@ module BindingGenerator =
                             sb.AppendLine("]") |> ignore
                             sb.AppendLine() |> ignore
                             sb.AppendLine("[platform]") |> ignore
+                            let platformPath, platformDescription, _ = dependencies
+                            platformDescription |> Option.iter (fun description ->
+                                let value = Fidelity.Data.TOML.Toml.serializeValue (Fidelity.Data.TOML.TomlValue.String description)
+                                sb.AppendLine($"description = {value}") |> ignore)
                             sb.AppendLine("runtime_model = \"libc\"") |> ignore
                             sb.AppendLine("os = \"linux\"") |> ignore
                             sb.AppendLine("arch = \"x86_64\"") |> ignore
@@ -823,7 +845,7 @@ module BindingGenerator =
                             sb.AppendLine("[dependencies]") |> ignore
 
                             // Use the same validated selection as the native binding project.
-                            match fst dependencies with
+                            match platformPath with
                             | Some platformPath ->
                                 let platformDep = Path.GetRelativePath(fidprojDir, platformPath).Replace('\\', '/')
                                 sb.AppendLine($"\"Fidelity.Platform\" = {{ path = \"{platformDep}\" }}") |> ignore
