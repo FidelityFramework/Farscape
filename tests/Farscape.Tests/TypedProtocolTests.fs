@@ -84,6 +84,7 @@ uint32_t wl_proxy_get_version(struct wl_proxy *p);
 [<InlineData("positive")>]
 [<InlineData("missing-native")>]
 [<InlineData("constructor-string")>]
+[<InlineData("constructor-string-errno")>]
 let ``XML-only whole project validates complete protocol before changing output`` shape =
   let directory = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "../..", "artifacts/ffi-contract-20261013", "typed-project-"+Guid.NewGuid().ToString("N")))
   try
@@ -92,14 +93,15 @@ let ``XML-only whole project validates complete protocol before changing output`
     let declarations = if shape = "missing-native" then nativeHeader.Replace("char *strdup(const char *s);", "") else nativeHeader
     File.WriteAllText(header, declarations)
     let xml = Path.Combine(directory, "protocol.xml")
-    let extra = if shape = "constructor-string" then "<arg name=\"title\" type=\"string\"/>" else ""
+    let extra = if shape.StartsWith "constructor-string" then "<arg name=\"title\" type=\"string\"/>" else ""
     File.WriteAllText(xml, "<protocol name=\"test\"><interface name=\"wl_callback\" version=\"1\"><request name=\"noop\"/><request name=\"spawn\"><arg name=\"id\" type=\"new_id\" interface=\"wl_callback\"/>"+extra+"</request><event name=\"done\"><arg name=\"callback_data\" type=\"uint\"/></event></interface></protocol>")
     let output = Path.Combine(directory, "out")
     let project: PilotTypes.PilotProject =
       { Library = { Name="wayland-client"; Headers=[header]; XmlProtocols=[xml]; Introspection=[]; IncludePaths=[directory]; Defines=[]; MacroPrefixes=[]; PkgConfig=[] }
         Output = {Mode="fidelity"; Directory=output}
         Namespaces = [{Name="Fidelity.Wayland.Protocol"; Description="Whole XML project"; Library="wayland-client"; Prefixes=[]; Functions=[]; XmlInterfaces=["wl_callback"]; Signals=[]}]
-        ErrorConventions=None; Callbacks=None; Nonnull=None; ProtocolConfig=None; Layer3=None; CppConfig=None
+        ErrorConventions=(if shape = "constructor-string-errno" then Some {Default=PilotTypes.Errno; Overrides=Map.empty} else None)
+        Callbacks=None; Nonnull=None; ProtocolConfig=None; Layer3=None; CppConfig=None
         Options=Some {AbiCriticalStructs=["union wl_argument"; "struct wl_message"; "struct wl_interface"]; GenerateDescriptors=true; NativePointerSurface=false; CHeaderMode=true; Bindings=[]; DescriptorOnlyDependencies=true; ValueStructs=[]; TypedProtocol=true; LinkLibraries=false; MappedReturns=[]} }
     let pilot = Path.Combine(directory, "xml.pilot.toml")
     PilotSerializer.saveToFile pilot project |> function Ok () -> () | Error error -> failwith error
