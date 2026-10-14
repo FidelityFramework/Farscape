@@ -493,3 +493,54 @@ let ``project signal preflight leaves every existing output intact on unsupporte
         Assert.Equal<string array>([|sentinel|], Directory.GetFiles(output, "*", SearchOption.AllDirectories))
     finally
         if Directory.Exists directory then Directory.Delete(directory, true)
+
+[<Theory>]
+[<InlineData("absent", false)>]
+[<InlineData("selected", false)>]
+[<InlineData("missing", false)>]
+[<InlineData("selected", true)>]
+[<InlineData("missing", true)>]
+let ``descriptor-only project preserves explicit platform selection before writing`` selection callbacks =
+  let checkout = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "../.."))
+  let directory = Path.Combine(checkout, "artifacts", "ffi-contract-20261013", "platform-selection-" + Guid.NewGuid().ToString("N"))
+  let previous = Environment.GetEnvironmentVariable "FIDELITY_PLATFORM_PROJECT"
+  try
+    Directory.CreateDirectory directory |> ignore
+    let pilot, output = signalProject directory projectHeader
+    if callbacks then
+      let project = PilotSerializer.loadFromFile pilot |> function Ok project -> project | Error error -> failwith error
+      let callbackProject =
+        { project with Callbacks = Some { Registrations = [{ Function = "g_signal_connect_data"; CallbackParam = "c_handler"; DataParam = Some "data" }]; ListenerStructs = [] } }
+      PilotSerializer.saveToFile pilot callbackProject |> function Ok () -> () | Error error -> failwith error
+    let selected = Path.Combine(directory, "Selected.Platform.fidproj")
+    if selection = "selected" then
+      File.WriteAllText(selected, "[package]\nname = \"Selected.Platform\"\n[build]\nsources = []\n")
+    Environment.SetEnvironmentVariable("FIDELITY_PLATFORM_PROJECT", if selection = "absent" then null else selected)
+    Directory.CreateDirectory output |> ignore
+    let sentinel = Path.Combine(output, "preserve-existing.clef")
+    File.WriteAllText(sentinel, "// Retained binding\n")
+    match BindingGenerator.generateFromProject pilot false callbacks Types.LP64 with
+    | Error error when selection = "missing" ->
+      Assert.Contains($"FIDELITY_PLATFORM_PROJECT names a missing dependency: {selected}", error)
+      Assert.Equal("// Retained binding\n", File.ReadAllText sentinel)
+      Assert.Equal<string array>([|sentinel|], Directory.GetFiles(output, "*", SearchOption.AllDirectories))
+    | Error error -> failwith error
+    | Ok _ when selection = "missing" -> failwith "An invalid explicit platform selection must refuse before output"
+    | Ok result ->
+      let manifests = result.OutputFiles |> List.filter(fun path -> path.EndsWith ".fidproj")
+      Assert.NotEmpty manifests
+      if callbacks then Assert.Equal(2, manifests.Length)
+      for path in manifests do
+        let contents = File.ReadAllText path
+        Assert.DoesNotContain("word_size", contents)
+        if selection = "absent" then Assert.DoesNotContain("Fidelity.Platform", contents)
+        else
+          let relative = Path.GetRelativePath(Path.GetDirectoryName path, selected).Replace('\\', '/')
+          Assert.Contains($"\"Fidelity.Platform\" = {{ path = \"{relative}\" }}", contents)
+        if path.Contains ".Bridge.fidproj" then
+          Assert.Contains("\"Fidelity.WebKit.Native.Core\" = { path =", contents)
+      let native = manifests |> List.find(fun path -> not (path.Contains ".Bridge.fidproj")) |> File.ReadAllText
+      Assert.Contains("BAREWire.BindingMetadata.fidproj", native)
+  finally
+    Environment.SetEnvironmentVariable("FIDELITY_PLATFORM_PROJECT", previous)
+    if Directory.Exists directory then Directory.Delete(directory, true)

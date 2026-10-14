@@ -96,8 +96,7 @@ module BindingGenerator =
 
     /// Resolve actual dependencies from the pilot/output tree or the running generator.
     /// Never publish a guessed path that cannot be loaded on regeneration.
-    let private resolveProjectDependency directory fileName siblingPath environmentVariable =
-        let overridePath = System.Environment.GetEnvironmentVariable environmentVariable
+    let private resolveProjectDependency directory fileName siblingPath environmentVariable overridePath =
         if not (System.String.IsNullOrWhiteSpace overridePath) then
             let path = Path.GetFullPath overridePath
             if File.Exists path then path
@@ -125,15 +124,23 @@ module BindingGenerator =
         if not (isNull parent) && parent.Name = "Bindings" then parent.Parent.FullName
         else fullPath
 
-    let private validateProjectDependencies (project: PilotProject) directory =
+    let private resolveProjectDependencies (project: PilotProject) directory =
         let descriptorOnly = project.Options |> Option.exists (fun opts -> opts.DescriptorOnlyDependencies)
-        if not descriptorOnly then
-            resolveProjectDependency directory "Fidelity.Platform.fidproj"
-                "Fidelity.Platform/Environments/Linux/x86_64/Fidelity.Platform.fidproj"
-                "FIDELITY_PLATFORM_PROJECT" |> ignore
+        // Retain the selected inputs once. Descriptor-only limits the BARE vocabulary;
+        // it does not revoke an explicitly selected platform's graph declarations.
+        let platformOverride = System.Environment.GetEnvironmentVariable "FIDELITY_PLATFORM_PROJECT"
+        let metadataOverride = System.Environment.GetEnvironmentVariable "BAREWIRE_METADATA_PROJECT"
+        let platformPath =
+            if descriptorOnly && System.String.IsNullOrWhiteSpace platformOverride then None
+            else
+                resolveProjectDependency directory "Fidelity.Platform.fidproj"
+                    "Fidelity.Platform/Environments/Linux/x86_64/Fidelity.Platform.fidproj"
+                    "FIDELITY_PLATFORM_PROJECT" platformOverride |> Some
         let metadataProject = if descriptorOnly then "BAREWire.BindingMetadata.fidproj" else "BAREWire.fidproj"
-        resolveProjectDependency directory metadataProject
-            (Path.Combine("BAREWire", "src", metadataProject)) "BAREWIRE_METADATA_PROJECT" |> ignore
+        let metadataPath =
+            resolveProjectDependency directory metadataProject
+                (Path.Combine("BAREWire", "src", metadataProject)) "BAREWIRE_METADATA_PROJECT" metadataOverride
+        platformPath, metadataPath
 
     /// Generate a canonical .fidproj file for the binding library.
     /// Fully automatic — derives everything from what Farscape already knows.
@@ -141,6 +148,7 @@ module BindingGenerator =
         (project: PilotProject)
         (nsPrefix: string)
         (outputDir: string)
+        (dependencies: string option * string)
         (allFiles: string list)
         (verbose: bool) : string option =
         let packageName = nsPrefix
@@ -188,22 +196,16 @@ module BindingGenerator =
         sb.AppendLine("runtime_model = \"libc\"") |> ignore
         sb.AppendLine("os = \"linux\"") |> ignore
         sb.AppendLine("arch = \"x86_64\"") |> ignore
-        sb.AppendLine("word_size = 64") |> ignore
         sb.AppendLine() |> ignore
         sb.AppendLine("[dependencies]") |> ignore
-        let descriptorOnly = project.Options |> Option.exists (fun opts -> opts.DescriptorOnlyDependencies)
-        if not descriptorOnly then
-            let platformPath = resolveProjectDependency fidprojDir "Fidelity.Platform.fidproj"
-                                   "Fidelity.Platform/Environments/Linux/x86_64/Fidelity.Platform.fidproj"
-                                   "FIDELITY_PLATFORM_PROJECT"
+        let platformPath, metadataPath = dependencies
+        match platformPath with
+        | Some platformPath ->
             let platformDepPath = Path.GetRelativePath(fidprojDir, platformPath).Replace('\\', '/')
-            sb.AppendLine($"Fidelity.Platform = {{ path = \"{platformDepPath}\" }}") |> ignore
+            sb.AppendLine($"\"Fidelity.Platform\" = {{ path = \"{platformDepPath}\" }}") |> ignore
+        | None -> ()
         // The descriptors reference BAREWire's Hardware and Descriptors vocabularies
-        let metadataProject = if descriptorOnly then "BAREWire.BindingMetadata.fidproj" else "BAREWire.fidproj"
-        let bareWireDepPath =
-            let path = resolveProjectDependency fidprojDir metadataProject
-                           (Path.Combine("BAREWire", "src", metadataProject)) "BAREWIRE_METADATA_PROJECT"
-            Path.GetRelativePath(fidprojDir, path).Replace('\\', '/')
+        let bareWireDepPath = Path.GetRelativePath(fidprojDir, metadataPath).Replace('\\', '/')
         sb.AppendLine($"BAREWire = {{ path = \"{bareWireDepPath}\" }}") |> ignore
 
         let content = sb.ToString()
@@ -265,6 +267,11 @@ module BindingGenerator =
         | Ok project when generateWrappers && (project.ErrorConventions |> Option.exists (fun spec -> match spec.Default with PilotTypes.NullWithReason _ -> true | _ -> false)) ->
             Error "null_with_reason wrappers require the declared reason return type and a native text extent/ownership projection. An assumed error-text handle is not an admitted contract. No bindings were written."
         | Ok project ->
+            let projectDir = Path.GetDirectoryName(Path.GetFullPath(projectPath))
+            let outputDir =
+                if Path.IsPathRooted(project.Output.Directory) then project.Output.Directory
+                else Path.GetFullPath(Path.Combine(projectDir, project.Output.Directory))
+            let dependencies = resolveProjectDependencies project (projectDirectoryForOutput outputDir)
             // Parse C/C++ headers
             let headerResults =
                 project.Library.Headers |> List.map (fun headerPath ->
@@ -347,15 +354,6 @@ module BindingGenerator =
                     for c in classDecls do
                         let classification = CppClassAnalysis.classifyClass c
                         logVerbose $"  class: {c.Name} (fields={c.Fields.Length}, methods={c.Methods.Length}) -> {classification}" verbose
-
-                // Resolve output directory relative to the project file location
-                let projectDir = Path.GetDirectoryName(Path.GetFullPath(projectPath))
-                let outputDir =
-                    if Path.IsPathRooted(project.Output.Directory) then
-                        project.Output.Directory
-                    else
-                        Path.GetFullPath(Path.Combine(projectDir, project.Output.Directory))
-                validateProjectDependencies project (projectDirectoryForOutput outputDir)
 
                 // Build generation context once from the full declaration list
                 let structLayouts =
@@ -724,7 +722,7 @@ module BindingGenerator =
                 let allFiles = [sharedTypesPath] @ errorModuleFiles @ nsFiles @ typedProtocolFiles @ signalFiles
 
                 // Generate canonical fidproj for the binding library
-                let fidprojFile = generateFidproj project (if typedProtocol then nsPrefix + ".Native" else nsPrefix) outputDir allFiles verbose
+                let fidprojFile = generateFidproj project (if typedProtocol then nsPrefix + ".Native" else nsPrefix) outputDir dependencies allFiles verbose
 
                 // ── Layer 2 Marshaling Bridge package ─────────────────────
                 let unpairedConstructors =
@@ -821,23 +819,18 @@ module BindingGenerator =
                             sb.AppendLine("runtime_model = \"libc\"") |> ignore
                             sb.AppendLine("os = \"linux\"") |> ignore
                             sb.AppendLine("arch = \"x86_64\"") |> ignore
-                            sb.AppendLine("word_size = 64") |> ignore
                             sb.AppendLine() |> ignore
                             sb.AppendLine("[dependencies]") |> ignore
 
-                            // Every dependency must name an existing project.
-                            let resolveDep name =
-                                let path = resolveProjectDependency fidprojDir $"{name}.fidproj"
-                                               $"Fidelity.Platform/Environments/Linux/x86_64/{name}.fidproj"
-                                               "FIDELITY_PLATFORM_PROJECT"
-                                Path.GetRelativePath(fidprojDir, path).Replace('\\', '/')
-
-                            if not (project.Options |> Option.exists (fun opts -> opts.DescriptorOnlyDependencies)) then
-                                let platformDep = resolveDep "Fidelity.Platform"
-                                sb.AppendLine($"Fidelity.Platform = {{ path = \"{platformDep}\" }}") |> ignore
+                            // Use the same validated selection as the native binding project.
+                            match fst dependencies with
+                            | Some platformPath ->
+                                let platformDep = Path.GetRelativePath(fidprojDir, platformPath).Replace('\\', '/')
+                                sb.AppendLine($"\"Fidelity.Platform\" = {{ path = \"{platformDep}\" }}") |> ignore
+                            | None -> ()
                             let libDep = fidprojFile |> Option.defaultWith (fun () -> invalidOp "Callback bridge requires its generated binding project")
                                          |> fun path -> Path.GetRelativePath(fidprojDir, path).Replace('\\', '/')
-                            sb.AppendLine($"{nsPrefix} = {{ path = \"{libDep}\" }}") |> ignore
+                            sb.AppendLine($"\"{nsPrefix}\" = {{ path = \"{libDep}\" }}") |> ignore
 
                             let bridgeFidprojPath = Path.Combine(fidprojDir, $"{bridgeName}.fidproj")
                             File.WriteAllText(bridgeFidprojPath, sb.ToString())
