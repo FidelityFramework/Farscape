@@ -26,7 +26,7 @@ let ``legacy native pointer profile cannot emit Clef source`` () =
 let ``pthread handle storage is derived from its scalar typedef`` () =
     let binding : PilotTypes.BindingProjection =
         { Name = createDecl.Name; Symbol = createDecl.Name; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
-          ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None }
+          ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None }
     let ctx = { FidelityCodeGenerator.buildGenerationContext decls Types.LP64 Map.empty with Bindings = Map.ofList [createDecl.Name, binding] }
     let source = FidelityCodeGenerator.generateModule ctx Set.empty [List.head decls] "Test.Types" "pthread" "test" []
     Assert.Contains("module pthread_t =", source)
@@ -153,7 +153,7 @@ let ``Linux x64 pthread storage comes from actual header unions and measured lay
 
 let private projection name symbol : PilotTypes.BindingProjection =
     { Name = name; Symbol = symbol; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []; ConstantParameters = []; StringParameters = []; NonnullCallbacks = []
-      ParameterHandles = []; ReturnHandle = None; Ownership = None }
+      ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None }
 
 [<Fact>]
 let ``pthread output array declares scalar reference ABI and nonnull typed callback`` () =
@@ -174,7 +174,7 @@ let ``pthread output array declares scalar reference ABI and nonnull typed callb
 [<Fact>]
 let ``typed malloc specialization retains native symbol and pointer ABI`` () =
     let fn = CppParser.Declaration.Function (mkFunc "mallocMutex" "void *" ["size", "size_t"])
-    let binding = { projection "mallocMutex" "malloc" with ReturnHandle = Some "pthread_mutex_t"; Ownership = Some PilotTypes.CallerOwns }
+    let binding = { projection "mallocMutex" "malloc" with ReturnHandle = Some "pthread_mutex_t"; Ownership = Some PilotTypes.CallerOwns; ResultRange = None }
     let ctx = { FidelityCodeGenerator.buildGenerationContext [fn] Types.LP64 Map.empty with Bindings = Map.ofList [binding.Name, binding] }
     let source = FidelityCodeGenerator.generateModule ctx Set.empty [fn] "Test.Storage" "c" "test" []
     Assert.Contains("FidelityExtern(\"c\", \"malloc\")", source)
@@ -215,7 +215,7 @@ let ``projected wrapper signature matches the emitted extern contract`` () =
 [<Fact>]
 let ``free specialization declares callee ownership consumption`` () =
     let fn = CppParser.Declaration.Function (mkFunc "freeMutex" "void" ["pointer", "void *"])
-    let binding = { projection "freeMutex" "free" with ParameterHandles = ["pthread_mutex_t"]; Ownership = Some PilotTypes.CalleeOwns }
+    let binding = { projection "freeMutex" "free" with ParameterHandles = ["pthread_mutex_t"]; Ownership = Some PilotTypes.CalleeOwns; ResultRange = None }
     let ctx = { FidelityCodeGenerator.buildGenerationContext [fn] Types.LP64 Map.empty with Bindings = Map.ofList [binding.Name, binding] }
     let source = FidelityCodeGenerator.generateModule ctx Set.empty [fn] "Test.Storage" "c" "test" []
     Assert.Contains("CName = \"free\"", source)

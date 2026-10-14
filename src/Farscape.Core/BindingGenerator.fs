@@ -404,6 +404,19 @@ module BindingGenerator =
                                 | FidelityCodeGenerator.Scalar r when r.Bits > 0 -> ()
                                 | _ -> failwithf "Native carrier storage '%s' has no known scalar or measured record representation." name
                     | _ -> ()
+                    // A behavioral contract must survive neither duplicate-map collapse
+                    // nor namespace filtering. Refuse before any generation effects.
+                    let resultBindings = project.Options |> Option.map _.Bindings |> Option.defaultValue [] |> List.filter (fun binding -> binding.ResultRange.IsSome)
+                    let bindings = project.Options |> Option.map _.Bindings |> Option.defaultValue []
+                    for binding in resultBindings do
+                        if bindings |> List.filter (fun other -> other.Name = binding.Name) |> List.length <> 1 then
+                            failwith $"{binding.Name} result_range: duplicate binding projections"
+                        let selected = project.Namespaces |> List.collect (fun ns ->
+                            PilotAnalyzer.filterDeclarationsForNamespace ns declarations
+                            |> List.choose (function CppParser.Declaration.Function func when func.Name = binding.Name && not (func.Attributes |> List.exists (fun attribute -> attribute.Kind = "DeprecatedAttr")) -> Some(ns.Name, func) | _ -> None))
+                        let unique = selected |> List.distinct
+                        if unique.Length <> 1 then
+                            failwith $"{binding.Name} result_range: requires exactly one selected native declaration"
                     let selectedNames = project.Namespaces |> List.collect (fun n -> n.Functions) |> Set.ofList
                     let rec markers = function
                         | CodeAST.Generic("CHandle", CodeAST.Named n) when not (Set.contains n (Set.ofList ["unit"; "int"; "float"; "bool"; "string"])) -> [n]

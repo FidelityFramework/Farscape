@@ -612,12 +612,53 @@ module FidelityCodeGenerator =
                                 "OwnershipTransfer", Identifier "Undeclared" ] ])) ]
                 index, recordName, declarations)) |> List.choose id
 
+    /// Render a supplied result promise against the exact emitted declaration.
+    /// ABI widths and placeholder bodies provide no behavioral contract.
+    let private resultRangeDecls (ctx: GenerationContext) namespace' (func: CppParser.FunctionDecl) nativeName hasAdapter =
+        match Map.tryFind func.Name ctx.Bindings |> Option.bind _.ResultRange with
+        | None -> []
+        | Some range ->
+            let refuse reason = failwith $"{func.Name} result_range: {reason}"
+            for name, value in ["identity", range.Identity; "version", range.Version; "source", range.Source] do
+                if System.String.IsNullOrWhiteSpace value then refuse $"requires nonempty {name}"
+            let projection = ctx.Bindings[func.Name]
+            if hasAdapter || (projection.ConstantParameters |> List.exists (System.String.IsNullOrWhiteSpace >> not)) then
+                refuse "requires an ordinary untranslated native binding"
+            let integer cType =
+                match resolveIn ctx cType with
+                | Scalar r when r.Family = TypeMapper.Signed || r.Family = TypeMapper.Unsigned -> true
+                | _ -> false
+            if not (integer func.ReturnType) then refuse "requires a scalar integer native result"
+            let endpoint = function
+                | ResultRangeBound.Constant value -> Literal (if value < 0 then $"Constant ({value})" else $"Constant {value}")
+                | ResultRangeBound.Argument index ->
+                    if index < 0 || index >= func.Parameters.Length then refuse $"argument {index} is outside native arity {func.Parameters.Length}"
+                    let reference, _ = referencePassing (Some projection) index (snd func.Parameters[index])
+                    if reference || not (integer (snd func.Parameters[index])) then refuse $"argument {index} requires a scalar integer Value parameter"
+                    Literal $"Argument {index}"
+            let lower, upper = endpoint range.Lower, endpoint range.Upper
+            match range.Lower, range.Upper with
+            | ResultRangeBound.Constant lo, ResultRangeBound.Constant hi when lo > hi -> refuse "constant bounds are contradictory"
+            | _ -> ()
+            [ XmlDoc "Result range is a supplied external execution hypothesis; it grants no ABI, loading or lifetime authority."
+              ValueBinding(nativeName + "ResultRange", Generic("Expr", Named "ResultRangeDescriptor"),
+                  Quoted(RecordBlock [
+                      "Binding", Literal (quoteString (namespace' + "." + nativeName))
+                      "Role", Identifier "ReturnValue"
+                      "Hypothesis", RecordBlock [
+                          "Identity", Literal (quoteString range.Identity); "Version", Literal (quoteString range.Version); "Source", Literal (quoteString range.Source) ]
+                      "Lower", lower; "Upper", upper ])) ]
+
     /// Keep the full native arity private while carrying declared entry provenance through a
     /// record projection. This is membrane plumbing, not the application callback interface.
     let generateDeclaredFunctionDecls (ctx: GenerationContext) libraryName namespace' (func: CppParser.FunctionDecl) =
         let entries = callbackEntries ctx namespace' func
         let raw = generateFunctionDecls ctx libraryName func
-        if entries.IsEmpty then raw else
+        if entries.IsEmpty then
+            let nativeName = raw |> List.pick (function LetBinding(name, _, _, _, attrs) when not attrs.IsEmpty -> Some name | _ -> None)
+            raw @ resultRangeDecls ctx namespace' func nativeName false
+        else
+        resultRangeDecls ctx namespace' func func.Name true |> ignore
         let callbackTypes = entries |> List.map (fun (i, name, _) -> cleanParamName (fst func.Parameters.[i]), name) |> Map.ofList
         let nativeName, nativeParameters, returnType =
             raw |> List.pick (function LetBinding(name, parameters, ret, _, attrs) when not attrs.IsEmpty -> Some (name, parameters, ret) | _ -> None)

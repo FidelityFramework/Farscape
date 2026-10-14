@@ -578,3 +578,53 @@ let ``descriptor-only project preserves explicit platform selection before writi
   finally
     Environment.SetEnvironmentVariable("FIDELITY_PLATFORM_PROJECT", previous)
     if Directory.Exists directory then Directory.Delete(directory, true)
+
+[<Theory>]
+[<InlineData("positive")>]
+[<InlineData("absent")>]
+[<InlineData("partial")>]
+[<InlineData("duplicate")>]
+[<InlineData("unselected")>]
+[<InlineData("ambiguous")>]
+[<InlineData("arity")>]
+[<InlineData("deprecated")>]
+let ``result range project validates every supplied contract before output writes`` shape =
+  let directory = Path.Combine(__SOURCE_DIRECTORY__, "../../artifacts/ffi-contract-20261013", "result-project-" + Guid.NewGuid().ToString("N")) |> Path.GetFullPath
+  try
+    Directory.CreateDirectory directory |> ignore
+    let pilot, output = signalProject directory "long read(int fd, void *buffer, unsigned long count);"
+    let project = PilotSerializer.loadFromFile pilot |> function Ok project -> project | Error error -> failwith error
+    if shape = "deprecated" then File.WriteAllText(project.Library.Headers.Head, "long read(int fd, void *buffer, unsigned long count) __attribute__((deprecated));")
+    let ns = { project.Namespaces.Head with Name = "Fidelity.Result.Native"; Functions = (if shape = "unselected" then ["other"] else ["read"]); Signals = [] }
+    let project = { project with Library = { project.Library with Introspection = [] }
+                                 Namespaces = if shape = "ambiguous" then [ns; { ns with Name = "Fidelity.Result.Other" }] else [ns]
+                                 ErrorConventions = if shape = "positive" || shape = "absent" then None else Some { Default = PilotTypes.Errno; Overrides = Map.empty } }
+    let contract =
+      "result_range = { identity = \"posix.read\", version = \"2024\", source = \"/contracts/read.pilot.toml\", lower = { constant = -1 }, upper = { argument = " + (if shape = "arity" then "3" else "2") + " } }\n"
+    let contract = if shape = "partial" then contract.Replace("version = \"2024\", ", "") else if shape = "absent" then "" else contract
+    let binding = "\n[[options.bindings]]\nname = \"read\"\n" + contract
+    let contents = PilotSerializer.toTomlString project + binding + (if shape = "duplicate" then binding else "")
+    File.WriteAllText(pilot, contents)
+    Directory.CreateDirectory output |> ignore
+    let sentinel = Path.Combine(output, "Types.clef")
+    File.WriteAllText(sentinel, "// Existing result bindings\n")
+    match BindingGenerator.generateFromProject pilot false false Types.LP64 with
+    | Ok result when shape = "positive" || shape = "absent" ->
+      let source = File.ReadAllText(Path.Combine(output, "Native", "Native.clef"))
+      if shape = "positive" then Assert.Contains("Binding = \"Fidelity.Result.Native.read\"", source)
+      else Assert.DoesNotContain("ResultRangeDescriptor", source)
+      Assert.Contains(Path.Combine(output, "Native", "Native.clef"), result.OutputFiles)
+    | Ok _ -> failwith "Invalid result contract must refuse before writes"
+    | Error error ->
+      let reason =
+        match shape with
+        | "partial" -> "result_range requires nonempty version"
+        | "duplicate" -> "read result_range: duplicate binding projections"
+        | "arity" -> "read result_range: argument 3 is outside native arity 3"
+        | "unselected" | "ambiguous" | "deprecated" -> "read result_range: requires exactly one selected native declaration"
+        | _ -> failwith error
+      Assert.Contains(reason, error)
+      Assert.Equal("// Existing result bindings\n", File.ReadAllText sentinel)
+      Assert.Equal<string array>([|sentinel|], Directory.GetFiles(output, "*", SearchOption.AllDirectories))
+  finally
+    if Directory.Exists directory then Directory.Delete(directory, true)

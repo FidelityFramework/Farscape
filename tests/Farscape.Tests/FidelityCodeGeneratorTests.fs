@@ -45,7 +45,7 @@ let ``each explicit callback nonnull source preserves its hypothesis provenance`
   let declarations = [CppParser.Declaration.Typedef (mkTypedef "Notify" "void (*)(void)"); CppParser.Declaration.Function func]
   let projection : PilotTypes.BindingProjection =
     { Name = func.Name; Symbol = func.Name; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
-      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None }
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None }
   let ctx = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
   let ctx =
     { ctx with
@@ -67,7 +67,7 @@ let ``pilot callback nonnull cannot override native nullable evidence`` () =
   let declarations = [CppParser.Declaration.Typedef (mkTypedef "Notify" "void (*)(void)"); CppParser.Declaration.Function func]
   let projection : PilotTypes.BindingProjection =
     { Name = func.Name; Symbol = func.Name; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
-      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None }
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None }
   let ctx = { FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty with Bindings = Map.ofList [func.Name, projection] }
   let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generateFunctionDecls ctx "test" func |> ignore)
   Assert.Contains("register parameter 0: nullable native type conflicts with a nonnull contract", error.Message)
@@ -90,7 +90,7 @@ let ``explicit ownership hypotheses survive generation and withdrawal removes au
   let ctx = FidelityCodeGenerator.buildGenerationContext [CppParser.Declaration.Function func] Types.LP64 Map.empty
   let projection : PilotTypes.BindingProjection =
     { Name = func.Name; Symbol = "native_acquire"; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
-      ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None }
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None }
   let emit ownership =
     let current = { ctx with Bindings = Map.ofList [func.Name, { projection with Ownership = ownership }] }
     FidelityCodeGenerator.generateFunctionDecls current "test" func |> List.map CodeRenderer.render |> String.concat "\n"
@@ -723,3 +723,56 @@ let ``rejects unsupported pimpl struct for xclbin-like inherited pimpl with no d
     let decls = [CppParser.Declaration.Class cls]
     let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty |> ignore)
     Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
+
+let private rangeProjection : PilotTypes.BindingProjection =
+    { Name = "read"; Symbol = "native_read"; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None
+      ResultRange = Some { Identity = "posix.read"; Version = "2024"; Source = "/contracts/read.pilot.toml"
+                           Lower = PilotTypes.ResultRangeBound.Constant -1; Upper = PilotTypes.ResultRangeBound.Argument 2 } }
+let private renderResultRange projection func =
+    let declarations = [CppParser.Declaration.Function func]
+    let ctx = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
+    FidelityCodeGenerator.generateModule { ctx with Bindings = Map.ofList ["read", projection] } Set.empty declarations "Test.Native" "test" "test" []
+let private readFunction = mkFunc "read" "long" ["fd", "int"; "buffer", "void *"; "count", "unsigned long"]
+
+[<Fact>]
+let ``result range sibling binds emitted Clef identity and exact supplied hypothesis`` () =
+    let source = renderResultRange rangeProjection readFunction
+    Assert.Contains("Binding = \"Test.Native.read\"", source)
+    Assert.Contains("CName = \"native_read\"", source)
+    Assert.Contains("Expr<ResultRangeDescriptor>", source)
+    for text in ["Identity = \"posix.read\""; "Version = \"2024\""; "Source = \"/contracts/read.pilot.toml\""; "Constant (-1)"; "Argument 2"; "Role = ReturnValue"] do Assert.Contains(text, source)
+    let absent = renderResultRange { rangeProjection with ResultRange = None } readFunction
+    Assert.DoesNotContain("ResultRangeDescriptor", absent)
+    Assert.Contains("OwnershipTransfer = Undeclared", source)
+    let changed = renderResultRange { rangeProjection with ResultRange = rangeProjection.ResultRange |> Option.map (fun range -> { range with Version = "2025"; Upper = PilotTypes.ResultRangeBound.Constant 4 }) } readFunction
+    Assert.Contains("Version = \"2025\"", changed)
+    Assert.Contains("Upper = Constant 4", changed)
+    Assert.Contains("CName = \"native_read\"", changed)
+
+[<Theory>]
+[<InlineData("arity", "outside native arity 3")>]
+[<InlineData("pointer", "scalar integer Value parameter")>]
+[<InlineData("reference", "scalar integer Value parameter")>]
+[<InlineData("float", "scalar integer Value parameter")>]
+[<InlineData("result", "scalar integer native result")>]
+[<InlineData("constant", "ordinary untranslated native binding")>]
+[<InlineData("callback", "ordinary untranslated native binding")>]
+[<InlineData("contradiction", "constant bounds are contradictory")>]
+[<InlineData("provenance", "requires nonempty source")>]
+let ``result range refuses ineligible native slots and unsupported translation`` shape reason =
+    let range = rangeProjection.ResultRange.Value
+    let projection, func =
+        match shape with
+        | "arity" -> { rangeProjection with ResultRange = Some { range with Upper = PilotTypes.ResultRangeBound.Argument 3 } }, readFunction
+        | "pointer" -> { rangeProjection with ResultRange = Some { range with Upper = PilotTypes.ResultRangeBound.Argument 1 } }, readFunction
+        | "reference" -> { rangeProjection with ReferenceParameters = [2] }, { readFunction with Parameters = ["fd", "int"; "buffer", "void *"; "count", "unsigned long *"] }
+        | "float" -> rangeProjection, { readFunction with Parameters = ["fd", "int"; "buffer", "void *"; "count", "double"] }
+        | "result" -> rangeProjection, { readFunction with ReturnType = "double" }
+        | "constant" -> { rangeProjection with ConstantParameters = [""; ""; "4"] }, readFunction
+        | "callback" -> rangeProjection, { readFunction with Parameters = ["fd", "int"; "notify", "void (*)(void)"; "count", "unsigned long"]; Attributes = [mkAttr "NonNullAttr" [1] None] }
+        | "contradiction" -> { rangeProjection with ResultRange = Some { range with Lower = PilotTypes.ResultRangeBound.Constant 5; Upper = PilotTypes.ResultRangeBound.Constant 4 } }, readFunction
+        | _ -> { rangeProjection with ResultRange = Some { range with Source = " " } }, readFunction
+    let error = Assert.ThrowsAny<System.Exception>(fun () -> renderResultRange projection func |> ignore)
+    Assert.Contains("read result_range", error.Message)
+    Assert.Contains(reason, error.Message)

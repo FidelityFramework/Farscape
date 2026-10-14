@@ -97,6 +97,19 @@ module PilotTypes =
     /// Ownership declared by a boundary profile, never guessed from pointer syntax.
     type BindingOwnership = CallerOwns | CalleeOwns | Borrowed
 
+    /// Explicit pilot input for the quoted BAREWire result contract.
+    [<RequireQualifiedAccess>]
+    type ResultRangeBound = Constant of int | Argument of int
+
+    /// A supplied execution hypothesis, never inferred from an ABI or stub body.
+    type BindingResultRange = {
+        Identity: string
+        Version: string
+        Source: string
+        Lower: ResultRangeBound
+        Upper: ResultRangeBound
+    }
+
     /// Projections of parsed C declarations, including explicit scalar buffer element contracts.
     type BindingProjection = {
         Name: string
@@ -111,6 +124,7 @@ module PilotTypes =
         ParameterHandles: string list
         ReturnHandle: string option
         Ownership: BindingOwnership option
+        ResultRange: BindingResultRange option
     }
 
     /// A scoped projection of an actual native mapped-pointer result. Parameter

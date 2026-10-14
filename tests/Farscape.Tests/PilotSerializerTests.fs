@@ -423,3 +423,45 @@ let ``absent protocol section deserializes as None`` () =
         | Error e -> Assert.Fail $"Deserialize failed: {e}"
         | Ok roundTripped ->
             Assert.True(roundTripped.ProtocolConfig.IsNone)
+
+let private resultContract = "{ identity = \"posix.read\", version = \"2024\", source = \"/contracts/read.pilot.toml\", lower = { constant = -1 }, upper = { argument = 2 } }"
+let private resultPilot contract =
+    PilotSerializer.toTomlString sampleProject + "\n[[options.bindings]]\nname = \"read\"\n" + (if contract = "absent" then "" else "result_range = " + contract + "\n")
+
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``result range profile roundtrips explicit provenance and absent stays absent`` absent =
+    let read text = PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail text) |> function Ok project -> project | Error error -> failwith error
+    let project = read (resultPilot (if absent then "absent" else resultContract))
+    let range = project.Options.Value.Bindings.Head.ResultRange
+    if absent then Assert.True(range.IsNone) else
+        let expected : PilotTypes.BindingResultRange =
+            { Identity = "posix.read"; Version = "2024"; Source = "/contracts/read.pilot.toml"
+              Lower = PilotTypes.ResultRangeBound.Constant -1; Upper = PilotTypes.ResultRangeBound.Argument 2 }
+        Assert.Equal(Some expected, range)
+    Assert.Equal(project, read (PilotSerializer.toTomlString project))
+
+[<Theory>]
+[<InlineData("identity", "requires nonempty identity")>]
+[<InlineData("version", "requires nonempty version")>]
+[<InlineData("source", "requires nonempty source")>]
+[<InlineData("lower", "requires lower")>]
+[<InlineData("both", "exactly one constant or argument integer")>]
+[<InlineData("negative", "argument requires a nonnegative index")>]
+[<InlineData("overflow", "within int range")>]
+[<InlineData("type", "exactly one constant or argument integer")>]
+let ``result range profile refuses partial or invalid explicit contracts`` shape reason =
+    let contract =
+        match shape with
+        | "identity" -> resultContract.Replace("identity = \"posix.read\", ", "")
+        | "version" -> resultContract.Replace("version = \"2024\"", "version = \" \"")
+        | "source" -> resultContract.Replace("source = \"/contracts/read.pilot.toml\", ", "")
+        | "lower" -> resultContract.Replace("lower = { constant = -1 }, ", "")
+        | "both" -> resultContract.Replace("{ argument = 2 }", "{ argument = 2, constant = 4 }")
+        | "negative" -> resultContract.Replace("argument = 2", "argument = -1")
+        | "overflow" -> resultContract.Replace("argument = 2", "argument = 2147483648")
+        | _ -> resultContract.Replace("argument = 2", "argument = \"2\"")
+    match PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail (resultPilot contract)) with
+    | Error error -> Assert.Contains("result_range", error); Assert.Contains(reason, error)
+    | Ok _ -> failwith "Invalid explicit result contract was accepted"

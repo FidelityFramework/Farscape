@@ -111,6 +111,14 @@ module PilotSerializer =
                 TomlTable.add "overrides" (TomlValue.Table overrideTable) table
         TomlValue.Table table
 
+    let private serializeResultRange (range: BindingResultRange) =
+        let endpoint = function
+            | ResultRangeBound.Constant value -> TomlValue.InlineTable (Map.ofList ["constant", TomlValue.Integer (int64 value)])
+            | ResultRangeBound.Argument index -> TomlValue.InlineTable (Map.ofList ["argument", TomlValue.Integer (int64 index)])
+        TomlValue.InlineTable (Map.ofList [
+            "identity", TomlValue.String range.Identity; "version", TomlValue.String range.Version
+            "source", TomlValue.String range.Source; "lower", endpoint range.Lower; "upper", endpoint range.Upper ])
+
     let private serializeOptions (opts: ProjectOptions) : TomlValue =
         let table = TomlTable.empty
         let table =
@@ -144,6 +152,7 @@ module PilotSerializer =
                              let spelling = match transfer with CallerOwns -> "caller_owns" | CalleeOwns -> "callee_owns" | Borrowed -> "borrowed"
                              TomlTable.add "ownership" (TomlValue.String spelling) t
                          | None -> t)
+            |> (fun t -> match binding.ResultRange with Some range -> TomlTable.add "result_range" (serializeResultRange range) t | None -> t)
             |> TomlValue.Table)
         let table = if bindings.IsEmpty then table else TomlTable.add "bindings" (TomlValue.Array bindings) table
         let table = if opts.DescriptorOnlyDependencies then TomlTable.add "descriptor_only_dependencies" (TomlValue.Boolean true) table else table
@@ -438,6 +447,30 @@ module PilotSerializer =
             Some { Default = defaultConv; Overrides = overrides }
         | _ -> None
 
+    let private deserializeResultRange (binding: TomlTable) =
+        let table label = function
+            | TomlValue.Table value | TomlValue.InlineTable value -> value
+            | _ -> failwith $"result_range {label} requires a table"
+        match TomlTable.tryFind "result_range" binding with
+        | None -> None
+        | Some value ->
+            let range = table "contract" value
+            let text key =
+                match TomlTable.tryFind key range with
+                | Some (TomlValue.String value) when not (System.String.IsNullOrWhiteSpace value) -> value
+                | _ -> failwith $"result_range requires nonempty {key}"
+            let endpoint key =
+                let fields = TomlTable.tryFind key range |> Option.map (table key) |> Option.defaultWith (fun () -> failwith $"result_range requires {key}")
+                match Map.toList fields with
+                | [arm, TomlValue.Integer value] when value >= int64 System.Int32.MinValue && value <= int64 System.Int32.MaxValue ->
+                    match arm with
+                    | "constant" -> ResultRangeBound.Constant (int value)
+                    | "argument" when value >= 0L -> ResultRangeBound.Argument (int value)
+                    | "argument" -> failwith $"result_range {key} argument requires a nonnegative index"
+                    | _ -> failwith $"result_range {key} requires exactly one constant or argument integer"
+                | _ -> failwith $"result_range {key} requires exactly one constant or argument integer within int range"
+            Some { Identity = text "identity"; Version = text "version"; Source = text "source"; Lower = endpoint "lower"; Upper = endpoint "upper" }
+
     let private deserializeOptions (doc: TomlDocument) : ProjectOptions option =
         match Toml.getValue "options" doc with
         | None -> None
@@ -477,6 +510,7 @@ module PilotSerializer =
                           ReferenceElements = match TomlTable.tryFind "reference_elements" binding with Some (TomlValue.Array xs) -> xs |> List.map (function TomlValue.String x -> x | _ -> failwith "reference_elements requires C element type names") | _ -> []
                           StringParameters = indices "string_parameters"; NonnullCallbacks = indices "nonnull_callbacks"
                           ParameterHandles = handles; ReturnHandle = optionalString "return_handle" binding
+                          ResultRange = deserializeResultRange binding
                           Ownership = optionalString "ownership" binding |> Option.map (function
                               | "caller_owns" -> CallerOwns | "callee_owns" -> CalleeOwns | "borrowed" -> Borrowed
                               | other -> failwith $"Unknown binding ownership '{other}'") }
