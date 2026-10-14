@@ -5,6 +5,23 @@ open Farscape.Core
 open TestHelpers
 
 [<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``normalized nonnull positions mean explicit slots and empty means none in bindings and wrappers`` explicitPointer =
+  let positions = if explicitPointer then [1] else []
+  let func = mkFuncWithAttrs "inspect" "void" ["count", "int"; "p", "void *"] [mkAttr "NonNullAttr" positions None]
+  let declarations = [CppParser.Declaration.Function func]
+  let ctx = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
+  let binding = FidelityCodeGenerator.generateModule ctx Set.empty declarations "Test.Bindings" "test" "test" []
+  let wrapper = WrapperCodeGenerator.generateWithContext (Some ctx) false Set.empty declarations "Test.Api" "test" "Test.Bindings" WrapperTypes.NoErrors Types.LP64 None
+  let expected = if explicitPointer then "(p: CHandle<unit>)" else "(p: option<CHandle<unit>>)"
+  let forbidden = if explicitPointer then "(p: option<CHandle<unit>>)" else "(p: CHandle<unit>)"
+  for source in [binding; wrapper] do
+    Assert.Contains(expected, source)
+    Assert.DoesNotContain(forbidden, source)
+    Assert.Contains("(count: int)", source)
+
+[<Theory>]
 [<InlineData("void (*)(void)")>]
 [<InlineData("Notify")>]
 [<InlineData("Notify _Nullable")>]
