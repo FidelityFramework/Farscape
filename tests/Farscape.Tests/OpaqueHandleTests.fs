@@ -297,6 +297,31 @@ void qualifiers(Token _Nullable optional, Token _Nonnull required);
         finally
             System.IO.File.Delete path
 
+    [<Fact>]
+    let ``native nonnull preserves restrict prototypes and applies empty arguments only to pointer slots`` () =
+      let directory = System.IO.Path.GetFullPath(System.IO.Path.Combine("artifacts", "ffi-contract-20261013", "native-nonnull-" + System.Guid.NewGuid().ToString("N")))
+      System.IO.Directory.CreateDirectory directory |> ignore
+      let path = System.IO.Path.Combine(directory, "native.h")
+      try
+        System.IO.File.WriteAllText(path, """
+typedef void *Token;
+extern double strtod(const char *__restrict text, char **__restrict end) __attribute__((nonnull(1)));
+void all_pointer_slots(Token token, int count, void *const destination, void (*notify)(void)) __attribute__((nonnull));
+void scalar_only(int count) __attribute__((nonnull));
+        """)
+        let options : CppParser.HeaderParserOptions =
+          { HeaderFile = path; IncludePaths = []; Defines = []; Verbose = false; IncludeMacros = false
+            MacroPrefixes = []; IncludeRoot = None; CppMode = false }
+        let declarations = CppParser.parseHeader options |> function Ok d -> d | Error e -> failwith e
+        let positions name =
+          declarations |> List.pick(function CppParser.Declaration.Function f when f.Name = name -> Some f | _ -> None)
+          |> fun f -> f.Attributes |> List.filter(fun a -> a.Kind = "NonNullAttr") |> List.collect(fun a -> a.Args)
+        Assert.Equal<int list>([0], positions "strtod")
+        Assert.Equal<int list>([0; 2; 3], positions "all_pointer_slots")
+        Assert.Empty(positions "scalar_only")
+      finally
+        System.IO.Directory.Delete(directory, true)
+
     [<Theory>]
     [<InlineData("void (* _Nullable)(void *)")>]
     [<InlineData("void (*)(void (* _Nullable)(int))")>]

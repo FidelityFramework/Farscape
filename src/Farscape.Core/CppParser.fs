@@ -1159,6 +1159,28 @@ module CppParser =
             let normalize (signature: string) =
                 signature |> Seq.filter (not << Char.IsWhiteSpace) |> Seq.toArray |> String
                 |> fun signature -> signature.Replace(",...", "")
+            let trimRestrict (cType: string) =
+                let trimmed = cType.TrimEnd()
+                ["__restrict__"; "__restrict"; "restrict"]
+                |> List.tryPick (fun qualifier ->
+                    if trimmed.EndsWith(qualifier, StringComparison.Ordinal) then
+                        let at = trimmed.Length - qualifier.Length
+                        if at > 0 && (Char.IsWhiteSpace trimmed.[at - 1] || trimmed.[at - 1] = '*') then Some (trimmed.Substring(0, at).TrimEnd()) else None
+                    else None)
+                |> Option.defaultValue trimmed
+            let pointerParameter (line: string) =
+                // Text AST supplies the canonical type after a typedef spelling.
+                // nonnull without positions applies only to native pointer slots.
+                let quoted = line.Split('\'')
+                if quoted.Length < 3 then failwith "Clang parameter lacks its native type"
+                let nativeType = quoted.[quoted.Length - 2].Trim()
+                let lastStar = nativeType.LastIndexOf('*')
+                let firstParen = nativeType.IndexOf('(')
+                (lastStar >= 0 &&
+                    (nativeType.Substring(lastStar + 1).Split([|' '; '\t'|], StringSplitOptions.RemoveEmptyEntries)
+                     |> Array.forall (fun word -> List.contains word ["const"; "volatile"; "restrict"; "__restrict"; "__restrict__"])))
+                || (firstParen >= 0 && not (nativeType.Substring(0, firstParen).Contains('<'))
+                    && nativeType.Substring(firstParen + 1).TrimStart().StartsWith("*", StringComparison.Ordinal))
             let nonnull =
                 output.Split('\n')
                 |> Array.fold (fun (current, evidence) (line: string) ->
@@ -1172,11 +1194,15 @@ module CppParser =
                         if endQuote < 0 then None, evidence else
                         let name = line.Substring(0, quote).Trim().Split([|' '; '\t'|], StringSplitOptions.RemoveEmptyEntries) |> Array.last
                         let signature = line.Substring(quote + 1, endQuote - quote - 1) |> normalize
-                        Some ((name, signature), depth), evidence
+                        Some ((name, signature), depth, [], 0), evidence
                     | None ->
                         let attribute = line.IndexOf("NonNullAttr ", StringComparison.Ordinal)
+                        let parameter = line.IndexOf("ParmVarDecl ", StringComparison.Ordinal)
                         match current with
-                        | Some (key, depth) when attribute = depth + 2 ->
+                        | Some (key, depth, pointers, count) when parameter = depth + 2 ->
+                            let pointers = if pointerParameter line then count :: pointers else pointers
+                            Some (key, depth, pointers, count + 1), evidence
+                        | Some (key, depth, pointers, _) when attribute = depth + 2 ->
                             let rangeEnd = line.LastIndexOf('>')
                             if rangeEnd < 0 then failwith "Clang NonNullAttr lacks a semantic source range"
                             let positions =
@@ -1187,6 +1213,7 @@ module CppParser =
                                     | _ when token = "Inherited" || token = "Implicit" -> None
                                     | _ -> failwith $"Cannot read clang nonnull position '{token}'")
                                 |> Array.toList
+                                |> fun positions -> if positions.IsEmpty then List.rev pointers else positions
                             let previous = Map.tryFind key evidence |> Option.defaultValue []
                             current, Map.add key (positions :: previous) evidence
                         | _ -> current, evidence) (None, Map.empty)
@@ -1197,11 +1224,13 @@ module CppParser =
                     let signature = normalize (f.ReturnType + " (" + parameters + ")")
                     let positions =
                         Map.tryFind (f.Name, signature) nonnull
+                        |> Option.orElseWith (fun () ->
+                            let parameters = f.Parameters |> List.map (snd >> trimRestrict) |> String.concat ", "
+                            Map.tryFind (f.Name, normalize (f.ReturnType + " (" + parameters + ")")) nonnull)
                         |> Option.orElseWith (fun () -> if f.Parameters.IsEmpty then Map.tryFind (f.Name, normalize (f.ReturnType + " (void)")) nonnull else None)
                         |> Option.defaultWith (fun () -> failwith $"Cannot recover clang nonnull parameter evidence for '{f.Name}'")
                     let indices =
-                        if positions |> List.exists List.isEmpty then [0 .. f.Parameters.Length - 1]
-                        else positions |> List.collect id |> List.distinct |> List.sort
+                        positions |> List.collect id |> List.distinct |> List.sort
                     if indices |> List.exists (fun index -> index < 0 || index >= f.Parameters.Length) then
                         failwith $"Clang nonnull parameter evidence is out of range for '{f.Name}'"
                     Function { f with Attributes = f.Attributes |> List.map (fun a -> if a.Kind = "NonNullAttr" then { a with Args = indices } else a) }

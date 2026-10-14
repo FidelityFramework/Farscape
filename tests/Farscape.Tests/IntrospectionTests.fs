@@ -425,8 +425,11 @@ let private signalProject (directory: string) (header: string) =
     PilotSerializer.saveToFile path project |> function Ok _ -> () | Error error -> failwith error
     path, output
 
-[<Fact>]
-let ``withdrawn signal project callback hypothesis preserves existing output`` () =
+[<Theory>]
+[<InlineData("plain")>]
+[<InlineData("callbacks")>]
+[<InlineData("typed-protocol")>]
+let ``withdrawn signal project callback hypothesis preserves existing output`` mode =
   let directory = Path.Combine(Path.GetTempPath(), "farscape-signal-project-unknown-" + Guid.NewGuid().ToString("N"))
   try
     Directory.CreateDirectory directory |> ignore
@@ -434,11 +437,18 @@ let ``withdrawn signal project callback hypothesis preserves existing output`` (
     let project =
       PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail (File.ReadAllText pilot))
       |> function Ok project -> project | Error error -> failwith error
-    PilotSerializer.saveToFile pilot { project with Nonnull = None } |> function Ok () -> () | Error error -> failwith error
+    let withdrawn =
+      { project with
+          Nonnull = None
+          Callbacks =
+            if mode = "callbacks" then Some { Registrations = [{ Function = "g_signal_connect_data"; CallbackParam = "c_handler"; DataParam = Some "data" }]; ListenerStructs = [] }
+            else project.Callbacks
+          Options = project.Options |> Option.map(fun options -> { options with TypedProtocol = mode = "typed-protocol" }) }
+    PilotSerializer.saveToFile pilot withdrawn |> function Ok () -> () | Error error -> failwith error
     Directory.CreateDirectory output |> ignore
     let sentinel = Path.Combine(output, "preserve-existing.clef")
     File.WriteAllText(sentinel, "// Retained binding\n")
-    let result = BindingGenerator.generateFromProject pilot false false Types.LP64
+    let result = BindingGenerator.generateFromProject pilot false (mode = "callbacks") Types.LP64
     match result with
     | Ok _ -> failwith "Omitted callback nonnull contract must refuse before output"
     | Error error ->
