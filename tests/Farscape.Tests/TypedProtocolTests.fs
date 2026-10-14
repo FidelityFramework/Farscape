@@ -39,7 +39,7 @@ xml_interfaces = ["wl_callback"]
           "wl_proxy_get_version", "uint32_t", ["p","struct wl_proxy *"] ]
         |> List.map (fun(n,r,p)->CppParser.Declaration.Function(TestHelpers.mkFunc n r p))
     let ctx = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 layouts
-    let dir = Path.Combine(Path.GetTempPath(), "farscape-protocol-"+Guid.NewGuid().ToString("N"))
+    let dir = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "../..", "artifacts/ffi-contract-20261013", "typed-existing-"+Guid.NewGuid().ToString("N")))
     try
         let files = TypedProtocolGenerator.generate project [{Name="test";Interfaces=[iface]}] declarations ctx dir
         let callbacks = File.ReadAllText(Path.Combine(dir,"Bridge/Callbacks.clef"))
@@ -61,3 +61,65 @@ xml_interfaces = ["wl_callback"]
             Assert.DoesNotContain("NativePtr", text)
     finally
         if Directory.Exists dir then Directory.Delete(dir,true)
+
+let private nativeHeader = """
+typedef unsigned long size_t;
+typedef unsigned int uint32_t;
+typedef int int32_t;
+struct wl_proxy;
+struct wl_interface;
+union wl_argument { int32_t i; uint32_t u; void *o; };
+struct wl_message { const char *name; const char *signature; const struct wl_interface **types; };
+struct wl_interface { const char *name; int version; int method_count; const struct wl_message *methods; int event_count; const struct wl_message *events; };
+void *calloc(size_t n, size_t size);
+char *strdup(const char *s);
+void free(void *p);
+void *mempcpy(void *d, const void *s, size_t n);
+struct wl_proxy *wl_proxy_marshal_array_flags(struct wl_proxy *p, uint32_t op, const struct wl_interface *i, uint32_t v, uint32_t f, union wl_argument *a);
+int wl_proxy_add_listener(struct wl_proxy *p, void **table, void *data);
+uint32_t wl_proxy_get_version(struct wl_proxy *p);
+"""
+
+[<Theory>]
+[<InlineData("positive")>]
+[<InlineData("missing-native")>]
+[<InlineData("constructor-string")>]
+let ``XML-only whole project validates complete protocol before changing output`` shape =
+  let directory = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "../..", "artifacts/ffi-contract-20261013", "typed-project-"+Guid.NewGuid().ToString("N")))
+  try
+    Directory.CreateDirectory directory |> ignore
+    let header = Path.Combine(directory, "native.h")
+    let declarations = if shape = "missing-native" then nativeHeader.Replace("char *strdup(const char *s);", "") else nativeHeader
+    File.WriteAllText(header, declarations)
+    let xml = Path.Combine(directory, "protocol.xml")
+    let extra = if shape = "constructor-string" then "<arg name=\"title\" type=\"string\"/>" else ""
+    File.WriteAllText(xml, "<protocol name=\"test\"><interface name=\"wl_callback\" version=\"1\"><request name=\"noop\"/><request name=\"spawn\"><arg name=\"id\" type=\"new_id\" interface=\"wl_callback\"/>"+extra+"</request><event name=\"done\"><arg name=\"callback_data\" type=\"uint\"/></event></interface></protocol>")
+    let output = Path.Combine(directory, "out")
+    let project: PilotTypes.PilotProject =
+      { Library = { Name="wayland-client"; Headers=[header]; XmlProtocols=[xml]; Introspection=[]; IncludePaths=[directory]; Defines=[]; MacroPrefixes=[]; PkgConfig=[] }
+        Output = {Mode="fidelity"; Directory=output}
+        Namespaces = [{Name="Fidelity.Wayland.Protocol"; Description="Whole XML project"; Library="wayland-client"; Prefixes=[]; Functions=[]; XmlInterfaces=["wl_callback"]; Signals=[]}]
+        ErrorConventions=None; Callbacks=None; Nonnull=None; ProtocolConfig=None; Layer3=None; CppConfig=None
+        Options=Some {AbiCriticalStructs=["union wl_argument"; "struct wl_message"; "struct wl_interface"]; GenerateDescriptors=true; NativePointerSurface=false; CHeaderMode=true; Bindings=[]; DescriptorOnlyDependencies=true; ValueStructs=[]; TypedProtocol=true; LinkLibraries=false; MappedReturns=[]} }
+    let pilot = Path.Combine(directory, "xml.pilot.toml")
+    PilotSerializer.saveToFile pilot project |> function Ok () -> () | Error error -> failwith error
+    Directory.CreateDirectory output |> ignore
+    let sentinel = Path.Combine(output, "Types.clef")
+    File.WriteAllText(sentinel, "// Retained XML bindings\n")
+    match BindingGenerator.generateFromProject pilot false false Types.LP64 with
+    | Ok result when shape = "positive" ->
+      let callbacks = File.ReadAllText(Path.Combine(output, "Bridge/Callbacks.clef"))
+      Assert.Contains("Field = \"Done\"", callbacks)
+      Assert.Contains("wl_callback_spawnNative", File.ReadAllText(Path.Combine(output, "Bridge/Protocol.clef")))
+      Assert.Contains(Path.Combine(output, "Bridge/NativeStorage.clef"), result.OutputFiles)
+      Assert.Contains(Path.Combine(output, "Bridge/ProtocolInterfaces.clef"), result.OutputFiles)
+      Assert.NotEqual<string>("// Retained XML bindings\n", File.ReadAllText sentinel)
+    | Ok _ -> failwith "Unsupported XML projection must refuse before changing output"
+    | Error error when shape <> "positive" ->
+      let reason = if shape = "missing-native" then "Typed protocol requires parsed C declaration 'strdup'" else "Typed constructor string arguments need an explicit ownership profile"
+      Assert.Contains(reason, error)
+      Assert.Equal("// Retained XML bindings\n", File.ReadAllText sentinel)
+      Assert.Equal<string array>([|sentinel|], Directory.GetFiles(output, "*", SearchOption.AllDirectories))
+    | Error error -> failwith error
+  finally
+    if Directory.Exists directory then Directory.Delete(directory, true)

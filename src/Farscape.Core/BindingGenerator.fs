@@ -551,6 +551,10 @@ module BindingGenerator =
                                       allNsDecls $"{ns.Name}.Api" ns.Library ns.Name errorHandling dataModel project.Nonnull)
                         ns, localTypeNames.Count, localCode, funcCount, funcCode, wrapperCode)
 
+                let typedProtocolContents =
+                    if typedProtocol then TypedProtocolGenerator.render project xmlProtocols declarations ctx outputDir
+                    else []
+
                 // ── Shared Types.clef (root level) ──────────────────────────
                 let sharedTypeDecls = PilotAnalyzer.filterTypesOnly classification.SharedTypes declarations
                 let sharedHandles = Set.intersect ctx.OpaqueHandles classification.SharedTypes
@@ -727,7 +731,7 @@ module BindingGenerator =
 
                         localTypeFiles @ [funcPath] @ wrapperFiles)
 
-                let typedProtocolFiles = if typedProtocol then TypedProtocolGenerator.generate project xmlProtocols declarations ctx outputDir else []
+                let typedProtocolFiles = TypedProtocolGenerator.emit typedProtocolContents
                 let signalFiles =
                     match signalCode with
                     | None -> []

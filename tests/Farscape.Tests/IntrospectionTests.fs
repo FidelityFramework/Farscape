@@ -1,3 +1,4 @@
+[<Xunit.Collection("Native project selection")>]
 module Farscape.Tests.IntrospectionTests
 
 open System
@@ -5,6 +6,11 @@ open System.IO
 open Xunit
 open Farscape.Core
 open TestHelpers
+
+// This fixture mutates process-wide dependency selection. Its collection must
+// not overlap any other collection that runs generation with the default inputs.
+[<CollectionDefinition("Native project selection", DisableParallelization = true)>]
+type NativeProjectSelectionCollection() = class end
 
 let private gir = """<?xml version="1.0"?>
 <repository version="1.2" xmlns="http://www.gtk.org/introspection/core/1.0" xmlns:c="http://www.gtk.org/introspection/c/1.0" xmlns:glib="http://www.gtk.org/introspection/glib/1.0">
@@ -504,6 +510,7 @@ let ``project signal preflight leaves every existing output intact on unsupporte
 [<InlineData("malformed", false)>]
 [<InlineData("malformed", true)>]
 [<InlineData("invalid-description", false)>]
+[<InlineData("sibling", false)>]
 let ``descriptor-only project preserves explicit platform selection before writing`` selection callbacks =
   let checkout = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "../.."))
   let directory = Path.Combine(checkout, "artifacts", "ffi-contract-20261013", "platform-selection-" + Guid.NewGuid().ToString("N"))
@@ -511,6 +518,10 @@ let ``descriptor-only project preserves explicit platform selection before writi
   try
     Directory.CreateDirectory directory |> ignore
     let pilot, output = signalProject directory projectHeader
+    if selection = "sibling" then
+      let project = PilotSerializer.loadFromFile pilot |> function Ok project -> project | Error error -> failwith error
+      let ordinary = { project with Options = project.Options |> Option.map(fun options -> { options with DescriptorOnlyDependencies = false }) }
+      PilotSerializer.saveToFile pilot ordinary |> function Ok () -> () | Error error -> failwith error
     if callbacks then
       let project = PilotSerializer.loadFromFile pilot |> function Ok project -> project | Error error -> failwith error
       let callbackProject =
@@ -523,7 +534,7 @@ let ``descriptor-only project preserves explicit platform selection before writi
       File.WriteAllText(selected, "[package]\nname = \"Uncommitted.Platform\"\n[build]\nsources = []\n")
     elif selection = "malformed" then File.WriteAllText(selected, "[platform\n")
     elif selection = "invalid-description" then File.WriteAllText(selected, "[platform]\ndescription = 64\n")
-    Environment.SetEnvironmentVariable("FIDELITY_PLATFORM_PROJECT", if selection = "absent" then null else selected)
+    Environment.SetEnvironmentVariable("FIDELITY_PLATFORM_PROJECT", if selection = "absent" then null elif selection = "sibling" then " " else selected)
     Directory.CreateDirectory output |> ignore
     let sentinel = Path.Combine(output, "preserve-existing.clef")
     File.WriteAllText(sentinel, "// Retained binding\n")
@@ -549,6 +560,9 @@ let ``descriptor-only project preserves explicit platform selection before writi
         Assert.Equal((if selection = "selected" then Some "Selected.Target.description" else None), Fidelity.Data.TOML.Toml.getString "platform.description" document)
         Assert.DoesNotContain("word_size", contents)
         if selection = "absent" then Assert.DoesNotContain("Fidelity.Platform", contents)
+        elif selection = "sibling" then
+          Assert.Contains("\"Fidelity.Platform\" =", contents)
+          Assert.Contains("Fidelity.Platform.fidproj", contents)
         else
           let relative = Path.GetRelativePath(Path.GetDirectoryName path, selected).Replace('\\', '/')
           Assert.Contains($"\"Fidelity.Platform\" = {{ path = \"{relative}\" }}", contents)
@@ -560,7 +574,7 @@ let ``descriptor-only project preserves explicit platform selection before writi
         if path.Contains ".Bridge.fidproj" then
           Assert.Contains("\"Fidelity.WebKit.Native.Core\" = { path =", contents)
       let native = manifests |> List.find(fun path -> not (path.Contains ".Bridge.fidproj")) |> File.ReadAllText
-      Assert.Contains("BAREWire.BindingMetadata.fidproj", native)
+      Assert.Contains((if selection = "sibling" then "BAREWire.fidproj" else "BAREWire.BindingMetadata.fidproj"), native)
   finally
     Environment.SetEnvironmentVariable("FIDELITY_PLATFORM_PROJECT", previous)
     if Directory.Exists directory then Directory.Delete(directory, true)
