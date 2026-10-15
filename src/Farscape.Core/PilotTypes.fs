@@ -130,6 +130,15 @@ module PilotTypes =
         Source: string
     }
 
+    /// Explicit call-bounded byte borrow; neither reference syntax nor ownership supplies it.
+    type BindingWritableBuffer = {
+        Parameter: int
+        CountParameter: int
+        Identity: string
+        Version: string
+        Source: string
+    }
+
     /// Projections of parsed C declarations, including explicit scalar buffer element contracts.
     type BindingProjection = {
         Name: string
@@ -146,6 +155,7 @@ module PilotTypes =
         Ownership: BindingOwnership option
         ResultRange: BindingResultRange option
         Resource: BindingResource option
+        WritableBuffers: BindingWritableBuffer list
         CallbackInvocations: BindingCallbackInvocation list
     }
 

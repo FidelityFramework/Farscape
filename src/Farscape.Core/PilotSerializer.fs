@@ -139,6 +139,15 @@ module PilotSerializer =
                 "version", TomlValue.String resource.Version
                 "source", TomlValue.String resource.Source ]) ])
 
+    let private serializeWritableBuffer (contract: BindingWritableBuffer) =
+        TomlValue.InlineTable (Map.ofList [
+            "parameter", TomlValue.Integer (int64 contract.Parameter)
+            "count_parameter", TomlValue.Integer (int64 contract.CountParameter)
+            "hypothesis", TomlValue.InlineTable (Map.ofList [
+                "identity", TomlValue.String contract.Identity
+                "version", TomlValue.String contract.Version
+                "source", TomlValue.String contract.Source ]) ])
+
     let private serializeOptions (opts: ProjectOptions) : TomlValue =
         let table = TomlTable.empty
         let table =
@@ -174,6 +183,7 @@ module PilotSerializer =
                          | None -> t)
             |> (fun t -> match binding.ResultRange with Some range -> TomlTable.add "result_range" (serializeResultRange range) t | None -> t)
             |> (fun t -> match binding.Resource with Some resource -> TomlTable.add "resource" (serializeResource resource) t | None -> t)
+            |> (fun t -> if binding.WritableBuffers.IsEmpty then t else TomlTable.add "writable_buffers" (TomlValue.Array (binding.WritableBuffers |> List.map serializeWritableBuffer)) t)
             |> (fun t -> if binding.CallbackInvocations.IsEmpty then t else TomlTable.add "callback_invocations" (TomlValue.Array (binding.CallbackInvocations |> List.map serializeCallbackInvocation)) t)
             |> TomlValue.Table)
         let table = if bindings.IsEmpty then table else TomlTable.add "bindings" (TomlValue.Array bindings) table
@@ -523,6 +533,40 @@ module PilotSerializer =
             Some { ReleaseBinding = release; ReleaseParameter = parameter
                    Identity = text "identity" hypothesis; Version = text "version" hypothesis; Source = text "source" hypothesis }
 
+    let private deserializeWritableBuffers binding =
+        let table label = function
+            | TomlValue.Table value | TomlValue.InlineTable value -> value
+            | _ -> failwith $"writable_buffers {label} requires a table"
+        let fields label allowed values =
+            if values |> Map.exists (fun key _ -> not (Set.contains key allowed)) then
+                failwith $"writable_buffers {label} has unknown fields"
+        let text name values =
+            match TomlTable.tryFind name values with
+            | Some (TomlValue.String value) when not (System.String.IsNullOrWhiteSpace value) -> value
+            | _ -> failwith $"writable_buffers requires nonempty {name}"
+        match TomlTable.tryFind "writable_buffers" binding with
+        | None -> []
+        | Some (TomlValue.Array values) ->
+            let contracts = values |> List.map (fun value ->
+                let contract = table "contract" value
+                fields "contract" (Set.ofList ["parameter"; "count_parameter"; "hypothesis"]) contract
+                let index name =
+                    match TomlTable.tryFind name contract with
+                    | Some (TomlValue.Integer value) when value >= 0L && value <= int64 System.Int32.MaxValue -> int value
+                    | _ -> failwith $"writable_buffers requires nonnegative {name} within int range"
+                let parameter, count = index "parameter", index "count_parameter"
+                if parameter = count then failwith "writable_buffers requires distinct buffer and count parameters"
+                let hypothesis =
+                    TomlTable.tryFind "hypothesis" contract |> Option.map (table "hypothesis")
+                    |> Option.defaultWith (fun () -> failwith "writable_buffers requires hypothesis")
+                fields "hypothesis" (Set.ofList ["identity"; "version"; "source"]) hypothesis
+                { Parameter = parameter; CountParameter = count
+                  Identity = text "identity" hypothesis; Version = text "version" hypothesis; Source = text "source" hypothesis })
+            if (contracts |> List.map _.Parameter |> Set.ofList).Count <> contracts.Length then
+                failwith "writable_buffers has duplicate parameter indices"
+            contracts
+        | Some _ -> failwith "writable_buffers requires an array"
+
     let private deserializeCallbackInvocations binding =
         match TomlTable.tryFind "callback_invocations" binding with
         | None -> []
@@ -605,6 +649,7 @@ module PilotSerializer =
                           ParameterHandles = handles; ReturnHandle = optionalString "return_handle" binding
                           ResultRange = deserializeResultRange binding
                           Resource = deserializeResource binding
+                          WritableBuffers = deserializeWritableBuffers binding
                           CallbackInvocations = deserializeCallbackInvocations binding
                           Ownership = optionalString "ownership" binding |> Option.map (function
                               | "caller_owns" -> CallerOwns | "callee_owns" -> CalleeOwns | "borrowed" -> Borrowed

@@ -45,7 +45,7 @@ let ``each explicit callback nonnull source preserves its hypothesis provenance`
   let declarations = [CppParser.Declaration.Typedef (mkTypedef "Notify" "void (*)(void)"); CppParser.Declaration.Function func]
   let projection : PilotTypes.BindingProjection =
     { Name = func.Name; Symbol = func.Name; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
-      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; CallbackInvocations = [] }
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; WritableBuffers = []; CallbackInvocations = [] }
   let ctx = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
   let ctx =
     { ctx with
@@ -67,7 +67,7 @@ let ``pilot callback nonnull cannot override native nullable evidence`` () =
   let declarations = [CppParser.Declaration.Typedef (mkTypedef "Notify" "void (*)(void)"); CppParser.Declaration.Function func]
   let projection : PilotTypes.BindingProjection =
     { Name = func.Name; Symbol = func.Name; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
-      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; CallbackInvocations = [] }
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; WritableBuffers = []; CallbackInvocations = [] }
   let ctx = { FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty with Bindings = Map.ofList [func.Name, projection] }
   let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generateFunctionDecls ctx "test" func |> ignore)
   Assert.Contains("register parameter 0: nullable native type conflicts with a nonnull contract", error.Message)
@@ -90,7 +90,7 @@ let ``explicit ownership hypotheses survive generation and withdrawal removes au
   let ctx = FidelityCodeGenerator.buildGenerationContext [CppParser.Declaration.Function func] Types.LP64 Map.empty
   let projection : PilotTypes.BindingProjection =
     { Name = func.Name; Symbol = "native_acquire"; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
-      ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; CallbackInvocations = [] }
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; WritableBuffers = []; CallbackInvocations = [] }
   let emit ownership =
     let current = { ctx with Bindings = Map.ofList [func.Name, { projection with Ownership = ownership }] }
     FidelityCodeGenerator.generateFunctionDecls current "test" func |> List.map CodeRenderer.render |> String.concat "\n"
@@ -726,7 +726,7 @@ let ``rejects unsupported pimpl struct for xclbin-like inherited pimpl with no d
 
 let private rangeProjection : PilotTypes.BindingProjection =
     { Name = "read"; Symbol = "native_read"; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
-      ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None; Resource = None; CallbackInvocations = []
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None; Resource = None; WritableBuffers = []; CallbackInvocations = []
       ResultRange = Some { Identity = "posix.read"; Version = "2024"; Source = "/contracts/read.pilot.toml"
                            Lower = PilotTypes.ResultRangeBound.Constant -1; Upper = PilotTypes.ResultRangeBound.Argument 2 } }
 let private renderResultRange projection func =
@@ -1094,3 +1094,121 @@ let ``owned nullable resource generation refuses nonoptional marker and translat
     else
         Assert.Contains("resource", error.Message)
         Assert.Contains(reason, error.Message)
+
+let private writableContract : PilotTypes.BindingWritableBuffer =
+    { Parameter = 1; CountParameter = 2; Identity = "posix.read.borrow"; Version = "2024"; Source = "read-contract.pilot.toml" }
+let private writableProjection =
+    { rangeProjection with ReferenceParameters = [1]; ReferenceElements = [""; "unsigned char"]
+                           WritableBuffers = [writableContract] }
+
+[<Fact>]
+let ``writable buffer quotation preserves exact declaration byte element and independent result promise`` () =
+    let source = renderResultRange writableProjection readFunction
+    for text in ["let read (fd: int) (buffer: int array) (count: int) : int"
+                 "Expr<WritableBufferDescriptor>"; "Binding = \"Test.Native.read\""; "CName = \"native_read\""
+                 "Parameter = 1"; "CountParameter = 2"; "Type = Integer (Unsigned, 8); PassBy = Reference"
+                 "Identity = \"posix.read.borrow\""; "Version = \"2024\""; "Source = \"read-contract.pilot.toml\""
+                 "Expr<ResultRangeDescriptor>"; "Upper = Argument 2"; "OwnershipTransfer = Undeclared"] do
+        Assert.Contains(text, source)
+    Assert.DoesNotContain("Binding = \"Test.Native.native_read\"", source)
+    let absent = renderResultRange {writableProjection with WritableBuffers = []} readFunction
+    Assert.DoesNotContain("Expr<WritableBufferDescriptor>", absent)
+    Assert.Contains("Expr<ResultRangeDescriptor>", absent)
+    let noResult = renderResultRange {writableProjection with ResultRange = None} readFunction
+    Assert.Contains("Expr<WritableBufferDescriptor>", noResult)
+    Assert.DoesNotContain("Expr<ResultRangeDescriptor>", noResult)
+    let changed = renderResultRange {writableProjection with WritableBuffers = [{writableContract with Version = "2025"}]} readFunction
+    Assert.Contains("Version = \"2025\"", changed)
+
+let private writableProject shape =
+    let dir = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "artifacts", "writable-buffer-tests", System.Guid.NewGuid().ToString("N")))
+    System.IO.Directory.CreateDirectory(dir) |> ignore
+    try
+        let header = System.IO.Path.Combine(dir, "read.h")
+        let bufferType = match shape with "const" -> "const void *" | "missing-element" -> "unsigned char *" | _ -> "void *"
+        let countType = match shape with "count-reference" -> "unsigned long *" | "count-float" -> "double" | _ -> "unsigned long"
+        System.IO.File.WriteAllText(header, $"long native_read(int fd, {bufferType} buffer, {countType} count);")
+        let output = System.IO.Path.Combine(dir, "output")
+        System.IO.Directory.CreateDirectory(output) |> ignore
+        let sentinel = System.IO.Path.Combine(output, "original.clef")
+        System.IO.File.WriteAllText(sentinel, "held-original")
+        let parameter = if shape = "buffer-ordinal" then 3 else 1
+        let count = match shape with "count-ordinal" -> 3 | "same" -> 1 | _ -> 2
+        let hypothesis = if shape = "hypothesis" then "" else ", hypothesis = { identity = \"posix.read.borrow\", version = \"2024\", source = \"read-contract.pilot.toml\" }"
+        let contract = $"{{ parameter = {parameter}, count_parameter = {count}{hypothesis}" + (if shape = "unknown" then ", retention = \"forever\"" else "") + " }"
+        let contracts = if shape = "duplicate" then contract + ", " + contract else contract
+        let reference = match shape with "not-reference" | "readonly" -> "[]" | "count-reference" -> "[1,2]" | _ -> "[1]"
+        let element = match shape with "wide" -> "int" | "signed" -> "signed char" | _ -> "unsigned char"
+        let projection = System.String.Join("\n", [
+            "[[options.bindings]]"; "name = \"read\""; "symbol = \"native_read\""
+            "reference_parameters = " + reference
+            (if shape = "readonly" then "read_only_reference_parameters = [1]" else "")
+            (if shape = "missing-element" then "" else "reference_elements = [\"\", \"" + element + "\"]")
+            (if shape = "translated" then "constant_parameters = [\"\", \"\", \"4\"]" else "")
+            "writable_buffers = [" + contracts + "]" ])
+        let pilot = System.String.Join("\n", [
+            "[library]"; "name = \"c\""; "header = \"" + header + "\""
+            "[output]"; "mode = \"fidelity\""; "directory = \"" + output + "\""
+            "[options]"; "c_header_mode = true"; "descriptor_only_dependencies = true"
+            projection; (if shape = "duplicate-binding" then projection else "")
+            "[[namespace]]"; "name = \"Test.Native\""; "description = \"writable byte contract fixture\""; "library = \"c\""
+            "functions = [\"" + (if shape = "unselected" then "missing" else "read") + "\"]" ])
+        let project = System.IO.Path.Combine(dir, "read.pilot.toml")
+        System.IO.File.WriteAllText(project, pilot)
+        match BindingGenerator.generateFromProject project false false Types.LP64 with
+        | Error error ->
+            Assert.Equal("held-original", System.IO.File.ReadAllText sentinel)
+            Assert.Equal<string array>([|sentinel|], System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories))
+            Error error
+        | Ok _ ->
+            let generated = System.IO.Directory.GetFiles(output, "*.clef", System.IO.SearchOption.AllDirectories)
+            let source = generated |> Array.map System.IO.File.ReadAllText |> String.concat "\n"
+            if shape = "positive" then
+                match System.Environment.GetEnvironmentVariable("FFI_WRITABLE_BUFFER_OUTPUT") with
+                | null | "" -> ()
+                | retained ->
+                    System.IO.Directory.CreateDirectory(retained) |> ignore
+                    System.IO.File.Copy(header, System.IO.Path.Combine(retained, "read.h"), true)
+                    System.IO.File.Copy(project, System.IO.Path.Combine(retained, "read.pilot.toml"), true)
+                    for file in generated do
+                        let destination = System.IO.Path.Combine(retained, System.IO.Path.GetRelativePath(output, file))
+                        System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(destination)) |> ignore
+                        System.IO.File.Copy(file, destination, true)
+            Ok source
+    finally
+        System.IO.Directory.Delete(dir, true)
+
+[<Fact>]
+let ``writable buffer actual header emits current neutral array signature and exact companion`` () =
+    match writableProject "positive" with
+    | Error error -> failwith error
+    | Ok source ->
+        for text in ["let read (fd: int) (buffer: int array) (count: int) : int"
+                     "Expr<WritableBufferDescriptor>"; "Binding = \"Test.Native.read\""
+                     "Parameter = 1"; "CountParameter = 2"; "Type = Integer (Unsigned, 8); PassBy = Reference"
+                     "Identity = \"posix.read.borrow\""; "OwnershipTransfer = Undeclared"] do
+            Assert.Contains(text, source)
+        Assert.DoesNotContain("Expr<ResultRangeDescriptor>", source)
+
+[<Theory>]
+[<InlineData("wide", "explicit unsigned8 byte reference element contract")>]
+[<InlineData("signed", "explicit unsigned8 byte reference element contract")>]
+[<InlineData("missing-element", "explicit unsigned8 byte reference element contract")>]
+[<InlineData("not-reference", "writable Reference passing")>]
+[<InlineData("readonly", "writable Reference passing")>]
+[<InlineData("const", "writable Reference passing")>]
+[<InlineData("count-reference", "scalar integer Value passing")>]
+[<InlineData("count-float", "scalar integer Value passing")>]
+[<InlineData("buffer-ordinal", "parameter 3 is outside native arity 3")>]
+[<InlineData("count-ordinal", "parameter 3 is outside native arity 3")>]
+[<InlineData("same", "distinct buffer and count parameters")>]
+[<InlineData("duplicate", "duplicate parameter indices")>]
+[<InlineData("unknown", "contract has unknown fields")>]
+[<InlineData("hypothesis", "requires hypothesis")>]
+[<InlineData("translated", "untranslated native parameter list")>]
+[<InlineData("unselected", "exactly one selected native declaration")>]
+[<InlineData("duplicate-binding", "duplicate binding projections")>]
+let ``writable buffer project refusals preserve all existing output`` shape reason =
+    match writableProject shape with
+    | Error error -> Assert.Contains("writable_buffers", error); Assert.Contains(reason, error)
+    | Ok _ -> failwith "Unsupported writable buffer generated output"

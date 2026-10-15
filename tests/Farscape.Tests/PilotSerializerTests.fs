@@ -590,3 +590,52 @@ let ``owned nullable resource pilot refuses partial unknown and unsupported prot
     match PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail (resourcePilot contract)) with
     | Error error -> Assert.Contains("resource", error); Assert.Contains(reason, error)
     | Ok _ -> failwith "Unsupported resource declaration was accepted"
+
+let private writableProfile = "{ parameter = 1, count_parameter = 2, hypothesis = { identity = \"posix.read.borrow\", version = \"2024\", source = \"read-contract.pilot.toml\" } }"
+let private writablePilot value =
+    PilotSerializer.toTomlString sampleProject + "\n[[options.bindings]]\nname = \"read\"\nreference_parameters = [1]\nreference_elements = [\"\", \"unsigned char\"]\n" + (if value = "absent" then "" else "writable_buffers = " + value + "\n")
+
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``writable buffer pilot roundtrips explicit byte borrow and absence`` absent =
+    let read text = PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail text) |> function Ok value -> value | Error error -> failwith error
+    let project = read (writablePilot (if absent then "absent" else "[" + writableProfile + "]"))
+    let binding = project.Options.Value.Bindings.Head
+    if absent then Assert.Empty(binding.WritableBuffers) else
+        let expected: PilotTypes.BindingWritableBuffer =
+            { Parameter = 1; CountParameter = 2; Identity = "posix.read.borrow"; Version = "2024"; Source = "read-contract.pilot.toml" }
+        Assert.Equal<PilotTypes.BindingWritableBuffer list>([expected], binding.WritableBuffers)
+    Assert.Equal(project, read (PilotSerializer.toTomlString project))
+
+[<Theory>]
+[<InlineData("parameter", "nonnegative parameter")>]
+[<InlineData("count", "nonnegative count_parameter")>]
+[<InlineData("overflow", "nonnegative count_parameter")>]
+[<InlineData("same", "distinct buffer and count parameters")>]
+[<InlineData("hypothesis", "requires hypothesis")>]
+[<InlineData("identity", "requires nonempty identity")>]
+[<InlineData("version", "requires nonempty version")>]
+[<InlineData("source", "requires nonempty source")>]
+[<InlineData("extra", "contract has unknown fields")>]
+[<InlineData("hypothesis-extra", "hypothesis has unknown fields")>]
+[<InlineData("duplicate", "duplicate parameter indices")>]
+[<InlineData("array", "requires an array")>]
+let ``writable buffer pilot refuses malformed ambiguous and unknown contracts`` shape reason =
+    let contract =
+        match shape with
+        | "parameter" -> writableProfile.Replace("parameter = 1", "parameter = -1")
+        | "count" -> writableProfile.Replace("count_parameter = 2, ", "")
+        | "overflow" -> writableProfile.Replace("count_parameter = 2", "count_parameter = 2147483648")
+        | "same" -> writableProfile.Replace("count_parameter = 2", "count_parameter = 1")
+        | "hypothesis" -> "{ parameter = 1, count_parameter = 2 }"
+        | "identity" -> writableProfile.Replace("identity = \"posix.read.borrow\", ", "")
+        | "version" -> writableProfile.Replace("version = \"2024\"", "version = \" \"")
+        | "source" -> writableProfile.Replace(", source = \"read-contract.pilot.toml\"", "")
+        | "extra" -> writableProfile.Replace("count_parameter =", "scope = \"retained\", count_parameter =")
+        | "hypothesis-extra" -> writableProfile.Replace("identity =", "encoding = \"utf8\", identity =")
+        | _ -> writableProfile
+    let value = match shape with "duplicate" -> "[" + contract + "," + contract + "]" | "array" -> contract | _ -> "[" + contract + "]"
+    match PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail (writablePilot value)) with
+    | Error error -> Assert.Contains("writable_buffers", error); Assert.Contains(reason, error)
+    | Ok _ -> failwith "Invalid writable buffer contract was admitted"

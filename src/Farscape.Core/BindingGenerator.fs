@@ -406,10 +406,10 @@ module BindingGenerator =
                     | _ -> ()
                     // An external contract must survive neither duplicate-map collapse
                     // nor namespace filtering. Refuse before any generation effects.
-                    let resultBindings = project.Options |> Option.map _.Bindings |> Option.defaultValue [] |> List.filter (fun binding -> binding.ResultRange.IsSome || not binding.CallbackInvocations.IsEmpty)
+                    let resultBindings = project.Options |> Option.map _.Bindings |> Option.defaultValue [] |> List.filter (fun binding -> binding.ResultRange.IsSome || not binding.CallbackInvocations.IsEmpty || not binding.WritableBuffers.IsEmpty)
                     let bindings = project.Options |> Option.map _.Bindings |> Option.defaultValue []
                     for binding in resultBindings do
-                        let contract = if binding.ResultRange.IsSome then "result_range" else "callback_invocations"
+                        let contract = if not binding.WritableBuffers.IsEmpty then "writable_buffers" elif binding.ResultRange.IsSome then "result_range" else "callback_invocations"
                         if bindings |> List.filter (fun other -> other.Name = binding.Name) |> List.length <> 1 then
                             failwith $"{binding.Name} {contract}: duplicate binding projections"
                         let selected = project.Namespaces |> List.collect (fun ns ->

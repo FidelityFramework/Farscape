@@ -805,13 +805,54 @@ module FidelityCodeGenerator =
                           "Version", Literal (quoteString resource.Version)
                           "Source", Literal (quoteString resource.Source) ] ])) ]
 
+    /// Add only the explicit call-bounded byte promise; source owns actual capacity and use.
+    let private writableBufferDecls (ctx: GenerationContext) namespace' (func: CppParser.FunctionDecl) nativeName hasAdapter =
+        let projection = ctx.Bindings |> Map.tryFind func.Name
+        let contracts = projection |> Option.map _.WritableBuffers |> Option.defaultValue []
+        let refuse reason = failwith $"{func.Name} writable_buffers: {reason}"
+        if (contracts |> List.map _.Parameter |> Set.ofList).Count <> contracts.Length then
+            refuse "duplicate parameter indices"
+        contracts |> List.collect (fun contract ->
+            for key, value in ["identity", contract.Identity; "version", contract.Version; "source", contract.Source] do
+                if System.String.IsNullOrWhiteSpace value then refuse $"requires nonempty {key}"
+            let projection = projection.Value
+            if hasAdapter || not projection.StringParameters.IsEmpty
+               || (projection.ConstantParameters |> List.exists (System.String.IsNullOrWhiteSpace >> not)) then
+                refuse "requires an untranslated native parameter list"
+            let parameter index =
+                if index < 0 || index >= func.Parameters.Length then refuse $"parameter {index} is outside native arity {func.Parameters.Length}"
+                snd func.Parameters[index]
+            let buffer, count = parameter contract.Parameter, parameter contract.CountParameter
+            if contract.Parameter = contract.CountParameter then refuse "requires distinct buffer and count parameters"
+            let reference, readOnly = referencePassing (Some projection) contract.Parameter buffer
+            if not reference || readOnly || not (isDataPointerIn ctx buffer) then
+                refuse "buffer parameter requires writable Reference passing"
+            match List.tryItem contract.Parameter projection.ReferenceElements |> Option.map (resolveIn ctx) with
+            | Some (Scalar element) when element.Family = TypeMapper.Unsigned && element.Bits = 8 -> ()
+            | _ -> refuse "buffer parameter requires an explicit unsigned8 byte reference element contract"
+            let countReference, _ = referencePassing (Some projection) contract.CountParameter count
+            match resolveIn ctx count with
+            | Scalar scalar when not countReference && (scalar.Family = TypeMapper.Signed || scalar.Family = TypeMapper.Unsigned) -> ()
+            | _ -> refuse "count parameter requires scalar integer Value passing"
+            [ XmlDoc "Call-bounded writable byte promise: actual capacity, guards, source uses and encoding require independent source evidence."
+              ValueBinding(nativeName + "WritableBuffer" + string contract.Parameter + "Descriptor", Generic("Expr", Named "WritableBufferDescriptor"),
+                  Quoted(RecordBlock [
+                      "Binding", Literal (quoteString (namespace' + "." + nativeName))
+                      "Parameter", Literal (string contract.Parameter)
+                      "CountParameter", Literal (string contract.CountParameter)
+                      "Hypothesis", RecordBlock [
+                          "Identity", Literal (quoteString contract.Identity)
+                          "Version", Literal (quoteString contract.Version)
+                          "Source", Literal (quoteString contract.Source) ] ])) ])
+
     let private declaredFunctionDecls (ctx: GenerationContext) namespace' anchors (func: CppParser.FunctionDecl) (entries: (int * string * FsDecl list) list) (raw: FsDecl list) =
         if entries.IsEmpty then
             let nativeName = raw |> List.pick (function LetBinding(name, _, _, _, attrs) when not attrs.IsEmpty -> Some name | _ -> None)
             callbackInvocationDecls ctx namespace' anchors func nativeName |> ignore
-            raw @ resultRangeDecls ctx namespace' func nativeName false @ resourceDecls ctx namespace' anchors func nativeName raw
+            raw @ resultRangeDecls ctx namespace' func nativeName false @ resourceDecls ctx namespace' anchors func nativeName raw @ writableBufferDecls ctx namespace' func nativeName false
         else
         resultRangeDecls ctx namespace' func func.Name true |> ignore
+        writableBufferDecls ctx namespace' func func.Name true |> ignore
         let callbackTypes = entries |> List.map (fun (i, name, _) -> cleanParamName (fst func.Parameters.[i]), name) |> Map.ofList
         let nativeName, nativeParameters, returnType =
             raw |> List.pick (function LetBinding(name, parameters, ret, _, attrs) when not attrs.IsEmpty -> Some (name, parameters, ret) | _ -> None)
