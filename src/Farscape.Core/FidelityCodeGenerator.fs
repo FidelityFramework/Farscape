@@ -678,8 +678,7 @@ module FidelityCodeGenerator =
                 | Scalar r when (r.Family = TypeMapper.Signed || r.Family = TypeMapper.Unsigned) && (r.Bits = 32 || r.Bits = 64) -> ()
                 | Scalar r when r.Family = TypeMapper.Bool ->
                     refuse "Boolean native entry signatures are outside the admitted ordered integer callback profile"
-                | Scalar r when isReturn && r.Family = TypeMapper.Void ->
-                    refuse "void native entry results are outside the admitted ordered integer callback profile"
+                | Scalar r when isReturn && r.Family = TypeMapper.Void -> ()
                 | _ -> refuse $"unsupported native entry signature type '{cType}'"
                 abiClaim ctx cType
             let infos = parameters |> List.map (fun (name, typ) ->

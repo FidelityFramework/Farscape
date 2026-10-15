@@ -843,9 +843,29 @@ let ``callback invocation ordered integer formals preserve every native position
     Assert.Contains("Invoke: FnPtr<int -> int -> int>", source)
 
 [<Theory>]
+[<InlineData("void (*)(int)", "Signed, 32", "", 1)>]
+[<InlineData("void (*)(unsigned long long)", "Unsigned, 64", "", 1)>]
+[<InlineData("void (*)(int, unsigned long long)", "Signed, 32", "Unsigned, 64", 2)>]
+[<InlineData("void (*)(unsigned int, long long)", "Unsigned, 32", "Signed, 64", 2)>]
+let ``callback invocation void result preserves complete ordered integer formals`` signature first second arity =
+    let source = renderInvocation invocationProjection "NativeCallback" signature
+    let contract = source.Substring(source.IndexOf("Expr<CallbackInvocationContract>"))
+    let signatureText = contract.Substring(0, contract.IndexOf("Hypothesis ="))
+    Assert.Contains($"Name = \"arg0\"; Type = Integer ({first})", signatureText)
+    if arity = 2 then
+        let secondField = $"Name = \"arg1\"; Type = Integer ({second})"
+        Assert.Contains(secondField, signatureText)
+        Assert.True(signatureText.IndexOf("Name = \"arg0\"") < signatureText.IndexOf(secondField))
+    Assert.Equal(arity, signatureText.Split("Name = ").Length - 1)
+    Assert.Contains("ReturnType = Void", signatureText)
+    Assert.DoesNotContain("ReturnType = Integer", signatureText)
+    Assert.Contains((if arity = 1 then "Invoke: FnPtr<int -> unit>" else "Invoke: FnPtr<int -> int -> unit>"), source)
+    for text in ["CallingConvention = CDecl"; "Parameter = 0"; "Scope = \"Test.Native.call_twiceNativeCallback0Scope\""; "Identity = \"fixture.call_twice.callback\""] do
+        Assert.Contains(text, contract)
+
+[<Theory>]
 [<InlineData("bool-parameter", "int (*)(bool)", "Boolean native entry signatures")>]
 [<InlineData("bool-result", "bool (*)(int)", "Boolean native entry signatures")>]
-[<InlineData("void-result", "void (*)(int)", "void native entry results")>]
 [<InlineData("zero", "int (*)(void)", "requires at least one native entry parameter; received 0")>]
 let ``callback invocation rejects signatures outside admitted integer profile`` _shape signature reason =
     let error = Assert.ThrowsAny<System.Exception>(fun () -> renderInvocation invocationProjection "NativeCallback" signature |> ignore)
@@ -888,7 +908,6 @@ let ``callback invocation contract refuses unsupported receiving correspondence 
 [<InlineData("kind", "not a native function pointer")>]
 [<InlineData("profile-bool-parameter", "Boolean native entry signatures")>]
 [<InlineData("profile-bool-result", "Boolean native entry signatures")>]
-[<InlineData("profile-void-result", "void native entry results")>]
 [<InlineData("profile-zero", "requires at least one native entry parameter; received 0")>]
 let ``callback invocation project refusal preserves every existing output`` shape reason =
     let dir = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "artifacts", "callback-receiving-tests", System.Guid.NewGuid().ToString("N")))
@@ -901,7 +920,6 @@ let ``callback invocation project refusal preserves every existing output`` shap
             | "kind" -> "void call_twice(int callback);"
             | "profile-bool-parameter" -> "void call_twice(int (*callback)(_Bool));"
             | "profile-bool-result" -> "void call_twice(_Bool (*callback)(int));"
-            | "profile-void-result" -> "void call_twice(void (*callback)(int));"
             | "profile-zero" -> "void call_twice(int (*callback)(void));"
             | _ -> "void call_twice(long long (*callback)(long long));"
         System.IO.File.WriteAllText(header, declaration)
