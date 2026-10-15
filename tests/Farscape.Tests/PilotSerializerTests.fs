@@ -479,7 +479,7 @@ let ``callback invocation profile roundtrips explicit provenance and missing sta
     let binding = value.Options.Value.Bindings.Head
     Assert.Equal<int list>([0], binding.NonnullCallbacks)
     if absent then Assert.Empty(binding.CallbackInvocations) else
-        let expected: PilotTypes.BindingCallbackInvocation = {Parameter = 0; Identity = "fixture.callback"; Version = "v1"; Source = "/contracts/call_twice.c"; Scope = "during_call"}
+        let expected: PilotTypes.BindingCallbackInvocation = {Parameter = 0; Identity = "fixture.callback"; Version = "v1"; Source = "/contracts/call_twice.c"; Scope = "during_call"; ExitBinding = None; SuccessStatus = None}
         Assert.Equal<PilotTypes.BindingCallbackInvocation list>([expected], binding.CallbackInvocations)
     Assert.Equal(value, read (PilotSerializer.toTomlString value))
 
@@ -508,3 +508,36 @@ let ``callback invocation profile refuses incomplete and unsupported contracts``
     match PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail (invocationPilot input)) with
     | Error error -> Assert.Contains("callback_invocations", error); Assert.Contains(reason, error)
     | Ok _ -> failwith "Unsupported callback invocation profile was admitted"
+
+[<Theory>]
+[<InlineData(false, 0)>]
+[<InlineData(true, -2147483648)>]
+let ``process exit invocation pilot roundtrips optional anchor and signed32 status`` anchored status =
+    let contract = invocationProfile.Replace("during_call", "process_exit").Replace(" }", ", success_status = " + string status + (if anchored then ", exit_binding = \"Test.Process.exit\"" else "") + " }")
+    let read text = PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail text) |> function Ok value -> value | Error error -> failwith error
+    let project = read (invocationPilot ("[" + contract + "]"))
+    let actual = project.Options.Value.Bindings.Head.CallbackInvocations.Head
+    Assert.Equal(Some status, actual.SuccessStatus)
+    Assert.Equal((if anchored then Some "Test.Process.exit" else None), actual.ExitBinding)
+    Assert.Equal(project, read (PilotSerializer.toTomlString project))
+
+[<Theory>]
+[<InlineData("missing", "requires signed32 success_status")>]
+[<InlineData("overflow", "requires signed32 success_status")>]
+[<InlineData("string", "requires signed32 success_status")>]
+[<InlineData("anchor", "requires nonempty exit_binding")>]
+[<InlineData("mixed", "during_call forbids")>]
+[<InlineData("unknown", "unknown fields")>]
+let ``process exit invocation pilot rejects malformed and mixed fields`` shape reason =
+    let extras =
+        match shape with
+        | "missing" -> ""
+        | "overflow" -> ", success_status = 2147483648"
+        | "string" -> ", success_status = \"0\""
+        | "anchor" -> ", success_status = 0, exit_binding = \" \""
+        | "unknown" -> ", success_status = 0, unexpected = true"
+        | _ -> ", success_status = 0"
+    let contract = invocationProfile.Replace("during_call", (if shape = "mixed" then "during_call" else "process_exit")).Replace(" }", extras + " }")
+    match PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail (invocationPilot ("[" + contract + "]"))) with
+    | Error error -> Assert.Contains(reason, error)
+    | Ok _ -> failwith "Invalid process-exit invocation pilot was accepted"

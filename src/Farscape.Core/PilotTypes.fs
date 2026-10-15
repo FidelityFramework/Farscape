@@ -117,6 +117,8 @@ module PilotTypes =
         Version: string
         Source: string
         Scope: string
+        ExitBinding: string option
+        SuccessStatus: int option
     }
 
     /// Projections of parsed C declarations, including explicit scalar buffer element contracts.

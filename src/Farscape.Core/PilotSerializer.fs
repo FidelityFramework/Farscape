@@ -125,7 +125,9 @@ module PilotSerializer =
             "identity", TomlValue.String contract.Identity
             "version", TomlValue.String contract.Version
             "source", TomlValue.String contract.Source
-            "scope", TomlValue.String contract.Scope ])
+            "scope", TomlValue.String contract.Scope
+            yield! contract.ExitBinding |> Option.map (fun value -> "exit_binding", TomlValue.String value) |> Option.toList
+            yield! contract.SuccessStatus |> Option.map (fun value -> "success_status", TomlValue.Integer (int64 value)) |> Option.toList ])
 
     let private serializeOptions (opts: ProjectOptions) : TomlValue =
         let table = TomlTable.empty
@@ -495,8 +497,26 @@ module PilotSerializer =
                         | Some (TomlValue.Integer value) when value >= 0L && value <= int64 System.Int32.MaxValue -> int value
                         | _ -> failwith "callback_invocations requires a nonnegative parameter index within int range"
                     let scope = text "scope"
-                    if scope <> "during_call" then failwith "callback_invocations scope must be during_call"
-                    { Parameter = index; Identity = text "identity"; Version = text "version"; Source = text "source"; Scope = scope }
+                    let allowed = Set.ofList ["parameter"; "identity"; "version"; "source"; "scope"; "exit_binding"; "success_status"]
+                    if fields |> Map.exists (fun key _ -> not (Set.contains key allowed)) then
+                        failwith "callback_invocations has unknown fields"
+                    let exitBinding, successStatus =
+                        match scope with
+                        | "during_call" ->
+                            if TomlTable.tryFind "exit_binding" fields |> Option.isSome
+                               || TomlTable.tryFind "success_status" fields |> Option.isSome then
+                                failwith "callback_invocations during_call forbids exit_binding and success_status"
+                            None, None
+                        | "process_exit" ->
+                            let exitBinding = TomlTable.tryFind "exit_binding" fields |> Option.map (fun _ -> text "exit_binding")
+                            let successStatus =
+                                match TomlTable.tryFind "success_status" fields with
+                                | Some (TomlValue.Integer value) when value >= int64 System.Int32.MinValue && value <= int64 System.Int32.MaxValue -> int value
+                                | _ -> failwith "callback_invocations process_exit requires signed32 success_status"
+                            exitBinding, Some successStatus
+                        | _ -> failwith "callback_invocations scope must be during_call or process_exit"
+                    { Parameter = index; Identity = text "identity"; Version = text "version"; Source = text "source"; Scope = scope
+                      ExitBinding = exitBinding; SuccessStatus = successStatus }
                 | _ -> failwith "callback_invocations requires tables")
             if (contracts |> List.map _.Parameter |> Set.ofList).Count <> contracts.Length then
                 failwith "callback_invocations has duplicate parameter indices"

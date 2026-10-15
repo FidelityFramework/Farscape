@@ -779,7 +779,7 @@ let ``result range refuses ineligible native slots and unsupported translation``
 
 let private invocationContract : PilotTypes.BindingCallbackInvocation =
     { Parameter = 0; Identity = "fixture.call_twice.callback"; Version = "v1"
-      Source = "/contracts/call_twice.c"; Scope = "during_call" }
+      Source = "/contracts/call_twice.c"; Scope = "during_call"; ExitBinding = None; SuccessStatus = None }
 let private invocationProjection =
     { rangeProjection with Name = "call_twice"; Symbol = "native_call_twice"
                            NonnullCallbacks = [0]; ResultRange = None; CallbackInvocations = [invocationContract] }
@@ -888,7 +888,7 @@ let ``callback invocation rejects signatures outside admitted integer profile`` 
 [<Theory>]
 [<InlineData("index", "outside native arity 1")>]
 [<InlineData("duplicate", "duplicate parameter indices")>]
-[<InlineData("scope", "scope must be during_call")>]
+[<InlineData("scope", "scope must be during_call or process_exit")>]
 [<InlineData("source", "requires nonempty source")>]
 [<InlineData("kind", "not a native function pointer")>]
 [<InlineData("translated", "untranslated native parameter list")>]
@@ -923,6 +923,9 @@ let ``callback invocation contract refuses unsupported receiving correspondence 
 [<InlineData("profile-bool-result", "Boolean native entry signatures")>]
 [<InlineData("profile-zero", "zero-argument native entries require a void result")>]
 [<InlineData("profile-ambiguous-zero", "zero-argument native entries require an explicit (void) prototype")>]
+[<InlineData("profile-process-anchor", "exit_binding must name a selected qualified generated declaration")>]
+[<InlineData("profile-process-status", "process_exit requires signed32 success_status")>]
+[<InlineData("profile-process-mixed", "during_call forbids")>]
 let ``callback invocation project refusal preserves every existing output`` shape reason =
     let dir = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "artifacts", "callback-receiving-tests", System.Guid.NewGuid().ToString("N")))
     System.IO.Directory.CreateDirectory(dir) |> ignore
@@ -936,6 +939,7 @@ let ``callback invocation project refusal preserves every existing output`` shap
             | "profile-bool-result" -> "void call_twice(_Bool (*callback)(int));"
             | "profile-zero" -> "void call_twice(int (*callback)(void));"
             | "profile-ambiguous-zero" -> "void call_twice(void (*callback)());"
+            | "profile-process-anchor" | "profile-process-status" | "profile-process-mixed" -> "int call_twice(void (*callback)(void)); void exit(int status);"
             | _ -> "void call_twice(long long (*callback)(long long));"
         System.IO.File.WriteAllText(header, declaration)
         let output = System.IO.Path.Combine(dir, "output")
@@ -943,7 +947,12 @@ let ``callback invocation project refusal preserves every existing output`` shap
         let sentinel = System.IO.Path.Combine(output, "original.clef")
         System.IO.File.WriteAllText(sentinel, "held-original")
         let nonnull = if shape = "kind" then "" else "nonnull_callbacks = [0]\n"
-        let projection = "\n[[options.bindings]]\nname = \"call_twice\"\n" + nonnull + "callback_invocations = [{ parameter = 0, identity = \"fixture.callback\", version = \"v1\", source = \"fixture.c\", scope = \"during_call\" }]\n"
+        let scope = if shape = "profile-process-anchor" || shape = "profile-process-status" then "process_exit" else "during_call"
+        let extra = match shape with
+                    | "profile-process-anchor" -> ", success_status = 0, exit_binding = \"Test.Native.exit\""
+                    | "profile-process-mixed" -> ", success_status = 0"
+                    | _ -> ""
+        let projection = "\n[[options.bindings]]\nname = \"call_twice\"\n" + nonnull + "callback_invocations = [{ parameter = 0, identity = \"fixture.callback\", version = \"v1\", source = \"fixture.c\", scope = \"" + scope + "\"" + extra + " }]\n"
         let pilot = System.String.Join("\n", [
             "[library]"; "name = \"call_twice\""; "header = \"" + header + "\""
             "[output]"; "mode = \"fidelity\""; "directory = \"" + output + "\""
@@ -960,3 +969,40 @@ let ``callback invocation project refusal preserves every existing output`` shap
         Assert.Equal<string array>([|sentinel|], System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories))
     finally
         System.IO.Directory.Delete(dir, true)
+
+let private renderProcessExit anchor status receiverResult signature =
+    let contract = {invocationContract with Scope = "process_exit"; ExitBinding = anchor; SuccessStatus = status}
+    let receiver = {invocationProjection with Name = "atexit"; Symbol = "native_atexit"; CallbackInvocations = [contract]}
+    let exit = {rangeProjection with Name = "exit"; Symbol = "native_exit"; ResultRange = None; ConstantParameters = ["0"]}
+    let declarations = [
+        CppParser.Declaration.Typedef (mkTypedef "ExitCallback" signature)
+        CppParser.Declaration.Function (mkFunc "atexit" receiverResult ["func", "ExitCallback"])
+        CppParser.Declaration.Function (mkFunc "exit" "void" ["status", "int"]) ]
+    let context = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
+    FidelityCodeGenerator.generateModule {context with Bindings = Map.ofList ["atexit", receiver; "exit", exit]} Set.empty declarations "Test.Process" "c" "process exit fixture" []
+
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``process exit invocation emits optional exact generated native anchor`` anchored =
+    let source = renderProcessExit (if anchored then Some "Test.Process.exit" else None) (Some 0) "int" "void (*)(void)"
+    for text in ["Expr<ProcessExitCallbackDescriptor>"; "Binding = \"Test.Process.atexitNative\""; "Parameter = \"func\""; "SuccessStatus = 0"; "Invoke: FnPtr<unit -> unit>"; "Identity = \"fixture.call_twice.callback\""; "ReturnType = Integer (Signed, 32)"] do
+        Assert.Contains(text, source)
+    Assert.Contains((if anchored then "ExitBinding = Some \"Test.Process.exitNative\"" else "ExitBinding = None"), source)
+    Assert.DoesNotContain("Expr<ScopedCallbackDescriptor>", source)
+    Assert.DoesNotContain("Expr<ResultRangeDescriptor>", source)
+    Assert.Contains("CName = \"native_exit\"", source)
+
+[<Theory>]
+[<InlineData("anchor", "exit_binding must name a selected qualified generated declaration")>]
+[<InlineData("symbol", "exit_binding must name a selected qualified generated declaration")>]
+[<InlineData("status", "process_exit requires signed32 success_status")>]
+[<InlineData("result", "signed32 registration result")>]
+[<InlineData("arity", "zero-argument void callback")>]
+let ``process exit invocation refuses unsupported registration correspondence`` shape reason =
+    let anchor = match shape with "anchor" -> Some "Other.Process.exit" | "symbol" -> Some "native_exit" | _ -> None
+    let status = if shape = "status" then None else Some 0
+    let receiver = if shape = "result" then "unsigned int" else "int"
+    let signature = if shape = "arity" then "void (*)(int)" else "void (*)(void)"
+    let error = Assert.ThrowsAny<System.Exception>(fun () -> renderProcessExit anchor status receiver signature |> ignore)
+    Assert.Contains(reason, error.Message)

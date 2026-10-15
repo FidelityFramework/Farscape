@@ -654,14 +654,31 @@ module FidelityCodeGenerator =
 
     /// Declare receiving-site activation separately from the listener record and its ABI.
     /// The existing native signature owner supplies every formal, including unused ones.
-    let private callbackInvocationDecls (ctx: GenerationContext) namespace' (func: CppParser.FunctionDecl) nativeName =
+    let private callbackInvocationDecls (ctx: GenerationContext) namespace' (anchors: Map<string, string>) (func: CppParser.FunctionDecl) nativeName =
         let contracts = ctx.Bindings |> Map.tryFind func.Name |> Option.map _.CallbackInvocations |> Option.defaultValue []
         let refuse reason = failwith $"{func.Name} callback_invocations: {reason}"
         if (contracts |> List.map _.Parameter |> Set.ofList).Count <> contracts.Length then refuse "duplicate parameter indices"
         let entries = contracts |> List.map (fun contract ->
             for key, value in ["identity", contract.Identity; "version", contract.Version; "source", contract.Source] do
                 if System.String.IsNullOrWhiteSpace value then refuse $"requires nonempty {key}"
-            if contract.Scope <> "during_call" then refuse "scope must be during_call"
+            let scopeType, scopeFields =
+                match contract.Scope, contract.ExitBinding, contract.SuccessStatus with
+                | "during_call", None, None -> "ScopedCallbackDescriptor", []
+                | "during_call", _, _ -> refuse "during_call forbids exit_binding and success_status"
+                | "process_exit", anchor, Some status ->
+                    match resolveIn ctx func.ReturnType with
+                    | Scalar r when r.Family = TypeMapper.Signed && r.Bits = 32 -> ()
+                    | _ -> refuse "process_exit requires a signed32 registration result"
+                    let anchorValue =
+                        match anchor with
+                        | None -> Identifier "None"
+                        | Some selected ->
+                            match Map.tryFind selected anchors with
+                            | Some actual -> Literal ("Some " + quoteString actual)
+                            | None -> refuse "exit_binding must name a selected qualified generated declaration"
+                    "ProcessExitCallbackDescriptor", ["ExitBinding", anchorValue; "SuccessStatus", Literal (string status)]
+                | "process_exit", _, None -> refuse "process_exit requires signed32 success_status"
+                | _ -> refuse "scope must be during_call or process_exit"
             if contract.Parameter < 0 || contract.Parameter >= func.Parameters.Length then
                 refuse $"parameter {contract.Parameter} is outside native arity {func.Parameters.Length}"
             let projection = ctx.Bindings[func.Name]
@@ -683,6 +700,10 @@ module FidelityCodeGenerator =
                 match resolveIn ctx ret with
                 | Scalar r when r.Family = TypeMapper.Void -> ()
                 | _ -> refuse "zero-argument native entries require a void result"
+            if contract.Scope = "process_exit" then
+                match parameters, resolveIn ctx ret with
+                | [], Scalar r when r.Family = TypeMapper.Void -> ()
+                | _ -> refuse "process_exit requires a zero-argument void callback"
             let nativeType isReturn (cType: string) =
                 if cType.Contains('&') then refuse $"unsupported native entry reference signature type '{cType}'"
                 match resolveIn ctx cType with
@@ -703,9 +724,9 @@ module FidelityCodeGenerator =
             let binding = namespace' + "." + nativeName
             contract.Parameter, namespace' + "." + contractName, [
                 XmlDoc "Declared foreign activation only: no argument values, invocation count, purity or functionhood are supplied."
-                ValueBinding(scopeName, Generic("Expr", Named "ScopedCallbackDescriptor"), Quoted(RecordBlock [
+                ValueBinding(scopeName, Generic("Expr", Named scopeType), Quoted(RecordBlock ([
                     "Binding", Literal (quoteString binding)
-                    "Parameter", Literal (quoteString ((cleanParamName name).Replace("``", ""))) ]))
+                    "Parameter", Literal (quoteString ((cleanParamName name).Replace("``", ""))) ] @ scopeFields)))
                 ValueBinding(contractName, Generic("Expr", Named "CallbackInvocationContract"), Quoted(RecordBlock [
                     "Binding", Literal (quoteString binding)
                     "Parameter", Literal (string contract.Parameter)
@@ -736,20 +757,22 @@ module FidelityCodeGenerator =
 
     /// Keep the full native arity private while carrying declared entry provenance through a
     /// record projection. This is membrane plumbing, not the application callback interface.
-    let generateDeclaredFunctionDecls (ctx: GenerationContext) libraryName namespace' (func: CppParser.FunctionDecl) =
-        let entries = callbackEntries ctx namespace' func
-        let raw = generateFunctionDecls ctx libraryName func
+    let private nativeDeclarationName (func: CppParser.FunctionDecl) (entries: (int * string * FsDecl list) list) (raw: FsDecl list) =
+        let name = raw |> List.pick (function LetBinding(name, _, _, _, attrs) when not attrs.IsEmpty -> Some name | _ -> None)
+        if not (List.isEmpty entries) && name = func.Name then name + "Native" else name
+
+    let private declaredFunctionDecls (ctx: GenerationContext) namespace' anchors (func: CppParser.FunctionDecl) (entries: (int * string * FsDecl list) list) (raw: FsDecl list) =
         if entries.IsEmpty then
             let nativeName = raw |> List.pick (function LetBinding(name, _, _, _, attrs) when not attrs.IsEmpty -> Some name | _ -> None)
-            callbackInvocationDecls ctx namespace' func nativeName |> ignore
+            callbackInvocationDecls ctx namespace' anchors func nativeName |> ignore
             raw @ resultRangeDecls ctx namespace' func nativeName false
         else
         resultRangeDecls ctx namespace' func func.Name true |> ignore
         let callbackTypes = entries |> List.map (fun (i, name, _) -> cleanParamName (fst func.Parameters.[i]), name) |> Map.ofList
         let nativeName, nativeParameters, returnType =
             raw |> List.pick (function LetBinding(name, parameters, ret, _, attrs) when not attrs.IsEmpty -> Some (name, parameters, ret) | _ -> None)
-        let privateName = if nativeName = func.Name then nativeName + "Native" else nativeName
-        let entryReferences, invocationDeclarations = callbackInvocationDecls ctx namespace' func privateName
+        let privateName = nativeDeclarationName func entries raw
+        let entryReferences, invocationDeclarations = callbackInvocationDecls ctx namespace' anchors func privateName
         let publicParameters, callArguments =
             match raw |> List.tryPick (function
                 | LetBinding(name, parameters, _, FunctionCall(_, _, arguments), []) when name = func.Name -> Some (parameters, arguments)
@@ -768,6 +791,9 @@ module FidelityCodeGenerator =
             | LetBinding(name, _, _, _, []) when name = func.Name -> None
             | declaration -> Some declaration)
         declarations @ invocationDeclarations @ [ LetBinding(func.Name, publicParameters, returnType, FunctionCall("", privateName, callArguments), []) ]
+
+    let generateDeclaredFunctionDecls (ctx: GenerationContext) libraryName namespace' (func: CppParser.FunctionDecl) =
+        declaredFunctionDecls ctx namespace' Map.empty func (callbackEntries ctx namespace' func) (generateFunctionDecls ctx libraryName func)
 
     /// Generate FsDecl list for an enum type.
     /// Automatically detects bitmask (flags) enums via value pattern analysis.
@@ -966,7 +992,11 @@ module FidelityCodeGenerator =
             functionDeclarations |> List.collect (callbackEntries ctx namespace')
             |> List.distinctBy (fun (_, name, _) -> name)
             |> List.collect (fun (_, _, declarations) -> declarations)
-        let functions = functionDeclarations |> List.collect (generateDeclaredFunctionDecls ctx libraryName namespace')
+        let prepared = functionDeclarations |> List.map (fun func ->
+            func, callbackEntries ctx namespace' func, generateFunctionDecls ctx libraryName func)
+        let anchors = prepared |> List.map (fun (func, entries, raw) ->
+            namespace' + "." + func.Name, namespace' + "." + nativeDeclarationName func entries raw) |> Map.ofList
+        let functions = prepared |> List.collect (fun (func, entries, raw) -> declaredFunctionDecls ctx namespace' anchors func entries raw)
         let macros = groups |> List.collect (function GMacro d -> d | _ -> [])
 
         let macroSection =
