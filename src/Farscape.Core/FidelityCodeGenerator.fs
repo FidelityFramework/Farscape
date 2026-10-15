@@ -148,7 +148,7 @@ module FidelityCodeGenerator =
         resolve Set.empty cType
 
     /// The return and parameter type strings of a C function-pointer type "R (*)(A, B)".
-    let private splitFunctionPointer (cType: string) : (string * string list) option =
+    let private splitFunctionPointerPrototype (cType: string) : (string * string list * bool) option =
         match cType.IndexOf("(*") with
         | -1 -> None
         | i ->
@@ -169,8 +169,11 @@ module FidelityCodeGenerator =
                         | ',' when depth = 0 -> parts @ [current.Trim()], "", depth
                         | _ -> parts, current + string c, depth) ([], "", 0)
                 let all = parts @ [last.Trim()] |> List.filter (fun p -> p <> "" && p <> "void")
-                Some (ret, all)
+                Some (ret, all, inner.Trim() = "void")
             else None
+
+    let private splitFunctionPointer cType =
+        splitFunctionPointerPrototype cType |> Option.map (fun (ret, args, _) -> ret, args)
 
     /// The ABI representation of an enum: its underlying type when clang reports one (declared),
     /// else the profile's int, unsigned unless an enumerator is negative (inferred: C leaves the
@@ -671,7 +674,15 @@ module FidelityCodeGenerator =
             | _ -> refuse $"parameter {contract.Parameter} is not a native function pointer"
             let ret, parameters = resolveCallbackNativeSignature ctx cType |> Option.defaultWith (fun () -> refuse "native entry signature is unavailable")
             if parameters.IsEmpty then
-                refuse "requires at least one native entry parameter; received 0"
+                let declaredType =
+                    Map.tryFind (TypeMapper.cleanTypeName (stripNullability cType)) ctx.TypedefMap
+                    |> Option.defaultValue cType
+                match splitFunctionPointerPrototype declaredType with
+                | Some (_, [], true) -> ()
+                | _ -> refuse "zero-argument native entries require an explicit (void) prototype"
+                match resolveIn ctx ret with
+                | Scalar r when r.Family = TypeMapper.Void -> ()
+                | _ -> refuse "zero-argument native entries require a void result"
             let nativeType isReturn (cType: string) =
                 if cType.Contains('&') then refuse $"unsupported native entry reference signature type '{cType}'"
                 match resolveIn ctx cType with

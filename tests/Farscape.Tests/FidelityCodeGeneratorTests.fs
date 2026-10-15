@@ -863,10 +863,23 @@ let ``callback invocation void result preserves complete ordered integer formals
     for text in ["CallingConvention = CDecl"; "Parameter = 0"; "Scope = \"Test.Native.call_twiceNativeCallback0Scope\""; "Identity = \"fixture.call_twice.callback\""] do
         Assert.Contains(text, contract)
 
+[<Fact>]
+let ``callback invocation explicit void prototype has logical unit and no native formals`` () =
+    let source = renderInvocation invocationProjection "NativeCallback" "void (*)(void)"
+    let contract = source.Substring(source.IndexOf("Expr<CallbackInvocationContract>"))
+    let signatureText = contract.Substring(0, contract.IndexOf("Hypothesis ="))
+    Assert.Contains("Invoke: FnPtr<unit -> unit>", source)
+    Assert.Contains("[||]", signatureText)
+    Assert.DoesNotContain("Name =", signatureText)
+    Assert.Contains("ReturnType = Void", signatureText)
+    for text in ["CallingConvention = CDecl"; "Parameter = 0"; "Scope = \"Test.Native.call_twiceNativeCallback0Scope\""; "Identity = \"fixture.call_twice.callback\""] do
+        Assert.Contains(text, contract)
+
 [<Theory>]
 [<InlineData("bool-parameter", "int (*)(bool)", "Boolean native entry signatures")>]
 [<InlineData("bool-result", "bool (*)(int)", "Boolean native entry signatures")>]
-[<InlineData("zero", "int (*)(void)", "requires at least one native entry parameter; received 0")>]
+[<InlineData("zero", "int (*)(void)", "zero-argument native entries require a void result")>]
+[<InlineData("ambiguous-zero", "void (*)()", "zero-argument native entries require an explicit (void) prototype")>]
 let ``callback invocation rejects signatures outside admitted integer profile`` _shape signature reason =
     let error = Assert.ThrowsAny<System.Exception>(fun () -> renderInvocation invocationProjection "NativeCallback" signature |> ignore)
     Assert.Contains("call_twice callback_invocations", error.Message)
@@ -908,7 +921,8 @@ let ``callback invocation contract refuses unsupported receiving correspondence 
 [<InlineData("kind", "not a native function pointer")>]
 [<InlineData("profile-bool-parameter", "Boolean native entry signatures")>]
 [<InlineData("profile-bool-result", "Boolean native entry signatures")>]
-[<InlineData("profile-zero", "requires at least one native entry parameter; received 0")>]
+[<InlineData("profile-zero", "zero-argument native entries require a void result")>]
+[<InlineData("profile-ambiguous-zero", "zero-argument native entries require an explicit (void) prototype")>]
 let ``callback invocation project refusal preserves every existing output`` shape reason =
     let dir = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "artifacts", "callback-receiving-tests", System.Guid.NewGuid().ToString("N")))
     System.IO.Directory.CreateDirectory(dir) |> ignore
@@ -921,6 +935,7 @@ let ``callback invocation project refusal preserves every existing output`` shap
             | "profile-bool-parameter" -> "void call_twice(int (*callback)(_Bool));"
             | "profile-bool-result" -> "void call_twice(_Bool (*callback)(int));"
             | "profile-zero" -> "void call_twice(int (*callback)(void));"
+            | "profile-ambiguous-zero" -> "void call_twice(void (*callback)());"
             | _ -> "void call_twice(long long (*callback)(long long));"
         System.IO.File.WriteAllText(header, declaration)
         let output = System.IO.Path.Combine(dir, "output")
