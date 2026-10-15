@@ -129,6 +129,16 @@ module PilotSerializer =
             yield! contract.ExitBinding |> Option.map (fun value -> "exit_binding", TomlValue.String value) |> Option.toList
             yield! contract.SuccessStatus |> Option.map (fun value -> "success_status", TomlValue.Integer (int64 value)) |> Option.toList ])
 
+    let private serializeResource (resource: BindingResource) =
+        TomlValue.InlineTable (Map.ofList [
+            "kind", TomlValue.String "owned_nullable_return"
+            "release_binding", TomlValue.String resource.ReleaseBinding
+            "release_parameter", TomlValue.Integer (int64 resource.ReleaseParameter)
+            "hypothesis", TomlValue.InlineTable (Map.ofList [
+                "identity", TomlValue.String resource.Identity
+                "version", TomlValue.String resource.Version
+                "source", TomlValue.String resource.Source ]) ])
+
     let private serializeOptions (opts: ProjectOptions) : TomlValue =
         let table = TomlTable.empty
         let table =
@@ -163,6 +173,7 @@ module PilotSerializer =
                              TomlTable.add "ownership" (TomlValue.String spelling) t
                          | None -> t)
             |> (fun t -> match binding.ResultRange with Some range -> TomlTable.add "result_range" (serializeResultRange range) t | None -> t)
+            |> (fun t -> match binding.Resource with Some resource -> TomlTable.add "resource" (serializeResource resource) t | None -> t)
             |> (fun t -> if binding.CallbackInvocations.IsEmpty then t else TomlTable.add "callback_invocations" (TomlValue.Array (binding.CallbackInvocations |> List.map serializeCallbackInvocation)) t)
             |> TomlValue.Table)
         let table = if bindings.IsEmpty then table else TomlTable.add "bindings" (TomlValue.Array bindings) table
@@ -482,6 +493,36 @@ module PilotSerializer =
                 | _ -> failwith $"result_range {key} requires exactly one constant or argument integer within int range"
             Some { Identity = text "identity"; Version = text "version"; Source = text "source"; Lower = endpoint "lower"; Upper = endpoint "upper" }
 
+    let private deserializeResource binding =
+        let table label = function
+            | TomlValue.Table value | TomlValue.InlineTable value -> value
+            | _ -> failwith $"resource {label} requires a table"
+        let text name fields =
+            match TomlTable.tryFind name fields with
+            | Some (TomlValue.String value) when not (System.String.IsNullOrWhiteSpace value) -> value
+            | _ -> failwith $"resource requires nonempty {name}"
+        let fields label allowed values =
+            if values |> Map.exists (fun key _ -> not (Set.contains key allowed)) then
+                failwith $"resource {label} has unknown fields"
+        match TomlTable.tryFind "resource" binding with
+        | None -> None
+        | Some value ->
+            let resource = table "contract" value
+            fields "contract" (Set.ofList ["kind"; "release_binding"; "release_parameter"; "hypothesis"]) resource
+            if text "kind" resource <> "owned_nullable_return" then failwith "resource kind must be owned_nullable_return"
+            let release = text "release_binding" resource
+            if not (release.Contains '.') || release.Trim() <> release then failwith "resource requires a qualified release_binding"
+            let parameter =
+                match TomlTable.tryFind "release_parameter" resource with
+                | Some (TomlValue.Integer 0L) -> 0
+                | _ -> failwith "resource owned_nullable_return requires release_parameter 0"
+            let hypothesis =
+                TomlTable.tryFind "hypothesis" resource |> Option.map (table "hypothesis")
+                |> Option.defaultWith (fun () -> failwith "resource requires hypothesis")
+            fields "hypothesis" (Set.ofList ["identity"; "version"; "source"]) hypothesis
+            Some { ReleaseBinding = release; ReleaseParameter = parameter
+                   Identity = text "identity" hypothesis; Version = text "version" hypothesis; Source = text "source" hypothesis }
+
     let private deserializeCallbackInvocations binding =
         match TomlTable.tryFind "callback_invocations" binding with
         | None -> []
@@ -563,6 +604,7 @@ module PilotSerializer =
                           StringParameters = indices "string_parameters"; NonnullCallbacks = indices "nonnull_callbacks"
                           ParameterHandles = handles; ReturnHandle = optionalString "return_handle" binding
                           ResultRange = deserializeResultRange binding
+                          Resource = deserializeResource binding
                           CallbackInvocations = deserializeCallbackInvocations binding
                           Ownership = optionalString "ownership" binding |> Option.map (function
                               | "caller_owns" -> CallerOwns | "callee_owns" -> CalleeOwns | "borrowed" -> Borrowed

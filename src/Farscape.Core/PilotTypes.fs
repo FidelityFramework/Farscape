@@ -121,6 +121,15 @@ module PilotTypes =
         SuccessStatus: int option
     }
 
+    /// Explicit owned-nullable protocol; no resource authority is inferred from transfer.
+    type BindingResource = {
+        ReleaseBinding: string
+        ReleaseParameter: int
+        Identity: string
+        Version: string
+        Source: string
+    }
+
     /// Projections of parsed C declarations, including explicit scalar buffer element contracts.
     type BindingProjection = {
         Name: string
@@ -136,6 +145,7 @@ module PilotTypes =
         ReturnHandle: string option
         Ownership: BindingOwnership option
         ResultRange: BindingResultRange option
+        Resource: BindingResource option
         CallbackInvocations: BindingCallbackInvocation list
     }
 

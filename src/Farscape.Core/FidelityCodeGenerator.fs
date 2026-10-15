@@ -654,7 +654,7 @@ module FidelityCodeGenerator =
 
     /// Declare receiving-site activation separately from the listener record and its ABI.
     /// The existing native signature owner supplies every formal, including unused ones.
-    let private callbackInvocationDecls (ctx: GenerationContext) namespace' (anchors: Map<string, string>) (func: CppParser.FunctionDecl) nativeName =
+    let private callbackInvocationDecls (ctx: GenerationContext) namespace' (anchors: Map<string, string * CppParser.FunctionDecl * FsDecl list>) (func: CppParser.FunctionDecl) nativeName =
         let contracts = ctx.Bindings |> Map.tryFind func.Name |> Option.map _.CallbackInvocations |> Option.defaultValue []
         let refuse reason = failwith $"{func.Name} callback_invocations: {reason}"
         if (contracts |> List.map _.Parameter |> Set.ofList).Count <> contracts.Length then refuse "duplicate parameter indices"
@@ -674,7 +674,7 @@ module FidelityCodeGenerator =
                         | None -> Identifier "None"
                         | Some selected ->
                             match Map.tryFind selected anchors with
-                            | Some actual -> Literal ("Some " + quoteString actual)
+                            | Some (actual, _, _) -> Literal ("Some " + quoteString actual)
                             | None -> refuse "exit_binding must name a selected qualified generated declaration"
                     "ProcessExitCallbackDescriptor", ["ExitBinding", anchorValue; "SuccessStatus", Literal (string status)]
                 | "process_exit", _, None -> refuse "process_exit requires signed32 success_status"
@@ -761,11 +761,55 @@ module FidelityCodeGenerator =
         let name = raw |> List.pick (function LetBinding(name, _, _, _, attrs) when not attrs.IsEmpty -> Some name | _ -> None)
         if not (List.isEmpty entries) && name = func.Name then name + "Native" else name
 
+    /// Consume the same selected declaration account as callback anchors. Native
+    /// representation stays in its original descriptor; this quotation adds a promise.
+    let private resourceDecls (ctx: GenerationContext) namespace' (anchors: Map<string, string * CppParser.FunctionDecl * FsDecl list>) (func: CppParser.FunctionDecl) nativeName raw =
+        match ctx.Bindings |> Map.tryFind func.Name |> Option.bind _.Resource with
+        | None -> []
+        | Some resource ->
+            let refuse reason = failwith $"{func.Name} resource: {reason}"
+            for key, value in ["identity", resource.Identity; "version", resource.Version; "source", resource.Source] do
+                if System.String.IsNullOrWhiteSpace value then refuse $"requires nonempty {key}"
+            if resource.ReleaseParameter <> 0 then refuse "owned_nullable_return requires release_parameter 0"
+            let signature declarations =
+                declarations |> List.pick (function
+                    | LetBinding(_, parameters, result, _, attrs) when not attrs.IsEmpty -> Some (parameters, result)
+                    | _ -> None)
+            let marker =
+                match signature raw |> snd with
+                | Generic("option", Generic("CHandle", Named marker)) when isDataPointerIn ctx func.ReturnType -> marker
+                | _ -> refuse "owned_nullable_return requires a native data pointer returned as option<CHandle<marker>>"
+            let releaseName, release, releaseRaw =
+                anchors |> Map.tryFind resource.ReleaseBinding
+                |> Option.defaultWith (fun () -> refuse "release_binding must name an exact selected qualified generated declaration")
+            let parameters, result = signature releaseRaw
+            match release.Parameters, parameters, result, resolveIn ctx release.ReturnType with
+            | [_, typ], [parameter], Named "unit", Scalar repr
+                when repr.Family = TypeMapper.Void && isDataPointerIn ctx typ
+                     && parameter.Type = Generic("CHandle", Named marker) -> ()
+            | _ -> refuse "release requires unary matching CHandle Value parameter 0 and a raw Void result"
+            match ctx.Bindings |> Map.tryFind release.Name with
+            | Some projection when not projection.ReferenceParameters.IsEmpty || not projection.ReadOnlyReferenceParameters.IsEmpty
+                                   || not projection.StringParameters.IsEmpty
+                                   || (projection.ConstantParameters |> List.exists (System.String.IsNullOrWhiteSpace >> not)) ->
+                refuse "release requires an untranslated unary Value parameter"
+            | _ -> ()
+            [ XmlDoc "Owned nullable return contract: explicit source cleanup and alias retirement remain required; no spatial or retention authority."
+              ValueBinding(nativeName + "ResourceDescriptor", Generic("Expr", Named "ResourceDescriptor"),
+                  Quoted(RecordBlock [
+                      "Resource", FunctionCall("", "OwnedNullableReturn", [RecordConstruction [
+                          "Binding", Literal (quoteString releaseName)
+                          "Parameter", Literal (string resource.ReleaseParameter) ]])
+                      "Hypothesis", RecordBlock [
+                          "Identity", Literal (quoteString resource.Identity)
+                          "Version", Literal (quoteString resource.Version)
+                          "Source", Literal (quoteString resource.Source) ] ])) ]
+
     let private declaredFunctionDecls (ctx: GenerationContext) namespace' anchors (func: CppParser.FunctionDecl) (entries: (int * string * FsDecl list) list) (raw: FsDecl list) =
         if entries.IsEmpty then
             let nativeName = raw |> List.pick (function LetBinding(name, _, _, _, attrs) when not attrs.IsEmpty -> Some name | _ -> None)
             callbackInvocationDecls ctx namespace' anchors func nativeName |> ignore
-            raw @ resultRangeDecls ctx namespace' func nativeName false
+            raw @ resultRangeDecls ctx namespace' func nativeName false @ resourceDecls ctx namespace' anchors func nativeName raw
         else
         resultRangeDecls ctx namespace' func func.Name true |> ignore
         let callbackTypes = entries |> List.map (fun (i, name, _) -> cleanParamName (fst func.Parameters.[i]), name) |> Map.ofList
@@ -790,7 +834,7 @@ module FidelityCodeGenerator =
             | ValueBinding(name, ty, body) when name = nativeName + "Descriptor" -> Some (ValueBinding(privateName + "Descriptor", ty, entryParameterReferences entryReferences body))
             | LetBinding(name, _, _, _, []) when name = func.Name -> None
             | declaration -> Some declaration)
-        declarations @ invocationDeclarations @ [ LetBinding(func.Name, publicParameters, returnType, FunctionCall("", privateName, callArguments), []) ]
+        declarations @ invocationDeclarations @ resourceDecls ctx namespace' anchors func privateName raw @ [ LetBinding(func.Name, publicParameters, returnType, FunctionCall("", privateName, callArguments), []) ]
 
     let generateDeclaredFunctionDecls (ctx: GenerationContext) libraryName namespace' (func: CppParser.FunctionDecl) =
         declaredFunctionDecls ctx namespace' Map.empty func (callbackEntries ctx namespace' func) (generateFunctionDecls ctx libraryName func)
@@ -995,7 +1039,7 @@ module FidelityCodeGenerator =
         let prepared = functionDeclarations |> List.map (fun func ->
             func, callbackEntries ctx namespace' func, generateFunctionDecls ctx libraryName func)
         let anchors = prepared |> List.map (fun (func, entries, raw) ->
-            namespace' + "." + func.Name, namespace' + "." + nativeDeclarationName func entries raw) |> Map.ofList
+            namespace' + "." + func.Name, (namespace' + "." + nativeDeclarationName func entries raw, func, raw)) |> Map.ofList
         let functions = prepared |> List.collect (fun (func, entries, raw) -> declaredFunctionDecls ctx namespace' anchors func entries raw)
         let macros = groups |> List.collect (function GMacro d -> d | _ -> [])
 

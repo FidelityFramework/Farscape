@@ -541,3 +541,52 @@ let ``process exit invocation pilot rejects malformed and mixed fields`` shape r
     match PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail (invocationPilot ("[" + contract + "]"))) with
     | Error error -> Assert.Contains(reason, error)
     | Ok _ -> failwith "Invalid process-exit invocation pilot was accepted"
+
+let private resourceProfile = "{ kind = \"owned_nullable_return\", release_binding = \"Test.Storage.freeFirst\", release_parameter = 0, hypothesis = { identity = \"first-owned\", version = \"1\", source = \"owned.pilot.toml\" } }"
+let private resourcePilot value =
+    PilotSerializer.toTomlString sampleProject + "\n[[options.bindings]]\nname = \"mallocFirst\"\nsymbol = \"malloc\"\n" + (if value = "absent" then "" else "resource = " + value + "\n")
+
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``owned nullable resource pilot roundtrips exact provenance and absence`` absent =
+    let read text = PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail text) |> function Ok value -> value | Error error -> failwith error
+    let project = read (resourcePilot (if absent then "absent" else resourceProfile))
+    let resource = project.Options.Value.Bindings.Head.Resource
+    if absent then Assert.True(resource.IsNone) else
+        let expected: PilotTypes.BindingResource =
+            { ReleaseBinding = "Test.Storage.freeFirst"; ReleaseParameter = 0; Identity = "first-owned"; Version = "1"; Source = "owned.pilot.toml" }
+        Assert.Equal(Some expected, resource)
+    Assert.Equal(project, read (PilotSerializer.toTomlString project))
+
+[<Theory>]
+[<InlineData("kind", "kind must be owned_nullable_return")>]
+[<InlineData("missing-kind", "requires nonempty kind")>]
+[<InlineData("release", "requires nonempty release_binding")>]
+[<InlineData("symbol", "requires a qualified release_binding")>]
+[<InlineData("ordinal", "requires release_parameter 0")>]
+[<InlineData("missing-ordinal", "requires release_parameter 0")>]
+[<InlineData("hypothesis", "requires hypothesis")>]
+[<InlineData("identity", "requires nonempty identity")>]
+[<InlineData("version", "requires nonempty version")>]
+[<InlineData("source", "requires nonempty source")>]
+[<InlineData("extra", "contract has unknown fields")>]
+[<InlineData("hypothesis-extra", "hypothesis has unknown fields")>]
+let ``owned nullable resource pilot refuses partial unknown and unsupported protocols`` shape reason =
+    let contract =
+        match shape with
+        | "kind" -> resourceProfile.Replace("owned_nullable_return", "borrowed")
+        | "missing-kind" -> resourceProfile.Replace("kind = \"owned_nullable_return\", ", "")
+        | "release" -> resourceProfile.Replace("release_binding = \"Test.Storage.freeFirst\", ", "")
+        | "symbol" -> resourceProfile.Replace("Test.Storage.freeFirst", "free")
+        | "ordinal" -> resourceProfile.Replace("release_parameter = 0", "release_parameter = 1")
+        | "missing-ordinal" -> resourceProfile.Replace("release_parameter = 0, ", "")
+        | "hypothesis" -> resourceProfile.Replace(", hypothesis = { identity = \"first-owned\", version = \"1\", source = \"owned.pilot.toml\" }", "")
+        | "identity" -> resourceProfile.Replace("identity = \"first-owned\", ", "")
+        | "version" -> resourceProfile.Replace("version = \"1\"", "version = \" \"")
+        | "source" -> resourceProfile.Replace(", source = \"owned.pilot.toml\"", "")
+        | "extra" -> resourceProfile.Replace("kind =", "unexpected = true, kind =")
+        | _ -> resourceProfile.Replace("identity =", "unexpected = true, identity =")
+    match PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail (resourcePilot contract)) with
+    | Error error -> Assert.Contains("resource", error); Assert.Contains(reason, error)
+    | Ok _ -> failwith "Unsupported resource declaration was accepted"

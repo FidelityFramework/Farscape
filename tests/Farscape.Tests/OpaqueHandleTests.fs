@@ -249,7 +249,7 @@ module IntegrationTests =
         let ctx = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
         let projection : PilotTypes.BindingProjection =
             { Name = output.Name; Symbol = output.Name; ReferenceParameters = [0]; ReadOnlyReferenceParameters = []; ReferenceElements = []
-              ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; CallbackInvocations = [] }
+              ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; CallbackInvocations = [] }
         let ctx = { ctx with Bindings = Map.ofList [output.Name, projection] }
         let source = FidelityCodeGenerator.generateModule ctx ctx.OpaqueHandles declarations "Test" "test" "test" []
         Assert.Contains("Invoke: FnPtr<option<CHandle<hipStream_t>> -> unit>", source)

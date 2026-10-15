@@ -45,7 +45,7 @@ let ``each explicit callback nonnull source preserves its hypothesis provenance`
   let declarations = [CppParser.Declaration.Typedef (mkTypedef "Notify" "void (*)(void)"); CppParser.Declaration.Function func]
   let projection : PilotTypes.BindingProjection =
     { Name = func.Name; Symbol = func.Name; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
-      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; CallbackInvocations = [] }
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; CallbackInvocations = [] }
   let ctx = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
   let ctx =
     { ctx with
@@ -67,7 +67,7 @@ let ``pilot callback nonnull cannot override native nullable evidence`` () =
   let declarations = [CppParser.Declaration.Typedef (mkTypedef "Notify" "void (*)(void)"); CppParser.Declaration.Function func]
   let projection : PilotTypes.BindingProjection =
     { Name = func.Name; Symbol = func.Name; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
-      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; CallbackInvocations = [] }
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; CallbackInvocations = [] }
   let ctx = { FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty with Bindings = Map.ofList [func.Name, projection] }
   let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generateFunctionDecls ctx "test" func |> ignore)
   Assert.Contains("register parameter 0: nullable native type conflicts with a nonnull contract", error.Message)
@@ -90,7 +90,7 @@ let ``explicit ownership hypotheses survive generation and withdrawal removes au
   let ctx = FidelityCodeGenerator.buildGenerationContext [CppParser.Declaration.Function func] Types.LP64 Map.empty
   let projection : PilotTypes.BindingProjection =
     { Name = func.Name; Symbol = "native_acquire"; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
-      ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; CallbackInvocations = [] }
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; CallbackInvocations = [] }
   let emit ownership =
     let current = { ctx with Bindings = Map.ofList [func.Name, { projection with Ownership = ownership }] }
     FidelityCodeGenerator.generateFunctionDecls current "test" func |> List.map CodeRenderer.render |> String.concat "\n"
@@ -726,7 +726,7 @@ let ``rejects unsupported pimpl struct for xclbin-like inherited pimpl with no d
 
 let private rangeProjection : PilotTypes.BindingProjection =
     { Name = "read"; Symbol = "native_read"; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
-      ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None; CallbackInvocations = []
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None; Resource = None; CallbackInvocations = []
       ResultRange = Some { Identity = "posix.read"; Version = "2024"; Source = "/contracts/read.pilot.toml"
                            Lower = PilotTypes.ResultRangeBound.Constant -1; Upper = PilotTypes.ResultRangeBound.Argument 2 } }
 let private renderResultRange projection func =
@@ -1005,4 +1005,75 @@ let ``process exit invocation refuses unsupported registration correspondence`` 
     let receiver = if shape = "result" then "unsigned int" else "int"
     let signature = if shape = "arity" then "void (*)(int)" else "void (*)(void)"
     let error = Assert.ThrowsAny<System.Exception>(fun () -> renderProcessExit anchor status receiver signature |> ignore)
+    Assert.Contains(reason, error.Message)
+
+let private ownedResource : PilotTypes.BindingResource =
+    { ReleaseBinding = "Test.Storage.freeFirst"; ReleaseParameter = 0
+      Identity = "first-owned"; Version = "1"; Source = "owned-resource.pilot.toml" }
+
+let private ownedResourceSource resource releaseType releaseParameterType releaseNonnull second =
+    let acquire name = mkFunc name "void *" ["size", "unsigned long"]
+    let release name = mkFunc name releaseType ["ptr", releaseParameterType]
+    let acquisition name contract =
+        { rangeProjection with Name = name; Symbol = "malloc"; ReturnHandle = Some "unit"; ResultRange = None; Resource = contract }
+    let retirement name =
+        { rangeProjection with Name = name; Symbol = "free"; ParameterHandles = (if releaseParameterType = "int" then [] else ["unit"]); ResultRange = None }
+    let declarations =
+        [ CppParser.Declaration.Function (acquire "mallocFirst")
+          CppParser.Declaration.Function (release "freeFirst") ]
+        @ (if second then [CppParser.Declaration.Function (acquire "mallocSecond"); CppParser.Declaration.Function (release "freeSecond")] else [])
+    let bindings =
+        [ "mallocFirst", acquisition "mallocFirst" resource; "freeFirst", retirement "freeFirst" ]
+        @ (if second then ["mallocSecond", acquisition "mallocSecond" (Some {ownedResource with ReleaseBinding = "Test.Storage.freeSecond"; Identity = "second-owned"}); "freeSecond", retirement "freeSecond"] else [])
+    let context = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
+    let context =
+        { context with Bindings = Map.ofList bindings
+                       NonnullAnnotations = Some {Parameters = (if releaseNonnull then Map.ofList ["freeFirst", [0]; "freeSecond", [0]] else Map.empty); Returns = Set.empty} }
+    FidelityCodeGenerator.generateModule context Set.empty declarations "Test.Storage" "c" "owned nullable fixture" []
+
+[<Fact>]
+let ``owned nullable resource companions distinguish identical native symbols and handle types`` () =
+    let source = ownedResourceSource (Some ownedResource) "void" "void *" true true
+    for acquisition, release, identity in ["mallocFirst", "freeFirst", "first-owned"; "mallocSecond", "freeSecond", "second-owned"] do
+        let start = source.IndexOf("let " + acquisition + "ResourceDescriptor", System.StringComparison.Ordinal)
+        Assert.True(start >= 0, source)
+        let finish = source.IndexOf("@>", start, System.StringComparison.Ordinal)
+        let companion = source.Substring(start, finish - start)
+        Assert.Contains("Expr<ResourceDescriptor>", companion)
+        Assert.Contains("OwnedNullableReturn", companion)
+        Assert.Contains("Binding = \"Test.Storage." + release + "\"", companion)
+        Assert.Contains("Parameter = 0", companion)
+        Assert.Contains("Identity = \"" + identity + "\"", companion)
+        Assert.DoesNotContain("CName", companion)
+        Assert.DoesNotContain("Binding = \"Test.Storage." + acquisition + "\"", companion)
+        Assert.Contains("let " + acquisition + " (size: int) : option<CHandle<unit>>", source)
+        Assert.Contains("let " + release + " (ptr: CHandle<unit>) : unit", source)
+    Assert.Contains("OwnershipTransfer = Undeclared", source)
+
+[<Fact>]
+let ``owned nullable resource absence emits no inferred companion`` () =
+    let source = ownedResourceSource None "void" "void *" true false
+    Assert.DoesNotContain("Expr<ResourceDescriptor>", source)
+    Assert.Contains("OwnershipTransfer = Undeclared", source)
+
+[<Theory>]
+[<InlineData("unselected", "exact selected qualified generated declaration")>]
+[<InlineData("symbol", "exact selected qualified generated declaration")>]
+[<InlineData("ordinal", "requires release_parameter 0")>]
+[<InlineData("result", "raw Void result")>]
+[<InlineData("parameter", "unary matching CHandle")>]
+[<InlineData("nullable", "unary matching CHandle")>]
+[<InlineData("provenance", "requires nonempty source")>]
+let ``owned nullable resource generation refuses unsupported release contracts`` shape reason =
+    let resource =
+        match shape with
+        | "unselected" -> {ownedResource with ReleaseBinding = "Test.Storage.missing"}
+        | "symbol" -> {ownedResource with ReleaseBinding = "free"}
+        | "ordinal" -> {ownedResource with ReleaseParameter = 1}
+        | "provenance" -> {ownedResource with Source = " "}
+        | _ -> ownedResource
+    let result = if shape = "result" then "int" else "void"
+    let parameter = if shape = "parameter" then "int" else "void *"
+    let error = Assert.ThrowsAny<System.Exception>(fun () -> ownedResourceSource (Some resource) result parameter (shape <> "nullable") false |> ignore)
+    Assert.Contains("resource", error.Message)
     Assert.Contains(reason, error.Message)
