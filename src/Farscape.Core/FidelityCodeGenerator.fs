@@ -649,6 +649,76 @@ module FidelityCodeGenerator =
                           "Identity", Literal (quoteString range.Identity); "Version", Literal (quoteString range.Version); "Source", Literal (quoteString range.Source) ]
                       "Lower", lower; "Upper", upper ])) ]
 
+    /// Declare receiving-site activation separately from the listener record and its ABI.
+    /// The existing native signature owner supplies every formal, including unused ones.
+    let private callbackInvocationDecls (ctx: GenerationContext) namespace' (func: CppParser.FunctionDecl) nativeName =
+        let contracts = ctx.Bindings |> Map.tryFind func.Name |> Option.map _.CallbackInvocations |> Option.defaultValue []
+        let refuse reason = failwith $"{func.Name} callback_invocations: {reason}"
+        if (contracts |> List.map _.Parameter |> Set.ofList).Count <> contracts.Length then refuse "duplicate parameter indices"
+        let entries = contracts |> List.map (fun contract ->
+            for key, value in ["identity", contract.Identity; "version", contract.Version; "source", contract.Source] do
+                if System.String.IsNullOrWhiteSpace value then refuse $"requires nonempty {key}"
+            if contract.Scope <> "during_call" then refuse "scope must be during_call"
+            if contract.Parameter < 0 || contract.Parameter >= func.Parameters.Length then
+                refuse $"parameter {contract.Parameter} is outside native arity {func.Parameters.Length}"
+            let projection = ctx.Bindings[func.Name]
+            if not projection.ReferenceParameters.IsEmpty || not projection.ReadOnlyReferenceParameters.IsEmpty
+               || not projection.StringParameters.IsEmpty || (projection.ConstantParameters |> List.exists (System.String.IsNullOrWhiteSpace >> not)) then
+                refuse "requires an untranslated native parameter list"
+            let name, cType = func.Parameters[contract.Parameter]
+            match resolveIn ctx cType with
+            | FunctionPointer _ -> ()
+            | _ -> refuse $"parameter {contract.Parameter} is not a native function pointer"
+            let ret, parameters = resolveCallbackNativeSignature ctx cType |> Option.defaultWith (fun () -> refuse "native entry signature is unavailable")
+            let nativeType isReturn (cType: string) =
+                if cType.Contains('&') then refuse $"unsupported native entry reference signature type '{cType}'"
+                match resolveIn ctx cType with
+                | Scalar r when (r.Family = TypeMapper.Signed || r.Family = TypeMapper.Unsigned) && (r.Bits = 32 || r.Bits = 64) -> ()
+                | Scalar r when r.Family = TypeMapper.Bool || (isReturn && r.Family = TypeMapper.Void) -> ()
+                | _ -> refuse $"unsupported native entry signature type '{cType}'"
+                abiClaim ctx cType
+            let infos = parameters |> List.map (fun (name, typ) ->
+                let typeRef, provenance = nativeType false typ
+                Commented(RecordConstruction [
+                    "Name", Literal (quoteString ((cleanParamName name).Replace("``", "")))
+                    "Type", Literal typeRef; "PassBy", Identifier "Value" ], provenance))
+            let returnRef, returnProvenance = nativeType true ret
+            let contractName = nativeName + "Callback" + string contract.Parameter + "InvocationContract"
+            let scopeName = nativeName + "Callback" + string contract.Parameter + "Scope"
+            let binding = namespace' + "." + nativeName
+            contract.Parameter, namespace' + "." + contractName, [
+                XmlDoc "Declared foreign activation only: no argument values, invocation count, purity or functionhood are supplied."
+                ValueBinding(scopeName, Generic("Expr", Named "ScopedCallbackDescriptor"), Quoted(RecordBlock [
+                    "Binding", Literal (quoteString binding)
+                    "Parameter", Literal (quoteString ((cleanParamName name).Replace("``", ""))) ]))
+                ValueBinding(contractName, Generic("Expr", Named "CallbackInvocationContract"), Quoted(RecordBlock [
+                    "Binding", Literal (quoteString binding)
+                    "Parameter", Literal (string contract.Parameter)
+                    "Signature", RecordBlock [
+                        "Parameters", ArrayBlock infos
+                        "ReturnType", Commented(Literal returnRef, returnProvenance)
+                        "CallingConvention", Identifier "CDecl" ]
+                    "Hypothesis", RecordBlock [
+                        "Identity", Literal (quoteString contract.Identity)
+                        "Version", Literal (quoteString contract.Version)
+                        "Source", Literal (quoteString contract.Source) ]
+                    "Scope", Literal (quoteString (namespace' + "." + scopeName)) ])) ])
+        entries |> List.map (fun (index, binding, _) -> index, binding) |> Map.ofList,
+        entries |> List.collect (fun (_, _, declarations) -> declarations)
+
+    let private entryParameterReferences entries body =
+        if Map.isEmpty entries then body else
+        let parameter index = function
+            | Commented(RecordConstruction fields, _) when Map.containsKey index entries ->
+                let typeRef = Literal ("Entry " + quoteString entries[index])
+                Commented(RecordConstruction (fields |> List.map (fun (name, value) -> name, if name = "Type" then typeRef else value)), "Declared native entry signature; physical representation and code residence require independent authority.")
+            | value -> value
+        match body with
+        | Quoted(RecordBlock fields) -> Quoted(RecordBlock (fields |> List.map (function
+            | "Parameters", ArrayBlock parameters -> "Parameters", ArrayBlock (parameters |> List.mapi parameter)
+            | field -> field)))
+        | _ -> invalidOp "A native entry reference requires the owning quoted function descriptor."
+
     /// Keep the full native arity private while carrying declared entry provenance through a
     /// record projection. This is membrane plumbing, not the application callback interface.
     let generateDeclaredFunctionDecls (ctx: GenerationContext) libraryName namespace' (func: CppParser.FunctionDecl) =
@@ -656,6 +726,7 @@ module FidelityCodeGenerator =
         let raw = generateFunctionDecls ctx libraryName func
         if entries.IsEmpty then
             let nativeName = raw |> List.pick (function LetBinding(name, _, _, _, attrs) when not attrs.IsEmpty -> Some name | _ -> None)
+            callbackInvocationDecls ctx namespace' func nativeName |> ignore
             raw @ resultRangeDecls ctx namespace' func nativeName false
         else
         resultRangeDecls ctx namespace' func func.Name true |> ignore
@@ -663,6 +734,7 @@ module FidelityCodeGenerator =
         let nativeName, nativeParameters, returnType =
             raw |> List.pick (function LetBinding(name, parameters, ret, _, attrs) when not attrs.IsEmpty -> Some (name, parameters, ret) | _ -> None)
         let privateName = if nativeName = func.Name then nativeName + "Native" else nativeName
+        let entryReferences, invocationDeclarations = callbackInvocationDecls ctx namespace' func privateName
         let publicParameters, callArguments =
             match raw |> List.tryPick (function
                 | LetBinding(name, parameters, _, FunctionCall(_, _, arguments), []) when name = func.Name -> Some (parameters, arguments)
@@ -677,10 +749,10 @@ module FidelityCodeGenerator =
         let declarations = raw |> List.choose (function
             | LetBinding(name, parameters, ret, body, attrs) when name = nativeName && not attrs.IsEmpty ->
                 Some (LetBinding("private " + privateName, parameters, ret, body, attrs))
-            | ValueBinding(name, ty, body) when name = nativeName + "Descriptor" -> Some (ValueBinding(privateName + "Descriptor", ty, body))
+            | ValueBinding(name, ty, body) when name = nativeName + "Descriptor" -> Some (ValueBinding(privateName + "Descriptor", ty, entryParameterReferences entryReferences body))
             | LetBinding(name, _, _, _, []) when name = func.Name -> None
             | declaration -> Some declaration)
-        declarations @ [ LetBinding(func.Name, publicParameters, returnType, FunctionCall("", privateName, callArguments), []) ]
+        declarations @ invocationDeclarations @ [ LetBinding(func.Name, publicParameters, returnType, FunctionCall("", privateName, callArguments), []) ]
 
     /// Generate FsDecl list for an enum type.
     /// Automatically detects bitmask (flags) enums via value pattern analysis.

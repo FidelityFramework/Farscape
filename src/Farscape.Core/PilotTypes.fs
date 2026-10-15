@@ -110,6 +110,15 @@ module PilotTypes =
         Upper: ResultRangeBound
     }
 
+    /// Explicit external callback activation provenance; ABI stays header-owned.
+    type BindingCallbackInvocation = {
+        Parameter: int
+        Identity: string
+        Version: string
+        Source: string
+        Scope: string
+    }
+
     /// Projections of parsed C declarations, including explicit scalar buffer element contracts.
     type BindingProjection = {
         Name: string
@@ -125,6 +134,7 @@ module PilotTypes =
         ReturnHandle: string option
         Ownership: BindingOwnership option
         ResultRange: BindingResultRange option
+        CallbackInvocations: BindingCallbackInvocation list
     }
 
     /// A scoped projection of an actual native mapped-pointer result. Parameter

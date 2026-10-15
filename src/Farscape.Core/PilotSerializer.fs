@@ -119,6 +119,14 @@ module PilotSerializer =
             "identity", TomlValue.String range.Identity; "version", TomlValue.String range.Version
             "source", TomlValue.String range.Source; "lower", endpoint range.Lower; "upper", endpoint range.Upper ])
 
+    let private serializeCallbackInvocation (contract: BindingCallbackInvocation) =
+        TomlValue.InlineTable (Map.ofList [
+            "parameter", TomlValue.Integer (int64 contract.Parameter)
+            "identity", TomlValue.String contract.Identity
+            "version", TomlValue.String contract.Version
+            "source", TomlValue.String contract.Source
+            "scope", TomlValue.String contract.Scope ])
+
     let private serializeOptions (opts: ProjectOptions) : TomlValue =
         let table = TomlTable.empty
         let table =
@@ -153,6 +161,7 @@ module PilotSerializer =
                              TomlTable.add "ownership" (TomlValue.String spelling) t
                          | None -> t)
             |> (fun t -> match binding.ResultRange with Some range -> TomlTable.add "result_range" (serializeResultRange range) t | None -> t)
+            |> (fun t -> if binding.CallbackInvocations.IsEmpty then t else TomlTable.add "callback_invocations" (TomlValue.Array (binding.CallbackInvocations |> List.map serializeCallbackInvocation)) t)
             |> TomlValue.Table)
         let table = if bindings.IsEmpty then table else TomlTable.add "bindings" (TomlValue.Array bindings) table
         let table = if opts.DescriptorOnlyDependencies then TomlTable.add "descriptor_only_dependencies" (TomlValue.Boolean true) table else table
@@ -471,6 +480,29 @@ module PilotSerializer =
                 | _ -> failwith $"result_range {key} requires exactly one constant or argument integer within int range"
             Some { Identity = text "identity"; Version = text "version"; Source = text "source"; Lower = endpoint "lower"; Upper = endpoint "upper" }
 
+    let private deserializeCallbackInvocations binding =
+        match TomlTable.tryFind "callback_invocations" binding with
+        | None -> []
+        | Some (TomlValue.Array values) ->
+            let contracts = values |> List.map (function
+                | TomlValue.Table fields | TomlValue.InlineTable fields ->
+                    let text name =
+                        match TomlTable.tryFind name fields with
+                        | Some (TomlValue.String value) when not (System.String.IsNullOrWhiteSpace value) -> value
+                        | _ -> failwith $"callback_invocations requires nonempty {name}"
+                    let index =
+                        match TomlTable.tryFind "parameter" fields with
+                        | Some (TomlValue.Integer value) when value >= 0L && value <= int64 System.Int32.MaxValue -> int value
+                        | _ -> failwith "callback_invocations requires a nonnegative parameter index within int range"
+                    let scope = text "scope"
+                    if scope <> "during_call" then failwith "callback_invocations scope must be during_call"
+                    { Parameter = index; Identity = text "identity"; Version = text "version"; Source = text "source"; Scope = scope }
+                | _ -> failwith "callback_invocations requires tables")
+            if (contracts |> List.map _.Parameter |> Set.ofList).Count <> contracts.Length then
+                failwith "callback_invocations has duplicate parameter indices"
+            contracts
+        | Some _ -> failwith "callback_invocations requires an array"
+
     let private deserializeOptions (doc: TomlDocument) : ProjectOptions option =
         match Toml.getValue "options" doc with
         | None -> None
@@ -511,6 +543,7 @@ module PilotSerializer =
                           StringParameters = indices "string_parameters"; NonnullCallbacks = indices "nonnull_callbacks"
                           ParameterHandles = handles; ReturnHandle = optionalString "return_handle" binding
                           ResultRange = deserializeResultRange binding
+                          CallbackInvocations = deserializeCallbackInvocations binding
                           Ownership = optionalString "ownership" binding |> Option.map (function
                               | "caller_owns" -> CallerOwns | "callee_owns" -> CalleeOwns | "borrowed" -> Borrowed
                               | other -> failwith $"Unknown binding ownership '{other}'") }

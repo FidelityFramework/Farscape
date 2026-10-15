@@ -45,7 +45,7 @@ let ``each explicit callback nonnull source preserves its hypothesis provenance`
   let declarations = [CppParser.Declaration.Typedef (mkTypedef "Notify" "void (*)(void)"); CppParser.Declaration.Function func]
   let projection : PilotTypes.BindingProjection =
     { Name = func.Name; Symbol = func.Name; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
-      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None }
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; CallbackInvocations = [] }
   let ctx = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
   let ctx =
     { ctx with
@@ -67,7 +67,7 @@ let ``pilot callback nonnull cannot override native nullable evidence`` () =
   let declarations = [CppParser.Declaration.Typedef (mkTypedef "Notify" "void (*)(void)"); CppParser.Declaration.Function func]
   let projection : PilotTypes.BindingProjection =
     { Name = func.Name; Symbol = func.Name; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
-      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None }
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; CallbackInvocations = [] }
   let ctx = { FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty with Bindings = Map.ofList [func.Name, projection] }
   let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generateFunctionDecls ctx "test" func |> ignore)
   Assert.Contains("register parameter 0: nullable native type conflicts with a nonnull contract", error.Message)
@@ -90,7 +90,7 @@ let ``explicit ownership hypotheses survive generation and withdrawal removes au
   let ctx = FidelityCodeGenerator.buildGenerationContext [CppParser.Declaration.Function func] Types.LP64 Map.empty
   let projection : PilotTypes.BindingProjection =
     { Name = func.Name; Symbol = "native_acquire"; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
-      ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None }
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; CallbackInvocations = [] }
   let emit ownership =
     let current = { ctx with Bindings = Map.ofList [func.Name, { projection with Ownership = ownership }] }
     FidelityCodeGenerator.generateFunctionDecls current "test" func |> List.map CodeRenderer.render |> String.concat "\n"
@@ -726,7 +726,7 @@ let ``rejects unsupported pimpl struct for xclbin-like inherited pimpl with no d
 
 let private rangeProjection : PilotTypes.BindingProjection =
     { Name = "read"; Symbol = "native_read"; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
-      ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None; CallbackInvocations = []
       ResultRange = Some { Identity = "posix.read"; Version = "2024"; Source = "/contracts/read.pilot.toml"
                            Lower = PilotTypes.ResultRangeBound.Constant -1; Upper = PilotTypes.ResultRangeBound.Argument 2 } }
 let private renderResultRange projection func =
@@ -776,3 +776,105 @@ let ``result range refuses ineligible native slots and unsupported translation``
     let error = Assert.ThrowsAny<System.Exception>(fun () -> renderResultRange projection func |> ignore)
     Assert.Contains("read result_range", error.Message)
     Assert.Contains(reason, error.Message)
+
+let private invocationContract : PilotTypes.BindingCallbackInvocation =
+    { Parameter = 0; Identity = "fixture.call_twice.callback"; Version = "v1"
+      Source = "/contracts/call_twice.c"; Scope = "during_call" }
+let private invocationProjection =
+    { rangeProjection with Name = "call_twice"; Symbol = "native_call_twice"
+                           NonnullCallbacks = [0]; ResultRange = None; CallbackInvocations = [invocationContract] }
+let private renderInvocation (projection: PilotTypes.BindingProjection) callbackType signature =
+    let parameters = ["callback", callbackType] @ (if projection.ConstantParameters.Length > 1 then ["count", "int"] else [])
+    let declarations = [
+        CppParser.Declaration.Typedef (mkTypedef "NativeCallback" signature)
+        CppParser.Declaration.Function (mkFunc "call_twice" "void" parameters) ]
+    let context = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
+    FidelityCodeGenerator.generateModule {context with Bindings = Map.ofList [projection.Name, projection]} Set.empty declarations "Test.Native" "test" "test" []
+
+[<Fact>]
+let ``callback invocation contract binds exact native receiver scope and complete entry ABI`` () =
+    let source = renderInvocation invocationProjection "NativeCallback" "long long (*)(long long, int)"
+    for text in ["Type = Entry \"Test.Native.call_twiceNativeCallback0InvocationContract\""
+                 "Expr<CallbackInvocationContract>"; "Expr<ScopedCallbackDescriptor>"
+                 "Binding = \"Test.Native.call_twiceNative\""; "Parameter = 0"; "Parameter = \"callback\""
+                 "Scope = \"Test.Native.call_twiceNativeCallback0Scope\""
+                 "Name = \"arg0\"; Type = Integer (Signed, 64)"; "Name = \"arg1\"; Type = Integer (Signed, 32)"
+                 "ReturnType = Integer (Signed, 64)"; "Invoke: FnPtr<int -> int -> int>"
+                 "Identity = \"fixture.call_twice.callback\""; "Version = \"v1\""; "Source = \"/contracts/call_twice.c\""
+                 "CName = \"native_call_twice\""; "call_twiceNative callback.Invoke"] do
+        Assert.Contains(text, source)
+    Assert.DoesNotContain("Binding = \"Test.Native.native_call_twice\"", source)
+    let withdrawn = renderInvocation {invocationProjection with CallbackInvocations = []} "NativeCallback" "long long (*)(long long, int)"
+    Assert.DoesNotContain("Expr<CallbackInvocationContract>", withdrawn)
+    Assert.DoesNotContain("Type = Entry", withdrawn)
+    Assert.Contains("Expr<CallbackDescriptor>", withdrawn)
+    let changed = renderInvocation {invocationProjection with CallbackInvocations = [{invocationContract with Version = "v2"}]} "NativeCallback" "long long (*)(long long, int)"
+    Assert.Contains("Version = \"v2\"", changed)
+
+[<Theory>]
+[<InlineData("index", "outside native arity 1")>]
+[<InlineData("duplicate", "duplicate parameter indices")>]
+[<InlineData("scope", "scope must be during_call")>]
+[<InlineData("source", "requires nonempty source")>]
+[<InlineData("kind", "not a native function pointer")>]
+[<InlineData("translated", "untranslated native parameter list")>]
+[<InlineData("signature", "unsupported native entry signature type")>]
+[<InlineData("reference", "unsupported native entry reference signature type 'int &'")>]
+[<InlineData("return-reference", "unsupported native entry reference signature type 'int &'")>]
+[<InlineData("nullable", "nullable native type conflicts with a nonnull contract")>]
+[<InlineData("nonnull", "requires explicit nonnull evidence")>]
+let ``callback invocation contract refuses unsupported receiving correspondence precisely`` shape reason =
+    let projection, callbackType, signature =
+        match shape with
+        | "index" -> {invocationProjection with CallbackInvocations = [{invocationContract with Parameter = 1}]}, "NativeCallback", "int (*)(int)"
+        | "duplicate" -> {invocationProjection with CallbackInvocations = [invocationContract; invocationContract]}, "NativeCallback", "int (*)(int)"
+        | "scope" -> {invocationProjection with CallbackInvocations = [{invocationContract with Scope = "retained"}]}, "NativeCallback", "int (*)(int)"
+        | "source" -> {invocationProjection with CallbackInvocations = [{invocationContract with Source = " "}]}, "NativeCallback", "int (*)(int)"
+        | "kind" -> {invocationProjection with NonnullCallbacks = []}, "int", "int (*)(int)"
+        | "translated" -> {invocationProjection with ConstantParameters = [""; "4"]}, "NativeCallback", "int (*)(int)"
+        | "signature" -> invocationProjection, "NativeCallback", "int (*)(void *)"
+        | "reference" -> invocationProjection, "NativeCallback", "int (*)(int &)"
+        | "return-reference" -> invocationProjection, "NativeCallback", "int & (*)(int)"
+        | "nullable" -> invocationProjection, "NativeCallback _Nullable", "int (*)(int)"
+        | _ -> {invocationProjection with NonnullCallbacks = []}, "NativeCallback", "int (*)(int)"
+    let error = Assert.ThrowsAny<System.Exception>(fun () -> renderInvocation projection callbackType signature |> ignore)
+    Assert.Contains(reason, error.Message)
+
+[<Theory>]
+[<InlineData("unselected", "requires exactly one selected native declaration")>]
+[<InlineData("duplicate", "duplicate binding projections")>]
+[<InlineData("signature", "unsupported native entry signature type")>]
+[<InlineData("kind", "not a native function pointer")>]
+let ``callback invocation project refusal preserves every existing output`` shape reason =
+    let dir = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "artifacts", "callback-receiving-tests", System.Guid.NewGuid().ToString("N")))
+    System.IO.Directory.CreateDirectory(dir) |> ignore
+    try
+        let header = System.IO.Path.Combine(dir, "entry.h")
+        let declaration =
+            match shape with
+            | "signature" -> "void call_twice(int (*callback)(void *));"
+            | "kind" -> "void call_twice(int callback);"
+            | _ -> "void call_twice(long long (*callback)(long long));"
+        System.IO.File.WriteAllText(header, declaration)
+        let output = System.IO.Path.Combine(dir, "output")
+        System.IO.Directory.CreateDirectory(output) |> ignore
+        let sentinel = System.IO.Path.Combine(output, "original.clef")
+        System.IO.File.WriteAllText(sentinel, "held-original")
+        let nonnull = if shape = "kind" then "" else "nonnull_callbacks = [0]\n"
+        let projection = "\n[[options.bindings]]\nname = \"call_twice\"\n" + nonnull + "callback_invocations = [{ parameter = 0, identity = \"fixture.callback\", version = \"v1\", source = \"fixture.c\", scope = \"during_call\" }]\n"
+        let pilot = System.String.Join("\n", [
+            "[library]"; "name = \"call_twice\""; "header = \"" + header + "\""
+            "[output]"; "mode = \"fidelity\""; "directory = \"" + output + "\""
+            "[options]"; "c_header_mode = true"; "descriptor_only_dependencies = true"
+            projection; (if shape = "duplicate" then projection else "")
+            "[[namespace]]"; "name = \"Test.Native\""; "description = \"receiving contract sentinel\""; "library = \"call_twice\""
+            "functions = [\"" + (if shape = "unselected" then "missing" else "call_twice") + "\"]" ])
+        let project = System.IO.Path.Combine(dir, "entry.pilot.toml")
+        System.IO.File.WriteAllText(project, pilot)
+        match BindingGenerator.generateFromProject project false false Types.LP64 with
+        | Error error -> Assert.Contains("callback_invocations", error); Assert.Contains(reason, error)
+        | Ok _ -> failwith "Unsupported receiving contract generated output"
+        Assert.Equal("held-original", System.IO.File.ReadAllText sentinel)
+        Assert.Equal<string array>([|sentinel|], System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories))
+    finally
+        System.IO.Directory.Delete(dir, true)

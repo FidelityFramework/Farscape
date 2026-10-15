@@ -465,3 +465,46 @@ let ``result range profile refuses partial or invalid explicit contracts`` shape
     match PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail (resultPilot contract)) with
     | Error error -> Assert.Contains("result_range", error); Assert.Contains(reason, error)
     | Ok _ -> failwith "Invalid explicit result contract was accepted"
+
+let private invocationProfile = "{ parameter = 0, identity = \"fixture.callback\", version = \"v1\", source = \"/contracts/call_twice.c\", scope = \"during_call\" }"
+let private invocationPilot value =
+    PilotSerializer.toTomlString sampleProject + "\n[[options.bindings]]\nname = \"call_twice\"\nnonnull_callbacks = [0]\n" + (if value = "absent" then "" else "callback_invocations = " + value + "\n")
+
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``callback invocation profile roundtrips explicit provenance and missing stays absent`` absent =
+    let read text = PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail text) |> function Ok value -> value | Error error -> failwith error
+    let value = read (invocationPilot (if absent then "absent" else "[" + invocationProfile + "]"))
+    let binding = value.Options.Value.Bindings.Head
+    Assert.Equal<int list>([0], binding.NonnullCallbacks)
+    if absent then Assert.Empty(binding.CallbackInvocations) else
+        let expected: PilotTypes.BindingCallbackInvocation = {Parameter = 0; Identity = "fixture.callback"; Version = "v1"; Source = "/contracts/call_twice.c"; Scope = "during_call"}
+        Assert.Equal<PilotTypes.BindingCallbackInvocation list>([expected], binding.CallbackInvocations)
+    Assert.Equal(value, read (PilotSerializer.toTomlString value))
+
+[<Theory>]
+[<InlineData("identity", "requires nonempty identity")>]
+[<InlineData("version", "requires nonempty version")>]
+[<InlineData("source", "requires nonempty source")>]
+[<InlineData("scope", "requires nonempty scope")>]
+[<InlineData("retained", "scope must be during_call")>]
+[<InlineData("negative", "nonnegative parameter index")>]
+[<InlineData("overflow", "nonnegative parameter index")>]
+[<InlineData("duplicate", "duplicate parameter indices")>]
+[<InlineData("array", "requires an array")>]
+let ``callback invocation profile refuses incomplete and unsupported contracts`` shape reason =
+    let contract =
+        match shape with
+        | "identity" -> invocationProfile.Replace("identity = \"fixture.callback\", ", "")
+        | "version" -> invocationProfile.Replace("version = \"v1\"", "version = \" \"")
+        | "source" -> invocationProfile.Replace("source = \"/contracts/call_twice.c\", ", "")
+        | "scope" -> invocationProfile.Replace(", scope = \"during_call\"", "")
+        | "retained" -> invocationProfile.Replace("during_call", "retained")
+        | "negative" -> invocationProfile.Replace("parameter = 0", "parameter = -1")
+        | "overflow" -> invocationProfile.Replace("parameter = 0", "parameter = 2147483648")
+        | _ -> invocationProfile
+    let input = match shape with "duplicate" -> "[" + contract + "," + contract + "]" | "array" -> contract | _ -> "[" + contract + "]"
+    match PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail (invocationPilot input)) with
+    | Error error -> Assert.Contains("callback_invocations", error); Assert.Contains(reason, error)
+    | Ok _ -> failwith "Unsupported callback invocation profile was admitted"
