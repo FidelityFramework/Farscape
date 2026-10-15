@@ -1011,13 +1011,16 @@ let private ownedResource : PilotTypes.BindingResource =
     { ReleaseBinding = "Test.Storage.freeFirst"; ReleaseParameter = 0
       Identity = "first-owned"; Version = "1"; Source = "owned-resource.pilot.toml" }
 
-let private ownedResourceSource resource releaseType releaseParameterType releaseNonnull second =
+let private ownedResourceSource resource releaseType releaseParameterType releaseNonnull second profile =
     let acquire name = mkFunc name "void *" ["size", "unsigned long"]
     let release name = mkFunc name releaseType ["ptr", releaseParameterType]
     let acquisition name contract =
         { rangeProjection with Name = name; Symbol = "malloc"; ReturnHandle = Some "unit"; ResultRange = None; Resource = contract }
     let retirement name =
-        { rangeProjection with Name = name; Symbol = "free"; ParameterHandles = (if releaseParameterType = "int" then [] else ["unit"]); ResultRange = None }
+        { rangeProjection with Name = name; Symbol = "free"
+                               ParameterHandles = (if releaseParameterType = "int" then [] else [if profile = "marker" then "other" else "unit"])
+                               ConstantParameters = (if profile = "translated" then ["0"] else [])
+                               ResultRange = None }
     let declarations =
         [ CppParser.Declaration.Function (acquire "mallocFirst")
           CppParser.Declaration.Function (release "freeFirst") ]
@@ -1028,12 +1031,13 @@ let private ownedResourceSource resource releaseType releaseParameterType releas
     let context = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
     let context =
         { context with Bindings = Map.ofList bindings
-                       NonnullAnnotations = Some {Parameters = (if releaseNonnull then Map.ofList ["freeFirst", [0]; "freeSecond", [0]] else Map.empty); Returns = Set.empty} }
+                       NonnullAnnotations = Some {Parameters = (if releaseNonnull then Map.ofList ["freeFirst", [0]; "freeSecond", [0]] else Map.empty)
+                                                  Returns = (if profile = "nonnull" then Set.singleton "mallocFirst" else Set.empty)} }
     FidelityCodeGenerator.generateModule context Set.empty declarations "Test.Storage" "c" "owned nullable fixture" []
 
 [<Fact>]
 let ``owned nullable resource companions distinguish identical native symbols and handle types`` () =
-    let source = ownedResourceSource (Some ownedResource) "void" "void *" true true
+    let source = ownedResourceSource (Some ownedResource) "void" "void *" true true "normal"
     for acquisition, release, identity in ["mallocFirst", "freeFirst", "first-owned"; "mallocSecond", "freeSecond", "second-owned"] do
         let start = source.IndexOf("let " + acquisition + "ResourceDescriptor", System.StringComparison.Ordinal)
         Assert.True(start >= 0, source)
@@ -1052,7 +1056,7 @@ let ``owned nullable resource companions distinguish identical native symbols an
 
 [<Fact>]
 let ``owned nullable resource absence emits no inferred companion`` () =
-    let source = ownedResourceSource None "void" "void *" true false
+    let source = ownedResourceSource None "void" "void *" true false "normal"
     Assert.DoesNotContain("Expr<ResourceDescriptor>", source)
     Assert.Contains("OwnershipTransfer = Undeclared", source)
 
@@ -1074,6 +1078,19 @@ let ``owned nullable resource generation refuses unsupported release contracts``
         | _ -> ownedResource
     let result = if shape = "result" then "int" else "void"
     let parameter = if shape = "parameter" then "int" else "void *"
-    let error = Assert.ThrowsAny<System.Exception>(fun () -> ownedResourceSource (Some resource) result parameter (shape <> "nullable") false |> ignore)
+    let error = Assert.ThrowsAny<System.Exception>(fun () -> ownedResourceSource (Some resource) result parameter (shape <> "nullable") false "normal" |> ignore)
     Assert.Contains("resource", error.Message)
     Assert.Contains(reason, error.Message)
+
+[<Theory>]
+[<InlineData("nonnull", "owned_nullable_return requires a native data pointer returned as option<CHandle<marker>>")>]
+[<InlineData("marker", "release requires unary matching CHandle Value parameter 0 and a raw Void result")>]
+[<InlineData("translated", "freeFirst parameter 0: constant projection requires an integer literal and scalar integer parameter")>]
+let ``owned nullable resource generation refuses nonoptional marker and translated contracts`` profile reason =
+    let error = Assert.ThrowsAny<System.Exception>(fun () ->
+        ownedResourceSource (Some ownedResource) "void" "void *" true false profile |> ignore)
+    if profile = "translated" then
+        Assert.Equal(reason, error.Message)
+    else
+        Assert.Contains("resource", error.Message)
+        Assert.Contains(reason, error.Message)
