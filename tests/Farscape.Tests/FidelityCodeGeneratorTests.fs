@@ -793,22 +793,23 @@ let private renderInvocation (projection: PilotTypes.BindingProjection) callback
 
 [<Fact>]
 let ``callback invocation contract binds exact native receiver scope and complete entry ABI`` () =
-    let source = renderInvocation invocationProjection "NativeCallback" "long long (*)(int)"
+    let source = renderInvocation invocationProjection "NativeCallback" "long long (*)(int, unsigned long long)"
     for text in ["Type = Entry \"Test.Native.call_twiceNativeCallback0InvocationContract\""
                  "Expr<CallbackInvocationContract>"; "Expr<ScopedCallbackDescriptor>"
                  "Binding = \"Test.Native.call_twiceNative\""; "Parameter = 0"; "Parameter = \"callback\""
                  "Scope = \"Test.Native.call_twiceNativeCallback0Scope\""
                  "Name = \"arg0\"; Type = Integer (Signed, 32)"
-                 "ReturnType = Integer (Signed, 64)"; "Invoke: FnPtr<int -> int>"
+                 "Name = \"arg1\"; Type = Integer (Unsigned, 64)"
+                 "ReturnType = Integer (Signed, 64)"; "Invoke: FnPtr<int -> int -> int>"
                  "Identity = \"fixture.call_twice.callback\""; "Version = \"v1\""; "Source = \"/contracts/call_twice.c\""
                  "CName = \"native_call_twice\""; "call_twiceNative callback.Invoke"] do
         Assert.Contains(text, source)
     Assert.DoesNotContain("Binding = \"Test.Native.native_call_twice\"", source)
-    let withdrawn = renderInvocation {invocationProjection with CallbackInvocations = []} "NativeCallback" "long long (*)(int)"
+    let withdrawn = renderInvocation {invocationProjection with CallbackInvocations = []} "NativeCallback" "long long (*)(int, unsigned long long)"
     Assert.DoesNotContain("Expr<CallbackInvocationContract>", withdrawn)
     Assert.DoesNotContain("Type = Entry", withdrawn)
     Assert.Contains("Expr<CallbackDescriptor>", withdrawn)
-    let changed = renderInvocation {invocationProjection with CallbackInvocations = [{invocationContract with Version = "v2"}]} "NativeCallback" "long long (*)(int)"
+    let changed = renderInvocation {invocationProjection with CallbackInvocations = [{invocationContract with Version = "v2"}]} "NativeCallback" "long long (*)(int, unsigned long long)"
     Assert.Contains("Version = \"v2\"", changed)
 
 [<Theory>]
@@ -824,11 +825,28 @@ let ``callback invocation admitted integer profile preserves declared widths and
     Assert.DoesNotContain("Name = \"arg1\"", source)
 
 [<Theory>]
+[<InlineData("long long (*)(int, unsigned long long)", "Signed, 32", "Unsigned, 64", "Signed, 64")>]
+[<InlineData("unsigned int (*)(unsigned long long, int)", "Unsigned, 64", "Signed, 32", "Unsigned, 32")>]
+[<InlineData("unsigned long long (*)(long long, unsigned int)", "Signed, 64", "Unsigned, 32", "Unsigned, 64")>]
+[<InlineData("int (*)(unsigned int, long long)", "Unsigned, 32", "Signed, 64", "Signed, 32")>]
+let ``callback invocation ordered integer formals preserve every native position`` signature first second result =
+    let source = renderInvocation invocationProjection "NativeCallback" signature
+    let contract = source.Substring(source.IndexOf("Expr<CallbackInvocationContract>"))
+    let parameters = contract.Substring(0, contract.IndexOf("ReturnType ="))
+    let firstField = $"Name = \"arg0\"; Type = Integer ({first})"
+    let secondField = $"Name = \"arg1\"; Type = Integer ({second})"
+    Assert.Contains(firstField, parameters)
+    Assert.Contains(secondField, parameters)
+    Assert.True(parameters.IndexOf(firstField) < parameters.IndexOf(secondField), "Native callback formal order changed")
+    Assert.Equal(2, parameters.Split("Name = ").Length - 1)
+    Assert.Contains($"ReturnType = Integer ({result})", contract)
+    Assert.Contains("Invoke: FnPtr<int -> int -> int>", source)
+
+[<Theory>]
 [<InlineData("bool-parameter", "int (*)(bool)", "Boolean native entry signatures")>]
 [<InlineData("bool-result", "bool (*)(int)", "Boolean native entry signatures")>]
 [<InlineData("void-result", "void (*)(int)", "void native entry results")>]
-[<InlineData("multi", "long long (*)(long long, int)", "requires exactly one native entry parameter; received 2")>]
-[<InlineData("zero", "int (*)(void)", "requires exactly one native entry parameter; received 0")>]
+[<InlineData("zero", "int (*)(void)", "requires at least one native entry parameter; received 0")>]
 let ``callback invocation rejects signatures outside admitted integer profile`` _shape signature reason =
     let error = Assert.ThrowsAny<System.Exception>(fun () -> renderInvocation invocationProjection "NativeCallback" signature |> ignore)
     Assert.Contains("call_twice callback_invocations", error.Message)
@@ -871,8 +889,7 @@ let ``callback invocation contract refuses unsupported receiving correspondence 
 [<InlineData("profile-bool-parameter", "Boolean native entry signatures")>]
 [<InlineData("profile-bool-result", "Boolean native entry signatures")>]
 [<InlineData("profile-void-result", "void native entry results")>]
-[<InlineData("profile-multi", "requires exactly one native entry parameter; received 2")>]
-[<InlineData("profile-zero", "requires exactly one native entry parameter; received 0")>]
+[<InlineData("profile-zero", "requires at least one native entry parameter; received 0")>]
 let ``callback invocation project refusal preserves every existing output`` shape reason =
     let dir = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "artifacts", "callback-receiving-tests", System.Guid.NewGuid().ToString("N")))
     System.IO.Directory.CreateDirectory(dir) |> ignore
@@ -885,7 +902,6 @@ let ``callback invocation project refusal preserves every existing output`` shap
             | "profile-bool-parameter" -> "void call_twice(int (*callback)(_Bool));"
             | "profile-bool-result" -> "void call_twice(_Bool (*callback)(int));"
             | "profile-void-result" -> "void call_twice(void (*callback)(int));"
-            | "profile-multi" -> "void call_twice(long long (*callback)(long long, int));"
             | "profile-zero" -> "void call_twice(int (*callback)(void));"
             | _ -> "void call_twice(long long (*callback)(long long));"
         System.IO.File.WriteAllText(header, declaration)
