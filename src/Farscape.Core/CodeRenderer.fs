@@ -1,6 +1,7 @@
 namespace Farscape.Core
 
 open System.Text
+open System.Text.RegularExpressions
 open CodeAST
 open ActivePatterns
 
@@ -10,11 +11,26 @@ open ActivePatterns
 /// Every other module produces FsDecl values: typed, inspectable, testable.
 module CodeRenderer =
 
+    // A finite source-AST hygiene check, not a Clef parser or backend type reader.
+    // Quoted data and comments are skipped; a quoted MLIR operation has an argument list.
+    let private backendType = Regex(@"!llvm(?:\.|<|$)")
+    let private backendFragment =
+        Regex(@"(?<backend>!llvm(?:\.|<)|(?<![A-Za-z0-9_.$])llvm\.[A-Za-z0-9_.]+\s+[%@][A-Za-z0-9_.$-]+|(?m:^\s*(?:%[A-Za-z0-9_.$-]+(?:\s*:\s*\d+)?\s*=\s*(?:llvm\.|""llvm\.)|""llvm\.[A-Za-z0-9_.]+""\s*\()))|""(?:\\[\s\S]|[^""\\])*""|//[^\r\n]*|\(\*[\s\S]*?\*\)")
+
+    let private sourceSyntax isType (value: string) =
+        let forbidden =
+            if isType then backendType.IsMatch value
+            else backendFragment.Matches value |> Seq.cast<Match> |> Seq.exists (fun matched -> matched.Groups["backend"].Success)
+        if forbidden then
+            let position = if isType then "type" else "operation or type fragment"
+            invalidOp $"Farscape source rendering forbids LLVM dialect {position}; bindings require target-independent source contracts."
+        value
+
     /// Render an FsType to its F# string representation
     let rec renderType = function
-        | Named n -> n
-        | Generic (outer, inner) -> $"{outer}<{renderType inner}>"
-        | Generic2 (outer, a, b) -> $"{outer}<{renderType a}, {renderType b}>"
+        | Named n -> sourceSyntax true n
+        | Generic (outer, inner) -> $"{sourceSyntax true outer}<{renderType inner}>"
+        | Generic2 (outer, a, b) -> $"{sourceSyntax true outer}<{renderType a}, {renderType b}>"
         | Unit -> "unit"
         | FunctionType (parameters, ret) ->
             let ps = if parameters.IsEmpty then ["unit"] else parameters |> List.map renderType
@@ -33,12 +49,12 @@ module CodeRenderer =
             if mod' = "" then $"{safeName} {argStr}"
             else $"{mod'}.{safeName} {argStr}"
         | Identifier name -> name
-        | TypeConversion (target, expr) -> $"{target} ({renderExpr indent expr})"
+        | TypeConversion (target, expr) -> $"{sourceSyntax true target} ({renderExpr indent expr})"
         | MethodCall (expr, method') -> $"{method'} ({renderExpr indent expr})"
         | IfThenElse (cond, thenE, elseE) ->
             $"if {renderExpr indent cond} then {renderExpr indent thenE}\n{indent}else {renderExpr indent elseE}"
         | Comparison (left, op, right) -> $"{renderExpr indent left} {op} {renderExpr indent right}"
-        | Literal s -> s
+        | Literal s -> sourceSyntax false s
         | ResultOk expr ->
             match expr with
             | Identifier _ | Literal _ -> $"Ok {renderExpr indent expr}"
@@ -95,7 +111,7 @@ module CodeRenderer =
                 let lines = elements |> List.map (fun e -> inner + renderExpr inner e)
                 "[|\n" + String.concat "\n" lines + $"\n{indent}|]"
         | Commented (expr, comment) -> $"{renderExpr indent expr} // {comment}"
-        | RawExpr code -> code
+        | RawExpr code -> sourceSyntax false code
 
     /// Render an expression as a function argument, parenthesizing compound expressions.
     and renderArg (indent: string) (expr: FsExpr) =
@@ -119,7 +135,7 @@ module CodeRenderer =
             sb.AppendLine(($"{prefix}/// {text}").TrimEnd()) |> ignore
 
         | Comment text ->
-            sb.AppendLine($"{prefix}{text}") |> ignore
+            sb.AppendLine($"{prefix}{sourceSyntax false text}") |> ignore
 
         | BlankLine ->
             sb.AppendLine() |> ignore
@@ -138,7 +154,7 @@ module CodeRenderer =
 
         | LiteralBinding (name, value) ->
             sb.AppendLine($"{prefix}[<Literal>]") |> ignore
-            sb.AppendLine($"{prefix}let {quoteIdentifier name} = {value}") |> ignore
+            sb.AppendLine($"{prefix}let {quoteIdentifier name} = {sourceSyntax false value}") |> ignore
 
         | ValueBinding (name, type', body) ->
             sb.AppendLine($"{prefix}let {quoteIdentifier name} : {renderType type'} =") |> ignore
@@ -148,11 +164,13 @@ module CodeRenderer =
             sb.AppendLine() |> ignore
 
         | OpaqueMarker name ->
+            let name = sourceSyntax true name
             sb.AppendLine($"{prefix}/// Opaque boundary marker; storage belongs to its declared handle or view.") |> ignore
             sb.AppendLine($"{prefix}type {name} = private | Opaque_{name}") |> ignore
             sb.AppendLine() |> ignore
 
         | RecordType (name, fields, doc, attributes) ->
+            let name = sourceSyntax true name
             match doc with
             | Some d -> sb.AppendLine($"{prefix}/// {d}") |> ignore
             | None -> ()
@@ -165,6 +183,7 @@ module CodeRenderer =
             sb.AppendLine() |> ignore
 
         | EnumType (name, values, doc, isFlags) ->
+            let name = sourceSyntax true name
             match doc with
             | Some d -> sb.AppendLine($"{prefix}/// {d}") |> ignore
             | None -> ()
@@ -182,6 +201,7 @@ module CodeRenderer =
             sb.AppendLine() |> ignore
 
         | DelegateType (name, parameters, returnType, doc) ->
+            let name = sourceSyntax true name
             match doc with
             | Some d -> sb.AppendLine($"{prefix}/// {d}") |> ignore
             | None -> ()
@@ -203,4 +223,4 @@ module CodeRenderer =
     let render (decl: FsDecl) : string =
         let sb = StringBuilder()
         renderDecl sb 0 decl
-        sb.ToString().TrimEnd() + "\n"
+        sourceSyntax false (sb.ToString().TrimEnd() + "\n")

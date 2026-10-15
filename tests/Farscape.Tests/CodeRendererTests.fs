@@ -139,3 +139,132 @@ let ``C keyword symbols are quoted in declarations and calls`` () =
     Assert.Contains("let ``open`` ()", source)
     Assert.Contains("Fidelity.Libc.IO.``open`` 0", source)
     Assert.Contains("let __errno_location", source)
+
+[<Fact>]
+let ``source boundary rendering preserves neutral handles contracts symbols and wrappers`` () =
+    let handle = Generic("CHandle", Named "LLVM_handle")
+    let native = render (Module("Fidelity.Test.Native", "LLVM backend is not binding authority", [
+        Comment "// !llvm.ptr and llvm.call @symbol are documentation, not source operations."
+        LetBinding("LLVM_malloc", [{Name = "size"; Type = Named "int"}], Generic("option", handle), NativeZeroed,
+            ["FidelityExtern(\"c\", \"llvm.mlir.constant\")"])
+        ValueBinding("LLVM_mallocResourceDescriptor", Generic("Expr", Named "ResourceDescriptor"),
+            Quoted(RecordBlock [
+                "Resource", FunctionCall("", "OwnedNullableReturn", [RecordConstruction ["Binding", Literal "\"Fidelity.Test.Native.LLVM_free\""; "Parameter", Literal "0"]])
+                "Hypothesis", RecordBlock ["Identity", Literal "\"LLVM_resource\""; "Version", Literal "\"1\""; "Source", Literal "\"!llvm.ptr\""] ])) ]))
+    let wrapper = render (Module("Fidelity.Test.Api", "LLVM word is legal", [
+        LetBinding("use", [{Name = "handle"; Type = handle}], handle,
+            FunctionCall("llvm", "libraryFunction", [Identifier "handle"]), []) ]))
+    Assert.Contains("option<CHandle<LLVM_handle>>", native)
+    Assert.Contains("Expr<ResourceDescriptor>", native)
+    Assert.Contains("FidelityExtern(\"c\", \"llvm.mlir.constant\")", native)
+    Assert.Contains("// !llvm.ptr and llvm.call @symbol", native)
+    Assert.Contains("Source = \"!llvm.ptr\"", native)
+    Assert.Contains("llvm.libraryFunction handle", wrapper)
+
+[<Theory>]
+[<InlineData("named")>]
+[<InlineData("generic")>]
+[<InlineData("outer")>]
+[<InlineData("nested")>]
+[<InlineData("function")>]
+let ``source boundary rendering refuses explicit LLVM type syntax`` shape =
+    let typ =
+        match shape with
+        | "named" -> Named "!llvm.ptr"
+        | "generic" -> Named "!llvm<ptr>"
+        | "outer" -> Generic("!llvm", Named "ptr")
+        | "nested" -> Generic("option", Generic("CHandle", Named "!llvm.ptr"))
+        | _ -> FunctionType([Named "int"], Named "!llvm.ptr")
+    let error = Assert.Throws<System.InvalidOperationException>(fun () -> renderType typ |> ignore)
+    Assert.Contains("Farscape source rendering forbids LLVM dialect type", error.Message)
+
+[<Theory>]
+[<InlineData(false, "%p = llvm.inttoptr %value : i64 to !llvm.ptr")>]
+[<InlineData(true, "%p = llvm.inttoptr %value : i64 to !llvm.ptr")>]
+[<InlineData(false, "\"llvm.mlir.constant\"() {value = 0 : i64} : () -> i64")>]
+[<InlineData(true, "\"llvm.mlir.constant\"() {value = 0 : i64} : () -> i64")>]
+[<InlineData(false, "llvm.call @foreign() : () -> ()")>]
+[<InlineData(true, "llvm.call @foreign() : () -> ()")>]
+[<InlineData(false, "()\n%p = llvm.inttoptr %value : i64 to !llvm.ptr")>]
+[<InlineData(true, "()\n%p = llvm.inttoptr %value : i64 to !llvm.ptr")>]
+let ``source boundary rendering refuses structural LLVM expression fragments`` literal code =
+    let expression = if literal then Literal code else RawExpr code
+    let error = Assert.Throws<System.InvalidOperationException>(fun () -> renderExpr "" expression |> ignore)
+    Assert.Contains("Farscape source rendering forbids LLVM dialect operation or type fragment", error.Message)
+
+[<Fact>]
+let ``source boundary rendering preserves quoted dialect data comments and qualified calls`` () =
+    for expression, expected in [
+        Literal "\"llvm.mlir.constant\"", "\"llvm.mlir.constant\""
+        Literal "\"!llvm<ptr>\"", "\"!llvm<ptr>\""
+        Literal "\"diagnostic\n%p = llvm.inttoptr %value : i64 to !llvm.ptr\"", "\"diagnostic\n%p = llvm.inttoptr %value : i64 to !llvm.ptr\""
+        RawExpr "// llvm.call @foreign() is a comment\n()", "// llvm.call @foreign() is a comment\n()"
+        RawExpr "(*\nllvm.call @foreign() is a comment\n*)\n()", "(*\nllvm.call @foreign() is a comment\n*)\n()"
+        RawExpr "llvm.libraryFunction value", "llvm.libraryFunction value" ] do
+        Assert.Equal(expected, renderExpr "" expression)
+
+[<Fact>]
+let ``source boundary rendering refuses LLVM in conversion and literal declaration positions`` () =
+    let conversion = Assert.Throws<System.InvalidOperationException>(fun () -> renderExpr "" (TypeConversion("!llvm.ptr", Identifier "p")) |> ignore)
+    Assert.Contains("forbids LLVM dialect type", conversion.Message)
+    let literal = Assert.Throws<System.InvalidOperationException>(fun () -> render (LiteralBinding("invalid", "llvm.call @foreign() : () -> ()")) |> ignore)
+    Assert.Contains("forbids LLVM dialect operation or type fragment", literal.Message)
+
+[<Theory>]
+[<InlineData("opaque", "!llvm.ptr")>]
+[<InlineData("opaque", "!llvm<ptr>")>]
+[<InlineData("record", "!llvm.ptr")>]
+[<InlineData("record", "!llvm<ptr>")>]
+[<InlineData("enum", "!llvm.ptr")>]
+[<InlineData("enum", "!llvm<ptr>")>]
+[<InlineData("delegate", "!llvm.ptr")>]
+[<InlineData("delegate", "!llvm<ptr>")>]
+let ``source boundary rendering refuses LLVM type declaration names`` shape name =
+    let declaration =
+        match shape with
+        | "opaque" -> OpaqueMarker name
+        | "record" -> RecordType(name, [], None, [])
+        | "enum" -> EnumType(name, [], None, false)
+        | _ -> DelegateType(name, [], Unit, None)
+    let error = Assert.Throws<System.InvalidOperationException>(fun () -> render declaration |> ignore)
+    Assert.Contains("Farscape source rendering forbids LLVM dialect type", error.Message)
+
+[<Fact>]
+let ``source boundary rendering preserves legal LLVM type declaration names`` () =
+    for declaration, expected in [
+        OpaqueMarker "LLVM_handle", "/// Opaque boundary marker; storage belongs to its declared handle or view.\ntype LLVM_handle = private | Opaque_LLVM_handle\n"
+        RecordType("LLVM_record", [], None, []), "type LLVM_record = {\n}\n"
+        EnumType("LLVM_enum", [], None, false), "type LLVM_enum =\n"
+        DelegateType("LLVM_callback", [], Unit, None), "type LLVM_callback = delegate of unit -> unit\n" ] do
+        Assert.Equal(expected, render declaration)
+
+[<Theory>]
+[<InlineData("!llvm.ptr")>]
+[<InlineData("// x\n%p = llvm.inttoptr %v : i64 to !llvm.ptr")>]
+let ``renderer follow-up refuses raw Comment injection`` code =
+    let error = Assert.Throws<System.InvalidOperationException>(fun () -> render (Comment code) |> ignore)
+    Assert.Contains("forbids LLVM dialect operation or type fragment", error.Message)
+
+[<Theory>]
+[<InlineData("ignore (llvm.call @foreign())")>]
+[<InlineData("f !llvm.ptr")>]
+[<InlineData("x |> llvm.inttoptr %v")>]
+let ``renderer follow-up refuses midline backend fragments`` code =
+    let error = Assert.Throws<System.InvalidOperationException>(fun () -> renderExpr "" (RawExpr code) |> ignore)
+    Assert.Contains("forbids LLVM dialect operation or type fragment", error.Message)
+
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``renderer follow-up final output refuses unchecked leaf injection`` doc =
+    let declaration =
+        if doc then RecordType("Good", [], Some "x\n!llvm.ptr", [])
+        else ValueBinding("good", Named "int", MatchExpr(Identifier "value", ["_ ->\n%p = llvm.inttoptr %v", Literal "0"]))
+    let error = Assert.Throws<System.InvalidOperationException>(fun () -> render declaration |> ignore)
+    Assert.Contains("forbids LLVM dialect operation or type fragment", error.Message)
+
+[<Theory>]
+[<InlineData("llvm.count % 2")>]
+[<InlineData("llvm.items @ rest")>]
+let ``source boundary rendering preserves qualified modulo and append expressions`` code =
+    Assert.Equal(code, renderExpr "" (RawExpr code))
