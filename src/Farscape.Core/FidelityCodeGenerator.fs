@@ -670,11 +670,16 @@ module FidelityCodeGenerator =
             | FunctionPointer _ -> ()
             | _ -> refuse $"parameter {contract.Parameter} is not a native function pointer"
             let ret, parameters = resolveCallbackNativeSignature ctx cType |> Option.defaultWith (fun () -> refuse "native entry signature is unavailable")
+            if parameters.Length <> 1 then
+                refuse $"requires exactly one native entry parameter; received {parameters.Length}"
             let nativeType isReturn (cType: string) =
                 if cType.Contains('&') then refuse $"unsupported native entry reference signature type '{cType}'"
                 match resolveIn ctx cType with
                 | Scalar r when (r.Family = TypeMapper.Signed || r.Family = TypeMapper.Unsigned) && (r.Bits = 32 || r.Bits = 64) -> ()
-                | Scalar r when r.Family = TypeMapper.Bool || (isReturn && r.Family = TypeMapper.Void) -> ()
+                | Scalar r when r.Family = TypeMapper.Bool ->
+                    refuse "Boolean native entry signatures are outside the admitted unary integer callback profile"
+                | Scalar r when isReturn && r.Family = TypeMapper.Void ->
+                    refuse "void native entry results are outside the admitted unary integer callback profile"
                 | _ -> refuse $"unsupported native entry signature type '{cType}'"
                 abiClaim ctx cType
             let infos = parameters |> List.map (fun (name, typ) ->
