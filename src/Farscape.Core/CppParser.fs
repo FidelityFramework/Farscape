@@ -574,13 +574,13 @@ module CppParser =
         (targetFile: string)
         (includeRoot: string option)
         (verbose: bool)
-        (enrichFunction: JsonValue -> FunctionDecl -> FunctionDecl)
+        (enrichFunction: (string * string) list option -> JsonValue -> FunctionDecl -> FunctionDecl)
         : Declaration list =
 
         let results = ResizeArray<Declaration>()
         let mutable currentFile: string option = None
-        let processFunction node =
-            processFunctionDecl node |> Option.map (enrichFunction node)
+        let processFunction scope node =
+            processFunctionDecl node |> Option.map (enrichFunction scope node)
 
         // Clang emits an anonymous typedef union or enum as a RecordDecl or EnumDecl followed
         // by a TypedefDecl whose RecordType or EnumType points back to that declaration.
@@ -631,11 +631,24 @@ module CppParser =
             | None -> false
 
         /// Process a single node
-        let rec processNode (node: JsonValue) =
+        let rec processNode scope (node: JsonValue) =
             updateFileTracking node
 
             let isImplicit = getBool node "isImplicit"
             let kind = getStringOr node "kind" ""
+            // Only named lexical declaration contexts participate in the join.
+            // Do not infer template identities or declarations inside function bodies.
+            let childScope =
+                match kind with
+                | "NamespaceDecl" | "RecordDecl" | "CXXRecordDecl" ->
+                    match getString node "name" with
+                    | Some name when not (String.IsNullOrEmpty name) ->
+                        scope |> Option.map (fun parents -> parents @ [kind, name])
+                    | _ -> None
+                | "FunctionTemplateDecl" | "ClassTemplateDecl"
+                | "ClassTemplateSpecializationDecl" | "ClassTemplatePartialSpecializationDecl" -> None
+                | "FunctionDecl" | "CXXMethodDecl" | "CXXConstructorDecl" -> None
+                | _ -> scope
 
             // NamespaceDecl is a structural container, not a declaration.
             // Always recurse into namespace children regardless of file context,
@@ -646,7 +659,7 @@ module CppParser =
                 match getString node "name" with
                 | Some name when not (System.String.IsNullOrEmpty(name)) ->
                     for inner in getArray node "inner" do
-                        processNode inner
+                        processNode childScope inner
                 | _ -> ()
 
             elif not isImplicit && isFromTargetFile node then
@@ -656,7 +669,7 @@ module CppParser =
 
                 match kind with
                 | "FunctionDecl" ->
-                    match processFunction node with
+                    match processFunction scope node with
                     | Some func -> results.Add(Function func)
                     | None -> ()
 
@@ -711,7 +724,7 @@ module CppParser =
                             |> Seq.filter (fun inner ->
                                 let k = getStringOr inner "kind" ""
                                 k = "CXXMethodDecl" || k = "FunctionDecl")
-                            |> Seq.choose processFunction
+                            |> Seq.choose (processFunction childScope)
                             |> Seq.map Function
                             |> List.ofSeq
 
@@ -721,7 +734,7 @@ module CppParser =
                             innerNodes
                             |> Seq.filter (fun inner ->
                                 getStringOr inner "kind" "" = "CXXConstructorDecl")
-                            |> Seq.choose processFunction
+                            |> Seq.choose (processFunction childScope)
                             |> Seq.map Function
                             |> List.ofSeq
 
@@ -806,7 +819,7 @@ module CppParser =
 
                 // Recurse into children for non-namespace declarations
                 for inner in getArray node "inner" do
-                    processNode inner
+                    processNode childScope inner
 
             else
                 // Outside the target file: still recurse to find target-file
@@ -814,10 +827,10 @@ module CppParser =
                 // TranslationUnitDecl or LinkageSpecDecl wrappers).
                 if kind <> "NamespaceDecl" then
                     for inner in getArray node "inner" do
-                        processNode inner
+                        processNode childScope inner
 
         // Start processing from root
-        processNode root
+        processNode (Some []) root
         List.ofSeq results
 
     // =========================================================================
@@ -1145,7 +1158,7 @@ module CppParser =
 
     /// Clang's JSON AST omits the arguments of NonNullAttr. Its text AST prints the
     /// semantic positions after the source range, even for macro-expanded attributes.
-    /// Match the complete function type as well as the name so overloads cannot share evidence.
+    /// Match lexical declaration scope, kind and complete type so distinct functions cannot share evidence.
     let private enrichNonNullAttributes (options: HeaderParserOptions) =
         let normalize (signature: string) =
             signature |> Seq.filter (not << Char.IsWhiteSpace) |> Seq.toArray |> String
@@ -1169,26 +1182,68 @@ module CppParser =
                 || (firstParen >= 0 && not (nativeType.Substring(0, firstParen).Contains('<'))
                     && nativeType.Substring(firstParen + 1).TrimStart().StartsWith("*", StringComparison.Ordinal))
             output.Split('\n')
-                |> Array.fold (fun (current, evidence) (line: string) ->
+                |> Array.fold (fun (scopes, current, evidence) (line: string) ->
+                    let nodeDepth =
+                        line |> Seq.tryFindIndex (fun c -> c <> ' ' && c <> '|' && c <> '`' && c <> '-')
+                        |> Option.defaultValue 0
+                    let scopes = scopes |> List.filter (fun (depth, _) -> depth < nodeDepth)
+                    let words = line.Substring(nodeDepth).Split([|' '; '\t'|], StringSplitOptions.RemoveEmptyEntries)
+                    let nodeKind = if words.Length = 0 then "" else words.[0]
+                    let identifier (name: string) =
+                        name.Length > 0 && (Char.IsLetter name.[0] || name.[0] = '_') &&
+                        (name |> Seq.forall (fun c -> Char.IsLetterOrDigit c || c = '_'))
+                    let scope =
+                        if nodeKind = "NamespaceDecl" then
+                            let suffix = line.Substring(line.LastIndexOf('>') + 1).Trim().Split([|' '; '\t'; '\r'|], StringSplitOptions.RemoveEmptyEntries)
+                            let name =
+                                match List.ofArray suffix with
+                                | [location; name] | [location; "inline"; name] | [location; name; "inline"]
+                                    when (location.StartsWith("col:", StringComparison.Ordinal) || location.StartsWith("line:", StringComparison.Ordinal)) && identifier name ->
+                                    Some (nodeKind, name)
+                                | _ -> None
+                            Some name
+                        elif nodeKind = "RecordDecl" || nodeKind = "CXXRecordDecl" then
+                            Some (
+                                words
+                                |> Array.tryFindIndex (fun word -> List.contains word ["struct"; "class"; "union"])
+                                |> Option.bind (fun index ->
+                                    if index + 1 < words.Length && identifier words.[index + 1] && words.[index + 1] <> "definition" then
+                                        Some (nodeKind, words.[index + 1])
+                                    else None))
+                        elif List.contains nodeKind ["FunctionTemplateDecl"; "ClassTemplateDecl"; "ClassTemplateSpecializationDecl"; "ClassTemplatePartialSpecializationDecl";
+                                                    "FunctionDecl"; "CXXMethodDecl"; "CXXConstructorDecl"] then Some None
+                        else None
+                    let parentScope =
+                        scopes |> List.rev |> List.fold (fun parents (_, identity) ->
+                            match parents, identity with
+                            | Some parents, Some identity -> Some (parents @ [identity])
+                            | _ -> None) (Some [])
+                    let scopes = match scope with Some identity -> (nodeDepth, identity) :: scopes | None -> scopes
+                    // A function's own attributes keep its entry key. Its body and
+                    // unsupported contexts cannot contribute evidence to that key.
+                    let current = current |> List.filter (fun (_, depth, _, _) -> depth < nodeDepth)
                     let functionKind =
                         ["FunctionDecl "; "CXXMethodDecl "; "CXXConstructorDecl "]
-                        |> List.tryPick (fun kind -> let index = line.IndexOf(kind, StringComparison.Ordinal) in if index < 0 then None else Some index)
+                        |> List.tryPick (fun kind -> let index = line.IndexOf(kind, StringComparison.Ordinal) in if index < 0 then None else Some (kind.Trim(), index))
                     match functionKind with
-                    | Some depth ->
+                    | Some (kind, depth) ->
                         let quote = line.IndexOf('\'')
                         let endQuote = if quote < 0 then -1 else line.IndexOf('\'', quote + 1)
-                        if endQuote < 0 then None, evidence else
+                        if endQuote < 0 then scopes, current, evidence else
                         let name = line.Substring(0, quote).Trim().Split([|' '; '\t'|], StringSplitOptions.RemoveEmptyEntries) |> Array.last
                         let signature = line.Substring(quote + 1, endQuote - quote - 1) |> normalize
-                        Some ((name, signature), depth, [], 0), evidence
+                        let key =
+                            if words |> Array.contains "parent" then None
+                            else parentScope |> Option.map (fun scope -> scope, kind, name, signature)
+                        scopes, (key, depth, [], 0) :: current, evidence
                     | None ->
                         let attribute = line.IndexOf("NonNullAttr ", StringComparison.Ordinal)
                         let parameter = line.IndexOf("ParmVarDecl ", StringComparison.Ordinal)
                         match current with
-                        | Some (key, depth, pointers, count) when parameter = depth + 2 ->
+                        | (key, depth, pointers, count) :: parents when parameter = depth + 2 ->
                             let pointers = if pointerParameter line then count :: pointers else pointers
-                            Some (key, depth, pointers, count + 1), evidence
-                        | Some (key, depth, pointers, _) when attribute = depth + 2 ->
+                            scopes, (key, depth, pointers, count + 1) :: parents, evidence
+                        | (Some key, depth, pointers, _) :: _ when attribute = depth + 2 ->
                             let rangeEnd = line.LastIndexOf('>')
                             if rangeEnd < 0 then failwith "Clang NonNullAttr lacks a semantic source range"
                             let positions =
@@ -1201,16 +1256,22 @@ module CppParser =
                                 |> Array.toList
                                 |> fun positions -> if positions.IsEmpty then List.rev pointers else positions
                             let previous = Map.tryFind key evidence |> Option.defaultValue []
-                            current, Map.add key (positions :: previous) evidence
-                        | _ -> current, evidence) (None, Map.empty)
-                |> snd)
-        fun node (f: FunctionDecl) ->
+                            scopes, current, Map.add key (positions :: previous) evidence
+                        | _ -> scopes, current, evidence) ([], [], Map.empty)
+                |> fun (_, _, evidence) -> evidence)
+        fun scope node (f: FunctionDecl) ->
             if f.Attributes |> List.exists (fun a -> a.Kind = "NonNullAttr") then
+                let scope =
+                    match scope, getString node "parentDeclContextId" with
+                    | Some scope, None -> scope
+                    // Out-of-line declarations can have a different semantic parent.
+                    // A lexical key cannot establish their identity.
+                    | _ -> failwith $"Cannot establish lexical clang nonnull declaration scope for '{f.Name}'"
                 // The function type can retain a builtin's canonical typedef spelling
                 // while ParmVarDecl uses the header spelling. Do not reconstruct it.
                 let signature = getQualType node |> normalize
                 let positions =
-                    Map.tryFind (f.Name, signature) evidence.Value
+                    Map.tryFind (scope, getStringOr node "kind" "", f.Name, signature) evidence.Value
                     |> Option.defaultWith (fun () -> failwith $"Cannot recover clang nonnull parameter evidence for '{f.Name}'")
                 let indices = positions |> List.collect id |> List.distinct |> List.sort
                 if indices |> List.exists (fun index -> index < 0 || index >= f.Parameters.Length) then

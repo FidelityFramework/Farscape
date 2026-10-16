@@ -214,3 +214,78 @@ struct Receiver {
         let method = receiver.Methods |> functions |> List.exactlyOne
         Assert.Equal<int list>([0], positions constructor)
         Assert.Equal<int list>([0], positions method)
+
+    [<Fact>]
+    let ``annotated namespace siblings keep separate nonnull positions`` () =
+        let declarations = parse true """
+namespace A { void f(char *requiredA, char *optionalA) __attribute__((nonnull(1))); }
+namespace B { void f(char *optionalB, char *requiredB) __attribute__((nonnull(2))); }
+namespace C { void f(char *optionalA, char *optionalB); }
+"""
+        let fs = functions declarations
+        Assert.Equal(3, fs.Length)
+        Assert.Equal(3, fs |> List.map _.MangledName |> List.distinct |> List.length)
+        Assert.All(fs, fun f -> Assert.True(f.MangledName |> Option.exists (System.String.IsNullOrEmpty >> not)))
+        Assert.Equal<int list list>([[0]; [1]; []], fs |> List.map positions)
+
+    [<Fact>]
+    let ``static methods in named classes keep separate nonnull positions`` () =
+        let declarations = parse true """
+namespace Group {
+struct A { static void f(char *requiredA, char *optionalA) __attribute__((nonnull(1))); };
+struct B { static void f(char *optionalB, char *requiredB) __attribute__((nonnull(2))); };
+struct C { static void f(char *optionalA, char *optionalB); };
+}
+"""
+        let methods =
+            declarations
+            |> List.choose (function CppParser.Class c -> Some c | _ -> None)
+            |> List.collect (fun c -> functions c.Methods)
+        Assert.Equal(3, methods.Length)
+        Assert.Equal(3, methods |> List.map _.MangledName |> List.distinct |> List.length)
+        Assert.Equal<int list list>([[0]; [1]; []], methods |> List.map positions)
+
+    [<Fact>]
+    let ``nonnull out of line namespace definition refuses unresolved lexical scope`` () =
+        let header = """
+namespace A { void f(char *value) __attribute__((nonnull(1))); }
+void A::f(char *value) {}
+"""
+        let error = Assert.Throws<System.Exception>(fun () -> parse true header |> ignore)
+        Assert.Contains("Cannot establish lexical clang nonnull declaration scope for 'f'", error.Message)
+
+    [<Fact>]
+    let ``nonnull function template refuses unresolved lexical scope`` () =
+        let header = """
+template<typename T> void f(T *value) __attribute__((nonnull(1)));
+"""
+        let error = Assert.Throws<System.Exception>(fun () -> parse true header |> ignore)
+        Assert.Contains("Cannot establish lexical clang nonnull declaration scope for 'f'", error.Message)
+
+    [<Fact>]
+    let ``inline and anonymous namespaces cannot lend nonnull positions to siblings`` () =
+        let declarations = parse true """
+inline namespace A { void f(char *requiredA, char *optionalA) __attribute__((nonnull(1))); }
+namespace { void f(char *optionalB, char *requiredB) __attribute__((nonnull(2))); }
+namespace B { void f(char *optionalA, char *requiredB) __attribute__((nonnull(2))); }
+"""
+        let fs = functions declarations
+        Assert.Equal(2, fs.Length)
+        Assert.Equal<int list list>([[0]; [1]], fs |> List.map positions)
+
+    [<Fact>]
+    let ``same declaration redeclarations retain their nonnull union`` () =
+        let declarations = parse true """
+namespace A {
+void f(char *first, char *second) __attribute__((nonnull(1)));
+void f(char *first, char *second) __attribute__((nonnull(2)));
+}
+"""
+        let fs = functions declarations
+        Assert.Equal(2, fs.Length)
+        Assert.Single(fs |> List.map _.MangledName |> List.distinct) |> ignore
+        let attributes = fs |> List.map (fun f -> f.Attributes |> List.filter (fun a -> a.Kind = "NonNullAttr"))
+        Assert.Equal<int list>([1; 2], attributes |> List.map List.length)
+        for declaration in attributes do
+            for attribute in declaration do
+                Assert.Equal<int list>([0; 1], attribute.Args)
