@@ -574,10 +574,13 @@ module CppParser =
         (targetFile: string)
         (includeRoot: string option)
         (verbose: bool)
+        (enrichFunction: JsonValue -> FunctionDecl -> FunctionDecl)
         : Declaration list =
 
         let results = ResizeArray<Declaration>()
         let mutable currentFile: string option = None
+        let processFunction node =
+            processFunctionDecl node |> Option.map (enrichFunction node)
 
         // Clang emits an anonymous typedef union or enum as a RecordDecl or EnumDecl followed
         // by a TypedefDecl whose RecordType or EnumType points back to that declaration.
@@ -653,7 +656,7 @@ module CppParser =
 
                 match kind with
                 | "FunctionDecl" ->
-                    match processFunctionDecl node with
+                    match processFunction node with
                     | Some func -> results.Add(Function func)
                     | None -> ()
 
@@ -708,7 +711,7 @@ module CppParser =
                             |> Seq.filter (fun inner ->
                                 let k = getStringOr inner "kind" ""
                                 k = "CXXMethodDecl" || k = "FunctionDecl")
-                            |> Seq.choose processFunctionDecl
+                            |> Seq.choose processFunction
                             |> Seq.map Function
                             |> List.ofSeq
 
@@ -718,7 +721,7 @@ module CppParser =
                             innerNodes
                             |> Seq.filter (fun inner ->
                                 getStringOr inner "kind" "" = "CXXConstructorDecl")
-                            |> Seq.choose processFunctionDecl
+                            |> Seq.choose processFunction
                             |> Seq.map Function
                             |> List.ofSeq
 
@@ -1143,31 +1146,15 @@ module CppParser =
     /// Clang's JSON AST omits the arguments of NonNullAttr. Its text AST prints the
     /// semantic positions after the source range, even for macro-expanded attributes.
     /// Match the complete function type as well as the name so overloads cannot share evidence.
-    let private enrichNonNullAttributes (options: HeaderParserOptions) (declarations: Declaration list) =
-        let rec needsPositions = function
-            | Function f -> f.Attributes |> List.exists (fun a -> a.Kind = "NonNullAttr")
-            | Namespace n -> n.Declarations |> List.exists needsPositions
-            | Class c -> (c.Methods @ c.Constructors) |> List.exists needsPositions
-            | _ -> false
-        if not (declarations |> List.exists needsPositions) then declarations
-        else
+    let private enrichNonNullAttributes (options: HeaderParserOptions) =
+        let normalize (signature: string) =
+            signature |> Seq.filter (not << Char.IsWhiteSpace) |> Seq.toArray |> String
+        let evidence = lazy (
             let args = buildClangArgs options
             let output =
                 match runClang args ["-Xclang"; "-ast-dump"; "-fsyntax-only"; options.HeaderFile] options.Verbose with
                 | Ok text -> text
                 | Error error -> failwith $"Cannot establish nonnull parameter evidence: {error}"
-            let normalize (signature: string) =
-                signature |> Seq.filter (not << Char.IsWhiteSpace) |> Seq.toArray |> String
-                |> fun signature -> signature.Replace(",...", "")
-            let trimRestrict (cType: string) =
-                let trimmed = cType.TrimEnd()
-                ["__restrict__"; "__restrict"; "restrict"]
-                |> List.tryPick (fun qualifier ->
-                    if trimmed.EndsWith(qualifier, StringComparison.Ordinal) then
-                        let at = trimmed.Length - qualifier.Length
-                        if at > 0 && (Char.IsWhiteSpace trimmed.[at - 1] || trimmed.[at - 1] = '*') then Some (trimmed.Substring(0, at).TrimEnd()) else None
-                    else None)
-                |> Option.defaultValue trimmed
             let pointerParameter (line: string) =
                 // Text AST supplies the canonical type after a typedef spelling.
                 // nonnull without positions applies only to native pointer slots.
@@ -1181,8 +1168,7 @@ module CppParser =
                      |> Array.forall (fun word -> List.contains word ["const"; "volatile"; "restrict"; "__restrict"; "__restrict__"])))
                 || (firstParen >= 0 && not (nativeType.Substring(0, firstParen).Contains('<'))
                     && nativeType.Substring(firstParen + 1).TrimStart().StartsWith("*", StringComparison.Ordinal))
-            let nonnull =
-                output.Split('\n')
+            output.Split('\n')
                 |> Array.fold (fun (current, evidence) (line: string) ->
                     let functionKind =
                         ["FunctionDecl "; "CXXMethodDecl "; "CXXConstructorDecl "]
@@ -1217,27 +1203,20 @@ module CppParser =
                             let previous = Map.tryFind key evidence |> Option.defaultValue []
                             current, Map.add key (positions :: previous) evidence
                         | _ -> current, evidence) (None, Map.empty)
-                |> snd
-            let rec enrich = function
-                | Function f when f.Attributes |> List.exists (fun a -> a.Kind = "NonNullAttr") ->
-                    let parameters = f.Parameters |> List.map snd |> String.concat ", "
-                    let signature = normalize (f.ReturnType + " (" + parameters + ")")
-                    let positions =
-                        Map.tryFind (f.Name, signature) nonnull
-                        |> Option.orElseWith (fun () ->
-                            let parameters = f.Parameters |> List.map (snd >> trimRestrict) |> String.concat ", "
-                            Map.tryFind (f.Name, normalize (f.ReturnType + " (" + parameters + ")")) nonnull)
-                        |> Option.orElseWith (fun () -> if f.Parameters.IsEmpty then Map.tryFind (f.Name, normalize (f.ReturnType + " (void)")) nonnull else None)
-                        |> Option.defaultWith (fun () -> failwith $"Cannot recover clang nonnull parameter evidence for '{f.Name}'")
-                    let indices =
-                        positions |> List.collect id |> List.distinct |> List.sort
-                    if indices |> List.exists (fun index -> index < 0 || index >= f.Parameters.Length) then
-                        failwith $"Clang nonnull parameter evidence is out of range for '{f.Name}'"
-                    Function { f with Attributes = f.Attributes |> List.map (fun a -> if a.Kind = "NonNullAttr" then { a with Args = indices } else a) }
-                | Namespace n -> Namespace { n with Declarations = List.map enrich n.Declarations }
-                | Class c -> Class { c with Methods = List.map enrich c.Methods; Constructors = List.map enrich c.Constructors }
-                | declaration -> declaration
-            List.map enrich declarations
+                |> snd)
+        fun node (f: FunctionDecl) ->
+            if f.Attributes |> List.exists (fun a -> a.Kind = "NonNullAttr") then
+                // The function type can retain a builtin's canonical typedef spelling
+                // while ParmVarDecl uses the header spelling. Do not reconstruct it.
+                let signature = getQualType node |> normalize
+                let positions =
+                    Map.tryFind (f.Name, signature) evidence.Value
+                    |> Option.defaultWith (fun () -> failwith $"Cannot recover clang nonnull parameter evidence for '{f.Name}'")
+                let indices = positions |> List.collect id |> List.distinct |> List.sort
+                if indices |> List.exists (fun index -> index < 0 || index >= f.Parameters.Length) then
+                    failwith $"Clang nonnull parameter evidence is out of range for '{f.Name}'"
+                { f with Attributes = f.Attributes |> List.map (fun a -> if a.Kind = "NonNullAttr" then { a with Args = indices } else a) }
+            else f
 
     /// Run clang preprocessor for macros
     let private runClangMacros (options: HeaderParserOptions) : Result<string, string> =
@@ -1403,7 +1382,7 @@ module CppParser =
                     let root = JsonValue.Parse(jsonOutput)
                     let targetFile = Path.GetFileName(options.HeaderFile)
 
-                    let declarations = walkAst root targetFile options.IncludeRoot options.Verbose |> enrichNonNullAttributes options
+                    let declarations = walkAst root targetFile options.IncludeRoot options.Verbose (enrichNonNullAttributes options)
 
                     if options.Verbose then
                         printfn "[CppParser] Extracted %d AST declarations" (List.length declarations)
