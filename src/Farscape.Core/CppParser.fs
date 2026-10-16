@@ -641,8 +641,8 @@ module CppParser =
             let childScope =
                 match kind with
                 | "NamespaceDecl" | "RecordDecl" | "CXXRecordDecl" ->
-                    match getString node "name" with
-                    | Some name when not (String.IsNullOrEmpty name) ->
+                    match getString node "parentDeclContextId", getString node "name" with
+                    | None, Some name when not (String.IsNullOrEmpty name) ->
                         scope |> Option.map (fun parents -> parents @ [kind, name])
                     | _ -> None
                 | "FunctionTemplateDecl" | "ClassTemplateDecl"
@@ -1189,17 +1189,31 @@ module CppParser =
                     let scopes = scopes |> List.filter (fun (depth, _) -> depth < nodeDepth)
                     let words = line.Substring(nodeDepth).Split([|' '; '\t'|], StringSplitOptions.RemoveEmptyEntries)
                     let nodeKind = if words.Length = 0 then "" else words.[0]
+                    let hasParentContext =
+                        let rangeStart = line.IndexOf('<')
+                        rangeStart >= 0 &&
+                        (line.Substring(0, rangeStart).Split([|' '; '\t'|], StringSplitOptions.RemoveEmptyEntries)
+                         |> Array.pairwise
+                         |> Array.exists (fun (marker, address) -> marker = "parent" && address.StartsWith("0x", StringComparison.Ordinal)))
                     let identifier (name: string) =
                         name.Length > 0 && (Char.IsLetter name.[0] || name.[0] = '_') &&
                         (name |> Seq.forall (fun c -> Char.IsLetterOrDigit c || c = '_'))
                     let scope =
-                        if nodeKind = "NamespaceDecl" then
+                        if hasParentContext && List.contains nodeKind ["NamespaceDecl"; "RecordDecl"; "CXXRecordDecl"] then Some None
+                        elif nodeKind = "NamespaceDecl" then
                             let suffix = line.Substring(line.LastIndexOf('>') + 1).Trim().Split([|' '; '\t'; '\r'|], StringSplitOptions.RemoveEmptyEntries)
                             let name =
                                 match List.ofArray suffix with
-                                | [location; name] | [location; "inline"; name] | [location; name; "inline"]
+                                | location :: "inline" :: name :: tail
+                                | location :: name :: tail
                                     when (location.StartsWith("col:", StringComparison.Ordinal) || location.StartsWith("line:", StringComparison.Ordinal)) && identifier name ->
-                                    Some (nodeKind, name)
+                                    let tail = match tail with "inline" :: rest -> rest | _ -> tail
+                                    let tail = match tail with "nested" :: rest -> rest | _ -> tail
+                                    match tail with
+                                    | [] -> Some (nodeKind, name)
+                                    | ["original"; "Namespace"; address; quotedName]
+                                        when address.StartsWith("0x", StringComparison.Ordinal) && quotedName = $"'{name}'" -> Some (nodeKind, name)
+                                    | _ -> None
                                 | _ -> None
                             Some name
                         elif nodeKind = "RecordDecl" || nodeKind = "CXXRecordDecl" then
@@ -1233,7 +1247,7 @@ module CppParser =
                         let name = line.Substring(0, quote).Trim().Split([|' '; '\t'|], StringSplitOptions.RemoveEmptyEntries) |> Array.last
                         let signature = line.Substring(quote + 1, endQuote - quote - 1) |> normalize
                         let key =
-                            if words |> Array.contains "parent" then None
+                            if hasParentContext then None
                             else parentScope |> Option.map (fun scope -> scope, kind, name, signature)
                         scopes, (key, depth, [], 0) :: current, evidence
                     | None ->

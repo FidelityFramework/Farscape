@@ -289,3 +289,41 @@ void f(char *first, char *second) __attribute__((nonnull(2)));
         for declaration in attributes do
             for attribute in declaration do
                 Assert.Equal<int list>([0; 1], attribute.Args)
+
+    [<Fact>]
+    let ``nonnull out of line nested record refuses unresolved lexical scope`` () =
+        let header = """
+struct Outer { struct Inner; };
+struct Outer::Inner {
+  static void f(char *first, char *second) __attribute__((nonnull(1)));
+};
+struct Inner {
+  static void f(char *first, char *second) __attribute__((nonnull(2)));
+};
+"""
+        let error = Assert.Throws<System.Exception>(fun () -> parse true header |> ignore)
+        Assert.Contains("Cannot establish lexical clang nonnull declaration scope for 'f'", error.Message)
+
+    [<Fact>]
+    let ``reopened and nested namespaces retain exact nonnull scope`` () =
+        let declarations = parse true """
+namespace A { void g(char *value); }
+namespace A { void f(char *first, char *second) __attribute__((nonnull(1))); }
+namespace B { void f(char *first, char *second) __attribute__((nonnull(2))); }
+namespace N::M { void f(char *first, char *second) __attribute__((nonnull(2))); }
+"""
+        let fs = functions declarations |> List.filter (fun f -> f.Name = "f")
+        Assert.Equal(3, fs.Length)
+        Assert.Equal(3, fs |> List.map _.MangledName |> List.distinct |> List.length)
+        Assert.Equal<int list list>([[0]; [1]; [1]], fs |> List.map positions)
+
+    [<Fact>]
+    let ``parent identifiers retain function and type nonnull evidence`` () =
+        let declarations = parse true """
+struct parent;
+void parent(char *value) __attribute__((nonnull(1)));
+void g(struct parent *value) __attribute__((nonnull(1)));
+"""
+        let fs = functions declarations
+        Assert.Equal(2, fs.Length)
+        Assert.Equal<int list list>([[0]; [0]], fs |> List.map positions)
