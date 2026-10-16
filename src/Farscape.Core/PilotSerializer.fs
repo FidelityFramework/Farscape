@@ -127,7 +127,12 @@ module PilotSerializer =
             "source", TomlValue.String contract.Source
             "scope", TomlValue.String contract.Scope
             yield! contract.ExitBinding |> Option.map (fun value -> "exit_binding", TomlValue.String value) |> Option.toList
-            yield! contract.SuccessStatus |> Option.map (fun value -> "success_status", TomlValue.Integer (int64 value)) |> Option.toList ])
+            yield! contract.SuccessStatus |> Option.map (fun value -> "success_status", TomlValue.Integer (int64 value)) |> Option.toList
+            yield! contract.AbsenceHypothesis |> Option.map (fun hypothesis ->
+                "absence_hypothesis", TomlValue.InlineTable (Map.ofList [
+                    "identity", TomlValue.String hypothesis.Identity
+                    "version", TomlValue.String hypothesis.Version
+                    "source", TomlValue.String hypothesis.Source ])) |> Option.toList ])
 
     let private serializeResource (resource: BindingResource) =
         TomlValue.InlineTable (Map.ofList [
@@ -582,7 +587,7 @@ module PilotSerializer =
                         | Some (TomlValue.Integer value) when value >= 0L && value <= int64 System.Int32.MaxValue -> int value
                         | _ -> failwith "callback_invocations requires a nonnegative parameter index within int range"
                     let scope = text "scope"
-                    let allowed = Set.ofList ["parameter"; "identity"; "version"; "source"; "scope"; "exit_binding"; "success_status"]
+                    let allowed = Set.ofList ["parameter"; "identity"; "version"; "source"; "scope"; "exit_binding"; "success_status"; "absence_hypothesis"]
                     if fields |> Map.exists (fun key _ -> not (Set.contains key allowed)) then
                         failwith "callback_invocations has unknown fields"
                     let exitBinding, successStatus =
@@ -600,8 +605,20 @@ module PilotSerializer =
                                 | _ -> failwith "callback_invocations process_exit requires signed32 success_status"
                             exitBinding, Some successStatus
                         | _ -> failwith "callback_invocations scope must be during_call or process_exit"
+                    let absenceHypothesis =
+                        match TomlTable.tryFind "absence_hypothesis" fields with
+                        | None -> None
+                        | Some (TomlValue.Table hypothesis) | Some (TomlValue.InlineTable hypothesis) ->
+                            if hypothesis |> Map.exists (fun key _ -> not (Set.contains key (Set.ofList ["identity"; "version"; "source"]))) then
+                                failwith "callback_invocations absence_hypothesis has unknown fields"
+                            let required name =
+                                match TomlTable.tryFind name hypothesis with
+                                | Some (TomlValue.String value) when not (System.String.IsNullOrWhiteSpace value) -> value
+                                | _ -> failwith $"callback_invocations absence_hypothesis requires nonempty {name}"
+                            Some { Identity = required "identity"; Version = required "version"; Source = required "source" }
+                        | Some _ -> failwith "callback_invocations absence_hypothesis requires a table"
                     { Parameter = index; Identity = text "identity"; Version = text "version"; Source = text "source"; Scope = scope
-                      ExitBinding = exitBinding; SuccessStatus = successStatus }
+                      ExitBinding = exitBinding; SuccessStatus = successStatus; AbsenceHypothesis = absenceHypothesis }
                 | _ -> failwith "callback_invocations requires tables")
             if (contracts |> List.map _.Parameter |> Set.ofList).Count <> contracts.Length then
                 failwith "callback_invocations has duplicate parameter indices"

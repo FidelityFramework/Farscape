@@ -110,6 +110,13 @@ module PilotTypes =
         Upper: ResultRangeBound
     }
 
+    /// Independent provenance for accepting absence at an exact receiving ordinal.
+    type BindingCallbackAbsenceHypothesis = {
+        Identity: string
+        Version: string
+        Source: string
+    }
+
     /// Explicit external callback activation provenance; ABI stays header-owned.
     type BindingCallbackInvocation = {
         Parameter: int
@@ -119,6 +126,7 @@ module PilotTypes =
         Scope: string
         ExitBinding: string option
         SuccessStatus: int option
+        AbsenceHypothesis: BindingCallbackAbsenceHypothesis option
     }
 
     /// Explicit owned-nullable protocol; no resource authority is inferred from transfer.

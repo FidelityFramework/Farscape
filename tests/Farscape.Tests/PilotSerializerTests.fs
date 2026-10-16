@@ -479,9 +479,33 @@ let ``callback invocation profile roundtrips explicit provenance and missing sta
     let binding = value.Options.Value.Bindings.Head
     Assert.Equal<int list>([0], binding.NonnullCallbacks)
     if absent then Assert.Empty(binding.CallbackInvocations) else
-        let expected: PilotTypes.BindingCallbackInvocation = {Parameter = 0; Identity = "fixture.callback"; Version = "v1"; Source = "/contracts/call_twice.c"; Scope = "during_call"; ExitBinding = None; SuccessStatus = None}
+        let expected: PilotTypes.BindingCallbackInvocation = {Parameter = 0; Identity = "fixture.callback"; Version = "v1"; Source = "/contracts/call_twice.c"; Scope = "during_call"; ExitBinding = None; SuccessStatus = None; AbsenceHypothesis = None}
         Assert.Equal<PilotTypes.BindingCallbackInvocation list>([expected], binding.CallbackInvocations)
     Assert.Equal(value, read (PilotSerializer.toTomlString value))
+
+[<Fact>]
+let ``callback absence hypothesis roundtrips separately from activation`` () =
+    let hypothesis = "{ identity = \"fixture.absence\", version = \"absence-v2\", source = \"/contracts/absence.c\" }"
+    let contract = invocationProfile.Replace(" }", ", absence_hypothesis = " + hypothesis + " }")
+    let read text = PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail text) |> function Ok value -> value | Error error -> failwith error
+    let project = read (invocationPilot ("[" + contract + "]"))
+    let actual = project.Options.Value.Bindings.Head.CallbackInvocations.Head
+    let expected : PilotTypes.BindingCallbackAbsenceHypothesis = {Identity = "fixture.absence"; Version = "absence-v2"; Source = "/contracts/absence.c"}
+    Assert.Equal(Some expected, actual.AbsenceHypothesis)
+    Assert.Equal("fixture.callback", actual.Identity)
+    Assert.Equal(project, read (PilotSerializer.toTomlString project))
+
+[<Theory>]
+[<InlineData("{}", "requires nonempty identity")>]
+[<InlineData("{ identity = \"absent\" }", "requires nonempty version")>]
+[<InlineData("{ identity = \"absent\", version = \"v1\", source = \" \" }", "requires nonempty source")>]
+[<InlineData("{ identity = \"absent\", version = \"v1\", source = \"contract\", extra = true }", "has unknown fields")>]
+[<InlineData("true", "requires a table")>]
+let ``callback absence hypothesis refuses malformed explicit provenance`` hypothesis reason =
+    let contract = invocationProfile.Replace(" }", ", absence_hypothesis = " + hypothesis + " }")
+    match PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail (invocationPilot ("[" + contract + "]"))) with
+    | Error error -> Assert.Contains("callback_invocations absence_hypothesis " + reason, error)
+    | Ok _ -> failwith "Malformed callback absence hypothesis was admitted"
 
 [<Theory>]
 [<InlineData("identity", "requires nonempty identity")>]
@@ -493,6 +517,7 @@ let ``callback invocation profile roundtrips explicit provenance and missing sta
 [<InlineData("overflow", "nonnegative parameter index")>]
 [<InlineData("duplicate", "duplicate parameter indices")>]
 [<InlineData("array", "requires an array")>]
+[<InlineData("boolean", "unknown fields")>]
 let ``callback invocation profile refuses incomplete and unsupported contracts`` shape reason =
     let contract =
         match shape with
@@ -503,6 +528,7 @@ let ``callback invocation profile refuses incomplete and unsupported contracts``
         | "retained" -> invocationProfile.Replace("during_call", "retained")
         | "negative" -> invocationProfile.Replace("parameter = 0", "parameter = -1")
         | "overflow" -> invocationProfile.Replace("parameter = 0", "parameter = 2147483648")
+        | "boolean" -> invocationProfile.Replace(" }", ", accepts_absence = true }")
         | _ -> invocationProfile
     let input = match shape with "duplicate" -> "[" + contract + "," + contract + "]" | "array" -> contract | _ -> "[" + contract + "]"
     match PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail (invocationPilot input)) with

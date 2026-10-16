@@ -779,7 +779,7 @@ let ``result range refuses ineligible native slots and unsupported translation``
 
 let private invocationContract : PilotTypes.BindingCallbackInvocation =
     { Parameter = 0; Identity = "fixture.call_twice.callback"; Version = "v1"
-      Source = "/contracts/call_twice.c"; Scope = "during_call"; ExitBinding = None; SuccessStatus = None }
+      Source = "/contracts/call_twice.c"; Scope = "during_call"; ExitBinding = None; SuccessStatus = None; AbsenceHypothesis = None }
 let private invocationProjection =
     { rangeProjection with Name = "call_twice"; Symbol = "native_call_twice"
                            NonnullCallbacks = [0]; ResultRange = None; CallbackInvocations = [invocationContract] }
@@ -831,6 +831,84 @@ let ``optional callback invocation preserves ordinary Option and exact during ca
     Assert.Equal(1, source.Split("let call_twice ").Length - 1)
     for forbidden in ["call_twiceNative"; ".Invoke"; "llvm."; "nativeptr"; "voidptr"; "nativeint"; " = null"; "fromSymbol"] do
         Assert.DoesNotContain(forbidden, source)
+    Assert.DoesNotContain("Expr<CallbackAbsenceContract>", source)
+
+let private absenceHypothesis : PilotTypes.BindingCallbackAbsenceHypothesis =
+    { Identity = "fixture.call_twice.absence"; Version = "absence-v2"; Source = "/contracts/call_twice-absence.c" }
+
+[<Fact>]
+let ``explicit callback absence emits independent exact receiving promise`` () =
+    let projection =
+        { invocationProjection with
+            NonnullCallbacks = []
+            CallbackInvocations = [{invocationContract with AbsenceHypothesis = Some absenceHypothesis}] }
+    let source = renderInvocation projection "NativeCallback" "void (*)(void)"
+    Assert.Contains("Expr<CallbackAbsenceContract>", source)
+    for text in ["let call_twice (callback: option<FnPtr<unit -> unit>>)"
+                 "Type = Entry \"Test.Native.call_twiceCallback0InvocationContract\""
+                 "Scope = \"Test.Native.call_twiceCallback0Scope\""
+                 "let call_twiceCallback0AbsenceContract : Expr<CallbackAbsenceContract>"
+                 "BAREWire.Descriptors.CallbackAbsenceContract.Binding = \"Test.Native.call_twice\""
+                 "Parameter = 0"; "Identity = \"fixture.call_twice.absence\""
+                 "Version = \"absence-v2\""; "Source = \"/contracts/call_twice-absence.c\""
+                 "Identity = \"fixture.call_twice.callback\""; "ReturnType = Void"] do
+        Assert.Contains(text, source)
+    for forbidden in ["call_twiceNative"; ".Invoke"; "llvm."; "nativeptr"; " = null"] do
+        Assert.DoesNotContain(forbidden, source)
+    Assert.Equal(1, source.Split("Expr<CallbackAbsenceContract>").Length - 1)
+    let withdrawn = renderInvocation {projection with CallbackInvocations = [invocationContract]} "NativeCallback" "void (*)(void)"
+    Assert.DoesNotContain("Expr<CallbackAbsenceContract>", withdrawn)
+    Assert.Contains("Expr<CallbackInvocationContract>", withdrawn)
+    Assert.Contains("(callback: option<FnPtr<unit -> unit>>)", withdrawn)
+
+[<Theory>]
+[<InlineData("identity", "absence_hypothesis requires nonempty identity")>]
+[<InlineData("version", "absence_hypothesis requires nonempty version")>]
+[<InlineData("source", "absence_hypothesis requires nonempty source")>]
+[<InlineData("shared", "absence_hypothesis identity must differ from activation identity")>]
+[<InlineData("duplicate", "duplicate parameter indices")>]
+[<InlineData("ordinal", "requires explicit nonnull evidence")>]
+[<InlineData("retained", "nullable callback parameters require only during_call invocation contracts")>]
+let ``explicit callback absence refuses incomplete shared and unmatched contracts`` shape reason =
+    let hypothesis =
+        match shape with
+        | "identity" -> {absenceHypothesis with Identity = " "}
+        | "version" -> {absenceHypothesis with Version = " "}
+        | "source" -> {absenceHypothesis with Source = " "}
+        | "shared" -> {absenceHypothesis with Identity = invocationContract.Identity}
+        | _ -> absenceHypothesis
+    let contract = {invocationContract with AbsenceHypothesis = Some hypothesis}
+    let contracts =
+        match shape with
+        | "duplicate" -> [contract; contract]
+        | "ordinal" -> [{contract with Parameter = 1}]
+        | "retained" -> [{contract with Scope = "process_exit"; SuccessStatus = Some 0}]
+        | _ -> [contract]
+    let error = Assert.ThrowsAny<System.Exception>(fun () ->
+        renderInvocation {invocationProjection with NonnullCallbacks = []; CallbackInvocations = contracts} "NativeCallback" "void (*)(void)" |> ignore)
+    Assert.Contains(reason, error.Message)
+
+[<Theory>]
+[<InlineData("header")>]
+[<InlineData("type")>]
+[<InlineData("annotations")>]
+[<InlineData("callbacks")>]
+let ``explicit callback absence refuses every current nonnull authority`` evidence =
+    let callbackType = if evidence = "type" then "NativeCallback _Nonnull" else "NativeCallback"
+    let func = mkFuncWithAttrs "call_twice" "void" ["callback", callbackType] (if evidence = "header" then [mkAttr "NonNullAttr" [0] None] else [])
+    let declarations = [CppParser.Declaration.Typedef(mkTypedef "NativeCallback" "void (*)(void)"); CppParser.Declaration.Function func]
+    let context = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
+    let projection =
+        { invocationProjection with
+            NonnullCallbacks = if evidence = "callbacks" then [0] else []
+            CallbackInvocations = [{invocationContract with AbsenceHypothesis = Some absenceHypothesis}] }
+    let context =
+        { context with
+            Bindings = Map.ofList [projection.Name, projection]
+            NonnullAnnotations = if evidence = "annotations" then Some {Parameters = Map.ofList [func.Name, [0]]; Returns = Set.empty} else None }
+    let error = Assert.ThrowsAny<System.Exception>(fun () ->
+        FidelityCodeGenerator.generateModule context Set.empty declarations "Test.Native" "test" "test" [] |> ignore)
+    Assert.Contains("call_twice parameter 0: absence_hypothesis conflicts with a nonnull contract", error.Message)
 
 [<Fact>]
 let ``optional callback invocation preserves nullable alias with its exact contract`` () =

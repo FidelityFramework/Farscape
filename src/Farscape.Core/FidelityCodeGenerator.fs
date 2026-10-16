@@ -527,6 +527,15 @@ module FidelityCodeGenerator =
         let entries = contracts |> List.map (fun contract ->
             for key, value in ["identity", contract.Identity; "version", contract.Version; "source", contract.Source] do
                 if System.String.IsNullOrWhiteSpace value then refuse $"requires nonempty {key}"
+            match contract.AbsenceHypothesis with
+            | Some hypothesis ->
+                for key, value in ["identity", hypothesis.Identity; "version", hypothesis.Version; "source", hypothesis.Source] do
+                    if System.String.IsNullOrWhiteSpace value then refuse $"absence_hypothesis requires nonempty {key}"
+                if hypothesis.Identity = contract.Identity then
+                    refuse "absence_hypothesis identity must differ from activation identity"
+                if contract.Scope <> "during_call" then
+                    refuse "absence_hypothesis requires during_call"
+            | None -> ()
             let scopeType, scopeFields =
                 match contract.Scope, contract.ExitBinding, contract.SuccessStatus with
                 | "during_call", None, None -> "ScopedCallbackDescriptor", []
@@ -604,7 +613,16 @@ module FidelityCodeGenerator =
                         "Identity", Literal (quoteString contract.Identity)
                         "Version", Literal (quoteString contract.Version)
                         "Source", Literal (quoteString contract.Source) ]
-                    "Scope", Literal (quoteString (namespace' + "." + scopeName)) ])) ])
+                    "Scope", Literal (quoteString (namespace' + "." + scopeName)) ]))
+                yield! contract.AbsenceHypothesis |> Option.map (fun hypothesis ->
+                    ValueBinding(nativeName + "Callback" + string contract.Parameter + "AbsenceContract",
+                        Generic("Expr", Named "CallbackAbsenceContract"), Quoted(RecordBlock [
+                            "BAREWire.Descriptors.CallbackAbsenceContract.Binding", Literal (quoteString binding)
+                            "Parameter", Literal (string contract.Parameter)
+                            "Hypothesis", RecordBlock [
+                                "Identity", Literal (quoteString hypothesis.Identity)
+                                "Version", Literal (quoteString hypothesis.Version)
+                                "Source", Literal (quoteString hypothesis.Source) ] ]))) |> Option.toList ])
         entries |> List.map (fun (index, binding, _) -> index, binding) |> Map.ofList,
         entries |> List.collect (fun (_, _, declarations) -> declarations)
 
@@ -644,6 +662,9 @@ module FidelityCodeGenerator =
                 let provenNonnull = nonnullIndices.Contains idx || outerNullabilityIn ctx "_Nonnull" cType || callbackNonnull
                 if provenNonnull && outerNullabilityIn ctx "_Nullable" cType then
                     failwith $"{func.Name} parameter {idx}: nullable native type conflicts with a nonnull contract"
+                if provenNonnull && (projection |> Option.exists (fun binding ->
+                    binding.CallbackInvocations |> List.exists (fun contract -> contract.Parameter = idx && contract.AbsenceHypothesis.IsSome))) then
+                    failwith $"{func.Name} parameter {idx}: absence_hypothesis conflicts with a nonnull contract"
                 let nullableCallback =
                     match resolveIn ctx cType with
                     | FunctionPointer _ when not provenNonnull ->
