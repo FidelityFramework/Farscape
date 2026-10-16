@@ -812,6 +812,68 @@ let ``callback invocation contract binds exact native receiver scope and complet
     let changed = renderInvocation {invocationProjection with CallbackInvocations = [{invocationContract with Version = "v2"}]} "NativeCallback" "long long (*)(int, unsigned long long)"
     Assert.Contains("Version = \"v2\"", changed)
 
+[<Fact>]
+let ``optional callback invocation preserves ordinary Option and exact during call contract`` () =
+    let projection = {invocationProjection with NonnullCallbacks = []}
+    let source = renderInvocation projection "NativeCallback" "long long (*)(int, unsigned long long)"
+    for text in ["(callback: option<FnPtr<int -> int -> int>>)"
+                 "Type = Entry \"Test.Native.call_twiceNativeCallback0InvocationContract\""
+                 "Expr<CallbackInvocationContract>"; "Expr<ScopedCallbackDescriptor>"
+                 "Binding = \"Test.Native.call_twiceNative\""; "Parameter = 0"; "Parameter = \"callback\""
+                 "Scope = \"Test.Native.call_twiceNativeCallback0Scope\""
+                 "Name = \"arg0\"; Type = Integer (Signed, 32)"
+                 "Name = \"arg1\"; Type = Integer (Unsigned, 64)"
+                 "ReturnType = Integer (Signed, 64)"; "CallingConvention = CDecl"
+                 "Identity = \"fixture.call_twice.callback\""; "Version = \"v1\""; "Source = \"/contracts/call_twice.c\""
+                 "let call_twice (callback: option<FnPtr<int -> int -> int>>)"; "call_twiceNative callback"
+                 "None supplies no callable entry"] do
+        Assert.Contains(text, source)
+    for forbidden in ["call_twiceNative callback.Invoke"; "llvm."; "nativeptr"; "voidptr"; "nativeint"; " = null"; "fromSymbol"] do
+        Assert.DoesNotContain(forbidden, source)
+
+[<Fact>]
+let ``optional callback invocation preserves nullable alias with its exact contract`` () =
+    let projection = {invocationProjection with NonnullCallbacks = []}
+    let source = renderInvocation projection "NativeCallback _Nullable" "int (*)(int)"
+    for text in ["(callback: option<FnPtr<int -> int>>)"; "NativeCallback _Nullable callback"
+                 "Type = Entry \"Test.Native.call_twiceNativeCallback0InvocationContract\""
+                 "Expr<CallbackInvocationContract>"; "Expr<ScopedCallbackDescriptor>"
+                 "Binding = \"Test.Native.call_twiceNative\""; "Parameter = 0"; "Parameter = \"callback\""
+                 "Scope = \"Test.Native.call_twiceNativeCallback0Scope\""
+                 "Name = \"arg0\"; Type = Integer (Signed, 32)"; "ReturnType = Integer (Signed, 32)"
+                 "CallingConvention = CDecl"; "Identity = \"fixture.call_twice.callback\""
+                 "Version = \"v1\""; "Source = \"/contracts/call_twice.c\""
+                 "let call_twice (callback: option<FnPtr<int -> int>>)"; "call_twiceNative callback"] do
+        Assert.Contains(text, source)
+    Assert.DoesNotContain("call_twiceNative callback.Invoke", source)
+
+[<Theory>]
+[<InlineData("missing", "requires explicit nonnull evidence")>]
+[<InlineData("wrong-ordinal", "requires explicit nonnull evidence")>]
+[<InlineData("duplicate", "duplicate parameter indices")>]
+[<InlineData("retained", "nullable callback parameters require only during_call invocation contracts")>]
+[<InlineData("process-exit", "nullable callback parameters require only during_call invocation contracts")>]
+[<InlineData("mixed", "nullable callback parameters require only during_call invocation contracts")>]
+[<InlineData("profile", "unsupported native entry signature type 'void *'")>]
+[<InlineData("source", "requires nonempty source")>]
+[<InlineData("exit-fields", "during_call forbids exit_binding and success_status")>]
+let ``optional callback invocation refuses missing ambiguous retained and unsupported contracts`` shape reason =
+    let projection = {invocationProjection with NonnullCallbacks = []}
+    let projection, signature =
+        match shape with
+        | "missing" -> {projection with CallbackInvocations = []}, "int (*)(int)"
+        | "wrong-ordinal" -> {projection with CallbackInvocations = [{invocationContract with Parameter = 1}]}, "int (*)(int)"
+        | "duplicate" -> {projection with CallbackInvocations = [invocationContract; invocationContract]}, "int (*)(int)"
+        | "retained" -> {projection with CallbackInvocations = [{invocationContract with Scope = "retained"}]}, "int (*)(int)"
+        | "process-exit" -> {projection with CallbackInvocations = [{invocationContract with Scope = "process_exit"; SuccessStatus = Some 0}]}, "void (*)(void)"
+        | "mixed" -> {projection with CallbackInvocations = [invocationContract; {invocationContract with Parameter = 1; Scope = "process_exit"; SuccessStatus = Some 0}]}, "int (*)(int)"
+        | "profile" -> projection, "int (*)(void *)"
+        | "source" -> {projection with CallbackInvocations = [{invocationContract with Source = " "}]}, "int (*)(int)"
+        | _ -> {projection with CallbackInvocations = [{invocationContract with ExitBinding = Some "Test.Native.exit"}]}, "int (*)(int)"
+    let error = Assert.ThrowsAny<System.Exception>(fun () -> renderInvocation projection "NativeCallback" signature |> ignore)
+    Assert.Contains("call_twice", error.Message)
+    Assert.Contains(reason, error.Message)
+
 [<Theory>]
 [<InlineData("int (*)(int)", "Signed, 32", "Signed, 32")>]
 [<InlineData("unsigned long long (*)(unsigned int)", "Unsigned, 32", "Unsigned, 64")>]
@@ -896,7 +958,6 @@ let ``callback invocation rejects signatures outside admitted integer profile`` 
 [<InlineData("reference", "unsupported native entry reference signature type 'int &'")>]
 [<InlineData("return-reference", "unsupported native entry reference signature type 'int &'")>]
 [<InlineData("nullable", "nullable native type conflicts with a nonnull contract")>]
-[<InlineData("nonnull", "requires explicit nonnull evidence")>]
 let ``callback invocation contract refuses unsupported receiving correspondence precisely`` shape reason =
     let projection, callbackType, signature =
         match shape with

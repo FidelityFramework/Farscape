@@ -431,140 +431,6 @@ module FidelityCodeGenerator =
                   "CallingConvention", Identifier "CDecl"
                   "OwnershipTransfer", Identifier ownership ])) ]
 
-    /// Generate FsDecl list for a single function binding, followed by its descriptor.
-    /// Pointer parameters are nullable (Option<>) by default unless proven non-null via:
-    /// 1. Clang NonNullAttr — parameter indices explicitly marked non-null
-    /// 2. Pilot TOML [annotations.nonnull] — developer-asserted non-null
-    let generateFunctionDecls (ctx: GenerationContext) (libraryName: string) (func: CppParser.FunctionDecl) : FsDecl list =
-        if ctx.NativePointerSurface then
-            failwith "experimental_native_pointer_surface cannot emit Clef source: raw addresses and width-named carriers violate the FFI boundary contract."
-        let mapType = resolveIn ctx >> clefTypeOf
-        let projection = Map.tryFind func.Name ctx.Bindings
-        let nonnullAnnotations = ctx.NonnullAnnotations
-
-        // Collect proven-nonnull parameter indices from clang attributes
-        let clangNonnull =
-            func.Attributes
-            |> List.collect (fun a -> if a.Kind = "NonNullAttr" then a.Args else [])
-            |> Set.ofList
-        // Collect proven-nonnull parameter indices from pilot TOML
-        let tomlNonnull =
-            nonnullAnnotations
-            |> Option.bind (fun a -> Map.tryFind func.Name a.Parameters)
-            |> Option.defaultValue []
-            |> Set.ofList
-        let nonnullIndices = Set.union clangNonnull tomlNonnull
-
-        // Map parameters with nullability awareness
-        let parameters =
-            func.Parameters
-            |> List.mapi (fun idx (name, cType) ->
-                let reference, _ = referencePassing projection idx cType
-                let element = projection |> Option.bind (fun b -> List.tryItem idx b.ReferenceElements) |> Option.filter ((<>) "")
-                let stringParameter = projection |> Option.exists (fun b -> List.contains idx b.StringParameters)
-                let callbackNonnull = projection |> Option.exists (fun b -> List.contains idx b.NonnullCallbacks)
-                let handle = projection |> Option.bind (fun b -> List.tryItem idx b.ParameterHandles) |> Option.filter ((<>) "")
-                let provenNonnull = nonnullIndices.Contains idx || outerNullabilityIn ctx "_Nonnull" cType || callbackNonnull
-                if provenNonnull && outerNullabilityIn ctx "_Nullable" cType then
-                    failwith $"{func.Name} parameter {idx}: nullable native type conflicts with a nonnull contract"
-                match resolveIn ctx cType with
-                | FunctionPointer _ when not provenNonnull ->
-                    failwith $"{func.Name} parameter {idx}: a native function-pointer parameter requires explicit nonnull evidence; nullable callback parameters require a supported boundary adapter."
-                | _ -> ()
-                let fsType =
-                    if reference then
-                        match cType with
-                        | ParsedCType info when info.PointerDepth = 1 ->
-                            match resolveIn ctx (element |> Option.defaultValue info.BaseType) with
-                            | Scalar r when r.Family = TypeMapper.Signed || r.Family = TypeMapper.Unsigned || r.Family = TypeMapper.Float -> Named (TypeMapper.clefSpelling r.Family + " array")
-                            | (OpaqueHandle _ | DataPointer _) as pointee ->
-                                Named (CodeRenderer.renderType (wrapOption (clefTypeOf pointee)) + " array")
-                            | Scalar r when r.Family = TypeMapper.Pointer ->
-                                Named (CodeRenderer.renderType (wrapOption (clefTypeOf (Scalar r))) + " array")
-                            | _ -> failwith $"{func.Name} parameter {idx}: Reference requires a scalar or opaque pointer cell"
-                        | ParsedCType info when info.PointerDepth = 2 ->
-                            let pointerType = cType.Substring(0, cType.LastIndexOf('*')).Trim()
-                            let element = resolveIn ctx pointerType |> clefTypeOf |> wrapOption
-                            Named (CodeRenderer.renderType element + " array")
-                        | _ -> failwith $"{func.Name} parameter {idx}: Reference requires a scalar cell or one opaque pointer cell"
-                    elif stringParameter then
-                        if isCharPointerIn ctx cType then Named "string"
-                        else failwith $"{func.Name} parameter {idx}: string projection requires char pointer"
-                    elif handle.IsSome then
-                        if not (isDataPointerIn ctx cType) then failwith $"{func.Name} parameter {idx}: handle projection requires a C data pointer"
-                        Generic("CHandle", Named handle.Value)
-                    elif callbackNonnull then
-                        match mapType cType with
-                        | Generic("FnPtr", _) as ty -> ty
-                        | _ -> failwith $"{func.Name} parameter {idx}: nonnull_callbacks requires a C function pointer"
-                    else mapType cType
-                let isNullable = not reference && isDataPointerIn ctx cType && not provenNonnull
-                let finalType = if isNullable then wrapOption fsType else fsType
-                { FsParam.Name = cleanParamName name; Type = finalType })
-
-        // Return type: nullable unless proven nonnull
-        let returnIsPointer = isDataPointerIn ctx func.ReturnType
-        let returnNonnull =
-            nonnullAnnotations
-            |> Option.map (fun a -> a.Returns.Contains func.Name)
-            |> Option.defaultValue false
-        let hasReturnsNonnullAttr =
-            func.Attributes |> List.exists (fun a -> a.Kind = "ReturnsNonNullAttr")
-        let provenReturnNonnull = returnNonnull || hasReturnsNonnullAttr || outerNullabilityIn ctx "_Nonnull" func.ReturnType
-        if provenReturnNonnull && outerNullabilityIn ctx "_Nullable" func.ReturnType then
-            failwith $"{func.Name}: nullable native result conflicts with a nonnull contract"
-        match resolveIn ctx func.ReturnType with
-        | FunctionPointer _ when not provenReturnNonnull ->
-            failwith $"{func.Name}: a native function-pointer result requires explicit nonnull evidence; nullable callback results require a supported boundary adapter."
-        | _ -> ()
-        let returnType =
-            match projection |> Option.bind (fun b -> b.ReturnHandle) with
-            | Some name ->
-                if not (isDataPointerIn ctx func.ReturnType) then failwith $"{func.Name}: return_handle requires a C data pointer"
-                Generic("CHandle", Named name)
-            | None -> mapType func.ReturnType
-        let finalReturnType =
-            if returnIsPointer && not provenReturnNonnull
-            then wrapOption returnType
-            else returnType
-
-        let symbol = projection |> Option.map (fun b -> b.Symbol) |> Option.defaultValue func.Name
-        let constants = projection |> Option.map (fun p -> p.ConstantParameters) |> Option.defaultValue []
-        let fixedAt index = constants |> List.tryItem index |> Option.filter ((<>) "")
-        let projected = constants |> List.exists ((<>) "")
-        let nativeName = if projected then func.Name + "Native" else func.Name
-        let nativeFunction = { func with Name = nativeName }
-        let descriptorContext =
-            match projection with
-            | Some p when projected -> { ctx with Bindings = Map.add nativeName { p with Name = nativeName; ConstantParameters = [] } ctx.Bindings }
-            | _ -> ctx
-        let wrapper =
-            if not projected then [] else
-            let args = parameters |> List.mapi (fun index p ->
-                match fixedAt index with
-                | None -> Identifier p.Name
-                | Some value ->
-                    match System.Int64.TryParse value, p.Type with
-                    | (true, _), Named "int" -> Literal value
-                    | _ -> failwith $"{func.Name} parameter {index}: constant projection requires an integer literal and scalar integer parameter")
-            let publicParameters = parameters |> List.indexed |> List.choose (fun(i,p)->if (fixedAt i).IsSome then None else Some p)
-            [ LetBinding(func.Name, publicParameters, finalReturnType, FunctionCall("", nativeName, args), []) ]
-        let callbackNotes =
-            func.Parameters |> List.mapi (fun idx (name, cType) ->
-                match resolveIn ctx cType with
-                | FunctionPointer _ ->
-                    let evidence =
-                        [ if clangNonnull.Contains idx then "header nonnull attribute"
-                          if tomlNonnull.Contains idx then "pilot annotations.nonnull"
-                          if outerNullabilityIn ctx "_Nonnull" cType then "native _Nonnull type"
-                          if projection |> Option.exists (fun b -> List.contains idx b.NonnullCallbacks) then "pilot nonnull_callbacks" ]
-                        |> String.concat ", "
-                    Some (XmlDoc $"Callback parameter `{name}` nonnull is an external execution hypothesis from {evidence}; it is not a proof of foreign behavior.")
-                | _ -> None) |> List.choose id
-        formatDocDecls { func with Name = symbol } @ callbackNotes @
-        [ LetBinding(nativeName, parameters, finalReturnType, NativeZeroed,
-                     [$"FidelityExtern(\"{libraryName}\", \"{symbol}\")"]) ] @
-        generateDescriptorDecls descriptorContext nativeFunction @ wrapper
 
     /// Escape punctuation reversibly: short record names must remain distinct across modules,
     /// because the compiler can fall back from qualified lookup to a short record name.
@@ -742,6 +608,152 @@ module FidelityCodeGenerator =
         entries |> List.map (fun (index, binding, _) -> index, binding) |> Map.ofList,
         entries |> List.collect (fun (_, _, declarations) -> declarations)
 
+    /// Generate FsDecl list for a single function binding, followed by its descriptor.
+    /// Pointer parameters are nullable (Option<>) by default unless proven non-null via:
+    /// 1. Clang NonNullAttr — parameter indices explicitly marked non-null
+    /// 2. Pilot TOML [annotations.nonnull] — developer-asserted non-null
+    let generateFunctionDecls (ctx: GenerationContext) (libraryName: string) (func: CppParser.FunctionDecl) : FsDecl list =
+        if ctx.NativePointerSurface then
+            failwith "experimental_native_pointer_surface cannot emit Clef source: raw addresses and width-named carriers violate the FFI boundary contract."
+        let mapType = resolveIn ctx >> clefTypeOf
+        let projection = Map.tryFind func.Name ctx.Bindings
+        let nonnullAnnotations = ctx.NonnullAnnotations
+
+        // Collect proven-nonnull parameter indices from clang attributes
+        let clangNonnull =
+            func.Attributes
+            |> List.collect (fun a -> if a.Kind = "NonNullAttr" then a.Args else [])
+            |> Set.ofList
+        // Collect proven-nonnull parameter indices from pilot TOML
+        let tomlNonnull =
+            nonnullAnnotations
+            |> Option.bind (fun a -> Map.tryFind func.Name a.Parameters)
+            |> Option.defaultValue []
+            |> Set.ofList
+        let nonnullIndices = Set.union clangNonnull tomlNonnull
+
+        // Map parameters with nullability awareness
+        let parameters =
+            func.Parameters
+            |> List.mapi (fun idx (name, cType) ->
+                let reference, _ = referencePassing projection idx cType
+                let element = projection |> Option.bind (fun b -> List.tryItem idx b.ReferenceElements) |> Option.filter ((<>) "")
+                let stringParameter = projection |> Option.exists (fun b -> List.contains idx b.StringParameters)
+                let callbackNonnull = projection |> Option.exists (fun b -> List.contains idx b.NonnullCallbacks)
+                let handle = projection |> Option.bind (fun b -> List.tryItem idx b.ParameterHandles) |> Option.filter ((<>) "")
+                let provenNonnull = nonnullIndices.Contains idx || outerNullabilityIn ctx "_Nonnull" cType || callbackNonnull
+                if provenNonnull && outerNullabilityIn ctx "_Nullable" cType then
+                    failwith $"{func.Name} parameter {idx}: nullable native type conflicts with a nonnull contract"
+                let nullableCallback =
+                    match resolveIn ctx cType with
+                    | FunctionPointer _ when not provenNonnull ->
+                        let contracts = projection |> Option.map _.CallbackInvocations |> Option.defaultValue []
+                        if not (contracts |> List.exists (fun contract -> contract.Parameter = idx)) then
+                            failwith $"{func.Name} parameter {idx}: a native function-pointer parameter requires explicit nonnull evidence; nullable callback parameters require a supported boundary adapter."
+                        if contracts |> List.exists (fun contract -> contract.Scope <> "during_call") then
+                            failwith $"{func.Name} parameter {idx}: nullable callback parameters require only during_call invocation contracts."
+                        // Reuse the complete receiving-contract validator before raw emission.
+                        // This profile has no process-exit anchors to resolve.
+                        callbackInvocationDecls ctx "" Map.empty func func.Name |> ignore
+                        true
+                    | _ -> false
+                let fsType =
+                    if reference then
+                        match cType with
+                        | ParsedCType info when info.PointerDepth = 1 ->
+                            match resolveIn ctx (element |> Option.defaultValue info.BaseType) with
+                            | Scalar r when r.Family = TypeMapper.Signed || r.Family = TypeMapper.Unsigned || r.Family = TypeMapper.Float -> Named (TypeMapper.clefSpelling r.Family + " array")
+                            | (OpaqueHandle _ | DataPointer _) as pointee ->
+                                Named (CodeRenderer.renderType (wrapOption (clefTypeOf pointee)) + " array")
+                            | Scalar r when r.Family = TypeMapper.Pointer ->
+                                Named (CodeRenderer.renderType (wrapOption (clefTypeOf (Scalar r))) + " array")
+                            | _ -> failwith $"{func.Name} parameter {idx}: Reference requires a scalar or opaque pointer cell"
+                        | ParsedCType info when info.PointerDepth = 2 ->
+                            let pointerType = cType.Substring(0, cType.LastIndexOf('*')).Trim()
+                            let element = resolveIn ctx pointerType |> clefTypeOf |> wrapOption
+                            Named (CodeRenderer.renderType element + " array")
+                        | _ -> failwith $"{func.Name} parameter {idx}: Reference requires a scalar cell or one opaque pointer cell"
+                    elif stringParameter then
+                        if isCharPointerIn ctx cType then Named "string"
+                        else failwith $"{func.Name} parameter {idx}: string projection requires char pointer"
+                    elif handle.IsSome then
+                        if not (isDataPointerIn ctx cType) then failwith $"{func.Name} parameter {idx}: handle projection requires a C data pointer"
+                        Generic("CHandle", Named handle.Value)
+                    elif callbackNonnull then
+                        match mapType cType with
+                        | Generic("FnPtr", _) as ty -> ty
+                        | _ -> failwith $"{func.Name} parameter {idx}: nonnull_callbacks requires a C function pointer"
+                    else mapType cType
+                let isNullable = nullableCallback || (not reference && isDataPointerIn ctx cType && not provenNonnull)
+                let finalType = if isNullable then wrapOption fsType else fsType
+                { FsParam.Name = cleanParamName name; Type = finalType })
+
+        // Return type: nullable unless proven nonnull
+        let returnIsPointer = isDataPointerIn ctx func.ReturnType
+        let returnNonnull =
+            nonnullAnnotations
+            |> Option.map (fun a -> a.Returns.Contains func.Name)
+            |> Option.defaultValue false
+        let hasReturnsNonnullAttr =
+            func.Attributes |> List.exists (fun a -> a.Kind = "ReturnsNonNullAttr")
+        let provenReturnNonnull = returnNonnull || hasReturnsNonnullAttr || outerNullabilityIn ctx "_Nonnull" func.ReturnType
+        if provenReturnNonnull && outerNullabilityIn ctx "_Nullable" func.ReturnType then
+            failwith $"{func.Name}: nullable native result conflicts with a nonnull contract"
+        match resolveIn ctx func.ReturnType with
+        | FunctionPointer _ when not provenReturnNonnull ->
+            failwith $"{func.Name}: a native function-pointer result requires explicit nonnull evidence; nullable callback results require a supported boundary adapter."
+        | _ -> ()
+        let returnType =
+            match projection |> Option.bind (fun b -> b.ReturnHandle) with
+            | Some name ->
+                if not (isDataPointerIn ctx func.ReturnType) then failwith $"{func.Name}: return_handle requires a C data pointer"
+                Generic("CHandle", Named name)
+            | None -> mapType func.ReturnType
+        let finalReturnType =
+            if returnIsPointer && not provenReturnNonnull
+            then wrapOption returnType
+            else returnType
+
+        let symbol = projection |> Option.map (fun b -> b.Symbol) |> Option.defaultValue func.Name
+        let constants = projection |> Option.map (fun p -> p.ConstantParameters) |> Option.defaultValue []
+        let fixedAt index = constants |> List.tryItem index |> Option.filter ((<>) "")
+        let projected = constants |> List.exists ((<>) "")
+        let nativeName = if projected then func.Name + "Native" else func.Name
+        let nativeFunction = { func with Name = nativeName }
+        let descriptorContext =
+            match projection with
+            | Some p when projected -> { ctx with Bindings = Map.add nativeName { p with Name = nativeName; ConstantParameters = [] } ctx.Bindings }
+            | _ -> ctx
+        let wrapper =
+            if not projected then [] else
+            let args = parameters |> List.mapi (fun index p ->
+                match fixedAt index with
+                | None -> Identifier p.Name
+                | Some value ->
+                    match System.Int64.TryParse value, p.Type with
+                    | (true, _), Named "int" -> Literal value
+                    | _ -> failwith $"{func.Name} parameter {index}: constant projection requires an integer literal and scalar integer parameter")
+            let publicParameters = parameters |> List.indexed |> List.choose (fun(i,p)->if (fixedAt i).IsSome then None else Some p)
+            [ LetBinding(func.Name, publicParameters, finalReturnType, FunctionCall("", nativeName, args), []) ]
+        let callbackNotes =
+            func.Parameters |> List.mapi (fun idx (name, cType) ->
+                match resolveIn ctx cType with
+                | FunctionPointer _ ->
+                    let evidence =
+                        [ if clangNonnull.Contains idx then "header nonnull attribute"
+                          if tomlNonnull.Contains idx then "pilot annotations.nonnull"
+                          if outerNullabilityIn ctx "_Nonnull" cType then "native _Nonnull type"
+                          if projection |> Option.exists (fun b -> List.contains idx b.NonnullCallbacks) then "pilot nonnull_callbacks" ]
+                        |> String.concat ", "
+                    Some (XmlDoc (if evidence = "" then
+                                      $"Callback parameter `{name}` is optional; None supplies no callable entry. Activation relies on the declared during_call external hypothesis, not a proof of foreign behavior."
+                                  else $"Callback parameter `{name}` nonnull is an external execution hypothesis from {evidence}; it is not a proof of foreign behavior."))
+                | _ -> None) |> List.choose id
+        formatDocDecls { func with Name = symbol } @ callbackNotes @
+        [ LetBinding(nativeName, parameters, finalReturnType, NativeZeroed,
+                     [$"FidelityExtern(\"{libraryName}\", \"{symbol}\")"]) ] @
+        generateDescriptorDecls descriptorContext nativeFunction @ wrapper
+
     let private entryParameterReferences entries body =
         if Map.isEmpty entries then body else
         let parameter index = function
@@ -853,9 +865,12 @@ module FidelityCodeGenerator =
         else
         resultRangeDecls ctx namespace' func func.Name true |> ignore
         writableBufferDecls ctx namespace' func func.Name true |> ignore
-        let callbackTypes = entries |> List.map (fun (i, name, _) -> cleanParamName (fst func.Parameters.[i]), name) |> Map.ofList
         let nativeName, nativeParameters, returnType =
             raw |> List.pick (function LetBinding(name, parameters, ret, _, attrs) when not attrs.IsEmpty -> Some (name, parameters, ret) | _ -> None)
+        let callbackTypes = entries |> List.choose (fun (i, name, _) ->
+            match nativeParameters[i].Type with
+            | Generic("option", Generic("FnPtr", _)) -> None
+            | _ -> Some (cleanParamName (fst func.Parameters.[i]), name)) |> Map.ofList
         let privateName = nativeDeclarationName func entries raw
         let entryReferences, invocationDeclarations = callbackInvocationDecls ctx namespace' anchors func privateName
         let publicParameters, callArguments =
