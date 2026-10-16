@@ -767,11 +767,17 @@ module FidelityCodeGenerator =
             | field -> field)))
         | _ -> invalidOp "A native entry reference requires the owning quoted function descriptor."
 
-    /// Keep the full native arity private while carrying declared entry provenance through a
-    /// record projection. This is membrane plumbing, not the application callback interface.
-    let private nativeDeclarationName (func: CppParser.FunctionDecl) (entries: (int * string * FsDecl list) list) (raw: FsDecl list) =
-        let name = raw |> List.pick (function LetBinding(name, _, _, _, attrs) when not attrs.IsEmpty -> Some name | _ -> None)
-        if not (List.isEmpty entries) && name = func.Name then name + "Native" else name
+    /// Only a real callback/argument adapter needs a separate native declaration.
+    /// An unchanged optional entry carrier is already the public binding surface.
+    let private nativeDeclarationName (ctx: GenerationContext) (func: CppParser.FunctionDecl) (entries: (int * string * FsDecl list) list) (raw: FsDecl list) =
+        let name, parameters = raw |> List.pick (function LetBinding(name, parameters, _, _, attrs) when not attrs.IsEmpty -> Some(name, parameters) | _ -> None)
+        let unchangedOptional =
+            not entries.IsEmpty &&
+            (ctx.Bindings |> Map.tryFind func.Name |> Option.bind _.Resource |> Option.isNone) &&
+            (entries |> List.forall (fun (ordinal, _, _) ->
+                match parameters[ordinal].Type with Generic("option", Generic("FnPtr", _)) -> true | _ -> false)) &&
+            not (raw |> List.exists (function LetBinding(publicName, _, _, _, []) when publicName = func.Name -> true | _ -> false))
+        if not entries.IsEmpty && name = func.Name && not unchangedOptional then name + "Native" else name
 
     /// Consume the same selected declaration account as callback anchors. Native
     /// representation stays in its original descriptor; this quotation adds a promise.
@@ -871,8 +877,9 @@ module FidelityCodeGenerator =
             match nativeParameters[i].Type with
             | Generic("option", Generic("FnPtr", _)) -> None
             | _ -> Some (cleanParamName (fst func.Parameters.[i]), name)) |> Map.ofList
-        let privateName = nativeDeclarationName func entries raw
-        let entryReferences, invocationDeclarations = callbackInvocationDecls ctx namespace' anchors func privateName
+        let emittedName = nativeDeclarationName ctx func entries raw
+        let needsAdapter = emittedName <> func.Name
+        let entryReferences, invocationDeclarations = callbackInvocationDecls ctx namespace' anchors func emittedName
         let publicParameters, callArguments =
             match raw |> List.tryPick (function
                 | LetBinding(name, parameters, _, FunctionCall(_, _, arguments), []) when name = func.Name -> Some (parameters, arguments)
@@ -886,11 +893,12 @@ module FidelityCodeGenerator =
             | arg -> arg)
         let declarations = raw |> List.choose (function
             | LetBinding(name, parameters, ret, body, attrs) when name = nativeName && not attrs.IsEmpty ->
-                Some (LetBinding("private " + privateName, parameters, ret, body, attrs))
-            | ValueBinding(name, ty, body) when name = nativeName + "Descriptor" -> Some (ValueBinding(privateName + "Descriptor", ty, entryParameterReferences entryReferences body))
+                Some (LetBinding((if needsAdapter then "private " + emittedName else emittedName), parameters, ret, body, attrs))
+            | ValueBinding(name, ty, body) when name = nativeName + "Descriptor" -> Some (ValueBinding(emittedName + "Descriptor", ty, entryParameterReferences entryReferences body))
             | LetBinding(name, _, _, _, []) when name = func.Name -> None
             | declaration -> Some declaration)
-        declarations @ invocationDeclarations @ resourceDecls ctx namespace' anchors func privateName raw @ [ LetBinding(func.Name, publicParameters, returnType, FunctionCall("", privateName, callArguments), []) ]
+        let adapter = if needsAdapter then [LetBinding(func.Name, publicParameters, returnType, FunctionCall("", emittedName, callArguments), [])] else []
+        declarations @ invocationDeclarations @ resourceDecls ctx namespace' anchors func emittedName raw @ adapter
 
     let generateDeclaredFunctionDecls (ctx: GenerationContext) libraryName namespace' (func: CppParser.FunctionDecl) =
         declaredFunctionDecls ctx namespace' Map.empty func (callbackEntries ctx namespace' func) (generateFunctionDecls ctx libraryName func)
@@ -1095,7 +1103,7 @@ module FidelityCodeGenerator =
         let prepared = functionDeclarations |> List.map (fun func ->
             func, callbackEntries ctx namespace' func, generateFunctionDecls ctx libraryName func)
         let anchors = prepared |> List.map (fun (func, entries, raw) ->
-            namespace' + "." + func.Name, (namespace' + "." + nativeDeclarationName func entries raw, func, raw)) |> Map.ofList
+            namespace' + "." + func.Name, (namespace' + "." + nativeDeclarationName ctx func entries raw, func, raw)) |> Map.ofList
         let functions = prepared |> List.collect (fun (func, entries, raw) -> declaredFunctionDecls ctx namespace' anchors func entries raw)
         let macros = groups |> List.collect (function GMacro d -> d | _ -> [])
 
