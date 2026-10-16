@@ -591,7 +591,7 @@ module FidelityCodeGenerator =
             contract.Parameter, namespace' + "." + contractName, [
                 XmlDoc "Declared foreign activation only: no argument values, invocation count, purity or functionhood are supplied."
                 ValueBinding(scopeName, Generic("Expr", Named scopeType), Quoted(RecordBlock ([
-                    "Binding", Literal (quoteString binding)
+                    "BAREWire.Descriptors." + scopeType + ".Binding", Literal (quoteString binding)
                     "Parameter", Literal (quoteString ((cleanParamName name).Replace("``", ""))) ] @ scopeFields)))
                 ValueBinding(contractName, Generic("Expr", Named "CallbackInvocationContract"), Quoted(RecordBlock [
                     "Binding", Literal (quoteString binding)

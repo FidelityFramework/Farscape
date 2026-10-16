@@ -962,6 +962,7 @@ let ``callback invocation void result preserves complete ordered integer formals
 [<Fact>]
 let ``callback invocation explicit void prototype has logical unit and no native formals`` () =
     let source = renderInvocation invocationProjection "NativeCallback" "void (*)(void)"
+    Assert.Contains("BAREWire.Descriptors.ScopedCallbackDescriptor.Binding = \"Test.Native.call_twiceNative\"", source)
     let contract = source.Substring(source.IndexOf("Expr<CallbackInvocationContract>"))
     let signatureText = contract.Substring(0, contract.IndexOf("Hypothesis ="))
     Assert.Contains("Invoke: FnPtr<unit -> unit>", source)
@@ -1081,6 +1082,7 @@ let private renderProcessExit anchor status receiverResult signature =
 [<InlineData(true)>]
 let ``process exit invocation emits optional exact generated native anchor`` anchored =
     let source = renderProcessExit (if anchored then Some "Test.Process.exit" else None) (Some 0) "int" "void (*)(void)"
+    Assert.Contains("BAREWire.Descriptors.ProcessExitCallbackDescriptor.Binding = \"Test.Process.atexitNative\"", source)
     for text in ["Expr<ProcessExitCallbackDescriptor>"; "Binding = \"Test.Process.atexitNative\""; "Parameter = \"func\""; "SuccessStatus = 0"; "Invoke: FnPtr<unit -> unit>"; "Identity = \"fixture.call_twice.callback\""; "ReturnType = Integer (Signed, 32)"] do
         Assert.Contains(text, source)
     Assert.Contains((if anchored then "ExitBinding = Some \"Test.Process.exitNative\"" else "ExitBinding = None"), source)
