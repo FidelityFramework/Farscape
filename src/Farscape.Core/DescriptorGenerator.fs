@@ -113,6 +113,10 @@ module DescriptorGenerator =
             let bytes = int (max 1L ((int64 r.Bits + 7L) / 8L))
             bytes, bytes
 
+    let private scalarFieldExtent structName fieldName count r =
+        let bytes, align = scalarExtent r
+        descriptorInt $"Struct '{structName}' field '{fieldName}' extent" (int64 bytes * int64 count), align
+
     /// Admit the measured storage extent before any consumer uses its byte quantities.
     let validateMeasuredLayout (s: CppParser.StructDecl) (measured: CppParser.StructLayoutInfo) : int * int =
         if s.Fields.Length <> measured.FieldOffsetsBits.Length then
@@ -183,8 +187,7 @@ module DescriptorGenerator =
             let fieldExtent fieldName count shape : int * int =
                 match shape with
                 | RepresentedScalar r ->
-                    let bytes, align = scalarExtent r
-                    descriptorInt $"Struct '{s.Name}' field '{fieldName}' extent" (int64 bytes * int64 count), align
+                    scalarFieldExtent s.Name fieldName count r
                 | RepresentedStruct nested when depth >= 16 && not (Map.containsKey nested.Name src.Layouts) ->
                     invalidOp $"Struct '{s.Name}' field '{fieldName}' nests record type '{nested.Name}' beyond the supported declared-layout depth of 16; a measured layout or a shallower complete representation contract is required."
                 | RepresentedStruct nested ->
@@ -201,17 +204,22 @@ module DescriptorGenerator =
             offsets, descriptorInt $"Struct '{s.Name}' final size" (alignUp endOffset (int64 maxAlign)), maxAlign, Declared
 
     /// The BAREWire field descriptor of one field at its offset.
-    let private fieldDescriptor (src: LayoutSource) structName (offsetStratum: Stratum) (f: CppParser.FieldDecl) (offset: int) : FsExpr =
+    let private fieldDescriptor (src: LayoutSource) structName (offsetStratum: Stratum) (size: int) (f: CppParser.FieldDecl) (offset: int) : FsExpr =
         let access = if f.IsConst then "AccessKind.ReadOnly" else "AccessKind.ReadWrite"
         let shape = representedFieldShape src structName f
         let count = elementCount structName f
-        let repr, countSource, note =
+        let repr, countSource, note, extent =
             match shape with
-            | RepresentedScalar r -> reprSource r, string count, $"repr {stratumName r.Stratum}: {r.CType} under {src.Model}"
+            | RepresentedScalar r ->
+                let extent, _ = scalarFieldExtent structName f.Name count r
+                reprSource r, string count, $"repr {stratumName r.Stratum}: {r.CType} under {src.Model}", extent
             | RepresentedStruct nested ->
                 let _, size, _, _ = layoutOf src 1 nested
                 let byteCount = descriptorInt $"Struct '{structName}' field '{f.Name}' nested byte count" (int64 size * int64 count)
-                "Repr.U8", string byteCount, $"nested struct {nested.Name} by value, as bytes; see {nested.Name}.Descriptor"
+                "Repr.U8", string byteCount, $"nested struct {nested.Name} by value, as bytes; see {nested.Name}.Descriptor", byteCount
+        let endOffset = int64 offset + int64 extent
+        if endOffset > int64 size then
+            invalidOp $"Struct '{structName}' field '{f.Name}' has byte extent {extent} at {stratumName offsetStratum} offset {offset}, ending at byte {endOffset} beyond the record size {size}; a measured layout consistent with its field representation is required."
         let doc = $"offset {stratumName offsetStratum}; {note}"
         RecordConstruction [
             "Name", Literal (quote f.Name)
@@ -246,7 +254,7 @@ module DescriptorGenerator =
                 "Layout", RecordBlock [
                     "Size", Literal (string size)
                     "Alignment", Literal (string align)
-                    "Fields", ArrayBlock (fieldPairs |> List.map (fun (f, offset) -> fieldDescriptor src s.Name stratum f offset))
+                    "Fields", ArrayBlock (fieldPairs |> List.map (fun (f, offset) -> fieldDescriptor src s.Name stratum size f offset))
                 ]
                 "Documentation", Literal (optionSource s.Documentation)
             ]
