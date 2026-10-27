@@ -915,7 +915,7 @@ module BindingGenerator =
 
                 // ── BAREWire descriptors ─────────────────────────────────────
                 // Every struct's StructDescriptor is emitted inside its layout module in the
-                // Types module (docs/14 §2); there is no separate Descriptors file to write.
+                // Types module (wiki 14_Binding_Generation_Gaps §2); there is no separate Descriptors file to write.
 
                 // ── Callback spec (resolved here, used by L2 marshaling) ────
                 let callbackSpec =

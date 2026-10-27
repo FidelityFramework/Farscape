@@ -21,7 +21,7 @@ open Types
 /// only `int`, `float`, `bool`, `unit`, `CHandle<'T>` and `FnPtr<'F>`; the width of every
 /// parameter and return is the ABI representation carried by the `Expr<FunctionDescriptor>`
 /// quotation emitted beside each extern (platform-bindings.md, Layer 2), and a C struct is a
-/// layout module plus a BAREWire `StructDescriptor` (docs/14 §2), never a record.
+/// layout module plus a BAREWire `StructDescriptor` (wiki 14_Binding_Generation_Gaps §2), never a record.
 ///
 /// Architecture:
 ///   Catamorphism (DeclarationAlgebra) → FsDecl list → CodeRenderer.render
@@ -932,7 +932,7 @@ module FidelityCodeGenerator =
         [ EnumType(e.Name, values, e.Documentation, isFlags) ]
 
     /// Generate FsDecl list for a C struct: a layout module of literal offsets plus its
-    /// BAREWire StructDescriptor (docs/14 §2), measured when the pilot measured it.
+    /// BAREWire StructDescriptor (wiki 14_Binding_Generation_Gaps §2), measured when the pilot measured it.
     let private generateStructDecl (ctx: GenerationContext) (s: CppParser.StructDecl) : FsDecl list =
         // Measured synchronization unions are opaque storage. Their public
         // extent/alignment is measured; overlapping implementation members are not fields

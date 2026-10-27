@@ -23,7 +23,7 @@ CCS performs reachability analysis on the PSG. Diagnostics on nodes not reachabl
 - Errors only surface when application code reaches for those bindings
 - Library verification must bypass this demotion to catch errors early
 
-> **Not implemented (verified 2026-08-03).** The CLI root command is `generate | pilot | project`; there is no `verify` subcommand. The description below is a design. See `docs/09_Library_Verification.md` and `docs/14_Binding_Generation_Gaps.md` §6.
+> **Not implemented (verified 2026-08-03).** The CLI root command is `generate | pilot | project`; there is no `verify` subcommand. The description below is a design. See the Farscape wiki pages 09_Library_Verification and 14_Binding_Generation_Gaps §6.
 
 ### `farscape verify` Command
 
@@ -100,7 +100,7 @@ Farscape is an interim tool. Its capabilities evolve into Composer features acce
 
 ## Related Documentation
 
-- Farscape: `docs/09_Library_Verification.md`
-- Farscape: `docs/roadmap/08_composer-transcribe-vision.md`
+- Farscape wiki: https://forge.spkez.dev/FidelityFramework/Farscape/wiki/09_Library_Verification
+- Farscape wiki: https://forge.spkez.dev/FidelityFramework/Farscape/wiki/Roadmap-08-composer-transcribe-vision
 - Composer: `docs/CCS_Architecture.md`
 - Atelier: `docs/08_tooling_integration.md`

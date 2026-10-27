@@ -14,7 +14,11 @@ Under Active Development<br>
 
 Farscape automatically generates Clef bindings from C header files. It uses **clang** for robust header parsing and **XParsec** parser combinators for post-processing C type declarations and preprocessor macro values, producing type-safe Clef code that integrates with the Fidelity native compilation toolchain.
 
-The [2026-10-03 FFI checkpoint](docs/handoff/2026-10-03-ffi-boundary-checkpoint.md)
+Design documents, the definition of done and the decision ledger live on the
+[project wiki](https://forge.spkez.dev/FidelityFramework/Farscape/wiki); every work item is an
+[issue](https://forge.spkez.dev/FidelityFramework/Farscape/issues) on a milestone.
+
+The [2026-10-03 FFI checkpoint](https://forge.spkez.dev/FidelityFramework/Farscape/wiki/History-20261003-ffi-boundary-checkpoint)
 records the completed pointer-surface correction, **649/649** source tests and
 **17/17** generator/compiler conformance gates. Generation uses nominal
 `CHandle` carriers, conservative nullability and typed `FnPtr` declarations.

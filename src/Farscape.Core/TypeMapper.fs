@@ -13,7 +13,7 @@ open XParsec.CharParsers
 /// leg): every C integer becomes `int` (signed) or `uint` (unsigned) in the Clef signature and the
 /// width is never in the type; floats become `float` likewise. The C type's ABI representation, its
 /// family and bits under the target profile, is the declaration the binding descriptor carries in
-/// its `ParameterInfo`, read by the compiler's C ABI boundary reader (design §4.1). docs/14 §2's
+/// its `ParameterInfo`, read by the compiler's C ABI boundary reader (design §4.1). Farscape wiki 14_Binding_Generation_Gaps §2's
 /// request for a fixed-width ABI map beside a register-width map dissolves: there is one table, and
 /// its width column is descriptor data, not a Clef type.
 module TypeMapper =
@@ -27,7 +27,7 @@ module TypeMapper =
         | Bool
         | Void
 
-    /// The provenance stratum of a width fact (Farscape docs/14 §8): measured outranks declared
+    /// The provenance stratum of a width fact (Farscape wiki 14_Binding_Generation_Gaps §8): measured outranks declared
     /// outranks inferred. A lower stratum refines where a higher is silent and never contradicts it.
     type Stratum =
         | Measured

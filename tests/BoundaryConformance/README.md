@@ -1,6 +1,6 @@
 # Generator/compiler boundary conformance
 
-The [2026-10-03 checkpoint](../../docs/handoff/2026-10-03-ffi-boundary-checkpoint.md)
+The [2026-10-03 checkpoint](https://forge.spkez.dev/FidelityFramework/Farscape/wiki/History-20261003-ffi-boundary-checkpoint)
 records the accepted **649/649** source tests and **17/17** conformance gates,
 their artifact hashes, current generation scope and regeneration procedure.
 These gates do not execute native callbacks or establish foreign lifetimes.

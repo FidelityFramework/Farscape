@@ -7,13 +7,13 @@ open TypeMapper
 
 /// Emits the two declarations a C struct becomes, and the descriptor vocabulary functions become.
 ///
-/// A C struct is never a Clef record (Farscape docs/14 §2: a packed record cannot overlay a C
+/// A C struct is never a Clef record (Farscape wiki 14_Binding_Generation_Gaps §2: a packed record cannot overlay a C
 /// layout, and one that looks usable and reads the wrong bytes is the worst artifact this
 /// generator can produce). It is a layout module of literal offsets plus a BAREWire
 /// `StructDescriptor` in the Hardware vocabulary (BAREWire/src/Hardware/Descriptors.fs), the
 /// contract every processor sharing the memory agrees on (roadmap §4.4).
 ///
-/// Every width fact names its stratum (docs/14 §8): offsets are measured when the pilot measured
+/// Every width fact names its stratum (wiki 14_Binding_Generation_Gaps §8): offsets are measured when the pilot measured
 /// the struct (clang record layout dump), declared when computed by natural alignment under the
 /// profile from the declared field types, inferred when a field's representation is unknown.
 module DescriptorGenerator =

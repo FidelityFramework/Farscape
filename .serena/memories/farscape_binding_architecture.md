@@ -71,7 +71,7 @@ Farscape generates Clef source libraries that must be **verified error-free** vi
 
 **The reachability trap**: CCS demotes diagnostics on unreachable nodes from Error→Info. A library with type errors appears clean as a dependency until application code `open`s its modules. Library verification must bypass this demotion.
 
-> **Not implemented (verified 2026-08-03).** The CLI root command is `generate | pilot | project`; there is no `verify` subcommand. The description below is a design. See `docs/09_Library_Verification.md` and `docs/14_Binding_Generation_Gaps.md` §6.
+> **Not implemented (verified 2026-08-03).** The CLI root command is `generate | pilot | project`; there is no `verify` subcommand. The description below is a design. See the Farscape wiki pages 09_Library_Verification and 14_Binding_Generation_Gaps §6.
 
 **Command**: `farscape verify --fidproj <path>` — invokes CCS against library sources, reports diagnostics at true severity.
 
