@@ -804,6 +804,156 @@ module GeneratorDispatch =
         let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 16 root |> ignore)
         Assert.Equal(expected, error.Message)
 
+    // Reuse parsed declarations across layout and emission without allocating the
+    // storage described by the large C arrays exercising integer boundaries.
+    let private extentSource declarations =
+        let records = declarations |> List.choose (function CppParser.Declaration.Struct s -> Some (s.Name, s) | _ -> None) |> Map.ofList
+        let source : DescriptorGenerator.LayoutSource =
+            { Structs = records; Layouts = Map.empty; Model = Types.LP64
+              Shape = fun typ ->
+                  if typ.StartsWith("struct ") then DescriptorGenerator.StructField(typ.Substring(7))
+                  elif typ = "char" || typ = "int" then
+                      DescriptorGenerator.ScalarField {Family = TypeMapper.Signed; Bits = (if typ = "char" then 8 else 32); Stratum = TypeMapper.Declared; CType = typ}
+                  else DescriptorGenerator.UnknownField typ }
+        source, records["Holder"]
+
+    [<Theory>]
+    [<InlineData("int values[536870912];", false, "field 'values' extent")>]
+    [<InlineData("struct Inner values[536870912];", false, "field 'values' extent")>]
+    [<InlineData("char bytes[2147483647]; char tail;", false, "final size")>]
+    [<InlineData("char bytes[2147483647]; int tail;", false, "field 'tail' aligned offset")>]
+    [<InlineData("int tag; char bytes[2147483643];", false, "final size")>]
+    [<InlineData("int values[536870912];", true, "field 'values' extent")>]
+    [<InlineData("struct Inner values[536870912];", true, "field 'values' extent")>]
+    let ``overflowing declared byte quantities refuse before emitting a layout`` fields isUnion subject =
+        let kind = if isUnion then "union" else "struct"
+        withLayoutHeader $"struct Inner {{ int value; }}; {kind} Holder {{ {fields} }};\n" [] (fun declarations _ ->
+            let source, root = extentSource declarations
+            let expected = $"Struct 'Holder' {subject} has byte quantity 2147483648 outside the supported descriptor range 0..2147483647; a wider descriptor representation contract is required."
+            let calls =
+                [ (fun () -> DescriptorGenerator.layoutOf source 0 root |> ignore)
+                  (fun () -> DescriptorGenerator.structDecls source root |> ignore)
+                  (fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore) ]
+            for call in calls do
+                let error = Assert.Throws<System.InvalidOperationException>(fun () -> call ())
+                Assert.Equal(expected, error.Message))
+
+    [<Theory>]
+    [<InlineData("char bytes[2147483647];", 2147483647, 1)>]
+    [<InlineData("int values[536870911];", 2147483644, 4)>]
+    [<InlineData("struct Inner values[536870911];", 2147483644, 4)>]
+    [<InlineData("int tag; char bytes[2147483639];", 2147483644, 4)>]
+    [<InlineData("char bytes[2147483639]; int tail;", 2147483644, 4)>]
+    let ``representable boundary extents retain exact layout and counts`` (fields: string) expected alignment =
+        withLayoutHeader $"struct Inner {{ int value; }}; struct Holder {{ {fields} }};\n" [] (fun declarations _ ->
+            let source, root = extentSource declarations
+            let offsets, size, align, stratum = DescriptorGenerator.layoutOf source 0 root
+            Assert.Equal(expected, size)
+            Assert.Equal(alignment, align)
+            Assert.Equal(TypeMapper.Declared, stratum)
+            let expectedOffsets =
+                if fields.StartsWith("int tag") then [0; 4]
+                elif fields.Contains("int tail") then [0; 2147483640]
+                else [0]
+            Assert.Equal<int list>(expectedOffsets, offsets)
+            let direct = CodeRenderer.render (Module("Test", "", DescriptorGenerator.structDecls source root))
+            let generated = FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty
+            for output in [direct; generated] do
+                Assert.Contains($"let Size = {expected}", output)
+                if fields.StartsWith("struct Inner") then Assert.Contains("Repr = Repr.U8; Count = 2147483644", output)
+                elif fields = "char bytes[2147483647];" then Assert.Contains("Count = 2147483647", output)
+                elif fields = "int values[536870911];" then Assert.Contains("Count = 536870911", output))
+
+    [<Fact>]
+    let ``four gigabyte extent cannot wrap to an apparently valid zero`` () =
+        withLayoutHeader "struct Holder { int values[1073741824]; };\n" [] (fun declarations _ ->
+            let source, root = extentSource declarations
+            for call in [ (fun () -> DescriptorGenerator.layoutOf source 0 root |> ignore)
+                          (fun () -> DescriptorGenerator.structDecls source root |> ignore)
+                          (fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore) ] do
+                let error = Assert.Throws<System.InvalidOperationException>(fun () -> call ())
+                Assert.Equal("Struct 'Holder' field 'values' extent has byte quantity 4294967296 outside the supported descriptor range 0..2147483647; a wider descriptor representation contract is required.", error.Message))
+
+    [<Fact>]
+    let ``representable union retains its maximum extent`` () =
+        withLayoutHeader "union Holder { char bytes[2147483644]; int tag; };\n" [] (fun declarations _ ->
+            let source, root = extentSource declarations
+            let offsets, size, align, stratum = DescriptorGenerator.layoutOf source 0 root
+            Assert.Equal<int list>([0; 0], offsets)
+            Assert.Equal(2147483644, size)
+            Assert.Equal(4, align)
+            Assert.Equal(TypeMapper.Declared, stratum)
+            let output = CodeRenderer.render (Module("Test", "", DescriptorGenerator.structDecls source root))
+            Assert.Contains("Count = 2147483644", output))
+
+    [<Fact>]
+    let ``empty top level layout retains zero size`` () =
+        let source, _ = depthChain 0 None
+        let root = mkStruct "Empty" [] None
+        let offsets, size, align, stratum = DescriptorGenerator.layoutOf source 0 root
+        Assert.Empty(offsets)
+        Assert.Equal(0, size)
+        Assert.Equal(1, align)
+        Assert.Equal(TypeMapper.Declared, stratum)
+
+    [<Fact>]
+    let ``measured parent does not bypass the nested descriptor count range`` () =
+        withLayoutHeader "struct Inner { int value; }; struct Holder { struct Inner values[536870912]; };\n" [] (fun declarations _ ->
+            let source, root = extentSource declarations
+            // Supplied direct metadata exercises emission after the measured branch;
+            // this deliberately contradictory size is not asserted to be valid C.
+            let layouts = Map.ofList ["Holder", mkLayout "Holder" 128 32 [0]]
+            let source = {source with Layouts = layouts}
+            let _, size, _, stratum = DescriptorGenerator.layoutOf source 0 root
+            Assert.Equal(16, size)
+            Assert.Equal(TypeMapper.Measured, stratum)
+            for call in [ (fun () -> DescriptorGenerator.structDecls source root |> ignore)
+                          (fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts |> ignore) ] do
+                let error = Assert.Throws<System.InvalidOperationException>(fun () -> call ())
+                Assert.Equal("Struct 'Holder' field 'values' nested byte count has byte quantity 2147483648 outside the supported descriptor range 0..2147483647; a wider descriptor representation contract is required.", error.Message))
+
+    [<Fact>]
+    let ``measured parent still checks the nested declared extent`` () =
+        withLayoutHeader "struct Product { int values[536870912]; }; struct Holder { struct Product payload; };\n" [] (fun declarations _ ->
+            let source, root = extentSource declarations
+            let source = {source with Layouts = Map.ofList ["Holder", mkLayout "Holder" 128 32 [0]]}
+            let _, _, _, stratum = DescriptorGenerator.layoutOf source 0 root
+            Assert.Equal(TypeMapper.Measured, stratum)
+            let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source root |> ignore)
+            Assert.Equal("Struct 'Product' field 'values' extent has byte quantity 2147483648 outside the supported descriptor range 0..2147483647; a wider descriptor representation contract is required.", error.Message))
+
+    [<Theory>]
+    [<InlineData(0)>]
+    [<InlineData(1)>]
+    [<InlineData(2)>]
+    let ``existing representation refusals precede arithmetic narrowing`` scenario =
+        let source, root = depthChain 1 None
+        let payload = {root.Fields.Head with IsArray = true; ArraySize = Some 536870912}
+        let root, depth, expected =
+            match scenario with
+            | 0 ->
+                {root with Fields = [payload; mkField "later" "mystery_t"]}, 0,
+                "Struct 'R0' field 'later' has no known representation for type 'mystery_t'; a complete C representation contract is required."
+            | 1 ->
+                {root with Fields = [payload]}, 16,
+                "Struct 'R0' field 'payload' nests record type 'R1' beyond the supported declared-layout depth of 16; a measured layout or a shallower complete representation contract is required."
+            | _ ->
+                {root with Fields = [payload; {mkField "flags" "int" with IsBitfield = true}]}, 0,
+                "Struct 'R0' field 'flags' is a bitfield; a supported bit-precise descriptor representation is required."
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source depth root |> ignore)
+        Assert.Equal(expected, error.Message)
+
+    [<Fact>]
+    let ``wide scalar bit rounding does not wrap before extent multiplication`` () =
+        let source, root = depthChain 0 None
+        let source = {source with Shape = fun typ -> DescriptorGenerator.ScalarField {Family = TypeMapper.Unsigned; Bits = 2147483647; Stratum = TypeMapper.Declared; CType = typ}}
+        let _, size, align, _ = DescriptorGenerator.layoutOf source 0 root
+        Assert.Equal(268435456, size)
+        Assert.Equal(268435456, align)
+        // The unsupported repr tag still belongs to the downstream vocabulary validator.
+        let output = CodeRenderer.render (Module("Test", "", DescriptorGenerator.structDecls source root))
+        Assert.Contains("Repr = \"u2147483647\"", output)
+
 // =========================================================================
 // PilotSerializer Tests ([options] section)
 // =========================================================================

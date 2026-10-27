@@ -78,8 +78,15 @@ module DescriptorGenerator =
         | Some (d: string) -> $"Some {quote d}"
         | None -> "None"
 
-    let private alignUp (offset: int) (align: int) =
-        if align <= 1 then offset else ((offset + align - 1) / align) * align
+    // Products have int operands; checked extents and offsets bound the next sum.
+    // These int64 intermediates are therefore at most 2^62 before narrowing.
+    let private descriptorInt subject (value: int64) =
+        if value < 0L || value > 2147483647L then
+            invalidOp $"{subject} has byte quantity {value} outside the supported descriptor range 0..2147483647; a wider descriptor representation contract is required."
+        int value
+
+    let private alignUp (offset: int64) (align: int64) =
+        if align <= 1L then offset else ((offset + align - 1L) / align) * align
 
     /// Only the field parser's supported declarators grant an element spelling.
     let private elementType structName (f: CppParser.FieldDecl) =
@@ -103,7 +110,7 @@ module DescriptorGenerator =
         match r.Family, r.Bits with
         | Float, 80 -> 16, 16
         | _ ->
-            let bytes = max 1 ((r.Bits + 7) / 8)
+            let bytes = int (max 1L ((int64 r.Bits + 7L) / 8L))
             bytes, bytes
 
     /// A measured layout is usable only when every original field has one offset.
@@ -155,21 +162,21 @@ module DescriptorGenerator =
                 match shape with
                 | RepresentedScalar r ->
                     let bytes, align = scalarExtent r
-                    bytes * count, align
+                    descriptorInt $"Struct '{s.Name}' field '{fieldName}' extent" (int64 bytes * int64 count), align
                 | RepresentedStruct nested when depth >= 16 && not (Map.containsKey nested.Name src.Layouts) ->
                     invalidOp $"Struct '{s.Name}' field '{fieldName}' nests record type '{nested.Name}' beyond the supported declared-layout depth of 16; a measured layout or a shallower complete representation contract is required."
                 | RepresentedStruct nested ->
                     let _, size, align, _ = layoutOf src (depth + 1) nested
-                    size * count, align
+                    descriptorInt $"Struct '{s.Name}' field '{fieldName}' extent" (int64 size * int64 count), align
             let (endOffset, maxAlign, offsets) =
                 fields
                 |> List.fold (fun (offset, maxAlign, offsets) (fieldName, shape, count) ->
                     let size, align = fieldExtent fieldName count shape
-                    let at = if s.IsUnion then 0 else alignUp offset align
-                    let next = if s.IsUnion then max offset size else at + size
+                    let at = if s.IsUnion then 0 else descriptorInt $"Struct '{s.Name}' field '{fieldName}' aligned offset" (alignUp offset (int64 align))
+                    let next = if s.IsUnion then max offset (int64 size) else int64 at + int64 size
                     next, max maxAlign align, offsets @ [at])
-                    (0, 1, [])
-            offsets, alignUp endOffset maxAlign, maxAlign, Declared
+                    (0L, 1, [])
+            offsets, descriptorInt $"Struct '{s.Name}' final size" (alignUp endOffset (int64 maxAlign)), maxAlign, Declared
 
     /// The BAREWire field descriptor of one field at its offset.
     let private fieldDescriptor (src: LayoutSource) structName (offsetStratum: Stratum) (f: CppParser.FieldDecl) (offset: int) : FsExpr =
@@ -181,7 +188,8 @@ module DescriptorGenerator =
             | RepresentedScalar r -> reprSource r, string count, $"repr {stratumName r.Stratum}: {r.CType} under {src.Model}"
             | RepresentedStruct nested ->
                 let _, size, _, _ = layoutOf src 1 nested
-                "Repr.U8", string (size * count), $"nested struct {nested.Name} by value, as bytes; see {nested.Name}.Descriptor"
+                let byteCount = descriptorInt $"Struct '{structName}' field '{f.Name}' nested byte count" (int64 size * int64 count)
+                "Repr.U8", string byteCount, $"nested struct {nested.Name} by value, as bytes; see {nested.Name}.Descriptor"
         let doc = $"offset {stratumName offsetStratum}; {note}"
         RecordConstruction [
             "Name", Literal (quote f.Name)
