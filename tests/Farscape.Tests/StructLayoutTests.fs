@@ -222,6 +222,62 @@ module GeneratorDispatch =
         Assert.Equal(1, output.Split("layout measured").Length - 1)
         Assert.Equal(1, output.Split("layout declared").Length - 1)
 
+    [<Theory>]
+    [<InlineData(false, 1)>]
+    [<InlineData(false, 8)>]
+    [<InlineData(true, 1)>]
+    [<InlineData(true, 8)>]
+    let ``generate refuses bitfields instead of widening them to scalar fields`` measured secondOffset =
+        let widths = if secondOffset = 8 then 8, 8 else 1, 3
+        let fields = [mkBitField "ready" "unsigned int" (fst widths); mkBitField "mode" "unsigned int" (snd widths)]
+        let decls = [CppParser.Declaration.Struct (mkStruct "Flags" fields None)]
+        let layouts = if measured then Map.ofList ["Flags", mkLayout "Flags" 32 32 [0; secondOffset]] else Map.empty
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 layouts |> ignore)
+        Assert.Equal("Struct 'Flags' field 'ready' is a bitfield; a supported bit-precise descriptor representation is required.", error.Message)
+
+    [<Fact>]
+    let ``measured bitfield union remains opaque storage without member descriptors`` () =
+        let union = {mkStruct "Bits" [mkBitField "flag" "unsigned int" 1; mkBitField "mode" "unsigned int" 3; mkField "word" "unsigned int"] None with IsUnion = true}
+        let layouts = Map.ofList ["Bits", mkLayout "Bits" 32 32 [0; 0; 0]]
+        let output = FidelityCodeGenerator.generate [CppParser.Declaration.Struct union] "Test" "test" Types.LP64 layouts
+        Assert.Contains("let StorageOffset = 0", output)
+        Assert.Contains("Repr = Repr.U8; Count = 4", output)
+        Assert.DoesNotContain("let flagOffset", output)
+        Assert.DoesNotContain("let modeOffset", output)
+        Assert.DoesNotContain("let wordOffset", output)
+        Assert.DoesNotContain("bit field", output)
+
+    [<Theory>]
+    [<InlineData(false)>]
+    [<InlineData(true)>]
+    let ``ordinary fixed array retains its byte layout`` measured =
+        let array = {mkField "bytes" "unsigned char[4]" with IsArray = true; ArraySize = Some 4}
+        let decls = [CppParser.Declaration.Struct (mkStruct "Buffer" [array; mkField "tag" "unsigned int"] None)]
+        let layouts = if measured then Map.ofList ["Buffer", mkLayout "Buffer" 64 32 [0; 32]] else Map.empty
+        let output = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 layouts
+        Assert.Contains("let tagOffset = 4", output)
+        Assert.Contains("Repr = Repr.U8; Count = 4", output)
+
+    [<Fact>]
+    let ``unflagged field with a measured bit offset is refused instead of truncated`` () =
+        let decls = [CppParser.Declaration.Struct (mkStruct "Flags" [mkField "ready" "unsigned int"; mkField "mode" "unsigned int"] None)]
+        let layouts = Map.ofList ["Flags", mkLayout "Flags" 32 32 [0; 1]]
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 layouts |> ignore)
+        Assert.Equal("Struct 'Flags' field 'mode' has measured bit offset 1, which is not byte-aligned; a supported bit-precise descriptor representation is required.", error.Message)
+
+    [<Fact>]
+    let ``unmeasured bitfield union is refused without an opaque storage measurement`` () =
+        let union = {mkStruct "Bits" [mkBitField "flag" "unsigned int" 1; mkField "word" "unsigned int"] None with IsUnion = true}
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate [CppParser.Declaration.Struct union] "Test" "test" Types.LP64 Map.empty |> ignore)
+        Assert.Equal("Struct 'Bits' field 'flag' is a bitfield; a supported bit-precise descriptor representation is required.", error.Message)
+
+    [<Fact>]
+    let ``value struct bitfield keeps its earlier plain record refusal`` () =
+        let decls = [CppParser.Declaration.Struct (mkStruct "Flags" [mkBitField "ready" "unsigned int" 1] None)]
+        let context = {FidelityCodeGenerator.buildGenerationContext decls Types.LP64 Map.empty with ValueStructs = Set.singleton "Flags"}
+        let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generateModule context Set.empty decls "Test" "test" "test" [] |> ignore)
+        Assert.Equal("Value struct 'Flags' requires a plain record with scalar or pointer fields", error.Message)
+
 // =========================================================================
 // PilotSerializer Tests ([options] section)
 // =========================================================================
@@ -309,6 +365,55 @@ module DescriptorGen =
 
     let private repr family bits : TypeMapper.AbiRepr =
         { Family = family; Bits = bits; Stratum = TypeMapper.Declared; CType = "t" }
+
+    [<Theory>]
+    [<InlineData(false)>]
+    [<InlineData(true)>]
+    let ``layout owner refuses a bitfield even when its width is absent`` measured =
+        let field = {mkBitField "flag" "unsigned int" 1 with BitWidth = None}
+        let structure = mkStruct "Incomplete" [field] None
+        let source : DescriptorGenerator.LayoutSource =
+            { Structs = Map.ofList [structure.Name, structure]
+              Layouts = if measured then Map.ofList [structure.Name, mkLayout structure.Name 32 32 [0]] else Map.empty
+              Model = Types.LP64
+              Shape = fun _ -> DescriptorGenerator.ScalarField (repr TypeMapper.Unsigned 32) }
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 0 structure |> ignore)
+        Assert.Equal("Struct 'Incomplete' field 'flag' is a bitfield; a supported bit-precise descriptor representation is required.", error.Message)
+
+    [<Theory>]
+    [<InlineData(false, false)>]
+    [<InlineData(false, true)>]
+    [<InlineData(true, false)>]
+    [<InlineData(true, true)>]
+    let ``descriptor refuses nested bitfields regardless of outer and inner measurements`` outerMeasured innerMeasured =
+        let inner = mkStruct "Inner" [mkBitField "flag" "unsigned int" 1] None
+        let outer = mkStruct "Outer" [mkField "inner" "Inner"] None
+        let layouts =
+            [if outerMeasured then "Outer", mkLayout "Outer" 32 32 [0]
+             if innerMeasured then "Inner", mkLayout "Inner" 32 32 [0]] |> Map.ofList
+        let source : DescriptorGenerator.LayoutSource =
+            { Structs = Map.ofList ["Inner", inner; "Outer", outer]
+              Layouts = layouts
+              Model = Types.LP64
+              Shape = function
+                | "Inner" -> DescriptorGenerator.StructField "Inner"
+                | _ -> DescriptorGenerator.ScalarField (repr TypeMapper.Unsigned 32) }
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source outer |> ignore)
+        Assert.Equal("Struct 'Inner' field 'flag' is a bitfield; a supported bit-precise descriptor representation is required.", error.Message)
+
+    [<Fact>]
+    let ``nested measured bitfield union is conservatively refused by the descriptor owner`` () =
+        let union = {mkStruct "Bits" [mkBitField "flag" "unsigned int" 1; mkField "word" "unsigned int"] None with IsUnion = true}
+        let outer = mkStruct "Outer" [mkField "bits" "Bits"] None
+        let source : DescriptorGenerator.LayoutSource =
+            { Structs = Map.ofList ["Bits", union; "Outer", outer]
+              Layouts = Map.ofList ["Bits", mkLayout "Bits" 32 32 [0; 0]; "Outer", mkLayout "Outer" 32 32 [0]]
+              Model = Types.LP64
+              Shape = function
+                | "Bits" -> DescriptorGenerator.StructField "Bits"
+                | _ -> DescriptorGenerator.ScalarField (repr TypeMapper.Unsigned 32) }
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source outer |> ignore)
+        Assert.Equal("Struct 'Bits' field 'flag' is a bitfield; a supported bit-precise descriptor representation is required.", error.Message)
 
     [<Fact>]
     let ``reprSource maps signed 32 to Repr.I32`` () =

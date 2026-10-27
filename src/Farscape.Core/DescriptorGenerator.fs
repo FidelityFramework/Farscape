@@ -107,12 +107,19 @@ module DescriptorGenerator =
     /// One struct's layout: per-field byte offsets, size, alignment, and the stratum of the offsets.
     let rec layoutOf (src: LayoutSource) (depth: int) (s: CppParser.StructDecl)
         : int list * int * int * Stratum =
+        match s.Fields |> List.tryFind (fun field -> field.IsBitfield) with
+        | Some field ->
+            invalidOp $"Struct '{s.Name}' field '{field.Name}' is a bitfield; a supported bit-precise descriptor representation is required."
+        | None -> ()
         match Map.tryFind s.Name src.Layouts with
         | Some measured ->
             validateMeasuredFieldCount s measured
             let offsets =
                 Seq.zip s.Fields measured.FieldOffsetsBits
-                |> Seq.map (fun (_, bits) -> bits / 8)
+                |> Seq.map (fun (field, bits) ->
+                    if bits % 8 <> 0 then
+                        invalidOp $"Struct '{s.Name}' field '{field.Name}' has measured bit offset {bits}, which is not byte-aligned; a supported bit-precise descriptor representation is required."
+                    bits / 8)
                 |> List.ofSeq
             offsets, measured.SizeBits / 8, measured.AlignmentBits / 8, Measured
         | None ->
@@ -121,8 +128,7 @@ module DescriptorGenerator =
                 match src.Shape (elementType f) with
                 | ScalarField r ->
                     let bytes, align = scalarExtent r
-                    let stratum = if f.IsBitfield then Inferred else Declared
-                    Some (bytes * count, align, stratum)
+                    Some (bytes * count, align, Declared)
                 | StructField name when depth < 16 ->
                     match Map.tryFind name src.Structs with
                     | Some nested when not nested.Fields.IsEmpty ->
@@ -150,9 +156,6 @@ module DescriptorGenerator =
         let count = elementCount f
         let repr, countSource, note =
             match src.Shape (elementType f) with
-            | ScalarField r when f.IsBitfield ->
-                let width = defaultArg f.BitWidth 0
-                reprSource r, string count, $"repr inferred: bit field of {width} bits in a {r.CType} unit"
             | ScalarField r -> reprSource r, string count, $"repr {stratumName r.Stratum}: {r.CType} under {src.Model}"
             | StructField name ->
                 let bytes =
@@ -183,7 +186,7 @@ module DescriptorGenerator =
             match stratum with
             | Measured -> "measured (clang record layout dump)"
             | Declared -> $"declared (natural alignment under {src.Model} from the declared field types)"
-            | Inferred -> "inferred (a field without a known representation or a bit field; verify against a measurement)"
+            | Inferred -> "inferred (a field without a known representation; verify against a measurement)"
         let kind = if s.IsUnion then "union" else "struct"
         let fieldPairs = Seq.zip s.Fields offsets |> List.ofSeq
         let offsetLiterals =
