@@ -87,8 +87,14 @@ module DescriptorGenerator =
         | -1 -> f.Type
         | i -> f.Type.Substring(0, i).Trim()
 
-    let private elementCount (f: CppParser.FieldDecl) =
-        if f.IsArray then defaultArg f.ArraySize 0 else 1
+    let private elementCount structName (f: CppParser.FieldDecl) =
+        match f.IsArray, f.ArraySize with
+        | false, _ -> 1
+        | true, Some count when count > 0 -> count
+        | true, None ->
+            invalidOp $"Struct '{structName}' field '{f.Name}' has an array with no fixed element count; a supported dynamic array representation contract is required."
+        | true, Some count ->
+            invalidOp $"Struct '{structName}' field '{f.Name}' has array element count {count}; a positive fixed element count is required."
 
     /// Bytes and alignment of a scalar representation. `long double` occupies 16 bytes at 16 on
     /// the x86-64 profile; every other scalar is naturally aligned at its own size.
@@ -128,7 +134,10 @@ module DescriptorGenerator =
         | Some field ->
             invalidOp $"Struct '{s.Name}' field '{field.Name}' is a bitfield; a supported bit-precise descriptor representation is required."
         | None -> ()
-        let fields = s.Fields |> List.map (fun field -> field, representedFieldShape src s.Name field)
+        let fields =
+            s.Fields |> List.map (fun field ->
+                let shape = representedFieldShape src s.Name field
+                shape, elementCount s.Name field)
         match Map.tryFind s.Name src.Layouts with
         | Some measured ->
             validateMeasuredFieldCount s measured
@@ -141,8 +150,7 @@ module DescriptorGenerator =
                 |> List.ofSeq
             offsets, measured.SizeBits / 8, measured.AlignmentBits / 8, Measured
         | None ->
-            let fieldExtent (f: CppParser.FieldDecl) shape : (int * int * Stratum) option =
-                let count = elementCount f
+            let fieldExtent count shape : (int * int * Stratum) option =
                 match shape with
                 | RepresentedScalar r ->
                     let bytes, align = scalarExtent r
@@ -154,8 +162,8 @@ module DescriptorGenerator =
                 | RepresentedStruct _ -> None
             let (endOffset, maxAlign, offsets, stratum) =
                 fields
-                |> List.fold (fun (offset, maxAlign, offsets, stratum) (f, shape) ->
-                    match fieldExtent f shape with
+                |> List.fold (fun (offset, maxAlign, offsets, stratum) (shape, count) ->
+                    match fieldExtent count shape with
                     | Some (size, align, fieldStratum) ->
                         let at = if s.IsUnion then 0 else alignUp offset align
                         let next = if s.IsUnion then max offset size else at + size
@@ -169,9 +177,10 @@ module DescriptorGenerator =
     /// The BAREWire field descriptor of one field at its offset.
     let private fieldDescriptor (src: LayoutSource) structName (offsetStratum: Stratum) (f: CppParser.FieldDecl) (offset: int) : FsExpr =
         let access = if f.IsConst then "AccessKind.ReadOnly" else "AccessKind.ReadWrite"
-        let count = elementCount f
+        let shape = representedFieldShape src structName f
+        let count = elementCount structName f
         let repr, countSource, note =
-            match representedFieldShape src structName f with
+            match shape with
             | RepresentedScalar r -> reprSource r, string count, $"repr {stratumName r.Stratum}: {r.CType} under {src.Model}"
             | RepresentedStruct nested ->
                 let _, size, _, _ = layoutOf src 1 nested

@@ -163,6 +163,21 @@ module LayoutModuleRendering =
 
 module GeneratorDispatch =
 
+    let private withLayoutHeader (text: string) names inspect =
+        let directory = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "../..", "artifacts", "array-extent-tests", System.Guid.NewGuid().ToString("N")))
+        System.IO.Directory.CreateDirectory(directory) |> ignore
+        try
+            let header = System.IO.Path.Combine(directory, "arrays.h")
+            System.IO.File.WriteAllText(header, text)
+            let options : CppParser.HeaderParserOptions =
+                { HeaderFile = header; IncludePaths = []; Defines = []; Verbose = false
+                  IncludeMacros = false; MacroPrefixes = []; IncludeRoot = None; CppMode = false }
+            let declarations = match CppParser.parseHeader options with Ok value -> value | Error reason -> failwith reason
+            let layouts = match CppParser.extractStructLayouts header [] [] (names |> List.map (fun name -> "struct " + name)) false with Ok value -> value | Error reason -> failwith reason
+            inspect declarations layouts
+        finally
+            System.IO.Directory.Delete(directory, true)
+
     [<Fact>]
     let ``generate produces a measured layout module for a struct the pilot measured`` () =
         let decls = [
@@ -451,6 +466,102 @@ module GeneratorDispatch =
             Assert.DoesNotContain("Count = 0", output)
         finally
             System.IO.Directory.Delete(directory, true)
+
+    [<Theory>]
+    [<InlineData("", false)>]
+    [<InlineData("", true)>]
+    [<InlineData("0", false)>]
+    [<InlineData("0", true)>]
+    [<InlineData("3", false)>]
+    [<InlineData("3", true)>]
+    let ``real array headers preserve extent and require a supported static count`` extent measured =
+        let header = $"struct Payload {{ int length; unsigned char data[{extent}]; }};\n"
+        withLayoutHeader header ["Payload"] (fun declarations layouts ->
+            let record = declarations |> List.pick (function CppParser.Declaration.Struct s when s.Name = "Payload" -> Some s | _ -> None)
+            let field = record.Fields |> List.find (fun field -> field.Name = "data")
+            let count = if extent = "" then None else Some (int extent)
+            Assert.True(field.IsArray)
+            Assert.Equal(count, field.ArraySize)
+            Assert.Equal("unsigned char", field.Type)
+            let generate () = FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 (if measured then layouts else Map.empty)
+            match count with
+            | Some 3 ->
+                let output = generate ()
+                Assert.Contains("Repr = Repr.U8; Count = 3", output)
+                Assert.Contains("let Size = 8", output)
+                Assert.Contains("let dataOffset = 4", output)
+            | _ ->
+                let error = Assert.Throws<System.InvalidOperationException>(fun () -> generate () |> ignore)
+                let expected =
+                    match count with
+                    | None -> "Struct 'Payload' field 'data' has an array with no fixed element count; a supported dynamic array representation contract is required."
+                    | Some value -> $"Struct 'Payload' field 'data' has array element count {value}; a positive fixed element count is required."
+                Assert.Equal(expected, error.Message))
+
+    [<Theory>]
+    [<InlineData(false, 0, false)>]
+    [<InlineData(false, 0, true)>]
+    [<InlineData(true, 0, false)>]
+    [<InlineData(true, 0, true)>]
+    [<InlineData(true, -1, false)>]
+    [<InlineData(true, -1, true)>]
+    let ``array extent refuses at both direct representation entry points`` hasCount count measured =
+        let field = {mkField "data" "unsigned char" with IsArray = true; ArraySize = if hasCount then Some count else None}
+        let record = mkStruct "Payload" [field] None
+        let source : DescriptorGenerator.LayoutSource =
+            { Structs = Map.ofList [record.Name, record]
+              Layouts = if measured then Map.ofList [record.Name, mkLayout record.Name 32 8 [0]] else Map.empty
+              Model = Types.LP64
+              Shape = fun _ -> DescriptorGenerator.ScalarField {Family = TypeMapper.Unsigned; Bits = 8; Stratum = TypeMapper.Declared; CType = "unsigned char"} }
+        let expected =
+            if hasCount then $"Struct 'Payload' field 'data' has array element count {count}; a positive fixed element count is required."
+            else "Struct 'Payload' field 'data' has an array with no fixed element count; a supported dynamic array representation contract is required."
+        let layoutError = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 0 record |> ignore)
+        let descriptorError = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source record |> ignore)
+        Assert.Equal(expected, layoutError.Message)
+        Assert.Equal(expected, descriptorError.Message)
+
+    [<Theory>]
+    [<InlineData(false, false)>]
+    [<InlineData(false, true)>]
+    [<InlineData(true, false)>]
+    [<InlineData(true, true)>]
+    let ``nested array extent is required before multiplying record size`` hasCount measured =
+        let nested = mkStruct "Mystery" [mkField "value" "int"] None
+        let field = {mkField "arr" "struct Mystery[]" with IsArray = true; ArraySize = if hasCount then Some 0 else None}
+        let holder = mkStruct "Holder" [field] None
+        let declarations = [CppParser.Declaration.Struct nested; CppParser.Declaration.Struct holder]
+        let layouts = if measured then Map.ofList ["Mystery", mkLayout "Mystery" 32 32 [0]; "Holder", mkLayout "Holder" 32 32 [0]] else Map.empty
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts |> ignore)
+        let expected =
+            if hasCount then "Struct 'Holder' field 'arr' has array element count 0; a positive fixed element count is required."
+            else "Struct 'Holder' field 'arr' has an array with no fixed element count; a supported dynamic array representation contract is required."
+        Assert.Equal(expected, error.Message)
+
+    [<Theory>]
+    [<InlineData(false)>]
+    [<InlineData(true)>]
+    let ``field representation refusal precedes missing array extent`` fieldless =
+        let field = {mkField "data" (if fieldless then "struct Empty[]" else "mystery_t[]") with IsArray = true; ArraySize = None}
+        let holder = mkStruct "Holder" [field] None
+        let declarations = [CppParser.Declaration.Struct (mkStructSimple "Empty"); CppParser.Declaration.Struct holder]
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore)
+        let expected =
+            if fieldless then "Struct 'Holder' field 'data' has fieldless nested record type 'Empty'; a supported empty or opaque record representation contract is required."
+            else "Struct 'Holder' field 'data' has no known representation for type 'mystery_t'; a complete C representation contract is required."
+        Assert.Equal(expected, error.Message)
+
+    [<Theory>]
+    [<InlineData(false)>]
+    [<InlineData(true)>]
+    let ``pointer to a flexible record needs no inline array extent`` measured =
+        let header = "struct Flexible { int length; unsigned char data[]; }; struct Holder { struct Flexible *p; int tail; };\n"
+        withLayoutHeader header ["Flexible"; "Holder"] (fun declarations layouts ->
+            let holder = declarations |> List.filter (function CppParser.Declaration.Struct s -> s.Name = "Holder" | _ -> false)
+            Assert.Single(holder) |> ignore
+            let output = FidelityCodeGenerator.generate holder "Test" "test" Types.LP64 (if measured then layouts else Map.empty)
+            Assert.Contains("Repr = Repr.Pointer; Count = 1", output)
+            Assert.Contains("let tailOffset = 8", output))
 
 // =========================================================================
 // PilotSerializer Tests ([options] section)

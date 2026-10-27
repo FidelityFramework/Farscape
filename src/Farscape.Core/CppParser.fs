@@ -31,8 +31,8 @@ module CppParser =
         Type: string
         IsVolatile: bool      // __IO, volatile
         IsConst: bool         // __I, const
-        IsArray: bool         // Fixed-size array (e.g., RESERVED[4])
-        ArraySize: int option // Size if IsArray
+        IsArray: bool         // Array, including an unknown extent (e.g., payload[])
+        ArraySize: int option // Declared element count when known
         IsBitfield: bool      // clang JSON "isBitfield"
         BitWidth: int option  // Bit width if IsBitfield
     }
@@ -364,7 +364,7 @@ module CppParser =
         // Check for array syntax using XParsec parser
         let pArraySize =
             skipMany (satisfyL (fun c -> c <> '[') "non-bracket")
-            >>. (skipChar '[' >>. pint32 .>> skipChar ']')
+            >>. (skipChar '[' >>. opt pint32 .>> skipChar ']')
 
         let isArray, arraySize, cleanType =
             let reader = Reader.ofString typeStr ()
@@ -374,7 +374,8 @@ module CppParser =
                     match typeStr.IndexOf('[') with
                     | -1 -> typeStr
                     | idx -> typeStr.Substring(0, idx)
-                true, Some result.Parsed, baseType.Trim()
+                let size = match result.Parsed with ValueSome value -> Some value | ValueNone -> None
+                true, size, baseType.Trim()
             | Error _ ->
                 false, None, typeStr
 
