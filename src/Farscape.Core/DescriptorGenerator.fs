@@ -104,6 +104,17 @@ module DescriptorGenerator =
         if s.Fields.Length <> measured.FieldOffsetsBits.Length then
             invalidOp $"Measured layout '{s.Name}' has {measured.FieldOffsetsBits.Length} field offsets for {s.Fields.Length} fields."
 
+    type private RepresentedFieldShape =
+        | RepresentedScalar of AbiRepr
+        | RepresentedStruct of string
+
+    let private representedFieldShape (src: LayoutSource) structName (field: CppParser.FieldDecl) =
+        match src.Shape (elementType field) with
+        | ScalarField repr -> RepresentedScalar repr
+        | StructField name -> RepresentedStruct name
+        | UnknownField name ->
+            invalidOp $"Struct '{structName}' field '{field.Name}' has no known representation for type '{name}'; a complete C representation contract is required."
+
     /// One struct's layout: per-field byte offsets, size, alignment, and the stratum of the offsets.
     let rec layoutOf (src: LayoutSource) (depth: int) (s: CppParser.StructDecl)
         : int list * int * int * Stratum =
@@ -111,6 +122,7 @@ module DescriptorGenerator =
         | Some field ->
             invalidOp $"Struct '{s.Name}' field '{field.Name}' is a bitfield; a supported bit-precise descriptor representation is required."
         | None -> ()
+        let fields = s.Fields |> List.map (fun field -> field, representedFieldShape src s.Name field)
         match Map.tryFind s.Name src.Layouts with
         | Some measured ->
             validateMeasuredFieldCount s measured
@@ -123,23 +135,23 @@ module DescriptorGenerator =
                 |> List.ofSeq
             offsets, measured.SizeBits / 8, measured.AlignmentBits / 8, Measured
         | None ->
-            let fieldExtent (f: CppParser.FieldDecl) : (int * int * Stratum) option =
+            let fieldExtent (f: CppParser.FieldDecl) shape : (int * int * Stratum) option =
                 let count = elementCount f
-                match src.Shape (elementType f) with
-                | ScalarField r ->
+                match shape with
+                | RepresentedScalar r ->
                     let bytes, align = scalarExtent r
                     Some (bytes * count, align, Declared)
-                | StructField name when depth < 16 ->
+                | RepresentedStruct name when depth < 16 ->
                     match Map.tryFind name src.Structs with
                     | Some nested when not nested.Fields.IsEmpty ->
                         let _, size, align, _ = layoutOf src (depth + 1) nested
                         Some (size * count, align, Declared)
                     | _ -> None
-                | StructField _ | UnknownField _ -> None
+                | RepresentedStruct _ -> None
             let (endOffset, maxAlign, offsets, stratum) =
-                s.Fields
-                |> List.fold (fun (offset, maxAlign, offsets, stratum) f ->
-                    match fieldExtent f with
+                fields
+                |> List.fold (fun (offset, maxAlign, offsets, stratum) (f, shape) ->
+                    match fieldExtent f shape with
                     | Some (size, align, fieldStratum) ->
                         let at = if s.IsUnion then 0 else alignUp offset align
                         let next = if s.IsUnion then max offset size else at + size
@@ -151,13 +163,13 @@ module DescriptorGenerator =
             offsets, alignUp endOffset maxAlign, maxAlign, stratum
 
     /// The BAREWire field descriptor of one field at its offset.
-    let private fieldDescriptor (src: LayoutSource) (offsetStratum: Stratum) (f: CppParser.FieldDecl) (offset: int) : FsExpr =
+    let private fieldDescriptor (src: LayoutSource) structName (offsetStratum: Stratum) (f: CppParser.FieldDecl) (offset: int) : FsExpr =
         let access = if f.IsConst then "AccessKind.ReadOnly" else "AccessKind.ReadWrite"
         let count = elementCount f
         let repr, countSource, note =
-            match src.Shape (elementType f) with
-            | ScalarField r -> reprSource r, string count, $"repr {stratumName r.Stratum}: {r.CType} under {src.Model}"
-            | StructField name ->
+            match representedFieldShape src structName f with
+            | RepresentedScalar r -> reprSource r, string count, $"repr {stratumName r.Stratum}: {r.CType} under {src.Model}"
+            | RepresentedStruct name ->
                 let bytes =
                     match Map.tryFind name src.Structs with
                     | Some nested when not nested.Fields.IsEmpty ->
@@ -165,7 +177,6 @@ module DescriptorGenerator =
                         size * count
                     | _ -> 0
                 "Repr.U8", string bytes, $"nested struct {name} by value, as bytes; see {name}.Descriptor"
-            | UnknownField name -> "Repr.U8", "0", $"repr unknown: no representation for {name}"
         let doc = $"offset {stratumName offsetStratum}; {note}"
         RecordConstruction [
             "Name", Literal (quote f.Name)
@@ -200,7 +211,7 @@ module DescriptorGenerator =
                 "Layout", RecordBlock [
                     "Size", Literal (string size)
                     "Alignment", Literal (string align)
-                    "Fields", ArrayBlock (fieldPairs |> List.map (fun (f, offset) -> fieldDescriptor src stratum f offset))
+                    "Fields", ArrayBlock (fieldPairs |> List.map (fun (f, offset) -> fieldDescriptor src s.Name stratum f offset))
                 ]
                 "Documentation", Literal (optionSource s.Documentation)
             ]

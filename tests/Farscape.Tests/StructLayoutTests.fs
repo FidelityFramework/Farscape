@@ -278,6 +278,65 @@ module GeneratorDispatch =
         let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generateModule context Set.empty decls "Test" "test" "test" [] |> ignore)
         Assert.Equal("Value struct 'Flags' requires a plain record with scalar or pointer fields", error.Message)
 
+    [<Theory>]
+    [<InlineData(false, "Mystery", "Mystery")>]
+    [<InlineData(true, "Mystery", "Mystery")>]
+    [<InlineData(false, "struct Mystery", "Mystery")>]
+    [<InlineData(true, "struct Mystery", "Mystery")>]
+    [<InlineData(false, "mystery_t", "mystery_t")>]
+    [<InlineData(true, "mystery_t", "mystery_t")>]
+    let ``unknown field representation is refused with its struct field and type`` measured cType unresolved =
+        let holder = mkStruct "Holder" [mkField "payload" cType; mkField "tail" "int"] None
+        let layouts = if measured then Map.ofList ["Holder", mkLayout "Holder" 96 32 [0; 64]] else Map.empty
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate [CppParser.Declaration.Struct holder] "Test" "test" Types.LP64 layouts |> ignore)
+        Assert.Equal($"Struct 'Holder' field 'payload' has no known representation for type '{unresolved}'; a complete C representation contract is required.", error.Message)
+
+    [<Fact>]
+    let ``unknown field in the middle refuses before returning a descriptor`` () =
+        let holder = mkStruct "Holder" [mkField "head" "int"; mkField "payload" "struct Mystery"; mkField "tail" "int"] None
+        let layouts = Map.ofList ["Holder", mkLayout "Holder" 128 32 [0; 32; 96]]
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate [CppParser.Declaration.Struct holder] "Test" "test" Types.LP64 layouts |> ignore)
+        Assert.Equal("Struct 'Holder' field 'payload' has no known representation for type 'Mystery'; a complete C representation contract is required.", error.Message)
+
+    [<Theory>]
+    [<InlineData(false)>]
+    [<InlineData(true)>]
+    let ``complete nested representation retains payload extent and following offset`` measured =
+        let data = {mkField "data" "unsigned char[8]" with IsArray = true; ArraySize = Some 8}
+        let nested = mkStruct "Mystery" [data] None
+        let holder = mkStruct "Holder" [mkField "payload" "struct Mystery"; mkField "tail" "int"] None
+        let layouts = if measured then Map.ofList ["Mystery", mkLayout "Mystery" 64 8 [0]; "Holder", mkLayout "Holder" 96 32 [0; 64]] else Map.empty
+        let output = FidelityCodeGenerator.generate [CppParser.Declaration.Struct nested; CppParser.Declaration.Struct holder] "Test" "test" Types.LP64 layouts
+        Assert.Contains("Repr = Repr.U8; Count = 8", output)
+        Assert.Contains("let tailOffset = 8", output)
+        Assert.DoesNotContain("Count = 0", output)
+
+    [<Theory>]
+    [<InlineData(false)>]
+    [<InlineData(true)>]
+    let ``pointer to incomplete type remains a known pointer representation`` measured =
+        let holder = mkStruct "Holder" [mkField "payload" "struct Incomplete *"; mkField "tail" "int"] None
+        let layouts = if measured then Map.ofList ["Holder", mkLayout "Holder" 128 64 [0; 64]] else Map.empty
+        let output = FidelityCodeGenerator.generate [CppParser.Declaration.Struct holder] "Test" "test" Types.LP64 layouts
+        Assert.Contains("Repr = Repr.Pointer; Count = 1", output)
+        Assert.Contains("let tailOffset = 8", output)
+
+    [<Theory>]
+    [<InlineData(false)>]
+    [<InlineData(true)>]
+    let ``opaque union needs measurement when a member representation is unknown`` measured =
+        let union = {mkStruct "Variant" [mkField "payload" "mystery_t"; mkField "word" "unsigned int"] None with IsUnion = true}
+        let declarations = [CppParser.Declaration.Struct union]
+        if measured then
+            let layouts = Map.ofList ["Variant", mkLayout "Variant" 64 32 [0; 0]]
+            let output = FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts
+            Assert.Contains("let StorageOffset = 0", output)
+            Assert.Contains("Repr = Repr.U8; Count = 8", output)
+            Assert.DoesNotContain("let payloadOffset", output)
+        else
+            let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore)
+            Assert.Equal("Struct 'Variant' field 'payload' has no known representation for type 'mystery_t'; a complete C representation contract is required.", error.Message)
+
 // =========================================================================
 // PilotSerializer Tests ([options] section)
 // =========================================================================
@@ -365,6 +424,40 @@ module DescriptorGen =
 
     let private repr family bits : TypeMapper.AbiRepr =
         { Family = family; Bits = bits; Stratum = TypeMapper.Declared; CType = "t" }
+
+    [<Theory>]
+    [<InlineData(false)>]
+    [<InlineData(true)>]
+    let ``layout owner refuses an unknown representation in either layout stratum`` measured =
+        let structure = mkStruct "Unknown" [mkField "payload" "missing_t"] None
+        let source : DescriptorGenerator.LayoutSource =
+            { Structs = Map.ofList [structure.Name, structure]
+              Layouts = if measured then Map.ofList [structure.Name, mkLayout structure.Name 32 32 [0]] else Map.empty
+              Model = Types.LP64
+              Shape = fun _ -> DescriptorGenerator.UnknownField "missing_t" }
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 0 structure |> ignore)
+        Assert.Equal("Struct 'Unknown' field 'payload' has no known representation for type 'missing_t'; a complete C representation contract is required.", error.Message)
+
+    [<Theory>]
+    [<InlineData(false, false)>]
+    [<InlineData(false, true)>]
+    [<InlineData(true, false)>]
+    [<InlineData(true, true)>]
+    let ``nested unknown representation is refused independently of measurements`` outerMeasured innerMeasured =
+        let inner = mkStruct "Inner" [mkField "payload" "missing_t"] None
+        let outer = mkStruct "Outer" [mkField "inner" "Inner"] None
+        let layouts =
+            [if outerMeasured then "Outer", mkLayout "Outer" 32 32 [0]
+             if innerMeasured then "Inner", mkLayout "Inner" 32 32 [0]] |> Map.ofList
+        let source : DescriptorGenerator.LayoutSource =
+            { Structs = Map.ofList ["Inner", inner; "Outer", outer]
+              Layouts = layouts
+              Model = Types.LP64
+              Shape = function
+                | "Inner" -> DescriptorGenerator.StructField "Inner"
+                | _ -> DescriptorGenerator.UnknownField "missing_t" }
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source outer |> ignore)
+        Assert.Equal("Struct 'Inner' field 'payload' has no known representation for type 'missing_t'; a complete C representation contract is required.", error.Message)
 
     [<Theory>]
     [<InlineData(false)>]
