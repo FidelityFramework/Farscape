@@ -355,35 +355,51 @@ module CppParser =
         | -1 -> typeStr.Trim()
         | idx -> typeStr.Substring(0, idx).Trim()
 
-    /// Parse a field type string into structured info.
-    /// Uses XParsec for array size extraction (no Regex).
+    /// Array decomposition admitted by field descriptors. Unsupported spellings stay intact
+    /// until a consumer requests a representation; parsing a header does not grant one.
+    type FieldDeclarator =
+        | PlainFieldType of string
+        | TrailingArrayType of elementType: string * count: int option
+        | UnsupportedArrayType of string
+
+    let classifyFieldDeclarator (typeStr: string) : FieldDeclarator =
+        if not (typeStr.Contains('[')) then PlainFieldType typeStr
+        elif typeStr.Contains('(') || typeStr.Contains(')') then UnsupportedArrayType typeStr
+        else
+            let pArray =
+                many1Chars (satisfyL (fun c -> c <> '[' && c <> ']') "array element type")
+                .>>. (skipChar '[' >>. opt pint32 .>> skipChar ']')
+                .>> spaces .>> eof
+            let reader = Reader.ofString typeStr ()
+            match pArray reader with
+            | Ok result ->
+                let struct (element, count) = result.Parsed
+                let element = element.Trim()
+                if element = "" then UnsupportedArrayType typeStr
+                else
+                    let count = match count with ValueSome value -> Some value | ValueNone -> None
+                    TrailingArrayType (element, count)
+            | Error _ -> UnsupportedArrayType typeStr
+
+    /// Parse field metadata using the same declarator classification as descriptor emission.
     let private parseFieldType (typeStr: string) : FieldDecl =
         let isVolatile = typeStr.Contains("volatile") || typeStr.Contains("__IO")
         let isConst = typeStr.Contains("const") || typeStr.Contains("__I")
 
-        // Check for array syntax using XParsec parser
-        let pArraySize =
-            skipMany (satisfyL (fun c -> c <> '[') "non-bracket")
-            >>. (skipChar '[' >>. opt pint32 .>> skipChar ']')
-
+        let declarator = classifyFieldDeclarator typeStr
         let isArray, arraySize, cleanType =
-            let reader = Reader.ofString typeStr ()
-            match pArraySize reader with
-            | Ok result ->
-                let baseType =
-                    match typeStr.IndexOf('[') with
-                    | -1 -> typeStr
-                    | idx -> typeStr.Substring(0, idx)
-                let size = match result.Parsed with ValueSome value -> Some value | ValueNone -> None
-                true, size, baseType.Trim()
-            | Error _ ->
-                false, None, typeStr
+            match declarator with
+            | TrailingArrayType (element, count) -> true, count, element
+            | PlainFieldType spelling | UnsupportedArrayType spelling -> false, None, spelling
 
-        // Clean up qualifiers for the base type
+        // Preserve an unsupported declarator verbatim for a located consumer refusal.
         let cleanType =
-            cleanType.Replace("volatile ", "").Replace("const ", "")
-                     .Replace("__IO ", "").Replace("__I ", "").Replace("__O ", "")
-                     .Trim()
+            match declarator with
+            | UnsupportedArrayType spelling -> spelling
+            | _ ->
+                cleanType.Replace("volatile ", "").Replace("const ", "")
+                         .Replace("__IO ", "").Replace("__I ", "").Replace("__O ", "")
+                         .Trim()
 
         {
             Name = ""

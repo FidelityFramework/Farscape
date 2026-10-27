@@ -563,6 +563,112 @@ module GeneratorDispatch =
             Assert.Contains("Repr = Repr.Pointer; Count = 1", output)
             Assert.Contains("let tailOffset = 8", output))
 
+    [<Theory>]
+    [<InlineData("int payload[2][3]", "int[2][3]", false)>]
+    [<InlineData("int payload[2][3]", "int[2][3]", true)>]
+    [<InlineData("int (*payload)[3]", "int (*)[3]", false)>]
+    [<InlineData("int (*payload)[3]", "int (*)[3]", true)>]
+    [<InlineData("void (*payload[3])(int)", "void (*[3])(int)", false)>]
+    [<InlineData("void (*payload[3])(int)", "void (*[3])(int)", true)>]
+    [<InlineData("const int payload[2][3]", "const int[2][3]", false)>]
+    [<InlineData("const int payload[2][3]", "const int[2][3]", true)>]
+    let ``real unsupported array declarators retain spelling until field emission`` memberDeclaration spelling measured =
+        withLayoutHeader $"struct Holder {{ {memberDeclaration}; }};\n" ["Holder"] (fun declarations layouts ->
+            let record = declarations |> List.pick (function CppParser.Declaration.Struct s when s.Name = "Holder" -> Some s | _ -> None)
+            let field = Assert.Single(record.Fields)
+            Assert.Equal(spelling, field.Type)
+            Assert.False(field.IsArray)
+            Assert.Equal(None, field.ArraySize)
+            let error = Assert.Throws<System.InvalidOperationException>(fun () ->
+                FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 (if measured then layouts else Map.empty) |> ignore)
+            Assert.Equal($"Struct 'Holder' field 'payload' has array declarator '{spelling}'; a supported one-dimensional trailing array declarator or a complete declarator representation contract is required.", error.Message))
+
+    [<Theory>]
+    [<InlineData("int[2][3]", false)>]
+    [<InlineData("int[2][3]", true)>]
+    [<InlineData("int (*)[3]", false)>]
+    [<InlineData("int (*)[3]", true)>]
+    let ``direct descriptor entry points refuse unsupported declarators before shape resolution`` spelling measured =
+        let holder = mkStruct "Holder" [mkField "payload" spelling] None
+        let source : DescriptorGenerator.LayoutSource =
+            { Structs = Map.ofList [holder.Name, holder]
+              Layouts = if measured then Map.ofList [holder.Name, mkLayout holder.Name 192 64 [0]] else Map.empty
+              Model = Types.LP64
+              Shape = fun _ -> Assert.Fail("Shape must not receive an unsupported declarator"); DescriptorGenerator.UnknownField "unreachable" }
+        let expected = $"Struct 'Holder' field 'payload' has array declarator '{spelling}'; a supported one-dimensional trailing array declarator or a complete declarator representation contract is required."
+        let layoutError = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 0 holder |> ignore)
+        let descriptorError = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source holder |> ignore)
+        Assert.Equal(expected, layoutError.Message)
+        Assert.Equal(expected, descriptorError.Message)
+
+    [<Theory>]
+    [<InlineData(0, false)>]
+    [<InlineData(0, true)>]
+    [<InlineData(1, false)>]
+    [<InlineData(1, true)>]
+    [<InlineData(2, false)>]
+    [<InlineData(2, true)>]
+    let ``declarator refusal preserves bitfield and declaration order precedence`` scenario measured =
+        let fields, expected =
+            match scenario with
+            | 0 ->
+                [mkField "payload" "mystery_t[2][3]"],
+                "Struct 'Holder' field 'payload' has array declarator 'mystery_t[2][3]'; a supported one-dimensional trailing array declarator or a complete declarator representation contract is required."
+            | 1 ->
+                [mkField "payload" "int[2][3]"; mkBitField "flag" "unsigned int" 1],
+                "Struct 'Holder' field 'flag' is a bitfield; a supported bit-precise descriptor representation is required."
+            | _ ->
+                [mkField "first" "mystery_t"; mkField "payload" "int[2][3]"],
+                "Struct 'Holder' field 'first' has no known representation for type 'mystery_t'; a complete C representation contract is required."
+        let holder = mkStruct "Holder" fields None
+        let layouts = if measured then Map.ofList [holder.Name, mkLayout holder.Name 256 64 (List.replicate fields.Length 0)] else Map.empty
+        let error = Assert.Throws<System.InvalidOperationException>(fun () ->
+            FidelityCodeGenerator.generate [CppParser.Declaration.Struct holder] "Test" "test" Types.LP64 layouts |> ignore)
+        Assert.Equal(expected, error.Message)
+
+    [<Fact>]
+    let ``declarator refusal precedes a mismatched measured field count`` () =
+        let holder = mkStruct "Holder" [mkField "payload" "int[2][3]"] None
+        let layouts = Map.ofList [holder.Name, mkLayout holder.Name 192 32 []]
+        let error = Assert.Throws<System.InvalidOperationException>(fun () ->
+            FidelityCodeGenerator.generate [CppParser.Declaration.Struct holder] "Test" "test" Types.LP64 layouts |> ignore)
+        Assert.Equal("Struct 'Holder' field 'payload' has array declarator 'int[2][3]'; a supported one-dimensional trailing array declarator or a complete declarator representation contract is required.", error.Message)
+
+    [<Theory>]
+    [<InlineData("int *payload[3]", "Repr.Pointer", 3, false, false, 24, false)>]
+    [<InlineData("int *payload[3]", "Repr.Pointer", 3, false, false, 24, true)>]
+    [<InlineData("const int payload[4]", "Repr.I32", 4, true, false, 16, false)>]
+    [<InlineData("const int payload[4]", "Repr.I32", 4, true, false, 16, true)>]
+    [<InlineData("volatile unsigned char payload[8]", "Repr.U8", 8, false, true, 8, false)>]
+    [<InlineData("volatile unsigned char payload[8]", "Repr.U8", 8, false, true, 8, true)>]
+    [<InlineData("void (*payload)(int)", "Repr.Pointer", 1, false, false, 8, false)>]
+    [<InlineData("void (*payload)(int)", "Repr.Pointer", 1, false, false, 8, true)>]
+    let ``supported array and function pointer fields retain representation`` memberDeclaration repr count readOnly isVolatile size measured =
+        withLayoutHeader $"struct Holder {{ {memberDeclaration}; }};\n" ["Holder"] (fun declarations layouts ->
+            let record = declarations |> List.pick (function CppParser.Declaration.Struct s when s.Name = "Holder" -> Some s | _ -> None)
+            let field = Assert.Single(record.Fields)
+            Assert.Equal(readOnly, field.IsConst)
+            Assert.Equal(isVolatile, field.IsVolatile)
+            let output = FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 (if measured then layouts else Map.empty)
+            let access = if readOnly then "AccessKind.ReadOnly" else "AccessKind.ReadWrite"
+            Assert.Contains($"Repr = {repr}; Count = {count}; Access = {access}", output)
+            Assert.Contains($"let Size = {size}", output))
+
+    [<Theory>]
+    [<InlineData(false)>]
+    [<InlineData(true)>]
+    let ``unsupported union members require opaque storage measurement`` measured =
+        withLayoutHeader "union Opaque { int matrix[2][3]; long tag; };\n" [] (fun declarations _ ->
+            let layouts = if measured then Map.ofList ["Opaque", mkLayout "Opaque" 192 64 [0; 0]] else Map.empty
+            let generate () = FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts
+            if measured then
+                let output = generate ()
+                Assert.Contains("Repr = Repr.U8; Count = 24", output)
+                Assert.DoesNotContain("let matrixOffset", output)
+            else
+                let error = Assert.Throws<System.InvalidOperationException>(fun () -> generate () |> ignore)
+                Assert.Equal("Struct 'Opaque' field 'matrix' has array declarator 'int[2][3]'; a supported one-dimensional trailing array declarator or a complete declarator representation contract is required.", error.Message))
+
 // =========================================================================
 // PilotSerializer Tests ([options] section)
 // =========================================================================

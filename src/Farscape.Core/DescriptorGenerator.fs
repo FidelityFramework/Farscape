@@ -81,11 +81,12 @@ module DescriptorGenerator =
     let private alignUp (offset: int) (align: int) =
         if align <= 1 then offset else ((offset + align - 1) / align) * align
 
-    /// Element type of an array field: the declared type without its extent.
-    let private elementType (f: CppParser.FieldDecl) =
-        match f.Type.IndexOf('[') with
-        | -1 -> f.Type
-        | i -> f.Type.Substring(0, i).Trim()
+    /// Only the field parser's supported declarators grant an element spelling.
+    let private elementType structName (f: CppParser.FieldDecl) =
+        match CppParser.classifyFieldDeclarator f.Type with
+        | CppParser.PlainFieldType element | CppParser.TrailingArrayType (element, _) -> element
+        | CppParser.UnsupportedArrayType spelling ->
+            invalidOp $"Struct '{structName}' field '{f.Name}' has array declarator '{spelling}'; a supported one-dimensional trailing array declarator or a complete declarator representation contract is required."
 
     let private elementCount structName (f: CppParser.FieldDecl) =
         match f.IsArray, f.ArraySize with
@@ -115,7 +116,7 @@ module DescriptorGenerator =
         | RepresentedStruct of CppParser.StructDecl
 
     let private representedFieldShape (src: LayoutSource) structName (field: CppParser.FieldDecl) =
-        match src.Shape (elementType field) with
+        match src.Shape (elementType structName field) with
         | ScalarField repr -> RepresentedScalar repr
         | StructField name ->
             match Map.tryFind name src.Structs with
