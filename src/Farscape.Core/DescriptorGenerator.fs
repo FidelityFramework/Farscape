@@ -113,10 +113,20 @@ module DescriptorGenerator =
             let bytes = int (max 1L ((int64 r.Bits + 7L) / 8L))
             bytes, bytes
 
-    /// A measured layout is usable only when every original field has one offset.
-    let validateMeasuredFieldCount (s: CppParser.StructDecl) (measured: CppParser.StructLayoutInfo) =
+    /// Admit the measured storage extent before any consumer uses its byte quantities.
+    let validateMeasuredLayout (s: CppParser.StructDecl) (measured: CppParser.StructLayoutInfo) : int * int =
         if s.Fields.Length <> measured.FieldOffsetsBits.Length then
             invalidOp $"Measured layout '{s.Name}' has {measured.FieldOffsetsBits.Length} field offsets for {s.Fields.Length} fields."
+        if measured.SizeBits % 8 <> 0 then
+            invalidOp $"Measured layout '{s.Name}' has size {measured.SizeBits} bits, which is not whole bytes; a supported bit-precise descriptor representation is required."
+        let size = descriptorInt $"Measured layout '{s.Name}' size" (int64 measured.SizeBits / 8L)
+        if size = 0 then
+            invalidOp $"Measured layout '{s.Name}' has size 0 bytes for {s.Fields.Length} fields; a supported empty or opaque record representation contract is required."
+        if measured.AlignmentBits % 8 <> 0 then
+            invalidOp $"Measured layout '{s.Name}' has alignment {measured.AlignmentBits} bits, which is not whole bytes; a supported bit-precise descriptor representation is required."
+        if measured.AlignmentBits <= 0 then
+            invalidOp $"Measured layout '{s.Name}' has alignment {measured.AlignmentBits} bits; a positive whole-byte measured alignment is required."
+        size, measured.AlignmentBits / 8
 
     type private RepresentedFieldShape =
         | RepresentedScalar of AbiRepr
@@ -148,15 +158,18 @@ module DescriptorGenerator =
                 field.Name, shape, elementCount s.Name field)
         match Map.tryFind s.Name src.Layouts with
         | Some measured ->
-            validateMeasuredFieldCount s measured
+            let size, alignment = validateMeasuredLayout s measured
             let offsets =
                 Seq.zip s.Fields measured.FieldOffsetsBits
                 |> Seq.map (fun (field, bits) ->
                     if bits % 8 <> 0 then
                         invalidOp $"Struct '{s.Name}' field '{field.Name}' has measured bit offset {bits}, which is not byte-aligned; a supported bit-precise descriptor representation is required."
-                    bits / 8)
+                    let offset = bits / 8
+                    if offset < 0 || offset >= size then
+                        invalidOp $"Struct '{s.Name}' field '{field.Name}' has measured byte offset {offset} outside the measured storage 0..{size - 1}; a measured layout consistent with its record size is required."
+                    offset)
                 |> List.ofSeq
-            offsets, measured.SizeBits / 8, measured.AlignmentBits / 8, Measured
+            offsets, size, alignment, Measured
         | None ->
             let requireNaturalAttributes subject (attributes: CppParser.AttributeData list) =
                 attributes |> List.iter (fun attribute ->

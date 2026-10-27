@@ -940,10 +940,10 @@ module FidelityCodeGenerator =
         let s, layouts =
             match s.IsUnion, Map.tryFind s.Name ctx.StructLayouts with
             | true, Some layout ->
-                DescriptorGenerator.validateMeasuredFieldCount s layout
+                let size, _ = DescriptorGenerator.validateMeasuredLayout s layout
                 let storage : CppParser.FieldDecl =
                     { Name = "Storage"; Type = "unsigned char"; IsConst = false; IsVolatile = false
-                      IsArray = true; ArraySize = Some (layout.SizeBits / 8); IsBitfield = false; BitWidth = None; Attributes = [] }
+                      IsArray = true; ArraySize = Some size; IsBitfield = false; BitWidth = None; Attributes = [] }
                 { s with Fields = [storage] }, ctx.StructLayouts.Add(s.Name, { layout with FieldOffsetsBits = [0] })
             | _ -> s, ctx.StructLayouts
         let shape (cType: string) : DescriptorGenerator.FieldShape =

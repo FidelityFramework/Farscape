@@ -190,6 +190,115 @@ module GeneratorDispatch =
             | spelling -> DescriptorGenerator.UnknownField spelling }
 
     [<Theory>]
+    [<InlineData(-8, 32, 0, 32, "Measured layout 'Holder' size has byte quantity -1 outside the supported descriptor range 0..2147483647; a wider descriptor representation contract is required.")>]
+    [<InlineData(0, 32, 0, 32, "Measured layout 'Holder' has size 0 bytes for 2 fields; a supported empty or opaque record representation contract is required.")>]
+    [<InlineData(65, 32, 0, 32, "Measured layout 'Holder' has size 65 bits, which is not whole bytes; a supported bit-precise descriptor representation is required.")>]
+    [<InlineData(64, 0, 0, 32, "Measured layout 'Holder' has alignment 0 bits; a positive whole-byte measured alignment is required.")>]
+    [<InlineData(64, -8, 0, 32, "Measured layout 'Holder' has alignment -8 bits; a positive whole-byte measured alignment is required.")>]
+    [<InlineData(64, 33, 0, 32, "Measured layout 'Holder' has alignment 33 bits, which is not whole bytes; a supported bit-precise descriptor representation is required.")>]
+    [<InlineData(64, 32, -8, 32, "Struct 'Holder' field 'first' has measured byte offset -1 outside the measured storage 0..7; a measured layout consistent with its record size is required.")>]
+    [<InlineData(64, 32, -3, 32, "Struct 'Holder' field 'first' has measured bit offset -3, which is not byte-aligned; a supported bit-precise descriptor representation is required.")>]
+    [<InlineData(64, 32, 0, 128, "Struct 'Holder' field 'second' has measured byte offset 16 outside the measured storage 0..7; a measured layout consistent with its record size is required.")>]
+    [<InlineData(64, 32, 0, 64, "Struct 'Holder' field 'second' has measured byte offset 8 outside the measured storage 0..7; a measured layout consistent with its record size is required.")>]
+    let ``measured storage quantities refuse before descriptor emission`` sizeBits alignmentBits firstOffset secondOffset expected =
+        withLayoutHeader "struct Holder { int first; int second; };" ["Holder"] (fun declarations _ ->
+            let record = declarations |> List.pick (function CppParser.Declaration.Struct s when s.Name = "Holder" -> Some s | _ -> None)
+            let layouts = Map.ofList ["Holder", mkLayout "Holder" sizeBits alignmentBits [firstOffset; secondOffset]]
+            let source = attributeLayoutSource [record] layouts
+            for emit in [ (fun () -> DescriptorGenerator.layoutOf source 0 record |> ignore)
+                          (fun () -> DescriptorGenerator.structDecls source record |> ignore)
+                          (fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts |> ignore) ] do
+                let error = Assert.Throws<System.InvalidOperationException>(fun () -> emit ())
+                Assert.Equal(expected, error.Message))
+
+    [<Theory>]
+    [<InlineData("int", 64, 32, 32)>]
+    [<InlineData("char", 16, 8, 8)>]
+    let ``valid measured storage retains every byte offset including size minus one`` cType sizeBits alignmentBits secondOffset =
+        withLayoutHeader $"struct Holder {{ {cType} first; {cType} second; }};" ["Holder"] (fun declarations measured ->
+            let layout = mkLayout "Holder" sizeBits alignmentBits [0; secondOffset]
+            Assert.Equal(layout, measured.["Holder"])
+            let output = FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 (Map.ofList ["Holder", layout])
+            Assert.Contains($"let Size = {sizeBits / 8}\n", output)
+            Assert.Contains($"let Alignment = {alignmentBits / 8}\n", output)
+            Assert.Contains($"let secondOffset = {secondOffset / 8}\n", output)
+            Assert.Contains("layout measured (clang record layout dump)", output))
+
+    [<Theory>]
+    [<InlineData(32)>]
+    [<InlineData(4)>]
+    [<InlineData(65)>]
+    let ``measured union admits storage size before replacing original members`` sizeBits =
+        withLayoutHeader "union Value { int first; int second; }; struct Probe { int payload; };" ["Probe"] (fun declarations _ ->
+            let record = declarations |> List.pick (function CppParser.Declaration.Struct record when record.Name = "Value" -> Some record | _ -> None)
+            let layouts = Map.ofList ["Value", mkLayout "Value" sizeBits 32 [0; 0]]
+            let generate () = FidelityCodeGenerator.generate [CppParser.Declaration.Struct record] "Test" "test" Types.LP64 layouts
+            if sizeBits = 32 then
+                let output = generate ()
+                Assert.Contains("let Size = 4", output)
+                Assert.Contains("Repr = Repr.U8; Count = 4", output)
+                Assert.DoesNotContain("let firstOffset", output)
+                Assert.DoesNotContain("let secondOffset", output)
+            else
+                let error = Assert.Throws<System.InvalidOperationException>(fun () -> generate () |> ignore)
+                Assert.Equal($"Measured layout 'Value' has size {sizeBits} bits, which is not whole bytes; a supported bit-precise descriptor representation is required.", error.Message))
+
+    [<Theory>]
+    [<InlineData(false, false)>]
+    [<InlineData(false, true)>]
+    [<InlineData(true, false)>]
+    [<InlineData(true, true)>]
+    let ``nested measured size is admitted at its own record before byte count`` outerMeasured invalidChild =
+        withLayoutHeader "struct P { int payload; }; struct Outer { struct P inner; int tail; };" ["P"; "Outer"] (fun declarations measured ->
+            let records = declarations |> List.choose (function CppParser.Declaration.Struct s -> Some s | _ -> None)
+            let outer = records |> List.find (fun record -> record.Name = "Outer")
+            let layouts = if outerMeasured then measured else measured.Remove "Outer"
+            let layouts = if invalidChild then layouts.Add("P", {layouts.["P"] with SizeBits = -8; DataSizeBits = -8}) else layouts
+            let source = attributeLayoutSource records layouts
+            if outerMeasured then
+                let offsets, size, alignment, stratum = DescriptorGenerator.layoutOf source 0 outer
+                Assert.Equal<int list>([0; 4], offsets)
+                Assert.Equal(8, size)
+                Assert.Equal(4, alignment)
+                Assert.Equal(TypeMapper.Measured, stratum)
+            if invalidChild then
+                let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source outer |> ignore)
+                Assert.Equal("Measured layout 'P' size has byte quantity -1 outside the supported descriptor range 0..2147483647; a wider descriptor representation contract is required.", error.Message)
+            else
+                let output = DescriptorGenerator.structDecls source outer |> fun decls -> CodeRenderer.render (Module("Test", "test", decls))
+                Assert.Contains("Repr = Repr.U8; Count = 4", output)
+                Assert.Contains("let tailOffset = 4", output))
+
+    [<Theory>]
+    [<InlineData(0)>]
+    [<InlineData(1)>]
+    [<InlineData(2)>]
+    [<InlineData(3)>]
+    [<InlineData(4)>]
+    let ``measured input refusal preserves field and record precedence`` scenario =
+        let ordinary = [mkField "first" "int"; mkField "second" "int"]
+        let fields, size, offsets, expected =
+            match scenario with
+            | 0 -> [mkBitField "first" "int" 1; mkField "second" "int"], 65, [0; 32], "Struct 'Holder' field 'first' is a bitfield; a supported bit-precise descriptor representation is required."
+            | 1 -> [mkField "first" "Mystery"; mkField "second" "int"], 65, [0; 32], "Struct 'Holder' field 'first' has no known representation for type 'Mystery'; a complete C representation contract is required."
+            | 2 -> ordinary, 65, [0], "Measured layout 'Holder' has 1 field offsets for 2 fields."
+            | 3 -> ordinary, 65, [-3; 32], "Measured layout 'Holder' has size 65 bits, which is not whole bytes; a supported bit-precise descriptor representation is required."
+            | _ -> ordinary, 64, [-8; 128], "Struct 'Holder' field 'first' has measured byte offset -1 outside the measured storage 0..7; a measured layout consistent with its record size is required."
+        let record = mkStruct "Holder" fields None
+        let layouts = Map.ofList ["Holder", mkLayout "Holder" size 32 offsets]
+        let source = attributeLayoutSource [record] layouts
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 0 record |> ignore)
+        Assert.Equal(expected, error.Message)
+
+    [<Fact>]
+    let ``fieldless measured record remains absent from generated storage`` () =
+        let record = mkStructSimple "Empty"
+        let layouts = Map.ofList ["Empty", mkLayout "Empty" 0 8 []]
+        let output = FidelityCodeGenerator.generate [CppParser.Declaration.Struct record] "Test" "test" Types.LP64 layouts
+        Assert.DoesNotContain("module Empty", output)
+        Assert.DoesNotContain("let Descriptor", output)
+
+    [<Theory>]
     [<InlineData("P", false)>]
     [<InlineData("P", true)>]
     [<InlineData("Pragma", false)>]
@@ -568,7 +677,8 @@ module GeneratorDispatch =
         let middle = mkStruct "Mid" [mkField "e" "struct Empty"] None
         let outer = mkStruct "Outer" [mkField "mid" "struct Mid"] None
         let declarations = [CppParser.Declaration.Struct outer; CppParser.Declaration.Struct middle; CppParser.Declaration.Struct empty]
-        let layouts = if measured then Map.ofList ["Empty", mkLayout "Empty" 0 8 []; "Mid", mkLayout "Mid" 0 8 [0]; "Outer", mkLayout "Outer" 0 8 [0]] else Map.empty
+        // Positive outer storage reaches the intended nested representation refusal.
+        let layouts = if measured then Map.ofList ["Empty", mkLayout "Empty" 0 8 []; "Mid", mkLayout "Mid" 0 8 [0]; "Outer", mkLayout "Outer" 8 8 [0]] else Map.empty
         let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts |> ignore)
         Assert.Equal("Struct 'Mid' field 'e' has fieldless nested record type 'Empty'; a supported empty or opaque record representation contract is required.", error.Message)
 
