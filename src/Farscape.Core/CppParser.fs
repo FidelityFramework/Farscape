@@ -1049,18 +1049,33 @@ module CppParser =
                 do! pSpaces
                 do! pstring label >>% ()
                 let! value = pint32
-                do! pSkipLine
+                do! pSpaces
+                do! pNewline
+                do! skipMany pNewline
                 return value
             }
 
         static let pFieldOffsets =
+            let rec remaining values =
+                parser {
+                    do! pSpaces
+                    let! comma = opt (skipChar ',')
+                    match comma with
+                    | ValueNone -> return List.rev values
+                    | ValueSome _ ->
+                        do! pSpaces
+                        let! value = pint32
+                        return! remaining (value :: values)
+                }
             parser {
                 do! pSpaces
                 do! pstring "FieldOffsets: [" >>% ()
-                let! offsets, _ = sepBy (pSpaces >>. pint32 .>> pSpaces) (skipChar ',')
+                do! pSpaces
+                let! first = pint32
+                let! offsets = remaining [first]
                 do! skipChar ']'
                 do! pSkipLine
-                return Seq.toList offsets
+                return offsets
             }
 
         static let pEmptyFieldOffsets =
@@ -1090,25 +1105,50 @@ module CppParser =
                 }
             }
 
+        static member StructName = pStructName
         static member LayoutBlock = pLayoutBlock
 
     type private LP = LayoutParsers<ReadableString, ReadableStringSlice>
 
     /// Parse clang's -fdump-record-layouts-simple stderr output into a map of struct layouts.
     /// Each record layout block is preceded by "*** Dumping AST Record Layout".
-    /// Blocks that fail to parse are silently skipped.
-    let parseRecordLayouts (stderr: string) : Map<string, StructLayoutInfo> =
+    /// Text before the first marker is clang output, not a layout block.
+    /// A marked block that cannot be parsed refuses the entire measurement.
+    let parseRecordLayouts (stderr: string) : Result<Map<string, StructLayoutInfo>, string> =
         let blocks = stderr.Split("*** Dumping AST Record Layout")
-        blocks
-        |> Array.choose (fun block ->
-            let trimmed = block.TrimStart([| '\n'; '\r' |])
-            if String.IsNullOrWhiteSpace(trimmed) then None
+        let rec outOfRange = function
+            | ErrorType.Message "Integer out of range." -> true
+            | ErrorType.Nested(parent, children) ->
+                outOfRange parent || (children |> List.exists (fun error -> outOfRange error.Errors))
+            | _ -> false
+        let rec collect ordinal layouts =
+            if ordinal >= blocks.Length then Ok layouts
             else
-                let reader = Reader.ofString trimmed ()
-                match LP.LayoutBlock reader with
-                | Ok result -> Some (result.Parsed.Name, result.Parsed)
-                | Error _ -> None)
-        |> Map.ofArray
+                let trimmed = blocks[ordinal].TrimStart([| '\n'; '\r' |])
+                if String.IsNullOrWhiteSpace trimmed then
+                    Error $"Record layout block {ordinal} is empty."
+                else
+                    match LP.LayoutBlock (Reader.ofString trimmed ()) with
+                    | Ok result -> collect (ordinal + 1) (Map.add result.Parsed.Name result.Parsed layouts)
+                    | Error error ->
+                        let name =
+                            match LP.StructName (Reader.ofString trimmed ()) with
+                            | Ok result -> $" for '{result.Parsed}'"
+                            | Error _ -> ""
+                        let position = min (max 0 error.Position.Index) (trimmed.Length - 1)
+                        let position =
+                            if position > 0 && (trimmed[position] = '\n' || trimmed[position] = '\r') then position - 1
+                            else position
+                        let start = trimmed.LastIndexOf('\n', position) + 1
+                        let finish = match trimmed.IndexOf('\n', position) with -1 -> trimmed.Length | value -> value
+                        let line = trimmed.Substring(start, finish - start).Trim()
+                        let range =
+                            if outOfRange error.Errors then
+                                " Measured bit quantities are supported in 0..2147483647; a wider measured bit representation contract is required."
+                            else ""
+                        let excerpt = trimmed.Split([| '\n'; '\r' |], StringSplitOptions.RemoveEmptyEntries) |> Array.truncate 6 |> String.concat " | "
+                        Error $"Record layout block {ordinal}{name} failed at '{line}': {error.Errors}.{range} Block: {excerpt}"
+        collect 1 Map.empty
 
     // =========================================================================
     // Clang Invocation
@@ -1376,17 +1416,18 @@ module CppParser =
                     printfn "[CppParser] Layout stderr: %d bytes, exit code: %d" stderr.Length proc.ExitCode
 
                 // Parse layout data from stderr (clang may return non-zero due to unused variables)
-                let layouts = parseRecordLayouts (stdout + "\n" + stderr)
+                match parseRecordLayouts (stdout + "\n" + stderr) with
+                | Error reason -> Error $"Record layout dump could not be parsed: {reason}"
+                | Ok layouts ->
+                    // Filter to only the requested struct names
+                    let filtered =
+                        structNames
+                        |> List.choose (fun name ->
+                            let key = name.Replace("typedef ", "").Replace("struct ", "").Replace("union ", "")
+                            layouts |> Map.tryFind key |> Option.map (fun l -> (key, l)))
+                        |> Map.ofList
 
-                // Filter to only the requested struct names
-                let filtered =
-                    structNames
-                    |> List.choose (fun name ->
-                        let key = name.Replace("typedef ", "").Replace("struct ", "").Replace("union ", "")
-                        layouts |> Map.tryFind key |> Option.map (fun l -> (key, l)))
-                    |> Map.ofList
-
-                Ok filtered
+                    Ok filtered
             with ex ->
                 Error $"Failed to extract struct layouts: {ex.Message}"
         try File.Delete(tempFile) with _ -> ()

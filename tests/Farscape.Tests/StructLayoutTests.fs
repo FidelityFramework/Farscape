@@ -11,42 +11,40 @@ open TestHelpers
 
 module LayoutParser =
 
+    let private parsed input =
+        match CppParser.parseRecordLayouts input with
+        | Ok layouts -> layouts
+        | Error reason -> failwithf "Expected a parsed layout: %s" reason
+
+    let private parseError input =
+        match CppParser.parseRecordLayouts input with
+        | Error reason -> reason
+        | Ok layouts -> failwithf "Expected a layout parse error, got %A" layouts
+
+    let private layout name size dataSize alignment offsets =
+        $"""*** Dumping AST Record Layout
+Type: struct {name}
+Layout: <ASTRecordLayout
+  Size:{size}
+  DataSize:{dataSize}
+  Alignment:{alignment}
+  FieldOffsets: {offsets}>
+"""
+
     [<Fact>]
     let ``parseRecordLayouts parses simple struct`` () =
-        let input = """*** Dumping AST Record Layout
-Type: struct Point
-Layout: <ASTRecordLayout
-  Size:64
-  DataSize:64
-  Alignment:32
-  FieldOffsets: [0, 32]>
-"""
-        let result = CppParser.parseRecordLayouts input
+        let result = parsed (layout "Point" "64" "64" "32" "[0, 32]")
         Assert.True(result.ContainsKey "Point")
-        let layout = result.["Point"]
-        Assert.Equal(64, layout.SizeBits)
-        Assert.Equal(64, layout.DataSizeBits)
-        Assert.Equal(32, layout.AlignmentBits)
-        Assert.Equal<int list>([0; 32], layout.FieldOffsetsBits)
+        let point = result.["Point"]
+        Assert.Equal(64, point.SizeBits)
+        Assert.Equal(64, point.DataSizeBits)
+        Assert.Equal(32, point.AlignmentBits)
+        Assert.Equal<int list>([0; 32], point.FieldOffsetsBits)
 
     [<Fact>]
     let ``parseRecordLayouts parses multiple structs`` () =
-        let input = """*** Dumping AST Record Layout
-Type: struct Point
-Layout: <ASTRecordLayout
-  Size:64
-  DataSize:64
-  Alignment:32
-  FieldOffsets: [0, 32]>
-*** Dumping AST Record Layout
-Type: struct Rect
-Layout: <ASTRecordLayout
-  Size:128
-  DataSize:128
-  Alignment:32
-  FieldOffsets: [0, 32, 64, 96]>
-"""
-        let result = CppParser.parseRecordLayouts input
+        let input = layout "Point" "64" "64" "32" "[0, 32]" + layout "Rect" "128" "128" "32" "[0, 32, 64, 96]"
+        let result = parsed input
         Assert.Equal(2, result.Count)
         Assert.True(result.ContainsKey "Point")
         Assert.True(result.ContainsKey "Rect")
@@ -54,33 +52,94 @@ Layout: <ASTRecordLayout
 
     [<Fact>]
     let ``parseRecordLayouts handles empty field offsets`` () =
-        let input = """*** Dumping AST Record Layout
-Type: struct Empty
-Layout: <ASTRecordLayout
-  Size:0
-  DataSize:0
-  Alignment:8
-  FieldOffsets: []>
-"""
-        let result = CppParser.parseRecordLayouts input
+        let result = parsed (layout "Empty" "0" "0" "8" "[]")
         Assert.True(result.ContainsKey "Empty")
         Assert.Equal<int list>([], result.["Empty"].FieldOffsetsBits)
 
     [<Fact>]
-    let ``parseRecordLayouts skips malformed blocks`` () =
-        let input = """*** Dumping AST Record Layout
-garbage that should be skipped
-*** Dumping AST Record Layout
-Type: struct Valid
-Layout: <ASTRecordLayout
-  Size:32
-  DataSize:32
-  Alignment:32
-  FieldOffsets: [0]>
-"""
-        let result = CppParser.parseRecordLayouts input
+    let ``parseRecordLayouts rejects the first malformed marked block`` () =
+        let input = "*** Dumping AST Record Layout\ngarbage that should be rejected\n" + layout "Valid" "32" "32" "32" "[0]"
+        let error = parseError input
+        Assert.Contains("block 1", error)
+        Assert.Contains("garbage", error)
+
+    [<Fact>]
+    let ``parseRecordLayouts accepts diagnostics around a marked block`` () =
+        let input = "clang diagnostic before layouts\n" + layout "P" "32" "32" "32" "[0]" + "clang diagnostic after layouts\n"
+        let result = parsed input
         Assert.Equal(1, result.Count)
-        Assert.True(result.ContainsKey "Valid")
+        Assert.Equal(32, result.["P"].SizeBits)
+
+    [<Fact>]
+    let ``parseRecordLayouts distinguishes absent and empty marked blocks`` () =
+        Assert.Empty(parsed "")
+        Assert.Empty(parsed "clang diagnostic without a layout marker")
+        let error = parseError "*** Dumping AST Record Layout\n  \n"
+        Assert.Contains("block 1", error)
+        Assert.Contains("empty", error)
+
+    [<Fact>]
+    let ``parseRecordLayouts accepts the Int32 bit limit`` () =
+        let result = parsed (layout "Limit" "2147483647" "2147483647" "2147483647" "[2147483647]")
+        let item = result.["Limit"]
+        Assert.Equal(System.Int32.MaxValue, item.SizeBits)
+        Assert.Equal(System.Int32.MaxValue, item.DataSizeBits)
+        Assert.Equal(System.Int32.MaxValue, item.AlignmentBits)
+        Assert.Equal<int list>([System.Int32.MaxValue], item.FieldOffsetsBits)
+
+    [<Theory>]
+    [<InlineData("2147483648", "32", "32", "[0]", "Size:")>]
+    [<InlineData("32", "2147483648", "32", "[0]", "DataSize:")>]
+    [<InlineData("32", "32", "2147483648", "[0]", "Alignment:")>]
+    [<InlineData("32", "32", "32", "[0, 2147483648]", "FieldOffsets:")>]
+    let ``parseRecordLayouts reports the first overflowing marked block`` size dataSize alignment offsets label =
+        let input = layout "Q" "32" "32" "32" "[0]" + layout "P" size dataSize alignment offsets
+        let error = parseError input
+        Assert.Contains("block 2", error)
+        Assert.Contains("'P'", error)
+        Assert.Contains(label, error)
+        Assert.Contains("0..2147483647", error)
+        Assert.Contains("wider measured bit representation contract is required", error)
+
+    [<Theory>]
+    [<InlineData("abc", "[0]", "Size:")>]
+    [<InlineData("32junk", "[0]", "Size:")>]
+    [<InlineData("32", "[0, x]", "FieldOffsets:")>]
+    [<InlineData("32", "[0, 32", "FieldOffsets:")>]
+    let ``parseRecordLayouts reports malformed field values and offsets`` size offsets label =
+        let error = parseError (layout "Malformed" size "32" "32" offsets)
+        Assert.Contains("block 1", error)
+        Assert.Contains("'Malformed'", error)
+        Assert.Contains(label, error)
+
+    [<Theory>]
+    [<InlineData("[]", 0)>]
+    [<InlineData("[0, 32,64]", 3)>]
+    let ``parseRecordLayouts accepts supported offset spacing`` offsets count =
+        let result = parsed (layout "Offsets" "96" "96" "32" offsets)
+        Assert.Equal(count, result.["Offsets"].FieldOffsetsBits.Length)
+
+    [<Fact>]
+    let ``real clang layout probe reports measured bit range overflow`` () =
+        let directory = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "../..", "artifacts", "layout-bit-range", System.Guid.NewGuid().ToString("N")))
+        System.IO.Directory.CreateDirectory(directory) |> ignore
+        try
+            let before = System.IO.Path.Combine(directory, "before.h")
+            let at = System.IO.Path.Combine(directory, "at.h")
+            System.IO.File.WriteAllText(before, "struct BitsBefore { unsigned char bytes[268435455]; };\n")
+            System.IO.File.WriteAllText(at, "struct BitsAt { unsigned char bytes[268435456]; };\n")
+            match CppParser.extractStructLayouts before [] [] ["struct BitsBefore"] false with
+            | Ok layouts -> Assert.Equal(2147483640, layouts.["BitsBefore"].SizeBits)
+            | Error reason -> failwithf "Expected measured BitsBefore: %s" reason
+            match CppParser.extractStructLayouts at [] [] ["struct BitsAt"] false with
+            | Ok layouts -> failwithf "Expected BitsAt range error, got %A" layouts
+            | Error reason ->
+                Assert.Contains("Record layout dump could not be parsed:", reason)
+                Assert.Contains("BitsAt", reason)
+                Assert.Contains("Size:", reason)
+                Assert.Contains("0..2147483647", reason)
+        finally
+            System.IO.Directory.Delete(directory, true)
 
     [<Fact>]
     let ``concurrent layout probes retain their own header measurements`` () =
