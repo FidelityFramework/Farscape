@@ -1204,13 +1204,14 @@ module CppParser =
                             let suffix = line.Substring(line.LastIndexOf('>') + 1).Trim().Split([|' '; '\t'; '\r'|], StringSplitOptions.RemoveEmptyEntries)
                             let name =
                                 match List.ofArray suffix with
+                                | location :: "referenced" :: name :: tail
                                 | location :: "inline" :: name :: tail
                                 | location :: name :: tail
                                     when (location.StartsWith("col:", StringComparison.Ordinal) || location.StartsWith("line:", StringComparison.Ordinal)) && identifier name ->
                                     let tail = match tail with "inline" :: rest -> rest | _ -> tail
                                     let tail = match tail with "nested" :: rest -> rest | _ -> tail
                                     match tail with
-                                    | [] -> Some (nodeKind, name)
+                                    | [] | ["external-linkage"] -> Some (nodeKind, name)
                                     | ["original"; "Namespace"; address; quotedName]
                                         when address.StartsWith("0x", StringComparison.Ordinal) && quotedName = $"'{name}'" -> Some (nodeKind, name)
                                     | _ -> None
@@ -1311,7 +1312,8 @@ module CppParser =
 
         let tempDir = Path.Combine(Path.GetTempPath(), "farscape-layout")
         Directory.CreateDirectory(tempDir) |> ignore
-        let tempFile = Path.Combine(tempDir, "_farscape_layout_probe.c")
+        // Each clang invocation must measure its own header, including concurrent probes.
+        let tempFile = Path.Combine(tempDir, "_farscape_layout_probe_" + System.Guid.NewGuid().ToString("N") + ".c")
 
         let result =
             try

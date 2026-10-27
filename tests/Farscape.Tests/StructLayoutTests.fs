@@ -82,6 +82,39 @@ Layout: <ASTRecordLayout
         Assert.Equal(1, result.Count)
         Assert.True(result.ContainsKey "Valid")
 
+    [<Fact>]
+    let ``concurrent layout probes retain their own header measurements`` () =
+        let directory = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "../..", "artifacts", "layout-concurrency", System.Guid.NewGuid().ToString("N")))
+        System.IO.Directory.CreateDirectory(directory) |> ignore
+        try
+            let probes =
+                [1 .. 4]
+                |> List.map (fun size ->
+                    let header = System.IO.Path.Combine(directory, $"probe{size}.h")
+                    System.IO.File.WriteAllText(header, $"struct Probe {{ unsigned char data[{size}]; }};\n")
+                    size, header)
+            use start = new System.Threading.Barrier(probes.Length)
+            let results =
+                probes
+                |> List.map (fun (size, header) -> async {
+                    do! Async.SwitchToNewThread()
+                    start.SignalAndWait() |> ignore
+                    return size, CppParser.extractStructLayouts header [] [] ["struct Probe"] false
+                })
+                |> Async.Parallel
+                |> Async.RunSynchronously
+            for size, result in results do
+                match result with
+                | Error error -> Assert.Fail(error)
+                | Ok layouts ->
+                    Assert.Equal(1, layouts.Count)
+                    let layout = layouts.["Probe"]
+                    Assert.Equal(size * 8, layout.SizeBits)
+                    Assert.Equal(8, layout.AlignmentBits)
+                    Assert.Equal<int list>([0], layout.FieldOffsetsBits)
+        finally
+            System.IO.Directory.Delete(directory, true)
+
 // =========================================================================
 // CodeAST + Renderer Tests (layout module and descriptor nodes)
 // =========================================================================
@@ -143,6 +176,26 @@ module GeneratorDispatch =
         Assert.Contains("let yOffset = 4", output)
         Assert.Contains("offset measured; repr declared: int under LP64", output)
         Assert.DoesNotContain("type Point", output)
+
+    [<Theory>]
+    [<InlineData(1)>]
+    [<InlineData(3)>]
+    let ``generate refuses measured layouts with missing or extra field offsets`` count =
+        let decls = [CppParser.Declaration.Struct (mkStruct "Point" [mkField "x" "int"; mkField "y" "int"] None)]
+        let layouts = Map.ofList ["Point", mkLayout "Point" 64 32 (List.replicate count 0)]
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 layouts |> ignore)
+        Assert.Equal($"Measured layout 'Point' has {count} field offsets for 2 fields.", error.Message)
+
+    [<Fact>]
+    let ``measured union retains opaque storage after verifying original field offsets`` () =
+        let union = {mkStruct "Value" [mkField "a" "int"; mkField "b" "int"] None with IsUnion = true}
+        let layouts = Map.ofList ["Value", mkLayout "Value" 32 32 [0; 0]]
+        let output = FidelityCodeGenerator.generate [CppParser.Declaration.Struct union] "Test" "test" Types.LP64 layouts
+        Assert.Contains("let StorageOffset = 0", output)
+        Assert.DoesNotContain("let aOffset", output)
+        let malformed = Map.ofList ["Value", mkLayout "Value" 32 32 [0]]
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate [CppParser.Declaration.Struct union] "Test" "test" Types.LP64 malformed |> ignore)
+        Assert.Equal("Measured layout 'Value' has 1 field offsets for 2 fields.", error.Message)
 
     [<Fact>]
     let ``generate produces a declared layout module for an unmeasured struct`` () =

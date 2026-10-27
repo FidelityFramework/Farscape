@@ -1382,6 +1382,58 @@ let private writableProject shape =
         System.IO.Directory.Delete(dir, true)
 
 [<Fact>]
+let ``required ABI layout probe preserves success and refuses extraction error`` () =
+    Assert.Equal(7, BindingGenerator.requireLayoutProbe (Ok 7))
+    let error = Assert.ThrowsAny<System.Exception>(fun () -> BindingGenerator.requireLayoutProbe (Error "probe failed") |> ignore)
+    Assert.Equal("ABI-critical struct layout extraction failed: probe failed", error.Message)
+
+[<Theory>]
+[<InlineData("record")>]
+[<InlineData("scalar")>]
+[<InlineData("missing")>]
+[<InlineData("later")>]
+[<InlineData("collision")>]
+[<InlineData("wrong-kind")>]
+[<InlineData("missing-typedef")>]
+let ``ABI critical layout probe must succeed before generation`` shape =
+    let dir = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "artifacts", "layout-probe-tests", System.Guid.NewGuid().ToString("N")))
+    System.IO.Directory.CreateDirectory(dir) |> ignore
+    try
+        let header = System.IO.Path.Combine(dir, "record.h")
+        let secondHeader = System.IO.Path.Combine(dir, "later.h")
+        let output = System.IO.Path.Combine(dir, "output")
+        System.IO.Directory.CreateDirectory(output) |> ignore
+        let sentinel = System.IO.Path.Combine(output, "original.clef")
+        System.IO.File.WriteAllText(sentinel, "held-original")
+        System.IO.File.WriteAllText(header, "struct Present { int value; };\ntypedef unsigned long Scalar;\n" + (if shape = "collision" then "typedef unsigned long Missing;\n" else ""))
+        System.IO.File.WriteAllText(secondHeader, "struct Later { int value; };\n")
+        let project = System.IO.Path.Combine(dir, "record.pilot.toml")
+        let pilot = System.String.Join("\n", [
+            "[library]"; "name = \"record\""
+            (if shape = "later" then "headers = [\"" + header + "\", \"" + secondHeader + "\"]" else "header = \"" + header + "\"")
+            "[output]"; "mode = \"fidelity\""; "directory = \"" + output + "\""
+            "[options]"; "abi_critical_structs = [\"" + (match shape with "record" -> "struct Present" | "scalar" -> "typedef Scalar" | "later" -> "struct Later" | "wrong-kind" -> "union Present" | "missing-typedef" -> "typedef Present" | _ -> "struct Missing") + "\"]"
+            "[[namespace]]"; "name = \"Test.Record\""; "description = \"layout probe\""; "library = \"record\""
+            "functions = []" ])
+        System.IO.File.WriteAllText(project, pilot)
+        match BindingGenerator.generateFromProject project false false Types.LP64 with
+        | Ok _ when shape = "record" || shape = "scalar" -> ()
+        | Ok _ -> failwith "An unsuccessful required layout probe was admitted"
+        | Error error when shape = "record" || shape = "scalar" -> failwithf "The valid required layout probe was refused: %s" error
+        | Error error ->
+            let expected =
+                match shape with
+                | "later" -> "Binding generation failed: ABI-critical storage 'Later' requires a measured layout; header probe did not provide it."
+                | "wrong-kind" -> "Binding generation failed: ABI-critical storage 'Present' does not match the requested record kind."
+                | "missing-typedef" -> "Binding generation failed: ABI-critical typedef 'Present' is not declared."
+                | _ -> "Binding generation failed: ABI-critical storage 'Missing' has no known scalar or measured record representation."
+            Assert.Equal(expected, error)
+            Assert.Equal("held-original", System.IO.File.ReadAllText sentinel)
+            Assert.Equal<string array>([|sentinel|], System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories))
+    finally
+        System.IO.Directory.Delete(dir, true)
+
+[<Fact>]
 let ``writable buffer actual header emits current neutral array signature and exact companion`` () =
     match writableProject "positive" with
     | Error error -> failwith error

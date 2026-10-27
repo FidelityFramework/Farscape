@@ -937,14 +937,15 @@ module FidelityCodeGenerator =
         // Measured synchronization unions are opaque storage. Their public
         // extent/alignment is measured; overlapping implementation members are not fields
         // consumers may access through a BAREWire struct view.
-        let s =
+        let s, layouts =
             match s.IsUnion, Map.tryFind s.Name ctx.StructLayouts with
             | true, Some layout ->
+                DescriptorGenerator.validateMeasuredFieldCount s layout
                 let storage : CppParser.FieldDecl =
                     { Name = "Storage"; Type = "unsigned char"; IsConst = false; IsVolatile = false
                       IsArray = true; ArraySize = Some (layout.SizeBits / 8); IsBitfield = false; BitWidth = None }
-                { s with Fields = [storage] }
-            | _ -> s
+                { s with Fields = [storage] }, ctx.StructLayouts.Add(s.Name, { layout with FieldOffsetsBits = [0] })
+            | _ -> s, ctx.StructLayouts
         let shape (cType: string) : DescriptorGenerator.FieldShape =
             match resolveIn ctx cType with
             | Unresolved name when ctx.Structs.ContainsKey name -> DescriptorGenerator.StructField name
@@ -971,7 +972,7 @@ module FidelityCodeGenerator =
                 [ RecordType(s.Name, s.Fields |> List.map (fun field -> cleanParamName field.Name, fieldType field), s.Documentation, []) ]
             else []
         valueDecls @ DescriptorGenerator.structDecls
-            { Structs = ctx.Structs; Layouts = ctx.StructLayouts; Model = ctx.DataModel; Shape = shape }
+            { Structs = ctx.Structs; Layouts = layouts; Model = ctx.DataModel; Shape = shape }
             s
 
     /// Generate FsDecl list for a macro constant (numeric values only).

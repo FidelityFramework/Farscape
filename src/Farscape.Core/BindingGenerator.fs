@@ -7,6 +7,11 @@ open PilotTypes
 
 module BindingGenerator =
 
+    /// A requested ABI layout probe cannot be replaced by declared layouts.
+    let requireLayoutProbe = function
+        | Ok layouts -> layouts
+        | Error error -> failwithf "ABI-critical struct layout extraction failed: %s" error
+
     type GenerationOptions = {
         HeaderFile: FileInfo
         LibraryName: string
@@ -382,27 +387,39 @@ module BindingGenerator =
                     if abiStructNames.IsEmpty then Map.empty
                     else
                         let headerFile = project.Library.Headers |> List.head
-                        match CppParser.extractStructLayouts headerFile project.Library.IncludePaths project.Library.Defines abiStructNames verbose with
-                        | Ok layouts ->
-                            logVerbose $"Extracted layouts for {layouts.Count} ABI-critical struct(s)" verbose
-                            layouts
-                        | Error e ->
-                            logVerbose $"Warning: struct layout extraction failed: {e}" verbose
-                            Map.empty
+                        let layouts =
+                            CppParser.extractStructLayouts headerFile project.Library.IncludePaths project.Library.Defines abiStructNames verbose
+                            |> requireLayoutProbe
+                        logVerbose $"Extracted layouts for {layouts.Count} ABI-critical struct(s)" verbose
+                        layouts
 
                 let ctx =
                     let baseCtx = FidelityCodeGenerator.buildGenerationContext declarations dataModel structLayouts
                     match project.Options with
-                    | Some opts when opts.NativePointerSurface || opts.CHeaderMode ->
+                    | Some opts ->
+                        let nativeCarrier = opts.NativePointerSurface || opts.CHeaderMode
                         for requested in opts.AbiCriticalStructs do
                             let name = requested.Replace("typedef ", "").Replace("struct ", "").Replace("union ", "")
-                            if baseCtx.Structs.ContainsKey name then
+                            let expectedUnion =
+                                if requested.StartsWith("struct ") then Some false
+                                elif requested.StartsWith("union ") then Some true
+                                else None
+                            if requested.StartsWith("typedef ") && not (baseCtx.TypedefMap.ContainsKey name) then
+                                failwithf "ABI-critical typedef '%s' is not declared." name
+                            let declared = baseCtx.Structs.TryFind name
+                            if expectedUnion |> Option.exists (fun expected -> declared |> Option.exists (fun record -> record.IsUnion <> expected)) then
+                                failwithf "ABI-critical storage '%s' does not match the requested record kind." name
+                            if declared.IsSome then
                                 if not (structLayouts.ContainsKey name) then
-                                    failwithf "Native carrier storage '%s' requires a measured layout; header probe did not provide it." name
+                                    if nativeCarrier then
+                                        failwithf "Native carrier storage '%s' requires a measured layout; header probe did not provide it." name
+                                    else
+                                        failwithf "ABI-critical storage '%s' requires a measured layout; header probe did not provide it." name
                             else
                                 match FidelityCodeGenerator.resolveCType baseCtx.TypedefMap dataModel Set.empty baseCtx.Delegates baseCtx.Enums name with
-                                | FidelityCodeGenerator.Scalar r when r.Bits > 0 -> ()
-                                | _ -> failwithf "Native carrier storage '%s' has no known scalar or measured record representation." name
+                                | FidelityCodeGenerator.Scalar r when expectedUnion.IsNone && r.Bits > 0 -> ()
+                                | _ when nativeCarrier -> failwithf "Native carrier storage '%s' has no known scalar or measured record representation." name
+                                | _ -> failwithf "ABI-critical storage '%s' has no known scalar or measured record representation." name
                     | _ -> ()
                     // An external contract must survive neither duplicate-map collapse
                     // nor namespace filtering. Refuse before any generation effects.

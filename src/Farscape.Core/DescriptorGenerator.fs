@@ -99,11 +99,17 @@ module DescriptorGenerator =
             let bytes = max 1 ((r.Bits + 7) / 8)
             bytes, bytes
 
+    /// A measured layout is usable only when every original field has one offset.
+    let validateMeasuredFieldCount (s: CppParser.StructDecl) (measured: CppParser.StructLayoutInfo) =
+        if s.Fields.Length <> measured.FieldOffsetsBits.Length then
+            invalidOp $"Measured layout '{s.Name}' has {measured.FieldOffsetsBits.Length} field offsets for {s.Fields.Length} fields."
+
     /// One struct's layout: per-field byte offsets, size, alignment, and the stratum of the offsets.
     let rec layoutOf (src: LayoutSource) (depth: int) (s: CppParser.StructDecl)
         : int list * int * int * Stratum =
         match Map.tryFind s.Name src.Layouts with
         | Some measured ->
+            validateMeasuredFieldCount s measured
             let offsets =
                 Seq.zip s.Fields measured.FieldOffsetsBits
                 |> Seq.map (fun (_, bits) -> bits / 8)
