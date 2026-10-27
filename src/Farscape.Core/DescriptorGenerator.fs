@@ -138,7 +138,7 @@ module DescriptorGenerator =
         let fields =
             s.Fields |> List.map (fun field ->
                 let shape = representedFieldShape src s.Name field
-                shape, elementCount s.Name field)
+                field.Name, shape, elementCount s.Name field)
         match Map.tryFind s.Name src.Layouts with
         | Some measured ->
             validateMeasuredFieldCount s measured
@@ -151,29 +151,25 @@ module DescriptorGenerator =
                 |> List.ofSeq
             offsets, measured.SizeBits / 8, measured.AlignmentBits / 8, Measured
         | None ->
-            let fieldExtent count shape : (int * int * Stratum) option =
+            let fieldExtent fieldName count shape : int * int =
                 match shape with
                 | RepresentedScalar r ->
                     let bytes, align = scalarExtent r
-                    Some (bytes * count, align, Declared)
-                | RepresentedStruct nested when depth < 16 ->
+                    bytes * count, align
+                | RepresentedStruct nested when depth >= 16 && not (Map.containsKey nested.Name src.Layouts) ->
+                    invalidOp $"Struct '{s.Name}' field '{fieldName}' nests record type '{nested.Name}' beyond the supported declared-layout depth of 16; a measured layout or a shallower complete representation contract is required."
+                | RepresentedStruct nested ->
                     let _, size, align, _ = layoutOf src (depth + 1) nested
-                    Some (size * count, align, Declared)
-                // The depth limit remains the sole inferred-extent path.
-                | RepresentedStruct _ -> None
-            let (endOffset, maxAlign, offsets, stratum) =
+                    size * count, align
+            let (endOffset, maxAlign, offsets) =
                 fields
-                |> List.fold (fun (offset, maxAlign, offsets, stratum) (shape, count) ->
-                    match fieldExtent count shape with
-                    | Some (size, align, fieldStratum) ->
-                        let at = if s.IsUnion then 0 else alignUp offset align
-                        let next = if s.IsUnion then max offset size else at + size
-                        let worst = match stratum, fieldStratum with Inferred, _ | _, Inferred -> Inferred | _ -> Declared
-                        next, max maxAlign align, offsets @ [at], worst
-                    | None ->
-                        offset, maxAlign, offsets @ [offset], Inferred)
-                    (0, 1, [], Declared)
-            offsets, alignUp endOffset maxAlign, maxAlign, stratum
+                |> List.fold (fun (offset, maxAlign, offsets) (fieldName, shape, count) ->
+                    let size, align = fieldExtent fieldName count shape
+                    let at = if s.IsUnion then 0 else alignUp offset align
+                    let next = if s.IsUnion then max offset size else at + size
+                    next, max maxAlign align, offsets @ [at])
+                    (0, 1, [])
+            offsets, alignUp endOffset maxAlign, maxAlign, Declared
 
     /// The BAREWire field descriptor of one field at its offset.
     let private fieldDescriptor (src: LayoutSource) structName (offsetStratum: Stratum) (f: CppParser.FieldDecl) (offset: int) : FsExpr =

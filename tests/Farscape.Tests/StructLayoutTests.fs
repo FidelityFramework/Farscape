@@ -669,6 +669,141 @@ module GeneratorDispatch =
                 let error = Assert.Throws<System.InvalidOperationException>(fun () -> generate () |> ignore)
                 Assert.Equal("Struct 'Opaque' field 'matrix' has array declarator 'int[2][3]'; a supported one-dimensional trailing array declarator or a complete declarator representation contract is required.", error.Message))
 
+    // One chain fixture exercises the existing layout and emission entry points with the
+    // same declarations; only the selected leaf measurement or array multiplicity changes.
+    let private depthChain last arrayAt =
+        let records =
+            [0 .. last] |> List.map (fun level ->
+                let name = $"R{level}"
+                let fields =
+                    if level = last then [mkField "value" "int"]
+                    else
+                        let field = mkField "payload" $"struct R{level + 1}"
+                        let field = if arrayAt = Some level then {field with IsArray = true; ArraySize = Some 3} else field
+                        [field; mkField "tail" "int"]
+                name, mkStruct name fields None) |> Map.ofList
+        let source : DescriptorGenerator.LayoutSource =
+            { Structs = records; Layouts = Map.empty; Model = Types.LP64
+              Shape = fun typ ->
+                  if typ = "int" then DescriptorGenerator.ScalarField {Family = TypeMapper.Signed; Bits = 32; Stratum = TypeMapper.Declared; CType = typ}
+                  elif typ.StartsWith("struct ") then DescriptorGenerator.StructField(typ.Substring(7))
+                  else DescriptorGenerator.UnknownField typ }
+        source, records["R0"]
+
+    [<Theory>]
+    [<InlineData(false)>]
+    [<InlineData(true)>]
+    let ``declared depth boundary retains scalar and array extents`` arrayLeaf =
+        let source, root = depthChain 16 (if arrayLeaf then Some 15 else None)
+        let expected = if arrayLeaf then 76 else 68
+        let offsets, size, alignment, stratum = DescriptorGenerator.layoutOf source 0 root
+        Assert.Equal<int list>([0; expected - 4], offsets)
+        Assert.Equal(expected, size)
+        Assert.Equal(4, alignment)
+        Assert.Equal(TypeMapper.Declared, stratum)
+        let output = CodeRenderer.render (Module("Test", "", DescriptorGenerator.structDecls source root))
+        Assert.Contains($"let Size = {expected}", output)
+        let declarations = source.Structs |> Map.toList |> List.map (snd >> CppParser.Declaration.Struct)
+        FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore
+
+    [<Fact>]
+    let ``measured leaf supplies extent beyond the declared depth boundary`` () =
+        let source, root = depthChain 17 None
+        let source = {source with Layouts = Map.ofList ["R17", mkLayout "R17" 32 32 [0]]}
+        let offsets, size, _, stratum = DescriptorGenerator.layoutOf source 0 root
+        Assert.Equal<int list>([0; 68], offsets)
+        Assert.Equal(72, size)
+        Assert.Equal(TypeMapper.Declared, stratum)
+        let output = CodeRenderer.render (Module("Test", "", DescriptorGenerator.structDecls source root))
+        Assert.Contains("Repr = Repr.U8; Count = 68", output)
+
+    [<Fact>]
+    let ``all measured deep records keep their measured layout`` () =
+        let source, root = depthChain 20 None
+        let layouts = [0 .. 20] |> List.map (fun i -> $"R{i}", mkLayout $"R{i}" ((21 - i) * 32) 32 (if i = 20 then [0] else [0; (20 - i) * 32])) |> Map.ofList
+        let source = {source with Layouts = layouts}
+        let offsets, size, _, stratum = DescriptorGenerator.layoutOf source 30 root
+        Assert.Equal<int list>([0; 80], offsets)
+        Assert.Equal(84, size)
+        Assert.Equal(TypeMapper.Measured, stratum)
+        let declarations = source.Structs |> Map.toList |> List.map (snd >> CppParser.Declaration.Struct)
+        let output = FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts
+        Assert.Contains("let Size = 84", output)
+
+    [<Theory>]
+    [<InlineData(16, false)>]
+    [<InlineData(17, false)>]
+    [<InlineData(16, true)>]
+    [<InlineData(17, true)>]
+    let ``direct depth counter permits scalars and measured nested extents`` depth nested =
+        let source, root = depthChain (if nested then 1 else 0) None
+        let source = if nested then {source with Layouts = Map.ofList ["R1", mkLayout "R1" 32 32 [0]]} else source
+        let offsets, size, _, stratum = DescriptorGenerator.layoutOf source depth root
+        Assert.Equal<int list>((if nested then [0; 4] else [0]), offsets)
+        Assert.Equal((if nested then 8 else 4), size)
+        Assert.Equal(TypeMapper.Declared, stratum)
+
+    [<Theory>]
+    [<InlineData(false)>]
+    [<InlineData(true)>]
+    let ``unmeasured nesting beyond the limit refuses every representation entry point`` arrayLeaf =
+        let source, root = depthChain 17 (if arrayLeaf then Some 16 else None)
+        let expected = "Struct 'R16' field 'payload' nests record type 'R17' beyond the supported declared-layout depth of 16; a measured layout or a shallower complete representation contract is required."
+        let declarations = source.Structs |> Map.toList |> List.map (snd >> CppParser.Declaration.Struct)
+        let calls =
+            [ (fun () -> DescriptorGenerator.layoutOf source 0 root |> ignore)
+              (fun () -> DescriptorGenerator.structDecls source root |> ignore)
+              (fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore) ]
+        for call in calls do
+            let error = Assert.Throws<System.InvalidOperationException>(fun () -> call ())
+            Assert.Equal(expected, error.Message)
+
+    [<Theory>]
+    [<InlineData(16)>]
+    [<InlineData(17)>]
+    let ``direct layout entry refuses an unmeasured nested extent at the limit`` depth =
+        let source, root = depthChain 1 None
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source depth root |> ignore)
+        Assert.Equal("Struct 'R0' field 'payload' nests record type 'R1' beyond the supported declared-layout depth of 16; a measured layout or a shallower complete representation contract is required.", error.Message)
+
+    [<Fact>]
+    let ``measured outer layout does not authorize an unmeasured nested field count`` () =
+        let source, root = depthChain 18 None
+        let source = {source with Layouts = Map.ofList ["R0", mkLayout "R0" 608 32 [0; 576]]}
+        let _, size, _, stratum = DescriptorGenerator.layoutOf source 0 root
+        Assert.Equal(76, size)
+        Assert.Equal(TypeMapper.Measured, stratum)
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source root |> ignore)
+        Assert.Equal("Struct 'R16' field 'payload' nests record type 'R17' beyond the supported declared-layout depth of 16; a measured layout or a shallower complete representation contract is required.", error.Message)
+
+    [<Fact>]
+    let ``cyclic direct record input receives the finite depth refusal`` () =
+        let source, _ = depthChain 0 None
+        let record = mkStruct "A" [mkField "a" "struct A"] None
+        let source = {source with Structs = Map.ofList ["A", record]}
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 0 record |> ignore)
+        Assert.Equal("Struct 'A' field 'a' nests record type 'A' beyond the supported declared-layout depth of 16; a measured layout or a shallower complete representation contract is required.", error.Message)
+
+    [<Theory>]
+    [<InlineData(0)>]
+    [<InlineData(1)>]
+    [<InlineData(2)>]
+    let ``representation and extent checks precede the depth fold`` scenario =
+        let source, root = depthChain 1 None
+        let source, root, expected =
+            match scenario with
+            | 0 ->
+                {source with Structs = Map.remove "R1" source.Structs}, root,
+                "Struct 'R0' field 'payload' has nested record type 'R1' with no available declaration; a complete C representation contract is required."
+            | 1 ->
+                source, {root with Fields = [{root.Fields.Head with IsArray = true; ArraySize = None}]},
+                "Struct 'R0' field 'payload' has an array with no fixed element count; a supported dynamic array representation contract is required."
+            | _ ->
+                source, {root with Fields = root.Fields @ [mkField "later" "mystery_t"]},
+                "Struct 'R0' field 'later' has no known representation for type 'mystery_t'; a complete C representation contract is required."
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 16 root |> ignore)
+        Assert.Equal(expected, error.Message)
+
 // =========================================================================
 // PilotSerializer Tests ([options] section)
 // =========================================================================
