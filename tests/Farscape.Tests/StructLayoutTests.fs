@@ -337,6 +337,121 @@ module GeneratorDispatch =
             let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore)
             Assert.Equal("Struct 'Variant' field 'payload' has no known representation for type 'mystery_t'; a complete C representation contract is required.", error.Message)
 
+    [<Theory>]
+    [<InlineData(false)>]
+    [<InlineData(true)>]
+    let ``nested record without declaration refuses at the representation owner`` measured =
+        let holder = mkStruct "Holder" [mkField "payload" "Missing"] None
+        let source : DescriptorGenerator.LayoutSource =
+            { Structs = Map.ofList [holder.Name, holder]
+              Layouts = if measured then Map.ofList [holder.Name, mkLayout holder.Name 32 32 [0]] else Map.empty
+              Model = Types.LP64
+              Shape = fun _ -> DescriptorGenerator.StructField "Missing" }
+        let error = Assert.Throws<System.InvalidOperationException>(fun () ->
+            if measured then DescriptorGenerator.structDecls source holder |> ignore
+            else DescriptorGenerator.layoutOf source 0 holder |> ignore)
+        Assert.Equal("Struct 'Holder' field 'payload' has nested record type 'Missing' with no available declaration; a complete C representation contract is required.", error.Message)
+
+    [<Theory>]
+    [<InlineData(false)>]
+    [<InlineData(true)>]
+    let ``fieldless nested record refuses in either layout stratum`` measured =
+        let empty = mkStructSimple "Empty"
+        let holder = mkStruct "Holder" [mkField "payload" "struct Empty"; mkField "tail" "int"] None
+        let layouts = if measured then Map.ofList ["Empty", mkLayout "Empty" 0 8 []; "Holder", mkLayout "Holder" 32 32 [0; 0]] else Map.empty
+        let declarations = [CppParser.Declaration.Struct empty; CppParser.Declaration.Struct holder]
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts |> ignore)
+        Assert.Equal("Struct 'Holder' field 'payload' has fieldless nested record type 'Empty'; a supported empty or opaque record representation contract is required.", error.Message)
+
+    [<Fact>]
+    let ``positive measured extent does not represent a fieldless nested record`` () =
+        let empty = mkStructSimple "Empty"
+        let holder = mkStruct "Holder" [mkField "payload" "Empty"] None
+        let source : DescriptorGenerator.LayoutSource =
+            { Structs = Map.ofList [empty.Name, empty; holder.Name, holder]
+              Layouts = Map.ofList ["Empty", mkLayout "Empty" 8 8 []; "Holder", mkLayout "Holder" 8 8 [0]]
+              Model = Types.LP64
+              Shape = fun _ -> DescriptorGenerator.StructField "Empty" }
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source holder |> ignore)
+        Assert.Equal("Struct 'Holder' field 'payload' has fieldless nested record type 'Empty'; a supported empty or opaque record representation contract is required.", error.Message)
+
+    [<Fact>]
+    let ``fieldless nested record in the middle names the refusing field`` () =
+        let empty = mkStructSimple "Empty"
+        let holder = mkStruct "Holder" [mkField "head" "int"; mkField "payload" "Empty"; mkField "tail" "int"] None
+        let declarations = [CppParser.Declaration.Struct empty; CppParser.Declaration.Struct holder]
+        let layouts = Map.ofList ["Empty", mkLayout "Empty" 0 8 []; "Holder", mkLayout "Holder" 64 32 [0; 32; 32]]
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts |> ignore)
+        Assert.Equal("Struct 'Holder' field 'payload' has fieldless nested record type 'Empty'; a supported empty or opaque record representation contract is required.", error.Message)
+
+    [<Theory>]
+    [<InlineData(false)>]
+    [<InlineData(true)>]
+    let ``nested recursion names the record holding the fieldless member`` measured =
+        let empty = mkStructSimple "Empty"
+        let middle = mkStruct "Mid" [mkField "e" "struct Empty"] None
+        let outer = mkStruct "Outer" [mkField "mid" "struct Mid"] None
+        let declarations = [CppParser.Declaration.Struct outer; CppParser.Declaration.Struct middle; CppParser.Declaration.Struct empty]
+        let layouts = if measured then Map.ofList ["Empty", mkLayout "Empty" 0 8 []; "Mid", mkLayout "Mid" 0 8 [0]; "Outer", mkLayout "Outer" 0 8 [0]] else Map.empty
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts |> ignore)
+        Assert.Equal("Struct 'Mid' field 'e' has fieldless nested record type 'Empty'; a supported empty or opaque record representation contract is required.", error.Message)
+
+    [<Fact>]
+    let ``unmeasured layout entry refuses fieldless representation through a nested record`` () =
+        let empty = mkStructSimple "Empty"
+        let middle = mkStruct "Mid" [mkField "e" "Empty"] None
+        let outer = mkStruct "Outer" [mkField "mid" "Mid"] None
+        let source : DescriptorGenerator.LayoutSource =
+            { Structs = Map.ofList ["Empty", empty; "Mid", middle; "Outer", outer]
+              Layouts = Map.empty
+              Model = Types.LP64
+              Shape = fun name -> DescriptorGenerator.StructField name }
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 0 outer |> ignore)
+        Assert.Equal("Struct 'Mid' field 'e' has fieldless nested record type 'Empty'; a supported empty or opaque record representation contract is required.", error.Message)
+
+    [<Fact>]
+    let ``array count cannot represent a fieldless nested element`` () =
+        let empty = mkStructSimple "Empty"
+        let field = {mkField "e" "struct Empty[4]" with IsArray = true; ArraySize = Some 4}
+        let holder = mkStruct "Holder" [field] None
+        let declarations = [CppParser.Declaration.Struct empty; CppParser.Declaration.Struct holder]
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore)
+        Assert.Equal("Struct 'Holder' field 'e' has fieldless nested record type 'Empty'; a supported empty or opaque record representation contract is required.", error.Message)
+
+    [<Theory>]
+    [<InlineData(false)>]
+    [<InlineData(true)>]
+    let ``fixed nested record array retains its full extent`` measured =
+        let data = {mkField "data" "unsigned char[8]" with IsArray = true; ArraySize = Some 8}
+        let nested = mkStruct "Mystery" [data] None
+        let array = {mkField "arr" "struct Mystery[3]" with IsArray = true; ArraySize = Some 3}
+        let holder = mkStruct "Holder" [array; mkField "tail" "int"] None
+        let declarations = [CppParser.Declaration.Struct nested; CppParser.Declaration.Struct holder]
+        let layouts = if measured then Map.ofList ["Mystery", mkLayout "Mystery" 64 8 [0]; "Holder", mkLayout "Holder" 224 32 [0; 192]] else Map.empty
+        let output = FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts
+        Assert.Contains("Repr = Repr.U8; Count = 24", output)
+        Assert.Contains("let tailOffset = 24", output)
+        Assert.DoesNotContain("Count = 0", output)
+
+    [<Fact>]
+    let ``real header forward declaration followed by definition retains nested layout`` () =
+        let directory = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "../..", "artifacts", "nested-forward-definition", System.Guid.NewGuid().ToString("N")))
+        System.IO.Directory.CreateDirectory(directory) |> ignore
+        try
+            let header = System.IO.Path.Combine(directory, "forward.h")
+            System.IO.File.WriteAllText(header, "struct S; struct S { int a; }; struct H { struct S s; int tail; };\n")
+            let options : CppParser.HeaderParserOptions =
+                { HeaderFile = header; IncludePaths = []; Defines = []; Verbose = false
+                  IncludeMacros = false; MacroPrefixes = []; IncludeRoot = None; CppMode = false }
+            let declarations = match CppParser.parseHeader options with Ok value -> value | Error reason -> failwith reason
+            let layouts = match CppParser.extractStructLayouts header [] [] ["struct S"; "struct H"] false with Ok value -> value | Error reason -> failwith reason
+            let output = FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts
+            Assert.Contains("Repr = Repr.U8; Count = 4", output)
+            Assert.Contains("let tailOffset = 4", output)
+            Assert.DoesNotContain("Count = 0", output)
+        finally
+            System.IO.Directory.Delete(directory, true)
+
 // =========================================================================
 // PilotSerializer Tests ([options] section)
 // =========================================================================

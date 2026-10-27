@@ -106,12 +106,18 @@ module DescriptorGenerator =
 
     type private RepresentedFieldShape =
         | RepresentedScalar of AbiRepr
-        | RepresentedStruct of string
+        | RepresentedStruct of CppParser.StructDecl
 
     let private representedFieldShape (src: LayoutSource) structName (field: CppParser.FieldDecl) =
         match src.Shape (elementType field) with
         | ScalarField repr -> RepresentedScalar repr
-        | StructField name -> RepresentedStruct name
+        | StructField name ->
+            match Map.tryFind name src.Structs with
+            | None ->
+                invalidOp $"Struct '{structName}' field '{field.Name}' has nested record type '{name}' with no available declaration; a complete C representation contract is required."
+            | Some nested when nested.Fields.IsEmpty ->
+                invalidOp $"Struct '{structName}' field '{field.Name}' has fieldless nested record type '{name}'; a supported empty or opaque record representation contract is required."
+            | Some nested -> RepresentedStruct nested
         | UnknownField name ->
             invalidOp $"Struct '{structName}' field '{field.Name}' has no known representation for type '{name}'; a complete C representation contract is required."
 
@@ -141,12 +147,10 @@ module DescriptorGenerator =
                 | RepresentedScalar r ->
                     let bytes, align = scalarExtent r
                     Some (bytes * count, align, Declared)
-                | RepresentedStruct name when depth < 16 ->
-                    match Map.tryFind name src.Structs with
-                    | Some nested when not nested.Fields.IsEmpty ->
-                        let _, size, align, _ = layoutOf src (depth + 1) nested
-                        Some (size * count, align, Declared)
-                    | _ -> None
+                | RepresentedStruct nested when depth < 16 ->
+                    let _, size, align, _ = layoutOf src (depth + 1) nested
+                    Some (size * count, align, Declared)
+                // The depth limit remains the sole inferred-extent path.
                 | RepresentedStruct _ -> None
             let (endOffset, maxAlign, offsets, stratum) =
                 fields
@@ -169,14 +173,9 @@ module DescriptorGenerator =
         let repr, countSource, note =
             match representedFieldShape src structName f with
             | RepresentedScalar r -> reprSource r, string count, $"repr {stratumName r.Stratum}: {r.CType} under {src.Model}"
-            | RepresentedStruct name ->
-                let bytes =
-                    match Map.tryFind name src.Structs with
-                    | Some nested when not nested.Fields.IsEmpty ->
-                        let _, size, _, _ = layoutOf src 1 nested
-                        size * count
-                    | _ -> 0
-                "Repr.U8", string bytes, $"nested struct {name} by value, as bytes; see {name}.Descriptor"
+            | RepresentedStruct nested ->
+                let _, size, _, _ = layoutOf src 1 nested
+                "Repr.U8", string (size * count), $"nested struct {nested.Name} by value, as bytes; see {nested.Name}.Descriptor"
         let doc = $"offset {stratumName offsetStratum}; {note}"
         RecordConstruction [
             "Name", Literal (quote f.Name)
