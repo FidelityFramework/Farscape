@@ -503,3 +503,43 @@ Remaining independent gaps:
 - Callback auto-discovery under the legacy wrapper path skips `g_signal_connect_data` because it has two function-pointer parameters. Typed signals use their explicit introspection contract instead.
 - With clang 22 the return type of `strlen` in `string.h` is read as `__size_t` from the function type string and does not resolve; `size_t` parameters resolve. The desktop binding uses length-preserving `GBytes` transfer and never infers message length from a C string terminator.
 - Declarations are kept only from files under the include root chosen for each header. GLib's generated `glibconfig.h` lives under `/usr/lib/glib-2.0/include` and cannot be listed directly; listing `/usr` first retains the needed declarations. The WREN pilots do this.
+
+## Addendum 2026-10-27: a measured layout is paired with its declaring translation unit
+
+A pilot parses each header independently, filtering declarations to that header's include
+root, and merges the lists by bare name (§1). Measurement, however, probed only the first
+pilot header's translation unit for every `abi_critical_structs` entry. The two origins can
+disagree: a header outside root A that A includes can define `struct X` with a different
+shape from the `struct X` header B declares. A's unit then measures the external record, the
+merge keeps B's declaration, and every existing fence (field count, whole-byte size and
+alignment, offsets and extents inside storage) passes, so the descriptor presented B's fields
+at the external record's size and offsets. The retained reproduction is
+`artifacts/measured-bit-range-20261027/multiheader-provenance-fixture/observation.json`. The
+same class reaches a nested record, a record behind a `typedef` entry, and a field whose type
+goes through a typedef: each can be declared by one unit and resolved from another.
+
+`BindingGenerator.measurementUnits` now resolves each entry to its record (the tag, the record
+carrying the typedef's own name, or what the typedef stands for) and measures it in the unit of
+every pilot header whose own filtered list defines that record and, for a `typedef` entry,
+declares the typedef; a typedef entry's complete chain must agree, with the merged spellings, in
+every header that declares it, whether or not that header defines the record. For the chosen unit, the merged declaration of
+the record and of every record nested in it by value must have the shape that header declares
+(kind, field names, types, extents, bit widths, serialized attribute arguments), and every
+typedef those field spellings depend on, through typedef chains (a name after `struct`,
+`union` or `enum` is a tag, not a typedef), must be declared there with the merged spelling; otherwise the pilot is refused by name and header. A record several
+headers declare is probed in each of their units and `BindingGenerator.agreeMeasurements`
+requires one effective layout: pack widths are not serialized by clang, so equal declarations
+under `#pragma pack(1)` and `#pragma pack(2)` are told apart by their measurements and refused.
+An entry no pilot header declares is not probed, so the existing declaration refusals report it
+instead of a layout some unrelated unit reaches under the same name. The former refusal
+"requires a measured layout; header probe did not provide it" for a storage declared only by a
+later header was a misattributed cause; that case is measured in its own unit and admitted.
+
+The provenance is the probed unit, not a field on `StructLayoutInfo` or `StructDecl`:
+clang's simple layout dump carries no file origin, and declarations retain none. Two
+different files declaring identically shaped records of one name are therefore one
+declaration, fenced only by their measured layouts agreeing. Emitted descriptor documentation
+still names the stratum ("offset measured") and not the measured unit. A typedef whose name
+differs from its record's tag still keys the layout by the tag (§4 residual). Representation
+facts that come from the profile scalar table rather than the unit's typedefs, inferred enum
+widths, and macros merged by bare name are separate, recorded gaps.

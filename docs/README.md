@@ -31,6 +31,7 @@ documents describe their historical scope rather than current desktop readiness.
 12. [OpenAPI Binding Generation](./12_OpenAPI_Binding_Generation.md): REST surface ingestion
 13. TypeScript and JavaScript: [Ingestion](./13a_TypeScript_Ingestion_Architecture.md), [Fearless JavaScript](./13b_Fearless_JavaScript.md), [Output and Integration](./13c_TypeScript_Output_and_Integration.md)
 14. [Binding Generation Gaps](./14_Binding_Generation_Gaps.md): Silent defects in generated bindings — read before trusting a generated struct or handle
+15. [FFI Definition of Done and Completion Ledger](./15_FFI_Definition_of_Done.md): Shared gates and the current completion status for all FFI areas
 
 ## Position in the Fidelity Closed-Loop Pipeline
 

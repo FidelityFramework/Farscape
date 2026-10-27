@@ -1418,12 +1418,18 @@ let ``ABI critical layout probe must succeed before generation`` shape =
         System.IO.File.WriteAllText(project, pilot)
         match BindingGenerator.generateFromProject project false false Types.LP64 with
         | Ok _ when shape = "record" || shape = "scalar" -> ()
+        | Ok _ when shape = "later" ->
+            // `Later` is declared only by the second header; it is measured in that header's
+            // own translation unit rather than refused because the first unit cannot see it.
+            let types = System.IO.File.ReadAllLines(System.IO.Path.Combine(output, "Types.clef")) |> Array.map (fun line -> line.Trim())
+            Assert.Contains("module Later =", types)
+            Assert.Contains("/// C struct `Later`: layout measured (clang record layout dump).", types)
+            Assert.Contains("let Size = 4", types)
         | Ok _ -> failwith "An unsuccessful required layout probe was admitted"
-        | Error error when shape = "record" || shape = "scalar" -> failwithf "The valid required layout probe was refused: %s" error
+        | Error error when shape = "record" || shape = "scalar" || shape = "later" -> failwithf "The valid required layout probe was refused: %s" error
         | Error error ->
             let expected =
                 match shape with
-                | "later" -> "Binding generation failed: ABI-critical storage 'Later' requires a measured layout; header probe did not provide it."
                 | "wrong-kind" -> "Binding generation failed: ABI-critical storage 'Present' does not match the requested record kind."
                 | "missing-typedef" -> "Binding generation failed: ABI-critical typedef 'Present' is not declared."
                 | _ -> "Binding generation failed: ABI-critical storage 'Missing' has no known scalar or measured record representation."
@@ -1432,6 +1438,256 @@ let ``ABI critical layout probe must succeed before generation`` shape =
             Assert.Equal<string array>([|sentinel|], System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories))
     finally
         System.IO.Directory.Delete(dir, true)
+
+[<Theory>]
+[<InlineData("external-shadow")>]
+[<InlineData("declared-later")>]
+[<InlineData("shared")>]
+[<InlineData("scalar-typedef-later")>]
+[<InlineData("conflict")>]
+[<InlineData("nested-conflict")>]
+[<InlineData("nested-shared")>]
+[<InlineData("typedef-conflict")>]
+[<InlineData("typedef-shared")>]
+[<InlineData("anonymous-typedef")>]
+[<InlineData("pack-conflict")>]
+[<InlineData("pack-shared")>]
+[<InlineData("field-typedef-conflict")>]
+[<InlineData("field-typedef-shared")>]
+[<InlineData("chain-typedef-conflict")>]
+[<InlineData("chain-typedef-shared")>]
+[<InlineData("tag-typedef-unrelated")>]
+[<InlineData("entry-chain-conflict")>]
+[<InlineData("entry-chain-shared")>]
+[<InlineData("entry-typedef-conflict")>]
+let ``ABI critical layouts are measured in the declaring header's translation unit`` shape =
+    let dir = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "artifacts", "layout-provenance-tests", System.Guid.NewGuid().ToString("N")))
+    let rootA = System.IO.Path.Combine(dir, "rootA")
+    let ext = System.IO.Path.Combine(dir, "ext")
+    let rootB = System.IO.Path.Combine(dir, "rootB")
+    for root in [rootA; ext; rootB] do System.IO.Directory.CreateDirectory(root) |> ignore
+    try
+        let a = System.IO.Path.Combine(rootA, "a.h")
+        // The `shared` shapes keep both headers under one include root with a common definition.
+        let sharedRoot = shape = "shared" || shape = "typedef-shared" || shape = "entry-chain-shared"
+        let b = System.IO.Path.Combine((if sharedRoot then rootA else rootB), "b.h")
+        let packed width = "#pragma pack(push, " + width + ")\nstruct X { char c; int i; };\n#pragma pack(pop)\n"
+        // Header A's unit reaches a different `X` than header B declares, the same `X`, or none;
+        // the nested, typedef and pack shapes vary the record behind the entry rather than the entry.
+        System.IO.File.WriteAllText(a,
+            match shape with
+            | "external-shadow" -> "#include \"e.h\"\n"
+            | "shared" | "typedef-shared" -> "#include \"common.h\"\n"
+            | "conflict" | "typedef-conflict" -> "struct X { int a; int b; };\n"
+            | "nested-conflict" -> "struct Inner { int a; int b; };\n"
+            | "nested-shared" -> "#include \"common.h\"\nstruct X { struct Inner child; };\n"
+            | "pack-conflict" | "pack-shared" -> packed "1"
+            | "field-typedef-conflict" -> "typedef int T;\n"
+            | "chain-typedef-conflict" -> "typedef int Base;\n"
+            | "field-typedef-shared" | "chain-typedef-shared" -> "#include \"common.h\"\nstruct X { T value; };\n"
+            | "tag-typedef-unrelated" -> "typedef int T;\nstruct T;\nstruct X { struct T *ptr; };\n"
+            | "entry-chain-conflict" -> "struct X { int a; int b; };\ntypedef struct X Base;\ntypedef Base X;\n"
+            | "entry-chain-shared" -> "#include \"common.h\"\n"
+            | "entry-typedef-conflict" -> "typedef struct X { int a; } X;\n"
+            | _ -> "int unrelated_a;\n")
+        System.IO.File.WriteAllText(System.IO.Path.Combine(ext, "e.h"), "struct X { long a; long b; };\n")
+        System.IO.File.WriteAllText(System.IO.Path.Combine(rootA, "common.h"),
+            match shape with
+            | "typedef-shared" -> "typedef struct X { int a; int b; } X;\n"
+            | "nested-shared" -> "struct Inner { int a; int b; };\n"
+            | "field-typedef-shared" -> "typedef int T;\n"
+            | "chain-typedef-shared" -> "typedef int Base;\ntypedef Base T;\n"
+            | "entry-chain-shared" -> "struct X { int a; int b; };\ntypedef struct X Base;\ntypedef Base X;\n"
+            | _ -> "struct X { int a; int b; };\n")
+        System.IO.File.WriteAllText(b,
+            match shape with
+            | "shared" | "typedef-shared" -> "#include \"common.h\"\n"
+            | "conflict" -> "struct X { long a; long b; };\n"
+            | "scalar-typedef-later" -> "typedef unsigned long Later;\n"
+            | "nested-conflict" -> "struct Inner { long a; long b; };\nstruct X { struct Inner child; };\n"
+            | "nested-shared" -> "int unrelated_b;\n"
+            | "typedef-conflict" -> "typedef struct X { long a; long b; } X;\n"
+            | "anonymous-typedef" -> "typedef struct { int a; int b; } X;\n"
+            | "pack-conflict" -> packed "2"
+            | "pack-shared" -> packed "1"
+            | "field-typedef-conflict" -> "typedef long T;\nstruct X { T value; };\n"
+            | "chain-typedef-conflict" -> "typedef long Base;\ntypedef Base T;\nstruct X { T value; };\n"
+            | "field-typedef-shared" | "chain-typedef-shared" -> "int unrelated_b;\n"
+            | "tag-typedef-unrelated" -> "struct T;\nstruct X { struct T *ptr; };\n"
+            // Same `struct X`, same `typedef Base X`, but `Base` names a same-sized different record here.
+            | "entry-chain-conflict" -> "struct Y { int a; int b; };\nstruct X { int a; int b; };\ntypedef struct Y Base;\ntypedef Base X;\n"
+            | "entry-chain-shared" -> "#include \"common.h\"\n"
+            | "entry-typedef-conflict" -> "typedef long X;\n"
+            | _ -> "struct X { int a; int b; };\n")
+        let includePaths = match shape with "external-shadow" -> [rootA; ext; rootB] | _ when sharedRoot -> [rootA] | _ -> [rootA; rootB]
+        let output = System.IO.Path.Combine(dir, "output")
+        System.IO.Directory.CreateDirectory(output) |> ignore
+        let sentinel = System.IO.Path.Combine(output, "original.clef")
+        System.IO.File.WriteAllText(sentinel, "held-original")
+        let requested =
+            match shape with
+            | "scalar-typedef-later" -> "typedef Later"
+            | "typedef-conflict" | "typedef-shared" | "anonymous-typedef" | "entry-chain-conflict" | "entry-chain-shared" | "entry-typedef-conflict" -> "typedef X"
+            | _ -> "struct X"
+        let quote (path: string) = "\"" + path + "\""
+        let pilot = System.String.Join("\n", [
+            "[library]"; "name = \"provenance\""
+            "headers = [" + quote a + ", " + quote b + "]"
+            "include_paths = [" + (includePaths |> List.map quote |> String.concat ", ") + "]"
+            "[output]"; "mode = \"fidelity\""; "directory = " + quote output
+            "[options]"; "abi_critical_structs = [" + quote requested + "]"
+            "[[namespace]]"; "name = \"Test.Provenance\""; "description = \"layout provenance\""; "library = \"provenance\""
+            "functions = []" ])
+        let project = System.IO.Path.Combine(dir, "provenance.pilot.toml")
+        System.IO.File.WriteAllText(project, pilot)
+        let expectedRefusal =
+            match shape with
+            | "conflict" | "typedef-conflict" ->
+                Some (sprintf "Binding generation failed: ABI-critical storage 'X' is declared differently by '%s' and '%s'; one declaration per pilot is required." a b)
+            | "nested-conflict" ->
+                Some (sprintf "Binding generation failed: ABI-critical storage 'X' is measured in '%s', but its nested record 'Inner' is declared differently by '%s' and that header; one declaration per pilot is required." b a)
+            | "pack-conflict" ->
+                Some (sprintf "Binding generation failed: ABI-critical storage 'X' measures differently in '%s' (5 bytes, alignment 1) and '%s' (6 bytes, alignment 2); one effective layout per pilot is required." a b)
+            | "field-typedef-conflict" ->
+                Some (sprintf "Binding generation failed: ABI-critical storage 'X' is measured in '%s', but its field typedef 'T' is declared differently by '%s' and that header; one declaration per pilot is required." b a)
+            | "chain-typedef-conflict" ->
+                // `T` agrees (both say `Base`); the second hop `Base` is `int` in the merge and `long` in the measuring unit.
+                Some (sprintf "Binding generation failed: ABI-critical storage 'X' is measured in '%s', but its field typedef 'Base' is declared differently by '%s' and that header; one declaration per pilot is required." b a)
+            | "entry-chain-conflict" ->
+                // The requested typedef `X` agrees at its first hop (`Base`) in both headers, but `Base` names `struct Y` in B.
+                Some (sprintf "Binding generation failed: ABI-critical typedef 'X' is declared by '%s', but its typedef 'Base' is declared differently by '%s' and that header; one declaration per pilot is required." b a)
+            | "entry-typedef-conflict" ->
+                // B declares the requested typedef differently although B defines no record for it.
+                Some (sprintf "Binding generation failed: ABI-critical typedef 'X' is declared differently by '%s' and '%s'; one declaration per pilot is required." a b)
+            | _ -> None
+        match BindingGenerator.generateFromProject project false false Types.LP64, expectedRefusal with
+        | Error error, Some expected ->
+            Assert.Equal(expected, error)
+            Assert.Equal("held-original", System.IO.File.ReadAllText sentinel)
+            Assert.Equal<string array>([|sentinel|], System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories))
+        | Error error, None -> failwithf "The storage declared by one pilot header was refused: %s" error
+        | Ok _, Some _ -> failwith "Two different declarations or layouts of one ABI-critical storage were admitted"
+        | Ok _, None ->
+            let types = System.IO.File.ReadAllLines(System.IO.Path.Combine(output, "Types.clef")) |> Array.map (fun line -> line.Trim())
+            match shape with
+            | "scalar-typedef-later" ->
+                // A scalar typedef declared only by the later header is admitted; it has no record layout to emit.
+                Assert.DoesNotContain("module Later =", types)
+                Assert.DoesNotContain("module X =", types)
+            | "nested-shared" ->
+                // `Inner` is declared by the measuring header with the merged shape: 8 bytes by value.
+                Assert.Contains("module X =", types)
+                Assert.Contains("let Size = 8", types)
+                Assert.Contains("Repr = Repr.U8; Count = 8", String.concat "\n" types)
+            | "field-typedef-shared" | "chain-typedef-shared" ->
+                // `T` (and `Base` behind it) is declared by the measuring header with the merged spelling:
+                // a 4-byte signed field at offset 0, emitted with its resolved representation.
+                Assert.Contains("module X =", types)
+                Assert.Contains("let Size = 4", types)
+                Assert.Contains("let valueOffset = 0", types)
+                Assert.Contains("{ Name = \"value\"; Offset = 0; Repr = Repr.I32; Count = 1;", String.concat "\n" types)
+            | "tag-typedef-unrelated" ->
+                // `struct T` names a tag; the typedef `T` header A also declares is not a dependency,
+                // so header B, which lacks it, still declares and measures the same record.
+                Assert.Contains("module X =", types)
+                Assert.Contains("let Size = 8", types)
+                Assert.Contains("let Alignment = 8", types)
+                Assert.Contains("let ptrOffset = 0", types)
+                Assert.Contains("{ Name = \"ptr\"; Offset = 0; Repr = Repr.Pointer; Count = 1;", String.concat "\n" types)
+            | "pack-shared" ->
+                // Both declaring units measure the packed record identically.
+                Assert.Contains("module X =", types)
+                Assert.Contains("/// C struct `X`: layout measured (clang record layout dump).", types)
+                Assert.Contains("let Size = 5", types)
+                Assert.Contains("let Alignment = 1", types)
+                Assert.Contains("let iOffset = 1", types)
+            | _ ->
+                // B's `X` is 8 bytes with `b` at 4. E's `X`, which only header A's unit reaches,
+                // is 16 bytes with `b` at 8; pairing that measurement with B's declaration is the defect.
+                Assert.Contains("module X =", types)
+                Assert.Contains("/// C struct `X`: layout measured (clang record layout dump).", types)
+                Assert.Contains("let Size = 8", types)
+                Assert.Contains("let Alignment = 4", types)
+                Assert.Contains("let bOffset = 4", types)
+    finally
+        System.IO.Directory.Delete(dir, true)
+
+[<Fact>]
+let ``measurement units probe only declaring headers and refuse disagreement`` () =
+    let x fields = CppParser.Declaration.Struct (mkStruct "X" fields None)
+    let inner fields = CppParser.Declaration.Struct (mkStruct "Inner" fields None)
+    let ints = [mkField "a" "int"; mkField "b" "int"]
+    let longs = [mkField "a" "long"; mkField "b" "long"]
+    let outer = CppParser.Declaration.Struct (mkStruct "X" [mkField "child" "struct Inner"] None)
+    let td = CppParser.Declaration.Typedef (mkTypedef "X" "struct X")
+    let units merged headers requested =
+        BindingGenerator.measurementUnits (FidelityCodeGenerator.buildGenerationContext merged Types.LP64 Map.empty) merged headers requested
+    // An entry no pilot header declares is not probed at all.
+    Assert.Equal(Ok [], units [] [("a.h", []); ("b.h", [])] ["struct Missing"])
+    Assert.Equal(Ok [], units [x ints] [("a.h", [x ints]); ("b.h", [])] ["struct Missing"])
+    // Only the declaring header is probed, wherever it stands in pilot order.
+    Assert.Equal(Ok [("b.h", ["struct X"])], units [x ints] [("a.h", []); ("b.h", [x ints])] ["struct X"])
+    // The same declaration reached by both headers is probed in both units.
+    Assert.Equal(Ok [("a.h", ["struct X"]); ("b.h", ["struct X"])], units [x ints] [("a.h", [x ints]); ("b.h", [x ints])] ["struct X"])
+    // Differing declarations are refused by name and header.
+    Assert.Equal(Error "ABI-critical storage 'X' is declared differently by 'a.h' and 'b.h'; one declaration per pilot is required.",
+                 units [x ints] [("a.h", [x ints]); ("b.h", [x longs])] ["struct X"])
+    // A nested record must be declared by the measuring header with the merged shape.
+    Assert.Equal(Error "ABI-critical storage 'X' is measured in 'b.h', but its nested record 'Inner' is declared differently by 'a.h' and that header; one declaration per pilot is required.",
+                 units [inner ints; outer] [("a.h", [inner ints]); ("b.h", [inner longs; outer])] ["struct X"])
+    Assert.Equal(Error "ABI-critical storage 'X' is measured in 'b.h', but its nested record 'Inner' is not declared by that header; a measured layout requires every nested record in one unit.",
+                 units [inner ints; outer] [("a.h", [inner ints]); ("b.h", [outer])] ["struct X"])
+    Assert.Equal(Ok [("b.h", ["struct X"])], units [inner ints; outer] [("a.h", [inner ints]); ("b.h", [inner ints; outer])] ["struct X"])
+    // A typedef entry needs its typedef and its record in one unit.
+    Assert.Equal(Ok [("b.h", ["typedef X"])], units [x ints; td] [("a.h", [x ints]); ("b.h", [x ints; td])] ["typedef X"])
+    Assert.Equal(Error "ABI-critical typedef 'X' is declared by 'b.h', but its record 'X' is not declared by that header; a measured layout requires both in one unit.",
+                 units [x ints; td] [("a.h", [x ints]); ("b.h", [td])] ["typedef X"])
+    Assert.Equal(Error "ABI-critical storage 'X' is declared differently by 'a.h' and 'b.h'; one declaration per pilot is required.",
+                 units [x ints; td] [("a.h", [x ints]); ("b.h", [x longs; td])] ["typedef X"])
+    // Every typedef a field spelling depends on must be declared by the measuring header with the merged spelling.
+    let tInt = CppParser.Declaration.Typedef (mkTypedef "T" "int")
+    let tLong = CppParser.Declaration.Typedef (mkTypedef "T" "long")
+    let viaT = CppParser.Declaration.Struct (mkStruct "X" [mkField "value" "T"] None)
+    // The merge keeps the first typedef of a name (A's `int`); B measures the record but declares `long`.
+    Assert.Equal(Error "ABI-critical storage 'X' is measured in 'b.h', but its field typedef 'T' is declared differently by 'a.h' and that header; one declaration per pilot is required.",
+                 units [tInt; viaT] [("a.h", [tInt]); ("b.h", [tLong; viaT])] ["struct X"])
+    Assert.Equal(Error "ABI-critical storage 'X' is measured in 'b.h', but its field typedef 'T' is not declared by that header; a measured layout requires every field representation in one unit.",
+                 units [tInt; viaT] [("a.h", [tInt]); ("b.h", [viaT])] ["struct X"])
+    Assert.Equal(Ok [("b.h", ["struct X"])], units [tInt; viaT] [("a.h", [tInt]); ("b.h", [tInt; viaT])] ["struct X"])
+    // Typedef chains: `T` stands for `Base`; the second hop must agree too.
+    let baseInt = CppParser.Declaration.Typedef (mkTypedef "Base" "int")
+    let baseLong = CppParser.Declaration.Typedef (mkTypedef "Base" "long")
+    let tBase = CppParser.Declaration.Typedef (mkTypedef "T" "Base")
+    Assert.Equal(Error "ABI-critical storage 'X' is measured in 'b.h', but its field typedef 'Base' is declared differently by 'a.h' and that header; one declaration per pilot is required.",
+                 units [baseInt; tBase; viaT] [("a.h", [baseInt]); ("b.h", [baseLong; tBase; viaT])] ["struct X"])
+    Assert.Equal(Error "ABI-critical storage 'X' is measured in 'b.h', but its field typedef 'Base' is not declared by that header; a measured layout requires every field representation in one unit.",
+                 units [baseInt; tBase; viaT] [("a.h", [baseInt]); ("b.h", [tBase; viaT])] ["struct X"])
+    Assert.Equal(Ok [("b.h", ["struct X"])], units [baseInt; tBase; viaT] [("a.h", [baseInt]); ("b.h", [baseInt; tBase; viaT])] ["struct X"])
+    // A tag after `struct` is not a typedef: an unrelated `typedef int T` beside `struct T` is no dependency.
+    let forwardT = CppParser.Declaration.Struct (mkStructSimple "T")
+    let viaTag = CppParser.Declaration.Struct (mkStruct "X" [mkField "ptr" "struct T *"] None)
+    Assert.Equal(Ok [("a.h", ["struct X"]); ("b.h", ["struct X"])],
+                 units [tInt; forwardT; viaTag] [("a.h", [tInt; forwardT; viaTag]); ("b.h", [forwardT; viaTag])] ["struct X"])
+    // A requested typedef's complete chain must agree in every header declaring it.
+    let y = CppParser.Declaration.Struct (mkStruct "Y" ints None)
+    let baseX = CppParser.Declaration.Typedef (mkTypedef "Base" "struct X")
+    let baseY = CppParser.Declaration.Typedef (mkTypedef "Base" "struct Y")
+    let xViaBase = CppParser.Declaration.Typedef (mkTypedef "X" "Base")
+    Assert.Equal(Error "ABI-critical typedef 'X' is declared by 'b.h', but its typedef 'Base' is declared differently by 'a.h' and that header; one declaration per pilot is required.",
+                 units [x ints; baseX; xViaBase; y] [("a.h", [x ints; baseX; xViaBase]); ("b.h", [y; x ints; baseY; xViaBase])] ["typedef X"])
+    Assert.Equal(Ok [("a.h", ["typedef X"]); ("b.h", ["typedef X"])],
+                 units [x ints; baseX; xViaBase] [("a.h", [x ints; baseX; xViaBase]); ("b.h", [x ints; baseX; xViaBase])] ["typedef X"])
+    // A header declaring the requested typedef differently is refused even when it defines no record for it.
+    let xLong = CppParser.Declaration.Typedef (mkTypedef "X" "long")
+    Assert.Equal(Error "ABI-critical typedef 'X' is declared differently by 'a.h' and 'b.h'; one declaration per pilot is required.",
+                 units [x [mkField "a" "int"]; td] [("a.h", [x [mkField "a" "int"]; td]); ("b.h", [xLong])] ["typedef X"])
+
+[<Fact>]
+let ``measurements agree only when every declaring unit measures the same layout`` () =
+    let eight = mkLayout "X" 64 32 [0; 32]
+    Assert.Equal(Ok (Map.ofList ["X", eight]), BindingGenerator.agreeMeasurements [("a.h", Map.ofList ["X", eight]); ("b.h", Map.ofList ["X", eight])])
+    Assert.Equal(Error "ABI-critical storage 'X' measures differently in 'a.h' (8 bytes, alignment 4) and 'b.h' (16 bytes, alignment 8); one effective layout per pilot is required.",
+                 BindingGenerator.agreeMeasurements [("a.h", Map.ofList ["X", eight]); ("b.h", Map.ofList ["X", mkLayout "X" 128 64 [0; 64]])])
 
 [<Fact>]
 let ``writable buffer actual header emits current neutral array signature and exact companion`` () =

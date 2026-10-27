@@ -12,6 +12,211 @@ module BindingGenerator =
         | Ok layouts -> layouts
         | Error error -> failwithf "ABI-critical struct layout extraction failed: %s" error
 
+    /// The declared shape of a record: its kind, each field's name, type, extent and bit
+    /// width, and the attributes clang attached with their serialized arguments. Two headers
+    /// declare the same storage only when these agree; pack widths, which clang does not
+    /// serialize, are settled by measuring each declaring unit (`agreeMeasurements`).
+    let private declaredShape (s: CppParser.StructDecl) =
+        let attributes (attrs: CppParser.AttributeData list) =
+            attrs |> List.map (fun a -> a.Kind + sprintf "%A" a.Args + defaultArg a.StringArg "") |> String.concat ","
+        let field (f: CppParser.FieldDecl) =
+            let extent = if f.IsArray then sprintf "[%A]" f.ArraySize else ""
+            let width = if f.IsBitfield then sprintf ":%A" f.BitWidth else ""
+            f.Name + ":" + f.Type + extent + width + attributes f.Attributes
+        let kind = if s.IsUnion then "union" else "struct"
+        String.concat " " [ kind; s.Name; "{"; s.Fields |> List.map field |> String.concat "; "; "}"; attributes s.Attributes ]
+
+    /// The records a record's fields hold by value, resolved through the same typedef
+    /// chains the generator uses, so the agreement check sees the nesting the descriptor emits.
+    let private nestedRecords (ctx: FidelityCodeGenerator.GenerationContext) (s: CppParser.StructDecl) =
+        s.Fields |> List.choose (fun field ->
+            match CppParser.classifyFieldDeclarator field.Type with
+            | CppParser.PlainFieldType element | CppParser.TrailingArrayType (element, _) ->
+                match FidelityCodeGenerator.resolveCType ctx.TypedefMap ctx.DataModel ctx.OpaqueHandles ctx.Delegates ctx.Enums element with
+                | FidelityCodeGenerator.Unresolved name when ctx.Structs.ContainsKey name -> Some name
+                | _ -> None
+            | CppParser.UnsupportedArrayType _ -> None)
+        |> List.distinct
+
+    /// A measured layout is a fact about one translation unit. Each ABI-critical entry names
+    /// a record (its tag, or what its typedef stands for); the record is measured in the unit
+    /// of every pilot header whose own declaration list defines it and, for a `typedef` entry,
+    /// declares that typedef or names the record by it; a typedef entry's complete chain must
+    /// agree in every header that declares it). The merged declaration the generator
+    /// emits for that record, and for every record nested in it by value, must have the shape
+    /// that header declares, and every typedef their field spellings depend on must be declared
+    /// there with the merged spelling; otherwise the pilot is refused by name and header. A record
+    /// several headers declare is measured in each of their units, and `agreeMeasurements`
+    /// requires one effective layout. An entry no pilot header declares is not measured, so
+    /// the existing declaration refusals report it instead of a layout some unrelated unit
+    /// reaches under the same name.
+    let measurementUnits (ctx: FidelityCodeGenerator.GenerationContext) (merged: CppParser.Declaration list)
+                         (headers: (string * CppParser.Declaration list) list) (requested: string list)
+        : Result<(string * string list) list, string> =
+        let bareName (name: string) = name.Replace("typedef ", "").Replace("struct ", "").Replace("union ", "")
+        let definitions (decls: CppParser.Declaration list) =
+            decls |> List.choose (function CppParser.Declaration.Struct s when s.Name <> "" && not s.Fields.IsEmpty -> Some (s.Name, s) | _ -> None) |> Map.ofList
+        // First declaration wins, as the merge itself keeps the first typedef of a name.
+        let typedefs (decls: CppParser.Declaration list) =
+            (Map.empty, decls) ||> List.fold (fun acc decl ->
+                match decl with
+                | CppParser.Declaration.Typedef t when not (acc.ContainsKey t.Name) -> acc.Add(t.Name, t.UnderlyingType)
+                | _ -> acc)
+        let mergedDefinitions = definitions merged
+        let mergedTypedefs = typedefs merged
+        let units = headers |> List.map (fun (header, decls) -> header, definitions decls, typedefs decls)
+        // The record an entry names: its tag, the record carrying the typedef's own name, or
+        // what the typedef stands for.
+        let recordOf (name: string) =
+            let bare = bareName name
+            if name.StartsWith "typedef " then
+                let resolved =
+                    if not (mergedTypedefs.ContainsKey bare) then None
+                    else
+                        match FidelityCodeGenerator.resolveCType ctx.TypedefMap ctx.DataModel ctx.OpaqueHandles ctx.Delegates ctx.Enums bare with
+                        | FidelityCodeGenerator.Unresolved record when mergedDefinitions.ContainsKey record -> Some record
+                        | _ -> None
+                match resolved with
+                | Some record -> Some record
+                | None -> if mergedDefinitions.ContainsKey bare then Some bare else None
+            elif mergedDefinitions.ContainsKey bare then Some bare
+            else None
+        // Every record the descriptor of `record` emits: itself and its by-value nesting.
+        let rec closure (visited: Set<string>) (record: string) =
+            if visited.Contains record then visited
+            else
+                match mergedDefinitions.TryFind record with
+                | None -> visited
+                | Some s -> nestedRecords ctx s |> List.fold closure (visited.Add record)
+        // The first pilot header declaring the merged shape of a record, for refusal messages.
+        let mergedOrigin (record: string) =
+            let shape = mergedDefinitions.[record] |> declaredShape
+            units |> List.tryPick (fun (header, defs, _) ->
+                match defs.TryFind record with
+                | Some d when declaredShape d = shape -> Some header
+                | _ -> None)
+            |> Option.defaultValue "<no pilot header>"
+        // Every merged typedef a field spelling depends on, through typedef chains: a
+        // field's representation is a fact of the unit whose typedefs resolve it. Tags
+        // named after `struct`, `union` or `enum` live in C's tag space and are not typedefs.
+        let identifiers (spelling: string) =
+            let names, word =
+                (([], ""), spelling + " ") ||> Seq.fold (fun (names, word) c ->
+                    if System.Char.IsLetterOrDigit c || c = '_' then names, word + string c
+                    elif word = "" then names, ""
+                    else word :: names, "")
+            ignore word
+            // A name after `struct`, `union` or `enum` is a tag, never a typedef.
+            let rec withoutTags acc = function
+                | ("struct" | "union" | "enum") :: _ :: rest -> withoutTags acc rest
+                | ("struct" | "union" | "enum") :: rest -> withoutTags acc rest
+                | token :: rest -> withoutTags (token :: acc) rest
+                | [] -> List.rev acc
+            List.rev names |> withoutTags [] |> List.distinct
+        let rec typedefClosure (visited: Set<string>) (spelling: string) =
+            (visited, identifiers spelling) ||> List.fold (fun acc typedefName ->
+                if acc.Contains typedefName then acc
+                else
+                    match mergedTypedefs.TryFind typedefName with
+                    | Some underlying -> typedefClosure (acc.Add typedefName) underlying
+                    | None -> acc)
+        let fieldTypedefs (record: string) =
+            match mergedDefinitions.TryFind record with
+            | Some s -> (Set.empty, s.Fields) ||> List.fold (fun acc f -> typedefClosure acc f.Type)
+            | None -> Set.empty
+        // The first pilot header declaring the merged spelling of a typedef, for refusal messages.
+        let typedefOrigin (typedefName: string) =
+            match mergedTypedefs.TryFind typedefName with
+            | Some merged ->
+                units |> List.tryPick (fun (h, _, t) -> if t.TryFind typedefName = Some merged then Some h else None)
+                |> Option.defaultValue "<no pilot header>"
+            | None -> "<no pilot header>"
+        let typedefAgreement (differs: string -> string -> string) (missing: string -> string) (tds: Map<string, string>) (typedefName: string) =
+            match tds.TryFind typedefName, mergedTypedefs.TryFind typedefName with
+            | Some own, Some merged when own = merged -> Ok ()
+            | Some _, Some _ -> Error (differs typedefName (typedefOrigin typedefName))
+            | _ -> Error (missing typedefName)
+        let fieldTypedefAgreement (storage: string) (header: string) (tds: Map<string, string>) =
+            typedefAgreement
+                (fun hop origin -> sprintf "ABI-critical storage '%s' is measured in '%s', but its field typedef '%s' is declared differently by '%s' and that header; one declaration per pilot is required." storage header hop origin)
+                (fun hop -> sprintf "ABI-critical storage '%s' is measured in '%s', but its field typedef '%s' is not declared by that header; a measured layout requires every field representation in one unit." storage header hop)
+                tds
+        // A requested typedef's complete chain must agree in every header declaring it, whether
+        // or not that header also defines the record.
+        let entryTypedefAgreement (bare: string) (header: string) (tds: Map<string, string>) =
+            typedefAgreement
+                (fun hop origin ->
+                    if hop = bare then sprintf "ABI-critical typedef '%s' is declared differently by '%s' and '%s'; one declaration per pilot is required." bare origin header
+                    else sprintf "ABI-critical typedef '%s' is declared by '%s', but its typedef '%s' is declared differently by '%s' and that header; one declaration per pilot is required." bare header hop origin)
+                (fun hop -> sprintf "ABI-critical typedef '%s' is declared by '%s', but its typedef '%s' is not declared by that header; a measured layout requires the complete typedef chain in one unit." bare header hop)
+                tds
+        let agreement (storage: string) (header: string) (definitions: Map<string, CppParser.StructDecl>) (record: string) =
+            match definitions.TryFind record with
+            | Some own when declaredShape own = declaredShape mergedDefinitions.[record] -> Ok ()
+            | Some _ when record = storage ->
+                Error (sprintf "ABI-critical storage '%s' is declared differently by '%s' and '%s'; one declaration per pilot is required." storage (mergedOrigin record) header)
+            | Some _ ->
+                Error (sprintf "ABI-critical storage '%s' is measured in '%s', but its nested record '%s' is declared differently by '%s' and that header; one declaration per pilot is required." storage header record (mergedOrigin record))
+            | None ->
+                Error (sprintf "ABI-critical storage '%s' is measured in '%s', but its nested record '%s' is not declared by that header; a measured layout requires every nested record in one unit." storage header record)
+        let assignments =
+            requested |> List.map (fun name ->
+                let bare = bareName name
+                let isTypedef = name.StartsWith "typedef "
+                let entryChain = if isTypedef && mergedTypedefs.ContainsKey bare then typedefClosure Set.empty bare |> Set.toList else []
+                let entryDisagreement =
+                    units |> List.tryPick (fun (header, defs, tds) ->
+                        ignore defs
+                        if not (isTypedef && tds.ContainsKey bare) then None
+                        else entryChain |> List.tryPick (fun hop -> match entryTypedefAgreement bare header tds hop with Error error -> Some error | Ok () -> None))
+                match entryDisagreement, recordOf name with
+                | Some error, _ -> Error error
+                | None, None -> Ok []
+                | None, Some record ->
+                    let declaresTypedef (tds: Map<string, string>) = tds.ContainsKey bare
+                    let candidates = units |> List.filter (fun (_, defs, tds) -> defs.ContainsKey record && (not isTypedef || declaresTypedef tds))
+                    match candidates with
+                    | [] when isTypedef ->
+                        match units |> List.tryFind (fun (_, _, tds) -> tds.ContainsKey bare) with
+                        | Some (header, _, _) ->
+                            Error (sprintf "ABI-critical typedef '%s' is declared by '%s', but its record '%s' is not declared by that header; a measured layout requires both in one unit." bare header record)
+                        | None -> Ok []
+                    | [] -> Ok []
+                    | candidates ->
+                        let records = closure Set.empty record |> Set.toList
+                        let dependencies = (Set.empty, records) ||> List.fold (fun acc r -> Set.union acc (fieldTypedefs r)) |> Set.toList
+                        candidates |> List.map (fun (header, defs, tds) ->
+                            (Ok (), records) ||> List.fold (fun state nested -> state |> Result.bind (fun () -> agreement record header defs nested))
+                            |> fun state -> (state, dependencies) ||> List.fold (fun state typedefName -> state |> Result.bind (fun () -> fieldTypedefAgreement record header tds typedefName))
+                            |> Result.map (fun () -> header, name))
+                        |> List.fold (fun state item -> state |> Result.bind (fun acc -> item |> Result.map (fun pair -> pair :: acc))) (Ok [])
+                        |> Result.map List.rev)
+        match assignments |> List.tryPick (function Error error -> Some error | _ -> None) with
+        | Some error -> Error error
+        | None ->
+            let assigned = assignments |> List.collect (function Ok pairs -> pairs | _ -> [])
+            units
+            |> List.choose (fun (header, _, _) ->
+                match assigned |> List.filter (fun (declaring, _) -> declaring = header) |> List.map snd with
+                | [] -> None
+                | names -> Some (header, names))
+            |> Ok
+
+    /// One effective layout per storage: a record measured in several declaring units must
+    /// measure identically in each, or the pilot is refused by name and headers.
+    let agreeMeasurements (measured: (string * Map<string, CppParser.StructLayoutInfo>) list)
+        : Result<Map<string, CppParser.StructLayoutInfo>, string> =
+        (Ok Map.empty, measured) ||> List.fold (fun state (header, layouts) ->
+            (state, Map.toList layouts) ||> List.fold (fun state (name, layout) ->
+                state |> Result.bind (fun (origins: Map<string, string * CppParser.StructLayoutInfo>) ->
+                    match origins.TryFind name with
+                    | Some (first, existing) when existing <> layout ->
+                        Error (sprintf "ABI-critical storage '%s' measures differently in '%s' (%d bytes, alignment %d) and '%s' (%d bytes, alignment %d); one effective layout per pilot is required."
+                                   name first (existing.SizeBits / 8) (existing.AlignmentBits / 8) header (layout.SizeBits / 8) (layout.AlignmentBits / 8))
+                    | Some _ -> Ok origins
+                    | None -> Ok (origins.Add(name, (header, layout))))))
+        |> Result.map (Map.map (fun _ (_, layout) -> layout))
+
     type GenerationOptions = {
         HeaderFile: FileInfo
         LibraryName: string
@@ -386,12 +591,21 @@ module BindingGenerator =
                         | _ -> []
                     if abiStructNames.IsEmpty then Map.empty
                     else
-                        let headerFile = project.Library.Headers |> List.head
-                        let layouts =
-                            CppParser.extractStructLayouts headerFile project.Library.IncludePaths project.Library.Defines abiStructNames verbose
-                            |> requireLayoutProbe
-                        logVerbose $"Extracted layouts for {layouts.Count} ABI-critical struct(s)" verbose
-                        layouts
+                        // Measure each storage in its declaring headers' units (measurementUnits):
+                        // the first header's unit may reach a different record under the same name.
+                        let probeCtx = FidelityCodeGenerator.buildGenerationContext declarations dataModel Map.empty
+                        let units =
+                            measurementUnits probeCtx declarations (List.zip project.Library.Headers headerDeclLists) abiStructNames
+                            |> Result.defaultWith failwith
+                        units
+                        |> List.map (fun (headerFile, names) ->
+                            let measured =
+                                CppParser.extractStructLayouts headerFile project.Library.IncludePaths project.Library.Defines names verbose
+                                |> requireLayoutProbe
+                            logVerbose $"Extracted layouts for {measured.Count} ABI-critical struct(s) in {headerFile}" verbose
+                            headerFile, measured)
+                        |> agreeMeasurements
+                        |> Result.defaultWith failwith
 
                 let ctx =
                     let baseCtx = FidelityCodeGenerator.buildGenerationContext declarations dataModel structLayouts

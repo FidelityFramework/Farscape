@@ -3,13 +3,27 @@
 **SpeakEZ Technologies | Fidelity Framework**
 **February 2026 | Architectural Analysis Memo**
 
+**Status clarification, September 25, 2026:** the daemon, native interactive
+evaluation, notebook and hot-loading capabilities below are proposals. Current
+Lattice checking does not establish those execution services. Composer's
+[interactive compiler workbench](../../../Composer/docs/Interactive_Compiler_Workbench.md)
+owns the bootstrap-host pilot and native session work; it can proceed before the
+late-roadmap schema service described here. The native command is `clefx`, and
+scripts use `.clefx`. FSI may host the F# compiler implementation; actual Clef
+evaluation follows CCS/Baker → PSG → Alex ctx pull → MLIR → LLVM/ORC.
+
+**Further clarification, October 3, 2026:** Bozzetto, the current development
+daemon, coordinates Composer project sessions, native builds and
+`composer_run_current`; no Clef interactive (ORC) host exists yet, and `clefx` is
+a selected name, not yet an implemented command.
+
 ---
 
 ## 1. Context and Motivation
 
 The F# ecosystem provides type providers through libraries like FSharp.Data, offering compile-time type generation from external data sources: JSON, XML, CSV, HTML, and others. Type providers infer schemas from sample documents and generate F# types that provide IntelliSense, type-checked field access, and serialization, all without manually defining record types or writing parsing code. Recent additions to this ecosystem include TOML support, contributed in part through work that originated from Fidelity.TOML development.
 
-Fidelity Framework's Composer toolchain introduces two capabilities for foreign code integration: **Transcribe** (full algorithmic port from C/C++/Rust/Python to Clef) and **Transpose** (typed dynamic binding that wraps foreign library interfaces with NTU type widths, BAREWire memory contracts, escape analysis, and lifetime inference). These are the Farscape core hosted inside Composer at a later horizon (`05_toolchain-sovereignty-and-native-assets.md` §9); the standalone tool remains the package-author entry point.
+Fidelity Framework's Composer toolchain introduces two capabilities for foreign code integration: **Transcribe** (full algorithmic port from C/C++/Rust/Python to Clef) and **Transpose** (typed dynamic binding: generated declarations for foreign library interfaces, with BAREWire binding descriptors for the C ABI, absence conversions and resource contracts; CCS/Baker derive and settle the resulting ABI, escape and lifetime obligations). These are the Farscape core hosted inside Composer at a later horizon (`05_toolchain-sovereignty-and-native-assets.md` §9); the standalone tool remains the package-author entry point.
 
 The question this memo addresses: **does Clef need a third capability, analogous to F#'s type providers, specifically for ingesting structured data formats?** Or does the Transcribe/Transpose architecture, combined with BAREWire's schema descriptor system, absorb this use case?
 
@@ -37,11 +51,11 @@ Fidelity Framework explicitly eliminates the .NET CLR and BCL. There is no runti
 
 When the data schema is known before compilation, no type provider machinery is needed. The schema is defined as Clef types. The parser validates conformance. The typed accessor is statically compiled.
 
-Fidelity.TOML exemplifies this tier. The `.fidproj` file has a known structure. The Fidelity.TOML library provides both deserialization (reading TOML into typed Clef values) and serialization (writing typed Clef values back to TOML). The BAREWire schema descriptor for the TOML structure is defined at compile time. The in-memory representation is a BAREWire region with typed field access at statically known offsets.
+TOML exemplifies this tier. The `.fidproj` file has a known structure. Today the TOML module of Fidelity.Data, a .NET (`net10.0`) library that also covers XML, JSON, CSV and YAML, parses `.fidproj` files for the .NET-hosted compiler; it uses no BAREWire schema descriptors. The proposed native Clef library would provide both deserialization (reading TOML into typed Clef values) and serialization (writing typed Clef values back to TOML). The BAREWire schema descriptor for the TOML structure would be defined at compile time, and the in-memory representation would be a BAREWire region with typed field access at statically known offsets.
 
 This pattern extends to every format where the schema is established before compilation:
 
-| Format | Library | Schema Source |
+| Format | Proposed native library | Schema Source |
 |---|---|---|
 | TOML | Fidelity.TOML | `.fidproj`, application config |
 | JSON | Fidelity.JSON | API contracts, OpenAPI specs |
@@ -49,15 +63,15 @@ This pattern extends to every format where the schema is established before comp
 | CSV | Fidelity.CSV | Known column headers and types |
 | YAML | Fidelity.YAML | Kubernetes manifests, CI configs |
 
-Each format library provides bidirectional serialization, BAREWire schema descriptors, and typed access. No runtime flexibility is needed or wanted. The compile-time type system provides full safety.
+Each format library would provide bidirectional serialization, BAREWire schema descriptors, and typed access. No runtime flexibility is needed or wanted. The compile-time type system provides full safety.
 
 ### 3.2 Architectural Characteristics
 
 Tier 1 libraries share common properties:
 
 - **Schema is compile-time data.** The BAREWire schema descriptor is a constant embedded in the compiled binary.
-- **Accessors are direct offset reads.** Field access compiles to pointer arithmetic at known offsets. No indirection, no type tag dispatch.
-- **Validation is parse-time.** A non-conforming document produces a typed `Result` error during parsing. Once parsed, every access is guaranteed safe by construction.
+- **Accessors are direct offset reads.** Field access compiles to reads at statically known offsets within a bounded region; a bounds check is omitted only where the compiler establishes the bound. No indirection, no type tag dispatch.
+- **Validation is parse-time.** A non-conforming document produces a typed `Result` error during parsing. Once parsed, every access is checked against the region's extent or proved in bounds.
 - **No runtime dependency.** The compiled binary contains the parser, the schema, and the accessors. Nothing else is needed.
 
 This is solved territory. The remaining question is whether the Tier 1 format libraries share enough infrastructure to warrant a common `Fidelity.Format` or similar base library, or whether each format library stands alone. The BAREWire schema descriptor system provides the natural shared infrastructure: each format library produces BAREWire-encoded data with format-specific parsing and format-generic typed access.
@@ -118,7 +132,7 @@ The `CsvSchema` type itself has a compile-time-known BAREWire layout. It can be 
 
 **Schema inference.** A schema inference pass reads the header row and samples N data rows, applies heuristics (does this column parse as integer? as float? as date?), and produces a `CsvSchema` value. This inference code is statically compiled. It examines runtime data and produces a runtime value. No code generation occurs.
 
-**Data region.** The parsed CSV data lives in a BAREWire memory region. The region is a flat byte buffer with a known base address, typed as `BAREWireRegion` (a base pointer plus a length). The layout of data within the region is determined by the schema descriptor: column offsets, type widths, row stride. The region itself is a compile-time-known type; its *contents* are interpreted according to the runtime-discovered schema.
+**Data region.** The parsed CSV data lives in a BAREWire memory region. The region is a bounded byte extent, typed as `BAREWireRegion`: an offset and length over backing storage, with every access checked against that extent. Its native realization is the compiler's; in Clef source an admitted memory view is `Ptr<'T, 'Region, 'Access>` with bounds and lifetime obligations. The layout of data within the region is determined by the schema descriptor: column offsets, type widths, row stride. The region itself is a compile-time-known type; its *contents* are interpreted according to the runtime-discovered schema.
 
 **Accessor function.** The accessor is statically compiled, parameterized by the schema descriptor:
 
@@ -135,7 +149,7 @@ let readField (schema: CsvSchema) (region: BAREWireRegion) (row: int) (col: int)
     | NullableOf inner -> // nested match with null sentinel check
 ```
 
-Every branch of that match is statically compiled. The schema descriptor determines which branch executes at runtime, but all branches exist in the binary. The `ReadInt32` at a computed offset is a pointer dereference with an addition. No vtable, no type metadata lookup, no garbage collector, no runtime.
+Every branch of that match is statically compiled. The schema descriptor determines which branch executes at runtime, but all branches exist in the binary. The `ReadInt32` at a computed offset is an addition and a load, checked against the region's extent unless the bound is proved. No vtable, no type metadata lookup, no garbage collector, no runtime.
 
 ### 4.4 The BAREWire Contract Is Not "Runtime Adaptive"
 
@@ -147,11 +161,13 @@ The resolution: the BAREWire contract is split in two.
 
 1. **The contract for the schema descriptor** is compile-time fixed. `CsvSchema` has a known layout. This is a normal BAREWire type. The compiled binary knows exactly how to read, write, and transmit schema descriptors.
 
-2. **The contract for the data region** is runtime-parameterized. The data region is a flat byte buffer whose interpretation depends on the schema descriptor. The compiled code treats it as `BAREWireRegion` (a base pointer plus a length), which is a compile-time-known type. The schema descriptor provides the interpretation.
+2. **The contract for the data region** is runtime-parameterized. The data region is a flat byte buffer whose interpretation depends on the schema descriptor. The compiled code treats it as `BAREWireRegion` (a bounded byte extent), which is a compile-time-known type. The schema descriptor provides the interpretation.
+
+BAREWire's schema tier is built for the fixed half of this split: schema values, validation, compatibility analysis and deterministic `.bare` emission. A `.bare` parser, codec generation and schema derivation from Clef types are not built yet.
 
 This is the same pattern as reading any binary file format with a header. A PNG file has a fixed header layout and a variable pixel data region whose dimensions are specified in the header. No one would argue that reading a PNG file requires a runtime. The compiled code handles all possible pixel dimensions through parameterized access. The schema descriptor is the "header" of the data format.
 
-The type vocabulary is finite and baked into the binary. `CsvValue`, `JsonValue`, `XmlValue` are closed discriminated unions. All possible types are compiled in; only the *selection* among them is runtime-determined. No new types are created at runtime. No type metadata is consulted. The DU match compiles to a jump table or branch chain on an integer tag, which is what all DU dispatch compiles to in Fidelity.
+The type vocabulary is finite and baked into the binary. `CsvValue`, `JsonValue`, `XmlValue` are closed discriminated unions. All possible types are compiled in; only the *selection* among them is runtime-determined. No new types are created at runtime. No type metadata is consulted. The DU match compiles to a jump table or branch chain on the integer tag of the representation the compiler settles for these unions.
 
 ### 4.5 The BAREWire Actor Pattern
 
@@ -199,11 +215,11 @@ The Tier 2 pattern suggests a shared library:
 - Column-major and row-major layout selection for tabular formats (CSV, TSV)
 - Schema comparison and migration utilities (detect when a new document's schema differs from an expected schema, identify added/removed/changed fields)
 
-Each Tier 1 format library (Fidelity.TOML, Fidelity.JSON, etc.) handles the compile-time-known case with direct typed access. Fidelity.Schema handles the runtime-discovered case with DU-based access parameterized by runtime schema descriptors. Both produce BAREWire regions. Both are statically compiled. They differ in whether the schema is a compile-time constant or a runtime value.
+The proposed Tier 1 format libraries (Fidelity.TOML, Fidelity.JSON, etc.) handle the compile-time-known case with direct typed access. Fidelity.Schema handles the runtime-discovered case with DU-based access parameterized by runtime schema descriptors. Both produce BAREWire regions. Both are statically compiled. They differ in whether the schema is a compile-time constant or a runtime value.
 
 ---
 
-## 5. Tier 3: Composer Daemon with JIT-Compiled Accessors
+## 5. Tier 3 (Proposal): JIT-Compiled Accessors in a Compilation Service
 
 ### 5.1 What Tier 3 Provides That Tier 2 Does Not
 
@@ -211,18 +227,18 @@ Tier 2's DU-based access pays a match cost on every field access. For a deeply n
 
 A JIT-compiled accessor that knows the specific schema can generate direct-offset memory reads, identical to what a Tier 1 compile-time-known schema produces. Column 3 is always `FloatCol` at offset 24; the compiled accessor emits `ReadFloat64 24` without the match.
 
-Tier 3 uses the Composer daemon (the same infrastructure built for LSP design-time support and Jupyter notebook kernel mode) to provide this optimization:
+Tier 3 would use a validated compilation service with LLVM ORC execution to provide this optimization. No compilation service offers ORC execution yet: Bozzetto's Composer sessions build and run ahead-of-time artifacts, Lattice's LSP server checks source for editors, and no Clef notebook kernel exists. The proposed flow:
 
 1. The application receives a document (or schema definition) at runtime
-2. The application's Prospero supervisor spawns a schema accessor actor
-3. The actor sends the schema descriptor to the Composer daemon
-4. The Composer daemon compiles (via LLVM ORC JIT) a specialized accessor: a Clef module with functions that read fields at known offsets from a BAREWire region conforming to that specific schema
-5. The compiled accessor is loaded into the actor's execution context
+2. The application's Prospero supervisor spawns a schema accessor actor in the service's process
+3. The actor sends the schema descriptor to the compilation service
+4. The compilation service compiles (via LLVM ORC JIT) a specialized accessor: a Clef module with functions that read fields at known offsets from a BAREWire region conforming to that specific schema
+5. The compiled accessor is loaded into the actor's execution context, outside the application's address space
 6. The application communicates with the accessor actor through BAREWire messages
 
 ### 5.2 Actor Containment: Preserving the Zero-Runtime Guarantee
 
-The Composer daemon and JIT-compiled accessor run inside a supervised actor, isolated from the compiled application's address space. The application never loads JIT-compiled code into its own memory. The optimization is contained behind an actor boundary.
+The compilation service and JIT-compiled accessor would run inside a supervised actor in the service's own process, isolated from the compiled application's address space. The application never loads JIT-compiled code into its own memory. The optimization is contained behind an actor boundary.
 
 The message protocol at the boundary uses compile-time-known types:
 
@@ -238,15 +254,17 @@ type SchemaResponse =
     | Schema of CsvSchema
 ```
 
-`SchemaRequest` and `SchemaResponse` are compile-time-known BAREWire types. The application sends requests and receives responses through a BAREWire channel. Everything inside the daemon actor (JIT compilation, schema-specific offsets, LLVM ORC infrastructure) is isolated. Everything outside operates on compile-time-known types with no runtime dependency.
+`SchemaRequest` and `SchemaResponse` are compile-time-known BAREWire types. The application sends requests and receives responses through a BAREWire channel. Everything inside the service actor (JIT compilation, schema-specific offsets, LLVM ORC infrastructure) is isolated. Everything outside operates on compile-time-known types with no runtime dependency.
 
-If the daemon actor crashes, the Prospero supervisor restarts it. If the schema changes, the supervisor can request recompilation. The compiled application's execution model is unaffected.
+Because the accessor runs outside the application's address space, every request crosses a process boundary. A per-field `ReadField` or per-row `ReadRow` round trip costs more than Tier 2's in-process DU match, so the protocol would need bulk requests (projecting columns into a new region, aggregating inside the actor, returning row batches) before Tier 3 pays off.
+
+If the service actor crashed, the Prospero supervisor would restart it; if the schema changed, the supervisor would request recompilation. Restart and recompilation must follow code-retirement and state contracts that are not yet defined (the workbench's WB-03 milestone). The compiled application's execution model is unaffected.
 
 ### 5.3 When Tier 3 Is Justified
 
 Tier 3 carries significant infrastructure cost:
 
-- Composer must run as a persistent daemon/TSR service
+- A compilation service must stay resident while Tier 3 accessors are in use, under the application's own supervision
 - LLVM ORC JIT must be integrated into the service environment
 - Actor supervision machinery must support hot-loading compiled code
 - BAREWire schema negotiation must handle the JIT-compiled actor's lifecycle
@@ -257,24 +275,37 @@ This is justified when:
 
 - The application processes high-volume data streams with runtime-discovered schemas (ETL pipelines, data lake ingestion, real-time analytics)
 - Profiling demonstrates that Tier 2's DU match is a measured bottleneck, not a theoretical concern
-- The Composer daemon is already running for other reasons (LSP support during development, Jupyter kernel for interactive analysis)
+- A validated Composer compilation service is already running for another use,
+  such as the proposed workbench; shared native sessions and a Jupyter kernel
+  must first satisfy their own implementation and lifetime gates.
 
-The last point is important. The marginal cost of adding schema JIT to an already-running Composer daemon is low. The fixed cost of standing up the daemon solely for schema JIT is high. Tier 3 becomes practical when the daemon exists for other purposes and schema optimization is an incremental capability.
+Reusing a validated service may reduce hosting work, but schema admission,
+compilation, code lifetime and supervision still have their own costs. Measure
+those costs against Tier 2 before selecting Tier 3; a resident process alone does
+not establish responsiveness or incremental compilation.
 
-### 5.4 Spawning the Daemon at Application Start
+### 5.4 Spawning a Compilation Service at Application Start
 
-An application that requires Tier 3 performance can spawn the Composer daemon at start time as a supervised actor. The daemon is an Olivier worker under the application's Prospero supervision tree. Its lifecycle is managed by the same actor infrastructure that manages all other application services.
+The proposed Tier 3 application would spawn a Composer compilation service as a
+supervised actor. An Olivier worker under a Prospero supervision tree is the
+proposed ownership model; this lifecycle is not an implemented service contract.
 
-This model provides runtime independence without runtime dependence. The daemon is an external process (its own executable, its own address space) supervised through BAREWire IPC. The compiled application does not embed a runtime; it communicates with a runtime-capable service through a typed protocol. If the daemon is unavailable (deployment to an embedded target, constrained environment), the application falls back to Tier 2's statically compiled DU-based access. The capability degrades gracefully.
+This model would provide runtime independence without runtime dependence. The service would be an external process (its own executable, its own address space) reached over a BAREWire channel. BAREWire supplies the message encoding and framing; supervision belongs to the service's owner, and BAREWire's IPC integration is still design work. The compiled application does not embed a runtime; it communicates with a runtime-capable service through a typed protocol. If the service is unavailable (deployment to an embedded target, constrained environment), the application falls back to Tier 2's statically compiled DU-based access, so the capability degrades gracefully.
 
-This pattern of spawning a Composer daemon at application start time has broader implications. It is the same architecture that supports:
+Potential later consumers of a validated compilation service include:
 
 - Live schema accessor compilation (this use case)
-- Interactive Clef evaluation (Jupyter kernel mode)
-- Hot-reload of application modules during development
+- Interactive Clef evaluation (`clefx` sessions; a notebook kernel is separately scoped)
+- Hot-reload of application modules during development, which Bozzetto's development horizons propose to coordinate across targets
 - Runtime profiling and performance advisory (Composer analyzing execution traces and suggesting optimization opportunities)
 
-Each of these is an incremental use of the daemon; none of them individually justifies the infrastructure cost; collectively they establish the Composer daemon as a general-purpose compilation service that applications can optionally leverage.
+Each consumer needs its own admission, freshness and lifetime contract. These
+possibilities do not establish a current general-purpose daemon or require the
+workbench to deliver all of them. Lattice and a future MCP/REPL client must share
+compiler-owned session authority rather than maintain competing semantic models.
+Today Lattice checks source in its own CCS editor session, separately from the
+Composer project sessions that Bozzetto's MCP tools and browser page drive; one
+shared service is the workbench's WB-02 milestone, still in progress.
 
 ---
 
@@ -324,20 +355,21 @@ let result = jsonAccess schema doc {
 
 This preserves explicit error handling (the computation expression is a `Result` builder) while reducing boilerplate. It is a library-level solution, requiring no compiler changes. The `field` function performs the DU match internally and returns `Result`.
 
-**Option C: Compile-time schema hints.** If a sample document or schema definition is available at compile time (even though the actual documents arrive at runtime), Composer could use the schema to generate specialized accessor functions during compilation. This is closest to F#'s type provider model: the sample document provides the schema; the compiler generates typed access; runtime documents are validated against the expected schema.
+**Option C: Compile-time schema hints.** If a sample document or schema definition is available at compile time (even though the actual documents arrive at runtime), a build-time generator could use the schema to emit specialized accessor functions before compilation. This is closest to F#'s type provider model: the sample document provides the schema; generated source provides typed access; runtime documents are validated against the expected schema.
 
 In Clef, this might look like:
 
 ```fsharp
-[<Schema("sample.json")>]
-type PersonDoc = JsonSchemaProvider
-
-let doc = PersonDoc.parse input  // Result<PersonDoc, SchemaError>
-let name = doc.Name              // string
-let age = doc.Age                // int
+// PersonDoc.clef is generated from sample.json before compilation
+match PersonDoc.parse input with  // Result<PersonDoc, SchemaError>
+| Ok doc ->
+    let name = doc.Name           // string
+    let age = doc.Age             // int
+    // use name and age
+| Error schemaError -> // handle the parse-time error
 ```
 
-This requires Composer to support schema-driven type generation as a compile-time code generation step. The generated types would be real Clef types (not erased) with direct-offset BAREWire accessors. Runtime documents that do not conform to the schema produce parse-time errors, not access-time errors.
+Clef has no type providers, so the generator emits ordinary `.clef` modules, as Farscape does from C headers, and CCS checks them like any other source. The generated types would be real Clef types (not erased) with direct-offset BAREWire accessors. Runtime documents that do not conform to the schema produce parse-time errors, not access-time errors.
 
 ### 6.3 Recommended Approach
 
@@ -351,7 +383,7 @@ Option C (compile-time schema hints) is the long-term direction. It converges wi
 
 ### 7.1 Phase 1: Tier 1 Format Libraries (Current)
 
-Fidelity.TOML exists and provides the pattern. Equivalent libraries for JSON, XML, CSV, and YAML follow the same architecture: compile-time-known schemas, BAREWire-typed accessors, bidirectional serialization.
+Fidelity.Data supplies TOML, XML, JSON, CSV and YAML parsing today as a .NET library without BAREWire schema descriptors. Native Clef libraries for these formats would follow the Tier 1 architecture: compile-time-known schemas, BAREWire-typed accessors, bidirectional serialization.
 
 Each library is independent. Shared infrastructure (BAREWire schema descriptor encoding, region management, parse error types) may be factored into a common base as the libraries mature.
 
@@ -366,29 +398,34 @@ The runtime schema inference library. Provides:
 - Computation expression builders for ergonomic access (Option B)
 - Schema comparison, validation, and migration utilities
 
-This library compiles statically. It requires no Composer daemon, no JIT, and no runtime. It handles the "user uploads an unknown CSV" case and its equivalents across all supported formats.
+This library compiles statically. It requires no compilation service, no JIT, and no runtime. It handles the "user uploads an unknown CSV" case and its equivalents across all supported formats.
 
 ### 7.3 Phase 3: Compile-Time Schema Providers (Medium-Term)
 
-Composer extension for schema-driven type generation. Given a sample document or explicit schema definition at compile time, Composer generates Clef types with direct-offset BAREWire accessors. This provides the ergonomic experience of F# type providers without .NET runtime dependency.
+A build-time generator for schema-driven types. Given a sample document or explicit schema definition before compilation, it emits Clef modules with direct-offset BAREWire accessors, which CCS checks like any other source. This provides the ergonomic experience of F# type providers without .NET runtime dependency.
 
-This phase depends on the Composer plugin architecture being stable enough to support compile-time code generation hooks. It is a natural extension point once Transcribe and Transpose establish the pattern for foreign artifact ingestion.
+This phase depends on a reviewed build-time generation step; Composer offers no compiler plugin hooks for code generation. It is a natural extension point once Transcribe and Transpose establish the pattern for foreign artifact ingestion.
 
-### 7.4 Phase 4: Composer Daemon JIT for Tier 3 (Late Roadmap)
+### 7.4 Phase 4: JIT Accessors for Tier 3 (Late Roadmap)
 
-Actor-supervised JIT compilation of schema-specific accessors. Shares infrastructure with:
+Proposed actor-supervised JIT compilation of schema-specific accessors. It may
+reuse validated workbench infrastructure; the following consumers remain
+separately scoped proposals:
 
-- Jupyter kernel mode (LLVM ORC JIT for interactive evaluation)
-- LSP/Atelier integration (live compilation service)
-- Hot-reload during development
+- A Clef notebook kernel (LLVM ORC JIT for interactive evaluation); notebook support is separately scoped, and Bozzetto's inherited Jupyter entry point is retired
+- Lattice (the current LSP server) and planned Atelier views over a live compilation service
+- Hot-reload during development, which also needs state compatibility and safe code retirement
 
-The daemon is spawned as an Olivier worker under Prospero supervision. Applications that need Tier 3 performance spawn the daemon at start time. Applications that do not need it fall back to Tier 2's statically compiled accessors. The capability degrades gracefully.
+The proposed service would run as an Olivier worker under Prospero supervision.
+Applications selecting Tier 3 would start it explicitly and retain Tier 2's
+statically compiled accessors as their fallback. That fallback, native code
+lifetime and supervision behavior require validation before this phase is usable.
 
 ### 7.5 Phase 5: Runtime BAREWire Schema Negotiation (Late Roadmap)
 
-Full actor-supervised runtime schema management. An application that processes documents with evolving schemas uses the Composer daemon to dynamically compile and load accessor actors as new schemas are discovered. The Prospero supervisor manages the lifecycle of these actors, including schema evolution, recompilation, and graceful migration when a schema version changes.
+Full actor-supervised runtime schema management. An application that processes documents with evolving schemas would use a validated compilation service to compile accessor actors and run them in a supervised process as new schemas are discovered. The Prospero supervisor would manage the lifecycle of these actors, including schema evolution, recompilation, and graceful migration when a schema version changes.
 
-This phase requires mature actor supervision, stable BAREWire IPC, and a proven Composer daemon. It is the most advanced expression of the schema capability and the furthest from current implementation.
+This phase requires mature actor supervision, stable BAREWire IPC, and a validated compilation service. It is the most advanced expression of the schema capability and the furthest from current implementation.
 
 ---
 
@@ -402,11 +439,11 @@ The schema capability is neither Transcribe nor Transpose. It occupies a third p
 | Transpose | Foreign library interfaces | Typed bindings with NTU/BAREWire | Library APIs |
 | Schema (TBD naming) | Data format samples/definitions | Schema descriptors + typed accessors | Data structures |
 
-All three share infrastructure: BAREWire schema descriptors, NTU type widths, the Atelier editor surface for browsing and IntelliSense, and the Composer compilation pipeline. They differ in what they ingest and what they produce.
+All three share infrastructure: BAREWire contracts (binding descriptors for Transpose, schemas for data), NTU type widths, editor integration (Lattice now, Atelier views planned) for browsing and IntelliSense, and the Composer compilation pipeline. They differ in what they ingest and what they produce.
 
 The schema capability's distinguishing characteristic is that it operates across the compile-time/runtime boundary. Transcribe and Transpose are purely build-time operations: they read foreign artifacts and produce Clef source or typed bindings that enter the compilation pipeline. The schema capability spans from compile-time (Tier 1 format libraries, Phase 3 schema providers) through runtime (Tier 2 inference, Tier 3 JIT), with a graceful degradation path between them.
 
-Whether the schema capability earns a musical name to complement Transcribe and Transpose, or lives as a BAREWire subsystem with an Atelier editorial surface, is a naming decision that can follow the implementation. The architectural identity is clear regardless of what it is called: it is the Fidelity Framework's answer to the question "how do I work with data whose structure I don't know until the program runs?" and the answer is "schema descriptors are data, not types; the type vocabulary is finite and compiled in; the schema selects which types apply at which positions."
+Whether the schema capability earns a musical name to complement Transcribe and Transpose, or lives as a BAREWire subsystem presented through Lattice (with Atelier views planned), is a naming decision that can follow the implementation. The architectural identity is clear regardless of what it is called: it is the Fidelity Framework's answer to the question "how do I work with data whose structure I don't know until the program runs?" and the answer is "schema descriptors are data, not types; the type vocabulary is finite and compiled in; the schema selects which types apply at which positions."
 
 ---
 
@@ -422,11 +459,11 @@ The accessor function bridges the two: it is compile-time code (statically compi
 
 The "runtime adaptive BAREWire contract" that seemed to threaten the zero-runtime model does not exist as a concept. What exists is a compile-time-fixed schema descriptor type, a compile-time-fixed data region type, and a compile-time-compiled accessor function that interprets one according to the other. The "adaptation" is a computed offset read and a DU branch selection, both of which are ordinary machine instructions in the compiled binary.
 
-This principle, that schema descriptors are data within the type system (not extensions of the type system), is what makes Tiers 2 through 5 tractable without abandoning Fidelity's core architectural commitment. The Composer daemon and JIT (Tiers 3-5) are performance optimizations, not capability extensions. They eliminate the DU match overhead for hot-path access, which is valuable in data-intensive applications, but the *capability* to access runtime-discovered schemas exists fully within the statically compiled binary.
+This principle, that schema descriptors are data within the type system (not extensions of the type system), is what makes Tiers 2 and 3 (roadmap Phases 2, 4 and 5) tractable without abandoning Fidelity's core architectural commitment. A compilation service and JIT (Tier 3; roadmap Phases 4 and 5) are performance optimizations, not capability extensions. They eliminate the DU match overhead for hot-path access, which is valuable in data-intensive applications, but the *capability* to access runtime-discovered schemas exists fully within the statically compiled binary.
 
 ---
 
-*This memo captures architectural analysis and design direction. Implementation specifics are subject to revision as the Fidelity.TOML pattern is validated across additional formats and the Fidelity.Schema library design matures.*
+*This memo captures architectural analysis and design direction. Implementation specifics are subject to revision as the Tier 1 pattern is validated across additional formats and the Fidelity.Schema library design matures.*
 
 *SpeakEZ Technologies | Fidelity Framework*
 *License: MIT*

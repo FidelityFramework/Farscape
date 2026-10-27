@@ -295,8 +295,16 @@ module ProtocolParser =
     // Retired Request Projection Entry Points
     // =========================================================================
 
-    // The former generator and synthetic extern projection have been removed;
-    // neither retired representation admits a typed protocol dispatch contract.
+    // The removed raw marshal generator typed every protocol object as nativeint
+    // and expected to restore handle records once signature-based loading landed.
+    // That expectation is withdrawn: namespace-scoped inference is separate
+    // compiler design work; it does not authorize changing the boundary
+    // representation to a handle record or an integer address. A protocol object
+    // crosses as CHandle<_>, or option<CHandle<_>> where it may be absent, and its
+    // pointer width and passing mode belong to the descriptor (clef-lang-spec
+    // ffi-boundary.md §5.3). Neither retired projection admits a typed protocol
+    // dispatch contract; the former generator and synthetic extern projection
+    // have been removed.
 
     let private requireTypeOnly (entryPoint: string) (interfaces: ProtocolInterface list) =
         match interfaces |> List.tryPick (fun iface ->
