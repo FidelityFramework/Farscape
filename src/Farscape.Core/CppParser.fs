@@ -25,6 +25,17 @@ module CppParser =
     // Declaration Types
     // =========================================================================
 
+    /// Raw attribute data extracted from clang AST nodes.
+    /// Stored as-is from clang JSON; semantic interpretation belongs to consumers.
+    type AttributeData = {
+        /// Clang AST node kind, e.g., "AllocSizeAttr", "NonNullAttr", "FormatAttr"
+        Kind: string
+        /// Integer arguments. NonNullAttr parameter positions are normalized to zero-based indices.
+        Args: int list
+        /// String argument (archetype for FormatAttr, label for AsmLabelAttr)
+        StringArg: string option
+    }
+
     /// Represents a struct field with full type information
     type FieldDecl = {
         Name: string
@@ -35,18 +46,7 @@ module CppParser =
         ArraySize: int option // Declared element count when known
         IsBitfield: bool      // clang JSON "isBitfield"
         BitWidth: int option  // Bit width if IsBitfield
-    }
-
-    /// Raw attribute data extracted from clang AST nodes.
-    /// Stored as-is from clang JSON; semantic interpretation happens downstream
-    /// in WrapperPatternAnalyzer.
-    type AttributeData = {
-        /// Clang AST node kind, e.g., "AllocSizeAttr", "NonNullAttr", "FormatAttr"
-        Kind: string
-        /// Integer arguments. NonNullAttr parameter positions are normalized to zero-based indices.
-        Args: int list
-        /// String argument (archetype for FormatAttr, label for AsmLabelAttr)
-        StringArg: string option
+        Attributes: AttributeData list
     }
 
     /// Represents a C/C++ function declaration
@@ -72,6 +72,7 @@ module CppParser =
         Fields: FieldDecl list
         Documentation: string option
         IsUnion: bool
+        Attributes: AttributeData list
     }
 
     /// Represents a C/C++ enum value with signed support
@@ -410,13 +411,14 @@ module CppParser =
             ArraySize = arraySize
             IsBitfield = false
             BitWidth = None
+            Attributes = []
         }
 
     // =========================================================================
     // AST Node Processing
     // =========================================================================
 
-    /// Extract raw attribute data from a FunctionDecl's inner nodes.
+    /// Extract raw attribute data from a declaration's inner nodes.
     /// Filters for child nodes with kind ending in "Attr" (excluding BuiltinAttr).
     let private extractAttributes (node: JsonValue) : AttributeData list =
         getArray node "inner"
@@ -499,7 +501,7 @@ module CppParser =
                                     | _ -> None)
                             | _ -> None))
                 else None
-            Some { fieldInfo with Name = fieldName; IsBitfield = isBitfield; BitWidth = bitWidth }
+            Some { fieldInfo with Name = fieldName; IsBitfield = isBitfield; BitWidth = bitWidth; Attributes = extractAttributes node }
 
     /// Process RecordDecl (struct/union) AST node
     let private processRecordDecl (node: JsonValue) : StructDecl option =
@@ -507,6 +509,7 @@ module CppParser =
         let tagUsed = getStringOr node "tagUsed" "struct"
         let isUnion = tagUsed = "union"
         let documentation = extractDocumentation node
+        let attributes = extractAttributes node
 
         let fields =
             getArray node "inner"
@@ -517,9 +520,9 @@ module CppParser =
 
         match name, fields with
         | Some n, _ when not (String.IsNullOrEmpty(n)) ->
-            Some { Name = n; Fields = fields; Documentation = documentation; IsUnion = isUnion }
+            Some { Name = n; Fields = fields; Documentation = documentation; IsUnion = isUnion; Attributes = attributes }
         | _, fs when not fs.IsEmpty ->
-            Some { Name = ""; Fields = fields; Documentation = documentation; IsUnion = isUnion }
+            Some { Name = ""; Fields = fields; Documentation = documentation; IsUnion = isUnion; Attributes = attributes }
         | _ -> None
 
     /// Extract the explicit value from an EnumConstantDecl AST node, if present.

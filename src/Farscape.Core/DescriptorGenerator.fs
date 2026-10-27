@@ -158,6 +158,15 @@ module DescriptorGenerator =
                 |> List.ofSeq
             offsets, measured.SizeBits / 8, measured.AlignmentBits / 8, Measured
         | None ->
+            let requireNaturalAttributes subject (attributes: CppParser.AttributeData list) =
+                attributes |> List.iter (fun attribute ->
+                    match attribute.Kind with
+                    | "PackedAttr" | "AlignedAttr" | "MaxFieldAlignmentAttr" ->
+                        invalidOp $"{subject} carries layout attribute '{attribute.Kind}' that natural alignment cannot represent; a measured layout is required."
+                    | kind ->
+                        invalidOp $"{subject} carries attribute '{kind}' with unclassified layout effect; a measured layout or a classified attribute contract is required.")
+            requireNaturalAttributes $"Struct '{s.Name}'" s.Attributes
+            s.Fields |> List.iter (fun field -> requireNaturalAttributes $"Struct '{s.Name}' field '{field.Name}'" field.Attributes)
             let fieldExtent fieldName count shape : int * int =
                 match shape with
                 | RepresentedScalar r ->

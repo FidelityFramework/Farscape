@@ -34,18 +34,18 @@ let mkEnumValWithDoc name value doc : CppParser.EnumValue =
     { Name = name; Value = value; Documentation = Some doc }
 
 let mkStruct name fields doc : CppParser.StructDecl =
-    { Name = name; Fields = fields; Documentation = doc; IsUnion = false }
+    { Name = name; Fields = fields; Documentation = doc; IsUnion = false; Attributes = [] }
 
 let mkStructSimple name : CppParser.StructDecl =
-    { Name = name; Fields = []; Documentation = None; IsUnion = false }
+    { Name = name; Fields = []; Documentation = None; IsUnion = false; Attributes = [] }
 
 let mkField name typ : CppParser.FieldDecl =
     { Name = name; Type = typ; IsConst = false; IsVolatile = false; IsArray = false; ArraySize = None
-      IsBitfield = false; BitWidth = None }
+      IsBitfield = false; BitWidth = None; Attributes = [] }
 
 let mkBitField name typ width : CppParser.FieldDecl =
     { Name = name; Type = typ; IsConst = false; IsVolatile = false; IsArray = false; ArraySize = None
-      IsBitfield = true; BitWidth = Some width }
+      IsBitfield = true; BitWidth = Some width; Attributes = [] }
 
 // ─── Layout helpers ───
 

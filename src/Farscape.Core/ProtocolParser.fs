@@ -244,12 +244,13 @@ module ProtocolParser =
                       Type = delegateTypeName
                       IsVolatile = false; IsConst = false
                       IsArray = false; ArraySize = None
-                      IsBitfield = false; BitWidth = None })
+                      IsBitfield = false; BitWidth = None; Attributes = [] })
             Some (CppParser.Declaration.Struct {
                 Name = $"{iface.Name}_listener"
                 Fields = fields
                 Documentation = Some $"Event listener for {iface.Name}"
                 IsUnion = false
+                Attributes = []
             })
 
     /// Generate enum declarations for an interface.

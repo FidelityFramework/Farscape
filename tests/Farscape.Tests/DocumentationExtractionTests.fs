@@ -89,9 +89,9 @@ let ``wrapper with documented function produces description and C signature`` ()
 let ``struct documentation flows to RecordType output`` () =
     let s : CppParser.StructDecl =
         { Name = "Point"; Fields = [
-            { Name = "x"; Type = "int"; IsConst = false; IsVolatile = false; IsArray = false; ArraySize = None; IsBitfield = false; BitWidth = None }
-            { Name = "y"; Type = "int"; IsConst = false; IsVolatile = false; IsArray = false; ArraySize = None; IsBitfield = false; BitWidth = None }
-          ]; Documentation = Some "A point in 2D space."; IsUnion = false }
+            { Name = "x"; Type = "int"; IsConst = false; IsVolatile = false; IsArray = false; ArraySize = None; IsBitfield = false; BitWidth = None; Attributes = [] }
+            { Name = "y"; Type = "int"; IsConst = false; IsVolatile = false; IsArray = false; ArraySize = None; IsBitfield = false; BitWidth = None; Attributes = [] }
+          ]; Documentation = Some "A point in 2D space."; IsUnion = false; Attributes = [] }
     let decls = [ CppParser.Declaration.Struct s ]
     let output = FidelityCodeGenerator.generate decls "Fidelity.test" "test" Types.LP64 Map.empty
     Assert.Contains("/// A point in 2D space.", output)

@@ -178,6 +178,167 @@ module GeneratorDispatch =
         finally
             System.IO.Directory.Delete(directory, true)
 
+    let private attributeLayoutSource records layouts : DescriptorGenerator.LayoutSource =
+        let scalar cType bits = DescriptorGenerator.ScalarField {Family = TypeMapper.Signed; Bits = bits; Stratum = TypeMapper.Declared; CType = cType}
+        { Structs = records |> List.map (fun (record: CppParser.StructDecl) -> record.Name, record) |> Map.ofList
+          Layouts = layouts
+          Model = Types.LP64
+          Shape = function
+            | "char" -> scalar "char" 8
+            | "int" -> scalar "int" 32
+            | "struct P" -> DescriptorGenerator.StructField "P"
+            | spelling -> DescriptorGenerator.UnknownField spelling }
+
+    [<Theory>]
+    [<InlineData("P", false)>]
+    [<InlineData("P", true)>]
+    [<InlineData("Pragma", false)>]
+    [<InlineData("Pragma", true)>]
+    [<InlineData("A", false)>]
+    [<InlineData("A", true)>]
+    [<InlineData("F", false)>]
+    [<InlineData("F", true)>]
+    [<InlineData("G", false)>]
+    [<InlineData("G", true)>]
+    [<InlineData("Deprecated", false)>]
+    [<InlineData("Deprecated", true)>]
+    let ``real record and field attributes require measured descriptor layouts`` name measured =
+        let header, kind, fieldAttribute, size, alignment, offsets, args =
+            match name with
+            | "P" -> "struct __attribute__((packed)) P { char lead; int payload; };", "PackedAttr", false, 5, 1, [0; 1], []
+            | "Pragma" -> "#pragma pack(push, 1)\nstruct Pragma { char lead; int payload; };\n#pragma pack(pop)\n", "MaxFieldAlignmentAttr", false, 5, 1, [0; 1], []
+            | "A" -> "struct __attribute__((aligned(32))) A { int payload; };", "AlignedAttr", false, 32, 32, [0], [32]
+            | "F" -> "struct F { char lead; int payload __attribute__((aligned(16))); };", "AlignedAttr", true, 32, 16, [0; 16], [16]
+            | "G" -> "struct G { char lead; int payload __attribute__((packed)); };", "PackedAttr", true, 5, 1, [0; 1], []
+            | _ -> "struct __attribute__((deprecated)) Deprecated { char lead; int payload; };", "DeprecatedAttr", false, 8, 4, [0; 4], []
+        withLayoutHeader header [name] (fun declarations layouts ->
+            let record = declarations |> List.pick (function CppParser.Declaration.Struct s when s.Name = name -> Some s | _ -> None)
+            let attributes = if fieldAttribute then (record.Fields |> List.find (fun field -> field.Name = "payload")).Attributes else record.Attributes
+            let attribute = Assert.Single(attributes)
+            Assert.Equal(kind, attribute.Kind)
+            Assert.Equal<int list>(args, attribute.Args)
+            let source = attributeLayoutSource [record] (if measured then layouts else Map.empty)
+            if measured then
+                let actualOffsets, actualSize, actualAlignment, stratum = DescriptorGenerator.layoutOf source 0 record
+                Assert.Equal<int list>(offsets, actualOffsets)
+                Assert.Equal(size, actualSize)
+                Assert.Equal(alignment, actualAlignment)
+                Assert.Equal(TypeMapper.Measured, stratum)
+                DescriptorGenerator.structDecls source record |> ignore
+                let output = FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts
+                Assert.Contains($"let Size = {size}\n", output)
+                Assert.Contains($"let Alignment = {alignment}\n", output)
+                List.zip record.Fields offsets |> List.iter (fun (field, offset) -> Assert.Contains($"let {field.Name}Offset = {offset}\n", output))
+            else
+                let subject = if fieldAttribute then $"Struct '{name}' field 'payload'" else $"Struct '{name}'"
+                let expected =
+                    if kind = "DeprecatedAttr" then $"{subject} carries attribute '{kind}' with unclassified layout effect; a measured layout or a classified attribute contract is required."
+                    else $"{subject} carries layout attribute '{kind}' that natural alignment cannot represent; a measured layout is required."
+                for emit in [ (fun () -> DescriptorGenerator.layoutOf source 0 record |> ignore)
+                              (fun () -> DescriptorGenerator.structDecls source record |> ignore)
+                              (fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore) ] do
+                    let error = Assert.Throws<System.InvalidOperationException>(fun () -> emit ())
+                    Assert.Equal(expected, error.Message))
+
+    [<Theory>]
+    [<InlineData(false)>]
+    [<InlineData(true)>]
+    let ``unused attributed record does not prevent ordinary record emission`` measured =
+        withLayoutHeader "struct __attribute__((packed)) P { char lead; int payload; }; struct Ordinary { char lead; int payload; };" ["P"; "Ordinary"] (fun declarations layouts ->
+            let records = declarations |> List.choose (function CppParser.Declaration.Struct s -> Some s | _ -> None)
+            let ordinary = records |> List.find (fun record -> record.Name = "Ordinary")
+            Assert.Empty(ordinary.Attributes)
+            let measurements = if measured then layouts else Map.empty
+            let source = attributeLayoutSource records measurements
+            let offsets, size, alignment, stratum = DescriptorGenerator.layoutOf source 0 ordinary
+            Assert.Equal<int list>([0; 4], offsets)
+            Assert.Equal(8, size)
+            Assert.Equal(4, alignment)
+            Assert.Equal((if measured then TypeMapper.Measured else TypeMapper.Declared), stratum)
+            DescriptorGenerator.structDecls source ordinary |> ignore
+            let output = FidelityCodeGenerator.generate [CppParser.Declaration.Struct ordinary] "Test" "test" Types.LP64 measurements
+            Assert.Contains("let payloadOffset = 4", output)
+            let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore)
+            Assert.Equal("Struct 'P' carries layout attribute 'PackedAttr' that natural alignment cannot represent; a measured layout is required.", error.Message))
+
+    [<Fact>]
+    let ``anonymous typedef record retains its layout attribute and public name`` () =
+        withLayoutHeader "typedef struct __attribute__((packed)) { char lead; int payload; } AnonPacked; struct Ordinary { int value; };" ["Ordinary"] (fun declarations _ ->
+            let record = declarations |> List.pick (function CppParser.Declaration.Struct s when s.Name = "AnonPacked" -> Some s | _ -> None)
+            Assert.Equal("PackedAttr", Assert.Single(record.Attributes).Kind)
+            let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore)
+            Assert.Equal("Struct 'AnonPacked' carries layout attribute 'PackedAttr' that natural alignment cannot represent; a measured layout is required.", error.Message))
+
+    [<Theory>]
+    [<InlineData(false, false)>]
+    [<InlineData(false, true)>]
+    [<InlineData(true, false)>]
+    [<InlineData(true, true)>]
+    let ``nested attributed record requires its own measured extent`` outerMeasured innerMeasured =
+        let inner = {mkStruct "P" [mkField "lead" "char"; mkField "payload" "int"] None with Attributes = [mkAttr "PackedAttr" [] None]}
+        let outer = mkStruct "Outer" [mkField "inner" "struct P"; mkField "tail" "int"] None
+        let layouts =
+            [ if innerMeasured then "P", mkLayout "P" 40 8 [0; 8]
+              if outerMeasured then "Outer", mkLayout "Outer" 96 32 [0; 64] ] |> Map.ofList
+        let source = attributeLayoutSource [inner; outer] layouts
+        if innerMeasured || outerMeasured then
+            let offsets, size, alignment, stratum = DescriptorGenerator.layoutOf source 0 outer
+            Assert.Equal<int list>([0; 8], offsets)
+            Assert.Equal(12, size)
+            Assert.Equal(4, alignment)
+            Assert.Equal((if outerMeasured then TypeMapper.Measured else TypeMapper.Declared), stratum)
+        if innerMeasured then
+            let output = DescriptorGenerator.structDecls source outer |> fun decls -> CodeRenderer.render (Module("Test", "test", decls))
+            Assert.Contains("Repr = Repr.U8; Count = 5", output)
+        else
+            let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source outer |> ignore)
+            Assert.Equal("Struct 'P' carries layout attribute 'PackedAttr' that natural alignment cannot represent; a measured layout is required.", error.Message)
+
+    [<Theory>]
+    [<InlineData(0)>]
+    [<InlineData(1)>]
+    [<InlineData(2)>]
+    [<InlineData(3)>]
+    let ``field validity precedes record layout attribute refusal`` scenario =
+        let field, expected =
+            match scenario with
+            | 0 -> mkField "payload" "Mystery", "Struct 'P' field 'payload' has no known representation for type 'Mystery'; a complete C representation contract is required."
+            | 1 -> mkBitField "payload" "int" 1, "Struct 'P' field 'payload' is a bitfield; a supported bit-precise descriptor representation is required."
+            | 2 -> mkField "payload" "int[2][3]", "Struct 'P' field 'payload' has array declarator 'int[2][3]'; a supported one-dimensional trailing array declarator or a complete declarator representation contract is required."
+            | _ -> {mkField "payload" "int" with IsArray = true; ArraySize = None}, "Struct 'P' field 'payload' has an array with no fixed element count; a supported dynamic array representation contract is required."
+        let record = {mkStruct "P" [mkField "lead" "char"; field] None with Attributes = [mkAttr "PackedAttr" [] None]}
+        let source = attributeLayoutSource [record] Map.empty
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 0 record |> ignore)
+        Assert.Equal(expected, error.Message)
+
+    [<Fact>]
+    let ``layout attribute refusal precedes the declared nesting limit`` () =
+        let record = {mkStruct "P" [mkField "self" "struct P"] None with Attributes = [mkAttr "PackedAttr" [] None]}
+        let source = attributeLayoutSource [record] Map.empty
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 16 record |> ignore)
+        Assert.Equal("Struct 'P' carries layout attribute 'PackedAttr' that natural alignment cannot represent; a measured layout is required.", error.Message)
+
+    [<Theory>]
+    [<InlineData(false)>]
+    [<InlineData(true)>]
+    let ``unclassified field attribute requires measurement at the field boundary`` measured =
+        let field = {mkField "payload" "int" with Attributes = [mkAttr "FutureAttr" [] None]}
+        let record = mkStruct "P" [field] None
+        let source = attributeLayoutSource [record] (if measured then Map.ofList ["P", mkLayout "P" 32 32 [0]] else Map.empty)
+        if measured then
+            DescriptorGenerator.structDecls source record |> ignore
+        else
+            let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source record |> ignore)
+            Assert.Equal("Struct 'P' field 'payload' carries attribute 'FutureAttr' with unclassified layout effect; a measured layout or a classified attribute contract is required.", error.Message)
+
+    [<Fact>]
+    let ``record attributes precede field attributes in unmeasured layout refusal`` () =
+        let field = {mkField "payload" "int" with Attributes = [mkAttr "AlignedAttr" [16] None]}
+        let record = {mkStruct "P" [field] None with Attributes = [mkAttr "PackedAttr" [] None]}
+        let source = attributeLayoutSource [record] Map.empty
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 0 record |> ignore)
+        Assert.Equal("Struct 'P' carries layout attribute 'PackedAttr' that natural alignment cannot represent; a measured layout is required.", error.Message)
+
     [<Fact>]
     let ``generate produces a measured layout module for a struct the pilot measured`` () =
         let decls = [
