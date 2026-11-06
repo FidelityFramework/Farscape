@@ -1,0 +1,19 @@
+@endpoint = https://duckdb-fidelity-pgq.spkez.dev/v1/retrieval
+@question = Show me the C-series acceptance requirements.
+
+# Click Send Request. REST Client prompts for the existing bearer token.
+# Token location: /home/hhh/.hermes/secrets/lab-retrieval.token
+# No repository path, evidence ID, or snapshot is supplied to discovery.
+
+### 1. Natural-language discovery — the actual capability under investigation
+# @name discovery
+# @prompt retrievalToken Retrieval bearer token
+POST {{endpoint}}
+Authorization: Bearer {{retrievalToken}}
+Content-Type: application/json
+Accept: application/json
+
+{
+  "action": "ask",
+  "text": "{{question}}"
+}
