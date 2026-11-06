@@ -498,3 +498,6 @@ $RECYCLE.BIN/
 *.swp
 /.claude/*
 /tests/Farscape.Tests/obj/Debug/net9.0/Farscape.Tests.AssemblyInfo.fs
+
+# Local agent scratch and receipts (kept out of the repository)
+/.scratch/
