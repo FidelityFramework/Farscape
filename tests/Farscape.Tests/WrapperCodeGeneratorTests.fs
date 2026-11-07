@@ -131,8 +131,14 @@ module ErrnoWrapperTests =
 
 module EnumErrorWrapperTests =
 
+    // hipError_t is declared (as the HIP headers do) so the descriptor has its width; an
+    // undeclared by-value result type is refused (FS9115). The measurement is synthetic: these
+    // tests are about wrapper shape, not enum measurement.
+    let private hipError =
+        CppParser.Declaration.Enum (mkMeasuredEnum "hipError_t" [mkEnumVal "hipSuccess" 0L; mkEnumVal "hipErrorInvalidValue" 1L] 32 false)
+
     let private generateWithEnumError name retType parms attrs =
-        let decls = [ mkDecl name retType parms attrs ]
+        let decls = [ hipError; mkDecl name retType parms attrs ]
         WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test"
             (UseEnumError ("hipError_t", 0L, "HipError", "Fidelity.HIP.HipError")) Types.LP64 None
 

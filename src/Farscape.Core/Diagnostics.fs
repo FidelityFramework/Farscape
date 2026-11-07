@@ -18,6 +18,14 @@ namespace Farscape.Core
 /// | FS9110 | a C/C++ enumerator's value does not fit clang's measured representation       |
 /// | FS9111 | a C/C++ enum's declared underlying type has no integer representation         |
 /// | FS9112 | an enum is declared differently by two of a pilot's translation units         |
+/// | FS9113 | an anonymous nested record has no clang-measured layout in its unit           |
+/// | FS9114 | a generated anonymous record name names another declaration of its unit       |
+/// | FS9115 | a by-value type resolves through no typedef, record or profile entry          |
+/// | FS9116 | a record is defined differently by two of a pilot's translation units         |
+/// | FS9117 | a clang built-in type alias in a result has no canonical type clang can give  |
+/// | FS9118 | clang's measurement of an alias's canonical type contradicts its profile row  |
+/// | FS9119 | a descriptor cites a record the pilot declares no value type for              |
+/// | FS9120 | a result alias is unreadable: its function takes an incomplete type by value  |
 ///
 /// Each refusal reason has exactly one code and each code one reason.
 module Diagnostics =
@@ -57,3 +65,27 @@ module Diagnostics =
 
     [<Literal>]
     let EnumDivergent = "FS9112"           // enum declared differently by two of a pilot's units (#53, #54)
+
+    [<Literal>]
+    let AnonymousRecordUnmeasured = "FS9113" // anonymous nested record without a clang-measured layout (#159)
+
+    [<Literal>]
+    let AnonymousNameCollision = "FS9114"  // generated anonymous record name names another declaration (#159)
+
+    [<Literal>]
+    let ByValueTypeUnresolved = "FS9115"   // by-value type resolving nowhere, so no descriptor width (#162)
+
+    [<Literal>]
+    let RecordDivergent = "FS9116"         // record defined differently by two of a pilot's units (#161)
+
+    [<Literal>]
+    let AliasUncanonicalized = "FS9117"    // clang built-in alias without a canonical type clang gives (#171)
+
+    [<Literal>]
+    let AliasMeasurementConflict = "FS9118" // alias canonical type: clang measurement vs profile row (#171)
+
+    [<Literal>]
+    let RecordWithoutValueType = "FS9119"  // descriptor cites a record with no emitted value type (#162)
+
+    [<Literal>]
+    let AliasIncompleteParameter = "FS9120" // result alias unreadable: function takes an incomplete type by value (#171)

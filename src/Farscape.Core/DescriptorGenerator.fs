@@ -160,7 +160,21 @@ module DescriptorGenerator =
             s.Fields |> List.map (fun field ->
                 let shape = representedFieldShape src s.Name field
                 field.Name, shape, elementCount s.Name field)
-        match Map.tryFind s.Name src.Layouts with
+        // A layout the pilot measured as ABI-critical storage, or the one the parse measured in
+        // the record's declaring unit (anonymous records and the records enclosing them); two
+        // measurements of one record must agree.
+        let measuredLayout =
+            match Map.tryFind s.Name src.Layouts, s.Measured with
+            | Some requested, Some parsed
+                when (requested.SizeBits, requested.AlignmentBits, requested.FieldOffsetsBits)
+                     <> (parsed.SizeBits, parsed.AlignmentBits, parsed.FieldOffsetsBits) ->
+                invalidOp $"Struct '{s.Name}' has two clang measurements that disagree: the ABI-critical probe measured {requested.SizeBits / 8} bytes at alignment {requested.AlignmentBits / 8}, its declaring unit's parse {parsed.SizeBits / 8} bytes at alignment {parsed.AlignmentBits / 8}; one effective layout is required."
+            | Some requested, _ -> Some requested
+            | None, parsed -> parsed
+        match measuredLayout with
+        | None when s.Anonymous.IsSome ->
+            let origin = s.Anonymous.Value
+            invalidOp $"{Diagnostics.AnonymousRecordUnmeasured}: anonymous record '{s.Name}' (field '{origin.Field}' of '{origin.Parent}', declared at {origin.Location}) has no clang-measured layout in its declaring unit; its layout is never computed from its declared fields."
         | Some measured ->
             let size, alignment = validateMeasuredLayout s measured
             let offsets =

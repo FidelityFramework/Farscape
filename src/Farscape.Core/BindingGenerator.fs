@@ -34,6 +34,11 @@ module BindingGenerator =
             | CppParser.PlainFieldType element | CppParser.TrailingArrayType (element, _) ->
                 match FidelityCodeGenerator.resolveCType ctx.TypedefMap ctx.DataModel ctx.OpaqueHandles ctx.Delegates ctx.Enums element with
                 | FidelityCodeGenerator.Unresolved name when ctx.Structs.ContainsKey name -> Some name
+                | FidelityCodeGenerator.Unresolved _ ->
+                    // A typedef of a defined record nests that record (#172), as the descriptor does.
+                    match FidelityCodeGenerator.byValueRecordOf ctx element with
+                    | Some (record, ("struct" | "union")) -> Some record
+                    | _ -> None
                 | _ -> None
             | CppParser.UnsupportedArrayType _ -> None)
         |> List.distinct
@@ -269,6 +274,123 @@ module BindingGenerator =
         | [] -> Ok ()
         | refusals -> Error (String.concat " " refusals + " No bindings were written.")
 
+    /// No anonymous record without a clang measurement in the unit that declares it (#159).
+    /// Every record a header's own parse named from its parent and field (glibc's
+    /// `__atomic_wide_counter.__value32`) must carry the layout clang measured in that unit;
+    /// otherwise the pilot is refused before any binding is written, naming the record, its
+    /// parent, field and location, and the unit. Its layout is never computed from its fields.
+    let requireMeasuredAnonymousRecords (headers: (string * CppParser.Declaration list) list) : Result<unit, string> =
+        let refusals =
+            headers |> List.collect (fun (header, decls) ->
+                decls |> List.choose (function
+                    | CppParser.Declaration.Struct ({ Anonymous = Some origin; Measured = None } as s) ->
+                        Some $"{Diagnostics.AnonymousRecordUnmeasured}: anonymous record '{s.Name}' (field '{origin.Field}' of '{origin.Parent}', declared at {origin.Location}) has no clang-measured layout in '{header}'; its layout is never computed from its declared fields."
+                    | _ -> None))
+        match refusals |> List.distinct with
+        | [] -> Ok ()
+        | refusals -> Error (String.concat " " refusals + " No bindings were written.")
+
+    /// No descriptor carries an unknown width (#162). Every type the descriptors of an emitted
+    /// function claim (`FidelityCodeGenerator.descriptorTypeSites`: parameters, result, and the
+    /// arguments and result of each callback entry), resolved in the function's declaring unit,
+    /// has a representation, is a by-value enum (measured, or refused with FS9103), or names a
+    /// record the pilot defines and declares as a value struct. A type that resolves through no
+    /// typedef, record or profile entry (FS9115), or a record without a declared value type,
+    /// whose record type and descriptor the binding would cite but no mode emits (FS9119), is
+    /// refused before any binding is written, naming the type, its site, the function and its
+    /// unit.
+    let requireRepresentedDescriptorTypes (ctx: FidelityCodeGenerator.GenerationContext)
+                                          (headers: (string * CppParser.Declaration list) list)
+                                          (functions: CppParser.FunctionDecl list) : Result<unit, string> =
+        let unitOf (f: CppParser.FunctionDecl) =
+            let symbol = ctx.Bindings |> Map.tryFind f.Name |> Option.map _.Symbol |> Option.defaultValue f.Name
+            headers |> List.tryPick (fun (header, decls) ->
+                let declares = decls |> List.exists (function
+                    | CppParser.Declaration.Function g -> g.Name = symbol && g.ReturnType = f.ReturnType && g.Parameters = f.Parameters
+                    | _ -> false)
+                if declares then Some header else None)
+            |> Option.defaultValue "<no pilot header>"
+        let refusals =
+            functions |> List.collect (fun f ->
+                let unit = FidelityCodeGenerator.inFunctionUnit ctx f
+                FidelityCodeGenerator.descriptorTypeSites ctx f
+                |> List.choose (fun (site, cType) ->
+                    match FidelityCodeGenerator.descriptorClaimOf unit cType with
+                    | FidelityCodeGenerator.ResolvesNowhere ->
+                        Some $"{Diagnostics.ByValueTypeUnresolved}: by-value type '{cType}' of the {site} of function '{f.Name}' in '{unitOf f}' resolves through no typedef, record or profile entry of that unit; a descriptor cannot carry an unknown width."
+                    // A descriptor citing a record names X.Descriptor, and the binding names the
+                    // record's type: both exist only for a declared value struct (its record
+                    // type and layout module are emitted in every mode).
+                    | FidelityCodeGenerator.RecordByValue (record, ("struct" | "union" as kind)) when not (ctx.ValueStructs.Contains record) ->
+                        Some $"{Diagnostics.RecordWithoutValueType}: {kind} '{record}' is the type of the {site} of function '{f.Name}' in '{unitOf f}', but the pilot declares no value type for it, so neither its record type nor {record}.Descriptor would be emitted for the binding that cites them; declare it in [options] value_structs."
+                    | _ -> None))
+        match refusals |> List.distinct with
+        | [] -> Ok ()
+        | refusals -> Error (String.concat " " refusals + " No bindings were written.")
+
+    /// The typedef facts of a unit's canonicalized result aliases (#171): `__size_t` stands for
+    /// clang's canonical type of the results that spell it (`unsigned long`). An alias clang
+    /// gave no canonical type has none, and a use of it is refused (`requireCanonicalAliases`).
+    let aliasTypedefs (aliases: CppParser.ClangTypeAlias list) : CppParser.Declaration list =
+        aliases |> List.choose (fun alias ->
+            match alias.Canonical with
+            | Ok (canonical, _) ->
+                Some (CppParser.Declaration.Typedef { Name = alias.Name; UnderlyingType = canonical; Documentation = Some "clang canonical type of a built-in alias" })
+            | Error _ -> None)
+
+    /// Every clang built-in alias an emitted function's result spells resolves through clang's
+    /// canonical type, and clang's measurement of that result (size and signedness) agrees with
+    /// the profile row of the canonical type (#171). An alias clang gave no canonical type is
+    /// refused before any binding is written (FS9117), naming the alias, the function, its unit
+    /// and clang's reason; a measurement contradicting the row is refused (FS9118). A
+    /// canonical type with no profile row is left to the descriptor check (FS9115).
+    let requireCanonicalAliasesAgainst (rowOf: string -> TypeMapper.AbiRepr option) (model: PlatformABI)
+                                        (aliases: Map<string, CppParser.ClangTypeAlias list>)
+                                        (headers: (string * CppParser.Declaration list) list)
+                                        (functions: CppParser.FunctionDecl list) : Result<unit, string> =
+        let describe (signed: bool) (bits: int) = (if signed then "signed " else "unsigned ") + string bits + "-bit"
+        let declaresIn (f: CppParser.FunctionDecl) (decls: CppParser.Declaration list) =
+            decls |> List.exists (function
+                | CppParser.Declaration.Function g -> g.Name = f.Name && g.ReturnType = f.ReturnType && g.Parameters = f.Parameters
+                | _ -> false)
+        let check (f: CppParser.FunctionDecl) (header: string) (alias: CppParser.ClangTypeAlias) =
+            match alias.Canonical with
+            | Error (CppParser.ProbeRefused reason) ->
+                Some $"{Diagnostics.AliasUncanonicalized}: type '{alias.Name}' of the result of function '{f.Name}' in '{header}' is a clang built-in alias that no declaration of that unit names, and clang gives no canonical type for it: {reason}."
+            | Error (CppParser.IncompleteParameter (parameter, spelled, reason)) ->
+                Some $"{Diagnostics.AliasIncompleteParameter}: type '{alias.Name}' of the result of function '{f.Name}' in '{header}' is a clang built-in alias that no declaration of that unit names, and its canonical type cannot be read: clang cannot type a call of '{f.Name}', whose parameter '{parameter}' takes incomplete type '{spelled}' by value ({reason})."
+            | Ok (canonical, measured) ->
+                let conflict rowText measuredText =
+                    Some $"{Diagnostics.AliasMeasurementConflict}: clang measures the result of function '{f.Name}' in '{header}' ('{alias.Name}', canonically '{canonical}') as {measuredText}, but the {model} profile row for '{canonical}' is {rowText}; the profile and the target must agree."
+                match rowOf canonical with
+                | Some row when row.Family = TypeMapper.Signed || row.Family = TypeMapper.Unsigned ->
+                    let rowSigned = (row.Family = TypeMapper.Signed)
+                    if row.Bits <> measured.Bits || rowSigned <> measured.IsSigned
+                    then conflict (describe rowSigned row.Bits) (describe measured.IsSigned measured.Bits)
+                    else None
+                | Some row when row.Family = TypeMapper.Float ->
+                    // clang measures storage: an 80-bit long double occupies 16 bytes.
+                    let storageBits = if row.Bits = 80 then 128 else row.Bits
+                    if storageBits <> measured.Bits then conflict (string row.Bits + "-bit") (string measured.Bits + "-bit storage") else None
+                | _ -> None
+        let refusals =
+            functions |> List.collect (fun f ->
+                let spelled = f.ReturnType.Replace("const ", "").Replace("volatile ", "").Trim()
+                headers
+                |> List.filter (fun (_, decls) -> declaresIn f decls)
+                |> List.truncate 1
+                |> List.choose (fun (header, _) ->
+                    aliases |> Map.tryFind header |> Option.defaultValue []
+                    |> List.tryFind (fun a -> a.Name = spelled)
+                    |> Option.bind (check f header)))
+        match refusals |> List.distinct with
+        | [] -> Ok ()
+        | refusals -> Error (String.concat " " refusals + " No bindings were written.")
+
+    /// `requireCanonicalAliasesAgainst` with the profile's own scalar rows under `model`.
+    let requireCanonicalAliases (model: PlatformABI) aliases headers functions =
+        requireCanonicalAliasesAgainst (TypeMapper.tryScalar model) model aliases headers functions
+
     /// The typedef map each merged declaration's types resolve through, keyed by kind
     /// ("struct", "function", "typedef") and name: that of the first pilot header whose own
     /// declaration list declares it as merged (a record with the merged shape, a function with
@@ -379,6 +501,85 @@ module BindingGenerator =
                             $"{hs} ({text})")
                         |> String.concat "; "
                     Some $"{Diagnostics.EnumDivergent}: enum '{name}' is declared differently by the pilot's headers: {described}. One declaration per pilot is required.")
+        if divergent.IsEmpty then Ok ()
+        else Error (String.concat " " divergent + " No bindings were written.")
+
+    /// One definition per record name per pilot (#161). Each header's unit declares its records
+    /// as its own clang parse sees them; two units defining one struct or union name must agree
+    /// on its kind, every field (name, type, extent, bit width and attributes, in order) and the
+    /// record's attributes, whether or not the pilot measures the record, and on every layout
+    /// clang measured for it in those units. Otherwise the pilot is refused naming the record,
+    /// each distinct definition with every header giving it, and the first field at which a
+    /// definition differs from the first. A forward declaration (no fields) is not a definition.
+    /// Checked while declaration lists are still paired with their headers, before the merge
+    /// keeps the first definition; identical definitions merge.
+    let agreeRecords (headers: (string * CppParser.Declaration list) list) : Result<unit, string> =
+        let definitionsOf (decls: CppParser.Declaration list) =
+            (Map.empty, decls) ||> List.fold (fun acc decl ->
+                match decl with
+                | CppParser.Declaration.Struct s when s.Name <> "" && not s.Fields.IsEmpty && not (Map.containsKey s.Name acc) -> Map.add s.Name s acc
+                | _ -> acc)
+        let perHeader = headers |> List.map (fun (header, decls) -> header, definitionsOf decls)
+        let names = perHeader |> List.collect (fun (_, defs) -> defs |> Map.toList |> List.map fst) |> List.distinct |> List.sort
+        let attributes (attrs: CppParser.AttributeData list) =
+            attrs |> List.map (fun a -> a.Kind + (if a.Args.IsEmpty then "" else sprintf "(%s)" (a.Args |> List.map string |> String.concat ", ")) + (match a.StringArg with Some t -> $" \"{t}\"" | None -> ""))
+        let fieldText (f: CppParser.FieldDecl) =
+            let qualifiers = (if f.IsConst then "const " else "") + (if f.IsVolatile then "volatile " else "")
+            let extent = if f.IsArray then (match f.ArraySize with Some n -> $"[{n}]" | None -> "[]") else ""
+            let width = match f.BitWidth with Some w when f.IsBitfield -> $" : {w}" | _ when f.IsBitfield -> " : ?" | _ -> ""
+            let attrs = match attributes f.Attributes with [] -> "" | list -> " [" + String.concat ", " list + "]"
+            $"{qualifiers}{f.Type} {f.Name}{extent}{width}{attrs}"
+        let kindOf (s: CppParser.StructDecl) = if s.IsUnion then "union" else "struct"
+        let describe (s: CppParser.StructDecl) =
+            let attrs = match attributes s.Attributes with [] -> "" | list -> " [" + String.concat ", " list + "]"
+            $"""{kindOf s} {s.Name} {{ {s.Fields |> List.map fieldText |> String.concat "; "} }}{attrs}"""
+        // Where `other` first departs from `first`: a field, the record's kind or its attributes.
+        let firstDifference (firstHeader: string, first: CppParser.StructDecl) (otherHeader: string, other: CppParser.StructDecl) =
+            let rec fields index (a: CppParser.FieldDecl list) (b: CppParser.FieldDecl list) =
+                match a, b with
+                | x :: xs, y :: ys when fieldText x = fieldText y -> fields (index + 1) xs ys
+                | x :: _, y :: _ -> Some $"field {index} '{x.Name}': '{fieldText x}' in '{firstHeader}', '{fieldText y}' in '{otherHeader}'"
+                | x :: _, [] -> Some $"field {index} '{x.Name}': '{fieldText x}' in '{firstHeader}', absent in '{otherHeader}'"
+                | [], y :: _ -> Some $"field {index} '{y.Name}': absent in '{firstHeader}', '{fieldText y}' in '{otherHeader}'"
+                | [], [] -> None
+            match fields 1 first.Fields other.Fields with
+            | Some field -> field
+            | None when first.IsUnion <> other.IsUnion -> $"its kind: {kindOf first} in '{firstHeader}', {kindOf other} in '{otherHeader}'"
+            | None ->
+                let a = attributes first.Attributes |> String.concat ", "
+                let b = attributes other.Attributes |> String.concat ", "
+                $"its attributes: [{a}] in '{firstHeader}', [{b}] in '{otherHeader}'"
+        // Where two clang measurements of one declared record first depart.
+        let measuredDifference (firstHeader: string, first: CppParser.StructDecl, a: CppParser.StructLayoutInfo) (otherHeader: string, b: CppParser.StructLayoutInfo) =
+            let offsets = List.zip3 first.Fields (a.FieldOffsetsBits |> List.truncate first.Fields.Length) (b.FieldOffsetsBits |> List.truncate first.Fields.Length)
+            match offsets |> List.tryFind (fun (_, x, y) -> x <> y) with
+            | Some (f, x, y) when a.FieldOffsetsBits.Length = b.FieldOffsetsBits.Length ->
+                $"field '{f.Name}': clang-measured offset {x / 8} in '{firstHeader}', {y / 8} in '{otherHeader}'"
+            | _ ->
+                $"its clang-measured layout: {a.SizeBits / 8} bytes at alignment {a.AlignmentBits / 8} in '{firstHeader}', {b.SizeBits / 8} bytes at alignment {b.AlignmentBits / 8} in '{otherHeader}'"
+        let headersOf (group: (string * CppParser.StructDecl) list) = group |> List.map (fun (h, _) -> $"'{h}'") |> String.concat ", "
+        let divergent =
+            names |> List.choose (fun name ->
+                let givers = perHeader |> List.choose (fun (header, defs) -> defs.TryFind name |> Option.map (fun s -> header, s))
+                let identity (s: CppParser.StructDecl) = kindOf s, s.Fields |> List.map fieldText, attributes s.Attributes
+                let shapes = givers |> List.groupBy (fun (_, s) -> identity s) |> List.map snd
+                match shapes with
+                | [ group ] ->
+                    let measured = group |> List.choose (fun (h, s) -> s.Measured |> Option.map (fun m -> h, s, m))
+                    let layoutKey (m: CppParser.StructLayoutInfo) = m.SizeBits, m.AlignmentBits, m.FieldOffsetsBits
+                    match measured |> List.groupBy (fun (_, _, m) -> layoutKey m) |> List.map snd with
+                    | [] | [ _ ] -> None
+                    | (firstGroup :: rest) ->
+                        let (h1, s1, m1) = List.head firstGroup
+                        let differences = rest |> List.map (fun g -> let (h, _, m) = List.head g in measuredDifference (h1, s1, m1) (h, m)) |> String.concat "; "
+                        let listed = (firstGroup :: rest) |> List.map (fun g -> g |> List.map (fun (h, _, _) -> $"'{h}'") |> String.concat ", ") |> String.concat "; "
+                        Some $"{Diagnostics.RecordDivergent}: record '{name}' ({describe s1}) is measured differently by the pilot's headers: {listed}; first difference at {differences}. One definition per pilot is required."
+                | [] -> None
+                | firstGroup :: rest ->
+                    let first = List.head firstGroup
+                    let described = shapes |> List.map (fun group -> $"{headersOf group} ({describe (snd (List.head group))})") |> String.concat "; "
+                    let differences = rest |> List.map (fun group -> firstDifference first (List.head group)) |> String.concat "; "
+                    Some $"{Diagnostics.RecordDivergent}: record '{name}' is defined differently by the pilot's headers: {described}; first difference at {differences}. One definition per pilot is required.")
         if divergent.IsEmpty then Ok ()
         else Error (String.concat " " divergent + " No bindings were written.")
 
@@ -753,7 +954,7 @@ module BindingGenerator =
     /// Shared types (referenced by 2+ namespaces) go into a root Types.clef.
     /// Supports multi-header projects: parses each header independently, merges with dedup.
     /// When generateWrappers is true, also generates Layer 2 idiomatic wrappers.
-    let private generateFromProjectCore (projectPath: string) (verbose: bool) (generateWrappers: bool) (dataModel: PlatformABI) : Result<GenerationResult, string> =
+    let private generateFromProjectCore (aliasRows: string -> TypeMapper.AbiRepr option) (projectPath: string) (verbose: bool) (generateWrappers: bool) (dataModel: PlatformABI) : Result<GenerationResult, string> =
         match PilotSerializer.loadFromFile projectPath with
         | Error e -> Error $"Failed to load project: {e}"
         | Ok _ when dataModel <> PlatformABI.LP64 ->
@@ -816,11 +1017,17 @@ module BindingGenerator =
                 Error $"Failed to parse XML protocols: {msg}"
             else
 
-                let headerDeclLists = headerResults |> List.choose (function Ok (d, _) -> Some d | _ -> None)
+                let headerDeclLists = headerResults |> List.choose (function Ok (d, _, _) -> Some d | _ -> None)
+                // Clang built-in aliases each unit's function results spell (#171), read by clang.
+                let resultAliases =
+                    List.zip project.Library.Headers (headerResults |> List.choose (function Ok (_, _, a) -> Some a | _ -> None))
+                    |> Map.ofList
                 // Typedefs and enums each header's own parse reaches through includes: facts of
-                // that unit for resolving its own declarations, never its declarations.
+                // that unit for resolving its own declarations, never its declarations. An alias
+                // clang canonicalized stands for its canonical type in that unit.
                 let included =
-                    List.zip project.Library.Headers (headerResults |> List.choose (function Ok (_, i) -> Some i | _ -> None))
+                    List.zip project.Library.Headers (headerResults |> List.choose (function Ok (_, i, _) -> Some i | _ -> None))
+                    |> List.map (fun (header, facts) -> header, facts @ aliasTypedefs (resultAliases |> Map.tryFind header |> Option.defaultValue []))
                     |> Map.ofList
                 // Before the merge discards provenance: one macro definition per pilot.
                 // Each header is tokenized in the language it was parsed in.
@@ -829,6 +1036,8 @@ module BindingGenerator =
                 agreeMacros (units |> List.map (fun (header, decls) -> header, (not cHeaders && CppParser.detectCppMode header), decls)) |> Result.defaultWith failwith
                 agreeEnums included units |> Result.defaultWith failwith
                 requireMeasuredEnumUses included units |> Result.defaultWith failwith
+                agreeRecords units |> Result.defaultWith failwith
+                requireMeasuredAnonymousRecords units |> Result.defaultWith failwith
                 let xmlProtocols = xmlResults |> List.choose (function Ok p -> Some p | _ -> None)
 
                 // GObject introspection data: the source of signal entry signatures (IntrospectionParser)
@@ -968,6 +1177,22 @@ module BindingGenerator =
                         ValueStructs = project.Options |> Option.map (fun opts -> Set.ofList opts.ValueStructs) |> Option.defaultValue Set.empty
                         NativePointerSurface = project.Options |> Option.exists (fun opts -> opts.NativePointerSurface) }
 
+                // Every descriptor an emitted function carries has a width or a record: refuse
+                // a type that resolves nowhere before any binding is written (#162).
+                let emittedFunctions =
+                    project.Namespaces
+                    |> List.collect (fun ns ->
+                        if typedProtocol && not ns.XmlInterfaces.IsEmpty then []
+                        else PilotAnalyzer.filterDeclarationsWithTypes ns Set.empty declarations)
+                    |> List.choose (function
+                        | CppParser.Declaration.Function f when not (f.Attributes |> List.exists (fun a -> a.Kind = "DeprecatedAttr")) -> Some f
+                        | _ -> None)
+                    |> List.distinct
+                requireCanonicalAliasesAgainst aliasRows dataModel resultAliases (List.zip project.Library.Headers headerDeclLists) emittedFunctions
+                |> Result.defaultWith failwith
+                requireRepresentedDescriptorTypes ctx (List.zip project.Library.Headers headerDeclLists) emittedFunctions
+                |> Result.defaultWith failwith
+
                 // Derive common namespace prefix for the project
                 let nsPrefix = deriveNamespacePrefix project
 
@@ -1044,7 +1269,10 @@ module BindingGenerator =
                             project.Options |> Option.map (fun opts ->
                                 opts.AbiCriticalStructs |> List.map (fun name -> name.Replace("typedef ", "").Replace("struct ", "").Replace("union ", "")) |> Set.ofList)
                             |> Option.defaultValue Set.empty
-                        { classified with SharedTypes = Set.unionMany [constants; storageNames; requestedStorage; signalTypes]; LocalTypes = Map.empty }
+                        // Declared value structs: the record types and descriptors by-value
+                        // claims cite (#162), emitted though no namespace classifies them here.
+                        let valueStructs = ctx.ValueStructs |> Set.filter ctx.Structs.ContainsKey
+                        { classified with SharedTypes = Set.unionMany [constants; storageNames; requestedStorage; signalTypes; valueStructs]; LocalTypes = Map.empty }
                     else
                         { classified with
                             SharedTypes = Set.unionMany [classified.SharedTypes; storageNames; signalTypes]
@@ -1463,5 +1691,13 @@ module BindingGenerator =
 
     /// Surface-contract failures are generation diagnostics, not uncaught tooling exceptions.
     let generateFromProject projectPath verbose generateWrappers dataModel =
-        try generateFromProjectCore projectPath verbose generateWrappers dataModel
+        try generateFromProjectCore (TypeMapper.tryScalar dataModel) projectPath verbose generateWrappers dataModel
+        with ex -> Error $"Binding generation failed: {ex.Message}"
+
+    /// `generateFromProject` with the profile rows clang's alias measurements are checked
+    /// against (FS9118) supplied, everything else unchanged. On an LP64 host every integer row
+    /// agrees with clang, so a contradiction is shown end to end only against a deliberately
+    /// wrong row.
+    let generateFromProjectCheckingAliasesAgainst (aliasRows: string -> TypeMapper.AbiRepr option) projectPath verbose generateWrappers dataModel =
+        try generateFromProjectCore aliasRows projectPath verbose generateWrappers dataModel
         with ex -> Error $"Binding generation failed: {ex.Message}"

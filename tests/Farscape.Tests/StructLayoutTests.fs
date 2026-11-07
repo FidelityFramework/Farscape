@@ -42,6 +42,12 @@ Layout: <ASTRecordLayout
         Assert.Equal<int list>([0; 32], point.FieldOffsetsBits)
 
     [<Fact>]
+    let ``an unnamed nested record keeps its whole dump name`` () =
+        let input = layout "fx_c::(unnamed at /h/a.h:4:3)" "64" "64" "32" "[0, 32]" + layout "fx_c::(unnamed at /h/a.h:9:3)" "8" "8" "8" "[0]"
+        let blocks = match CppParser.parseRecordLayoutBlocks input with Ok blocks -> blocks | Error e -> failwith e
+        Assert.Equal<string list>(["fx_c::(unnamed at /h/a.h:4:3)"; "fx_c::(unnamed at /h/a.h:9:3)"], blocks |> List.map _.Name)
+
+    [<Fact>]
     let ``parseRecordLayouts parses multiple structs`` () =
         let input = layout "Point" "64" "64" "32" "[0, 32]" + layout "Rect" "128" "128" "32" "[0, 32, 64, 96]"
         let result = parsed input
@@ -247,6 +253,18 @@ module GeneratorDispatch =
             | "int" -> scalar "int" 32
             | "struct P" -> DescriptorGenerator.StructField "P"
             | spelling -> DescriptorGenerator.UnknownField spelling }
+
+    [<Fact>]
+    let ``an anonymous record without a clang measurement is refused, not laid out from its fields`` () =
+        let origin : CppParser.AnonymousRecordOrigin = { Parent = "P"; Field = "halves"; Location = "p.h:3:5" }
+        let halves = { mkStruct "P_halves" [mkField "low" "int"; mkField "high" "int"] None with Anonymous = Some origin }
+        let source = attributeLayoutSource [halves] Map.empty
+        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source halves |> ignore)
+        Assert.Equal("FS9113: anonymous record 'P_halves' (field 'halves' of 'P', declared at p.h:3:5) has no clang-measured layout in its declaring unit; its layout is never computed from its declared fields.", error.Message)
+        // With the measurement its declaring unit's parse recorded, it is emitted at clang's offsets.
+        let measured = { halves with Measured = Some (mkLayout "P_halves" 64 32 [0; 32]) }
+        let offsets, size, alignment, stratum = DescriptorGenerator.layoutOf (attributeLayoutSource [measured] Map.empty) 0 measured
+        Assert.Equal((([0; 4], 8, 4, TypeMapper.Measured)), (offsets, size, alignment, stratum))
 
     [<Theory>]
     [<InlineData(0, false)>]

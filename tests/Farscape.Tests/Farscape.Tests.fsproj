@@ -12,6 +12,8 @@
     <Compile Include="ActivePatternsTests.fs" />
     <Compile Include="CppParserDetectionTests.fs" />
     <Compile Include="CppParserEnumMeasurementTests.fs" />
+    <Compile Include="CppParserAnonymousRecordTests.fs" />
+    <Compile Include="CppParserResultAliasTests.fs" />
     <Compile Include="CppClassAnalysisTests.fs" />
     <Compile Include="DeclarationAlgebraTests.fs" />
     <Compile Include="CodeRendererTests.fs" />

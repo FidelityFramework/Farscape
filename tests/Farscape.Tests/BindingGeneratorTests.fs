@@ -385,3 +385,513 @@ let ``a signal enum payload whose enum its unit includes is measured in that uni
         | Ok _ ->
             let signals = System.IO.File.ReadAllText(System.IO.Path.Combine(output, "Bridge", "Signals.clef"))
             Assert.Contains("{ Name = \"count\"; Type = Integer (Unsigned, 32); PassBy = Value }", signals))
+
+// ═══════════════════════════════════════════════════════════════════
+// Unnamed records typed into named fields (issue #159)
+// ═══════════════════════════════════════════════════════════════════
+
+/// Every emitted Types module (shared and per namespace), trimmed, as one text.
+let private allTypesOf (output: string) =
+    System.IO.Directory.GetFiles(output, "Types.clef", System.IO.SearchOption.AllDirectories)
+    |> Array.sort
+    |> Array.collect System.IO.File.ReadAllLines
+    |> Array.map (fun line -> line.Trim())
+    |> String.concat "\n"
+
+/// The text of one emitted layout module, from its headline to the next record's.
+let private recordModule (types: string) (name: string) =
+    let at = types.IndexOf($"module {name} =")
+    Assert.True(at >= 0, $"module {name} is not emitted:\n{types}")
+    let next = types.IndexOf("\nmodule ", at + 1)
+    if next < 0 then types.Substring(at) else types.Substring(at, next - at)
+
+[<Fact>]
+let ``an anonymous field record is emitted with its own clang-measured layout`` () =
+    let header = fixturePath "anonymous-records/wide-counter.h"
+    withPilot [header] [] ["fx_counter_read"] (fun result output ->
+        match result with
+        | Error error -> failwithf "The anonymous field record was refused: %s" error
+        | Ok _ ->
+            let types = allTypesOf output
+            Assert.Contains("/// C union `fx_wide_counter`: layout measured (clang record layout dump).", types)
+            Assert.Contains("/// C struct `fx_wide_counter___value32`: layout measured (clang record layout dump).", types)
+            let counter = recordModule types "fx_wide_counter"
+            Assert.Contains("let Size = 8", counter)
+            Assert.Contains("let Alignment = 8", counter)
+            Assert.Contains("let __value64Offset = 0", counter)
+            Assert.Contains("let __value32Offset = 0", counter)
+            Assert.Contains("{ Name = \"__value32\"; Offset = 0; Repr = Repr.U8; Count = 8;", counter)
+            Assert.Contains("nested struct fx_wide_counter___value32 by value, as bytes; see fx_wide_counter___value32.Descriptor", counter)
+            let halves = recordModule types "fx_wide_counter___value32"
+            Assert.Contains("let Size = 8", halves)
+            Assert.Contains("let Alignment = 4", halves)
+            Assert.Contains("let __lowOffset = 0", halves)
+            Assert.Contains("let __highOffset = 4", halves)
+            Assert.Contains("{ Name = \"__high\"; Offset = 4; Repr = Repr.U32; Count = 1;", halves)
+            Assert.DoesNotContain("layout declared", counter + halves)
+            // The emitted numbers are clang's: its own sizeof, _Alignof and offsetof agree.
+            clangConfirms header [
+                "sizeof(fx_wide_counter) == 8"; "_Alignof(fx_wide_counter) == 8"
+                "offsetof(fx_wide_counter, __value64) == 0"; "offsetof(fx_wide_counter, __value32) == 0"
+                "sizeof(((fx_wide_counter*)0)->__value32) == 8"; "_Alignof(__typeof__(((fx_wide_counter*)0)->__value32)) == 4"
+                "offsetof(fx_wide_counter, __value32.__low) == 0"; "offsetof(fx_wide_counter, __value32.__high) == 4" ])
+
+[<Fact>]
+let ``nested anonymous records are emitted at clang's offsets`` () =
+    let header = fixturePath "anonymous-records/nested.h"
+    withPilot [header] [] ["fx_outer_read"] (fun result output ->
+        match result with
+        | Error error -> failwithf "The nested anonymous records were refused: %s" error
+        | Ok _ ->
+            let types = allTypesOf output
+            let outer = recordModule types "fx_outer"
+            Assert.Contains("let Size = 24", outer)
+            Assert.Contains("let slotsOffset = 4", outer)
+            Assert.Contains("let fixedOffset = 16", outer)
+            Assert.Contains("{ Name = \"slots\"; Offset = 4; Repr = Repr.U8; Count = 8;", outer)
+            Assert.Contains("{ Name = \"fixed\"; Offset = 16; Repr = Repr.U8; Count = 8; Access = AccessKind.ReadOnly;", outer)
+            Assert.Contains("let hiOffset = 2", recordModule types "fx_outer_slots_parts")
+            Assert.Contains("let Alignment = 2", recordModule types "fx_outer_slots_parts")
+            Assert.Contains("let Size = 4", recordModule types "fx_outer_slots"))
+
+[<Fact>]
+let ``an anonymous record clang cannot attribute a layout to is refused before output`` () =
+    let header = fixturePath "anonymous-records/macro-pair.h"
+    withPilot [header] [] ["fx_pair_read"] (fun result output ->
+        Assert.Equal(
+            Error ($"Binding generation failed: FS9113: anonymous record 'fx_pair_narrow' (field 'narrow' of 'fx_pair', declared at {header}:7:3) has no clang-measured layout in '{header}'; its layout is never computed from its declared fields."
+                   + $" FS9113: anonymous record 'fx_pair_wide' (field 'wide' of 'fx_pair', declared at {header}:7:3) has no clang-measured layout in '{header}'; its layout is never computed from its declared fields. No bindings were written."),
+            result |> Result.map ignore)
+        Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+
+[<Fact>]
+let ``a generated record name colliding with a declared record is refused before output`` () =
+    let header = fixturePath "anonymous-records/name-clash.h"
+    withPilot [header] [] ["fx_clash_read"] (fun result output ->
+        Assert.Equal(
+            Error $"Failed to parse headers: FS9114: the generated record name 'fx_clash_inner' in '{header}' names more than one declaration: the unnamed record of field 'inner' of 'fx_clash' at {header}:10:3; a record. A generated name must name one record.",
+            result |> Result.map ignore)
+        Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+
+// ═══════════════════════════════════════════════════════════════════
+// No descriptor carries an unknown width (issue #162)
+// ═══════════════════════════════════════════════════════════════════
+
+/// Every descriptor a generated binding cites exists in the output: each `laid out by
+/// X.Descriptor` and `see X.Descriptor` names an emitted layout module, and a record cited by
+/// a function descriptor also has its emitted record type, which the binding's signature names.
+let private citedDescriptorsExist (output: string) =
+    let sources =
+        System.IO.Directory.GetFiles(output, "*.clef", System.IO.SearchOption.AllDirectories)
+        |> Array.map System.IO.File.ReadAllText |> String.concat "\n"
+    let types = allTypesOf output
+    let cited pattern =
+        System.Text.RegularExpressions.Regex.Matches(sources, pattern)
+        |> Seq.map (fun m -> m.Groups.[1].Value) |> Seq.distinct |> List.ofSeq
+    let laidOut = cited @"laid out by (\w+)\.Descriptor"
+    for name in laidOut @ cited @"see (\w+)\.Descriptor" do
+        Assert.True(types.Contains($"module {name} ="), $"{name}.Descriptor is cited but not emitted:\n{types}")
+    for name in laidOut do
+        Assert.True(types.Contains($"type {name} ="), $"record type {name} is cited but not emitted:\n{types}")
+    laidOut
+
+/// Farscape's own end-to-end, static consistency check of every cited record (#162). It reads
+/// the generated package (it does not compile it: the closure cannot yet) and returns every
+/// citing site it checked, as `(site, record)`, so a caller can require the exact site set.
+/// - Each emitted `type X = { … }` has exactly the descriptor's fields, in order, and each field's
+///   Clef type agrees with that field's descriptor representation (`Repr.I*`/`Repr.U*`: `int`,
+///   `Repr.F*`: `float`, `Repr.Bool`: `bool`, `Repr.Pointer`: a handle, option or FnPtr);
+///   `X.Size` and each `X.<f>Offset` literal equal the descriptor's Size and Offsets.
+/// - Every site whose descriptor claims `Named "X" // record: … laid out by X.Descriptor` names
+///   the type `X` in the Clef it describes: a function parameter `(p: X)` and result `: X =`,
+///   and a callback entry's argument and result in its `Invoke: FnPtr<…>` signature.
+let private citedRecordsConsistent (output: string) : (string * string) list =
+    let rx (pattern: string) = System.Text.RegularExpressions.Regex(pattern, System.Text.RegularExpressions.RegexOptions.Multiline)
+    let types = allTypesOf output
+    let bindings =
+        System.IO.Directory.GetFiles(output, "*.clef", System.IO.SearchOption.AllDirectories)
+        |> Array.filter (fun path -> System.IO.Path.GetFileName path <> "Types.clef")
+        |> Array.sort |> Array.map System.IO.File.ReadAllText |> String.concat "\n"
+    let claim = @"Named ""(\w+)"" // record: (?:struct|union) \1, laid out by \1\.Descriptor"
+    let compatible (repr: string) (clef: string) =
+        match repr with
+        | r when r.StartsWith "Repr.I" -> clef = TypeMapper.clefSpelling TypeMapper.Signed
+        | r when r.StartsWith "Repr.U" -> clef = TypeMapper.clefSpelling TypeMapper.Unsigned
+        | r when r.StartsWith "Repr.F" -> clef = TypeMapper.clefSpelling TypeMapper.Float
+        | "Repr.Bool" -> clef = TypeMapper.clefSpelling TypeMapper.Bool
+        | "Repr.Pointer" -> clef.StartsWith "CHandle<" || clef.StartsWith "option<" || clef.StartsWith "FnPtr<"
+        | _ -> false
+    let checkRecord (record: string) =
+        let recordType = rx($@"^type {record} = \{{\n((?:\w+: [^\n]+\n)+)\}}").Match(types)
+        Assert.True(recordType.Success, $"record type {record} is cited but not emitted")
+        let typeFields =
+            recordType.Groups.[1].Value.Split('\n', System.StringSplitOptions.RemoveEmptyEntries)
+            |> Array.map (fun line -> let at = line.IndexOf(':') in line.Substring(0, at).Trim(), line.Substring(at + 1).Trim())
+            |> List.ofArray
+        let layout = recordModule types record
+        let descriptorFields =
+            rx(@"\{ Name = ""(\w+)""; Offset = (\d+); Repr = ([\w.]+);").Matches(layout)
+            |> Seq.map (fun m -> m.Groups.[1].Value, int m.Groups.[2].Value, m.Groups.[3].Value) |> List.ofSeq
+        Assert.Equal<string list>(typeFields |> List.map fst, descriptorFields |> List.map (fun (n, _, _) -> n))
+        for (field, clef), (_, offset, repr) in List.zip typeFields descriptorFields do
+            Assert.True(compatible repr clef, $"{record}.{field} is emitted as '{clef}' but its descriptor representation is {repr}")
+            Assert.Contains($"let {field}Offset = {offset}", layout)
+        let size = rx(@"^let Size = (\d+)").Match(layout).Groups.[1].Value
+        Assert.Contains($"{{ Size = {size}", layout)
+    let sites = ResizeArray<string * string>()
+    // Function descriptors: each one follows the extern it describes.
+    for m in rx(@"^let (?:private )?(\w+) (.*) : (\S+) =\n(?:.*\n)*?let \1Descriptor[\s\S]*?@>").Matches(bindings) do
+        let name, signature, result, descriptor = m.Groups.[1].Value, m.Groups.[2].Value, m.Groups.[3].Value, m.Value
+        for p in rx(@"\{ Name = ""(\w+)""; Type = Named ""(\w+)""; PassBy = \w+ \} // record: (?:struct|union) \2, laid out by \2\.Descriptor").Matches(descriptor) do
+            Assert.Contains($"({p.Groups.[1].Value}: {p.Groups.[2].Value})", signature)
+            sites.Add($"{name} parameter {p.Groups.[1].Value}", p.Groups.[2].Value)
+        let ret = rx("ReturnType = " + claim).Match(descriptor)
+        if ret.Success then
+            Assert.Equal(ret.Groups.[1].Value, result)
+            sites.Add($"{name} result", ret.Groups.[1].Value)
+    // Callback descriptors: each names its entry record, whose Invoke field carries the signature.
+    for m in rx(@"Expr<CallbackDescriptor> =[\s\S]*?Record = ""(\w+)""[\s\S]*?@>").Matches(bindings) do
+        let entry, descriptor = m.Groups.[1].Value, m.Value
+        let invoke = rx($@"^type {entry} = \{{\n\s*Invoke: FnPtr<(.*)>\n").Match(bindings)
+        Assert.True(invoke.Success, $"callback entry {entry} has no Invoke signature")
+        let parts = invoke.Groups.[1].Value.Split([| " -> " |], System.StringSplitOptions.None)
+        let args, result = parts.[.. parts.Length - 2], parts.[parts.Length - 1]
+        let arguments = rx(@"\{ Name = ""(\w+)""; Type = ([^;]+); PassBy").Matches(descriptor) |> Seq.toArray
+        for i, a in Array.indexed arguments do
+            if a.Groups.[2].Value.StartsWith "Named " then
+                let record = a.Groups.[2].Value.Substring(6).Trim('"')
+                Assert.True(i < args.Length && args.[i] = record, $"callback {entry} argument {a.Groups.[1].Value} cites {record}, but its signature is {invoke.Groups.[1].Value}")
+                sites.Add($"{entry} argument {a.Groups.[1].Value}", record)
+        let ret = rx("ReturnType = " + claim).Match(descriptor)
+        if ret.Success then
+            Assert.Equal(ret.Groups.[1].Value, result)
+            sites.Add($"{entry} result", ret.Groups.[1].Value)
+    for record in sites |> Seq.map snd |> Seq.distinct do checkRecord record
+    List.ofSeq sites
+
+[<Fact>]
+let ``a by-value record is cited by name, never with an unknown width`` () =
+    let entry = "Callback_Test_002E_Fixture_003A__003A_fx_005F_vec_005F_mapEntry"
+    for mode in [ []; ["c_header_mode = true"] ] do
+        withPilot [fixturePath "by-value/record.h"] (mode @ ["value_structs = [\"fx_vec_t\", \"fx_point\"]"]) ["fx_take_vec"; "fx_make_point"; "fx_map_vec"] (fun result output ->
+            match result with
+            | Error error -> failwithf "By-value records were refused: %s" error
+            | Ok _ ->
+                let source = System.IO.File.ReadAllText(System.IO.Path.Combine(output, "Fixture", "Fixture.clef"))
+                Assert.Contains("{ Name = \"v\"; Type = Named \"fx_vec_t\"; PassBy = Value } // record: struct fx_vec_t, laid out by fx_vec_t.Descriptor", source)
+                // The typedef chain reaches the record; the signature names the record's type.
+                Assert.Contains("Named \"fx_point\" // record: struct fx_point, laid out by fx_point.Descriptor", source)
+                Assert.Contains(": fx_point =", source)
+                Assert.DoesNotContain("width unknown", source)
+                Assert.Equal<string list>(["fx_vec_t"; "fx_point"], citedDescriptorsExist output |> List.sort |> List.rev)
+                // Every citing site, each checked: parameter, result, callback argument and callback result.
+                Assert.Equal<(string * string) list>(
+                    [ "fx_take_vec parameter v", "fx_vec_t"
+                      "fx_make_point result", "fx_point"
+                      $"{entry} argument arg0", "fx_vec_t"
+                      $"{entry} result", "fx_vec_t" ],
+                    citedRecordsConsistent output |> List.sort |> fun sites ->
+                        // Order: function sites as emitted, then callback sites.
+                        let order (site: string, _) = if site.StartsWith "fx_take_vec" then 0 elif site.StartsWith "fx_make_point" then 1 elif site.EndsWith "arg0" then 2 else 3
+                        sites |> List.sortBy order))
+
+[<Fact>]
+let ``a by-value record without a declared value type is refused before output`` () =
+    let header = fixturePath "by-value/record.h"
+    for mode in [ []; ["c_header_mode = true"] ] do
+        withPilot [header] mode ["fx_take_vec"] (fun result output ->
+            Assert.Equal(
+                Error $"Binding generation failed: FS9119: struct 'fx_vec_t' is the type of the parameter 'v' of function 'fx_take_vec' in '{header}', but the pilot declares no value type for it, so neither its record type nor fx_vec_t.Descriptor would be emitted for the binding that cites them; declare it in [options] value_structs. No bindings were written.",
+                result |> Result.map ignore)
+            Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+    // The audit's C-header-mode case: a nested record returned by value, never declared as a value type.
+    let nested = fixturePath "by-value/nested-result.h"
+    withPilot [nested] ["c_header_mode = true"] ["fx_use"] (fun result output ->
+        Assert.Equal(
+            Error $"Binding generation failed: FS9119: struct 'fx_outer_v' is the type of the result of function 'fx_use' in '{nested}', but the pilot declares no value type for it, so neither its record type nor fx_outer_v.Descriptor would be emitted for the binding that cites them; declare it in [options] value_structs. No bindings were written.",
+            result |> Result.map ignore)
+        Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+
+[<Fact>]
+let ``a by-value type that resolves nowhere is refused before output`` () =
+    let header = fixturePath "by-value/unresolved.h"
+    let refused (functions: string list) (expected: string) =
+        withPilot [header] [] functions (fun result output ->
+            Assert.Equal(Error ("Binding generation failed: " + expected + " No bindings were written."), result |> Result.map ignore)
+            Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+    // A record defined only outside the pilot's declarations (an included, non-pilot header).
+    refused ["fx_take_elsewhere"]
+        $"FS9115: by-value type 'struct fx_elsewhere' of the parameter 'value' of function 'fx_take_elsewhere' in '{header}' resolves through no typedef, record or profile entry of that unit; a descriptor cannot carry an unknown width."
+    // A record only forward-declared.
+    refused ["fx_take_incomplete"]
+        $"FS9115: by-value type 'struct fx_incomplete' of the parameter 'value' of function 'fx_take_incomplete' in '{header}' resolves through no typedef, record or profile entry of that unit; a descriptor cannot carry an unknown width."
+    // A result (audit codex-audit-m2f: its result-site mutant survived without this).
+    refused ["fx_make_elsewhere"]
+        $"FS9115: by-value type 'struct fx_elsewhere' of the result of function 'fx_make_elsewhere' in '{header}' resolves through no typedef, record or profile entry of that unit; a descriptor cannot carry an unknown width."
+    // A callback entry's argument.
+    refused ["fx_register"]
+        $"FS9115: by-value type 'struct fx_elsewhere' of the argument 'arg0' of callback parameter 'cb' of function 'fx_register' in '{header}' resolves through no typedef, record or profile entry of that unit; a descriptor cannot carry an unknown width."
+
+// ═══════════════════════════════════════════════════════════════════
+// One record definition per pilot, measured or not (issue #161)
+// ═══════════════════════════════════════════════════════════════════
+
+let private record name fields = CppParser.Declaration.Struct (mkStruct name fields None)
+
+[<Fact>]
+let ``identical record definitions from several headers merge`` () =
+    let rec' = record "R" [mkField "a" "int"; mkField "b" "long"]
+    // A forward declaration is not a definition, so it never disagrees.
+    Assert.Equal(Ok (), BindingGenerator.agreeRecords [ "a.h", [rec']; "b.h", [rec']; "c.h", [CppParser.Declaration.Struct (mkStructSimple "R")] ])
+
+[<Fact>]
+let ``a record defined differently is refused naming each header and the first differing field`` () =
+    let base' = record "R" [mkField "a" "int"; mkField "b" "long"]
+    let refused (other: CppParser.Declaration) (expected: string) =
+        Assert.Equal(Error (expected + " No bindings were written."), BindingGenerator.agreeRecords [ "a.h", [base']; "b.h", [other]; "c.h", [base'] ])
+    refused (record "R" [mkField "a" "int"; mkField "b" "long"; mkField "c" "int"])
+        "FS9116: record 'R' is defined differently by the pilot's headers: 'a.h', 'c.h' (struct R { int a; long b }); 'b.h' (struct R { int a; long b; int c }); first difference at field 3 'c': absent in 'a.h', 'int c' in 'b.h'. One definition per pilot is required."
+    refused (CppParser.Declaration.Struct { mkStruct "R" [mkField "a" "int"; mkField "b" "long"] None with IsUnion = true })
+        "FS9116: record 'R' is defined differently by the pilot's headers: 'a.h', 'c.h' (struct R { int a; long b }); 'b.h' (union R { int a; long b }); first difference at its kind: struct in 'a.h', union in 'b.h'. One definition per pilot is required."
+    refused (record "R" [mkField "a" "int"; { mkField "b" "long" with IsConst = true }])
+        "FS9116: record 'R' is defined differently by the pilot's headers: 'a.h', 'c.h' (struct R { int a; long b }); 'b.h' (struct R { int a; const long b }); first difference at field 2 'b': 'long b' in 'a.h', 'const long b' in 'b.h'. One definition per pilot is required."
+
+[<Fact>]
+let ``a record defined alike but measured differently is refused`` () =
+    let measured offsets size =
+        CppParser.Declaration.Struct { mkStruct "R" [mkField "a" "char"; mkField "b" "int"] None with Measured = Some (mkLayout "R" size 32 offsets) }
+    Assert.Equal(
+        Error "FS9116: record 'R' (struct R { char a; int b }) is measured differently by the pilot's headers: 'a.h'; 'b.h'; first difference at field 'b': clang-measured offset 4 in 'a.h', 1 in 'b.h'. One definition per pilot is required. No bindings were written.",
+        BindingGenerator.agreeRecords [ "a.h", [measured [0; 32] 64]; "b.h", [measured [0; 8] 40] ])
+
+[<Fact>]
+let ``clang-parsed headers defining one record alike generate it once`` () =
+    withPilot [fixturePath "record-divergence/first.h"; fixturePath "record-divergence/same.h"] [] ["fx_first"; "fx_same"] (fun result output ->
+        match result with
+        | Error error -> failwithf "Identical record definitions were refused: %s" error
+        | Ok _ ->
+            let types = allTypesOf output
+            let at = types.IndexOf("module fx_rec =")
+            Assert.True(at >= 0, types)
+            Assert.Equal(-1, types.IndexOf("module fx_rec =", at + 1)))
+
+[<Fact>]
+let ``clang-parsed headers defining one record differently are refused before output, measured or not`` () =
+    let first = fixturePath "record-divergence/first.h"
+    let differs = fixturePath "record-divergence/differs.h"
+    let expected =
+        $"Binding generation failed: FS9116: record 'fx_rec' is defined differently by the pilot's headers: '{first}' (struct fx_rec {{ int a; long b }}); '{differs}' (struct fx_rec {{ int a; short b }}); first difference at field 2 'b': 'long b' in '{first}', 'short b' in '{differs}'. One definition per pilot is required. No bindings were written."
+    for options, functions in [ [], ["fx_first"; "fx_differs"]
+                                [], ["fx_first"]
+                                ["c_header_mode = true"; "abi_critical_structs = [\"struct fx_rec\"]"], [] ] do
+        withPilot [first; differs] options functions (fun result output ->
+            Assert.Equal(Error expected, result |> Result.map ignore)
+            Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+
+// ═══════════════════════════════════════════════════════════════════
+// Clang built-in aliases in results resolve through clang's canonical type (issue #171)
+// ═══════════════════════════════════════════════════════════════════
+
+[<Fact>]
+let ``a result clang spells with a built-in alias carries its canonical, measured width`` () =
+    withPilot [fixturePath "result-aliases/builtin-result.h"] [] ["strlen"] (fun result output ->
+        match result with
+        | Error error -> failwithf "The canonicalized alias result was refused: %s" error
+        | Ok _ ->
+            let source = System.IO.File.ReadAllText(System.IO.Path.Combine(output, "Fixture", "Fixture.clef"))
+            Assert.Contains("ReturnType = Integer (Unsigned, 64) // width declared: unsigned long under LP64", source)
+            Assert.DoesNotContain("width unknown", source))
+
+[<Fact>]
+let ``a result alias clang gives no canonical type is refused before output`` () =
+    let header = fixturePath "result-aliases/hidden-result.h"
+    withPilot [header] [] ["strlen"] (fun result output ->
+        Assert.Equal(
+            Error $"Binding generation failed: FS9117: type '__size_t' of the result of function 'strlen' in '{header}' is a clang built-in alias that no declaration of that unit names, and clang gives no canonical type for it: clang could not evaluate the result type of 'strlen' at file scope: called object type 'int' is not a function or function pointer. No bindings were written.",
+            result |> Result.map ignore)
+        Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+
+// ═══════════════════════════════════════════════════════════════════
+// A field typed by a typedef of a tagged record resolves to that record (issue #172)
+// ═══════════════════════════════════════════════════════════════════
+
+let private listAgreesWithClang () =
+    clangConfirms (fixturePath "typedef-records/list.h") [
+        "sizeof(struct fx_holder) == 24"; "_Alignof(struct fx_holder) == 8"
+        "offsetof(struct fx_holder, lock) == 0"; "offsetof(struct fx_holder, list) == 8"
+        "sizeof(fx_node_t) == 16"; "offsetof(struct fx_node, next) == 8" ]
+
+[<Fact>]
+let ``a field typed by a typedef of a tagged record is that record by value`` () =
+    withPilot [fixturePath "typedef-records/list.h"] [] ["fx_hold"] (fun result output ->
+        match result with
+        | Error error -> failwithf "The typedef'd record field was refused: %s" error
+        | Ok _ ->
+            let holder = recordModule (allTypesOf output) "fx_holder"
+            Assert.Contains("let Size = 24", holder)
+            Assert.Contains("let listOffset = 8", holder)
+            Assert.Contains("{ Name = \"list\"; Offset = 8; Repr = Repr.U8; Count = 16;", holder)
+            Assert.Contains("nested struct fx_node by value, as bytes; see fx_node.Descriptor", holder)
+            citedDescriptorsExist output |> ignore
+            listAgreesWithClang ())
+
+[<Fact>]
+let ``a measured record's typedef'd field takes the nested record's measured layout`` () =
+    withPilot [fixturePath "typedef-records/list.h"] ["c_header_mode = true"; "abi_critical_structs = [\"struct fx_holder\", \"struct fx_node\"]"] [] (fun result output ->
+        match result with
+        | Error error -> failwithf "The measured typedef'd record field was refused: %s" error
+        | Ok _ ->
+            let types = allTypesOf output
+            Assert.Contains("/// C struct `fx_holder`: layout measured (clang record layout dump).", types)
+            Assert.Contains("/// C struct `fx_node`: layout measured (clang record layout dump).", types)
+            Assert.Contains("{ Name = \"list\"; Offset = 8; Repr = Repr.U8; Count = 16;", recordModule types "fx_holder")
+            listAgreesWithClang ())
+
+[<Fact>]
+let ``a field typed by a typedef of a record no pilot declaration defines is refused`` () =
+    withPilot [fixturePath "typedef-records/far-list.h"] [] ["fx_far_hold"] (fun result output ->
+        Assert.Equal(
+            Error "Binding generation failed: Struct 'fx_far_holder' field 'node' has no known representation for type 'fx_far_t'; a complete C representation contract is required.",
+            result |> Result.map ignore)
+        Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+
+[<Fact>]
+let ``a measured record's typedef'd nested record must be declared in the measuring unit`` () =
+    let node = fixturePath "typedef-records/node-only.h"
+    let user = fixturePath "typedef-records/node-user.h"
+    withPilot [node; user] ["c_header_mode = true"; "abi_critical_structs = [\"struct fx_user\"]"] [] (fun result output ->
+        Assert.Equal(
+            Error $"Binding generation failed: ABI-critical storage 'fx_user' is measured in '{user}', but its nested record 'fx_shared_node' is not declared by that header; a measured layout requires every nested record in one unit.",
+            result |> Result.map ignore)
+        Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+
+[<Fact>]
+let ``a result alias whose function takes an incomplete record by value is refused before output`` () =
+    let header = fixturePath "result-aliases/incomplete-param.h"
+    withPilot [header] [] ["fx_widen"] (fun result output ->
+        Assert.Equal(
+            Error $"Binding generation failed: FS9120: type '__int128_t' of the result of function 'fx_widen' in '{header}' is a clang built-in alias that no declaration of that unit names, and its canonical type cannot be read: clang cannot type a call of 'fx_widen', whose parameter 'value' takes incomplete type 'struct fx_opaque' by value (invalid application of 'sizeof' to an incomplete type 'struct fx_opaque'). No bindings were written.",
+            result |> Result.map ignore)
+        Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+
+[<Fact>]
+let ``clang's alias measurement contradicting a profile row is refused end to end`` () =
+    // On LP64 every integer row agrees with clang, so the contradiction is shown against
+    // deliberately wrong rows for the canonical type clang reports, `unsigned long`.
+    let header = fixturePath "result-aliases/builtin-result.h"
+    let wrong (edit: TypeMapper.AbiRepr -> TypeMapper.AbiRepr) (canonical: string) =
+        TypeMapper.tryScalar Types.LP64 canonical |> Option.map (fun row -> if canonical = "unsigned long" then edit row else row)
+    let refused edit (expected: string) =
+        withPilotGenerating (fun project -> BindingGenerator.generateFromProjectCheckingAliasesAgainst (wrong edit) project false false Types.LP64)
+            [header] [] [] ["strlen"] [] [] (fun result output ->
+                Assert.Equal(Error ("Binding generation failed: " + expected + " No bindings were written."), result |> Result.map ignore)
+                Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+    // Same width, opposite signedness.
+    refused (fun row -> { row with Family = TypeMapper.Signed })
+        $"FS9118: clang measures the result of function 'strlen' in '{header}' ('__size_t', canonically 'unsigned long') as unsigned 64-bit, but the LP64 profile row for 'unsigned long' is signed 64-bit; the profile and the target must agree."
+    // Same signedness, another width (an ILP32 row on this LP64 target).
+    refused (fun row -> { row with Bits = 32 })
+        $"FS9118: clang measures the result of function 'strlen' in '{header}' ('__size_t', canonically 'unsigned long') as unsigned 64-bit, but the LP64 profile row for 'unsigned long' is unsigned 32-bit; the profile and the target must agree."
+
+// ═══════════════════════════════════════════════════════════════════
+// Round 3 coverage (audit codex-audit-m2g, comments 5363 and 5365)
+// ═══════════════════════════════════════════════════════════════════
+
+[<Fact>]
+let ``a union returned by value without a declared value type is refused before output`` () =
+    let header = fixturePath "by-value/union-result.h"
+    for mode in [ []; ["c_header_mode = true"] ] do
+        withPilot [header] mode ["fx_get_word"] (fun result output ->
+            Assert.Equal(
+                Error $"Binding generation failed: FS9119: union 'fx_word' is the type of the result of function 'fx_get_word' in '{header}', but the pilot declares no value type for it, so neither its record type nor fx_word.Descriptor would be emitted for the binding that cites them; declare it in [options] value_structs. No bindings were written.",
+                result |> Result.map ignore)
+            Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+    // Declaring it is not enough: a value type is a plain record, which a union is not.
+    withPilot [header] ["value_structs = [\"fx_word\"]"] ["fx_get_word"] (fun result output ->
+        Assert.Equal(Error "Binding generation failed: Value struct 'fx_word' requires a plain record with scalar or pointer fields", result |> Result.map ignore)
+        Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+
+let private chainAgreesWithClang () =
+    clangConfirms (fixturePath "typedef-records/chain.h") [
+        "sizeof(struct fx_chain_holder) == 24"; "_Alignof(struct fx_chain_holder) == 8"
+        "offsetof(struct fx_chain_holder, link) == 8"; "sizeof(fx_link_alias_t) == 16"
+        "offsetof(struct fx_link, second) == 8" ]
+
+[<Fact>]
+let ``a field typed through two typedef links takes the tagged record's measured layout`` () =
+    withPilot [fixturePath "typedef-records/chain.h"] ["c_header_mode = true"; "abi_critical_structs = [\"struct fx_chain_holder\", \"struct fx_link\"]"] [] (fun result output ->
+        match result with
+        | Error error -> failwithf "The two-link typedef'd record field was refused: %s" error
+        | Ok _ ->
+            let types = allTypesOf output
+            Assert.Contains("/// C struct `fx_link`: layout measured (clang record layout dump).", types)
+            let holder = recordModule types "fx_chain_holder"
+            Assert.Contains("layout measured", types.Substring(types.IndexOf("C struct `fx_chain_holder`")))
+            Assert.Contains("let linkOffset = 8", holder)
+            Assert.Contains("{ Name = \"link\"; Offset = 8; Repr = Repr.U8; Count = 16;", holder)
+            Assert.Contains("nested struct fx_link by value, as bytes; see fx_link.Descriptor", holder)
+            citedDescriptorsExist output |> ignore
+            chainAgreesWithClang ())
+
+[<Fact>]
+let ``a field typed through two typedef links to a record no pilot declaration defines is refused`` () =
+    withPilot [fixturePath "typedef-records/far-chain.h"] [] ["fx_far_chain_hold"] (fun result output ->
+        Assert.Equal(
+            Error "Binding generation failed: Struct 'fx_far_chain' field 'node' has no known representation for type 'fx_far_alias_t'; a complete C representation contract is required.",
+            result |> Result.map ignore)
+        Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+
+// ═══════════════════════════════════════════════════════════════════
+// Round 4 coverage (audit codex-audit-m2h, comments 5401 and 5402)
+// ═══════════════════════════════════════════════════════════════════
+
+[<Fact>]
+let ``a long double result alias agrees with its row by storage and is accepted`` () =
+    // The profile's long double row is an 80-bit value; clang measures its 16 bytes of storage.
+    withPilot [fixturePath "result-aliases/long-double-result.h"] [] ["fx_extended"] (fun result output ->
+        match result with
+        | Error error -> failwithf "The long double alias result was refused: %s" error
+        | Ok _ ->
+            let source = System.IO.File.ReadAllText(System.IO.Path.Combine(output, "Fixture", "Fixture.clef"))
+            Assert.Contains("ReturnType = Float 80 // width inferred: long double under LP64", source))
+
+[<Fact>]
+let ``a float row whose storage contradicts clang's measurement is refused end to end`` () =
+    let header = fixturePath "result-aliases/long-double-result.h"
+    let wrong (canonical: string) =
+        TypeMapper.tryScalar Types.LP64 canonical |> Option.map (fun row -> if canonical = "long double" then { row with Bits = 64 } else row)
+    withPilotGenerating (fun project -> BindingGenerator.generateFromProjectCheckingAliasesAgainst wrong project false false Types.LP64)
+        [header] [] [] ["fx_extended"] [] [] (fun result output ->
+            Assert.Equal(
+                Error $"Binding generation failed: FS9118: clang measures the result of function 'fx_extended' in '{header}' ('typeof', canonically 'long double') as 128-bit storage, but the LP64 profile row for 'long double' is 64-bit; the profile and the target must agree. No bindings were written.",
+                result |> Result.map ignore)
+            Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+
+let private unionChainAgreesWithClang () =
+    clangConfirms (fixturePath "typedef-records/union-chain.h") [
+        "sizeof(struct fx_uchain_holder) == 16"; "_Alignof(struct fx_uchain_holder) == 8"
+        "offsetof(struct fx_uchain_holder, link) == 8"; "sizeof(fx_ulink_alias_t) == 8"; "_Alignof(union fx_ulink) == 8" ]
+
+[<Fact>]
+let ``a field typed through a qualified typedef link to a tagged union takes its measured layout`` () =
+    withPilot [fixturePath "typedef-records/union-chain.h"] ["c_header_mode = true"; "abi_critical_structs = [\"struct fx_uchain_holder\", \"union fx_ulink\"]"] [] (fun result output ->
+        match result with
+        | Error error -> failwithf "The typedef'd union field was refused: %s" error
+        | Ok _ ->
+            let types = allTypesOf output
+            Assert.Contains("/// C union `fx_ulink`: layout measured (clang record layout dump).", types)
+            Assert.Contains("let Size = 8", recordModule types "fx_ulink")
+            let holder = recordModule types "fx_uchain_holder"
+            Assert.Contains("let linkOffset = 8", holder)
+            Assert.Contains("{ Name = \"link\"; Offset = 8; Repr = Repr.U8; Count = 8;", holder)
+            Assert.Contains("nested struct fx_ulink by value, as bytes; see fx_ulink.Descriptor", holder)
+            citedDescriptorsExist output |> ignore
+            unionChainAgreesWithClang ())
+
+[<Fact>]
+let ``a field typed through a qualified typedef link to a union no pilot declaration defines is refused`` () =
+    withPilot [fixturePath "typedef-records/far-union-chain.h"] [] ["fx_far_u_hold"] (fun result output ->
+        Assert.Equal(
+            Error "Binding generation failed: Struct 'fx_far_u_holder' field 'link' has no known representation for type 'fx_far_u_alias_t'; a complete C representation contract is required.",
+            result |> Result.map ignore)
+        Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))

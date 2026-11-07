@@ -66,6 +66,39 @@ module CppParser =
         MangledName: string option
     }
 
+    // =========================================================================
+    // Struct Layout Information (from clang -fdump-record-layouts-simple)
+    // =========================================================================
+
+    /// Layout information for a struct, extracted from clang's record layout dump.
+    /// All sizes are in bits as reported by clang; byte conversion happens downstream.
+    type StructLayoutInfo = {
+        /// Struct name (e.g., "drm_mode_create_dumb")
+        Name: string
+        /// Total size in bits
+        SizeBits: int
+        /// Data size in bits (excludes padding at end)
+        DataSizeBits: int
+        /// Required alignment in bits
+        AlignmentBits: int
+        /// Per-field offsets in bits (order matches FieldDecl order)
+        FieldOffsetsBits: int list
+    }
+
+    /// Where a record C leaves unnamed comes from: an unnamed struct or union declared as the
+    /// type of a named field (glibc's `__atomic_wide_counter.__value32`). Farscape names it
+    /// `<Parent>_<Field>` (`anonymousRecordName`); it is never flattened into its parent.
+    type AnonymousRecordOrigin = {
+        /// The enclosing record's name: its C name, or the generated name of an enclosing
+        /// anonymous record.
+        Parent: string
+        /// The named field whose type the unnamed record is.
+        Field: string
+        /// Clang's location of the unnamed record, `path:line:col`, as it spells the type
+        /// `struct (unnamed at path:line:col)`.
+        Location: string
+    }
+
     /// Represents a C/C++ struct declaration
     type StructDecl = {
         Name: string
@@ -73,7 +106,20 @@ module CppParser =
         Documentation: string option
         IsUnion: bool
         Attributes: AttributeData list
+        /// Set when C leaves the record unnamed and Farscape named it from its parent and field.
+        Anonymous: AnonymousRecordOrigin option
+        /// Clang's record layout of this record in its declaring unit, when the parse measured
+        /// it: every anonymous record and every record enclosing one is measured
+        /// (`measureAnonymousRecords`). None for records the parse did not measure.
+        Measured: StructLayoutInfo option
     }
+
+    /// The name Farscape gives an unnamed record that is the type of a named field: the
+    /// enclosing record's name and the field's name, joined by `_`.
+    let anonymousRecordName (parent: string) (field: string) = parent + "_" + field
+
+    /// A unit whose generated anonymous record names collide (FS9114); carries the refusal.
+    exception AnonymousNameCollision of string
 
     /// Represents a C/C++ enum value with signed support
     type EnumValue = {
@@ -186,25 +232,6 @@ module CppParser =
         /// Base class type strings from clang AST "bases" array.
         /// Used to detect inherited pimpl pattern (e.g., "detail::pimpl<xclbin_impl>").
         BaseClasses: string list
-    }
-
-    // =========================================================================
-    // Struct Layout Information (from clang -fdump-record-layouts-simple)
-    // =========================================================================
-
-    /// Layout information for a struct, extracted from clang's record layout dump.
-    /// All sizes are in bits as reported by clang; byte conversion happens downstream.
-    type StructLayoutInfo = {
-        /// Struct name (e.g., "drm_mode_create_dumb")
-        Name: string
-        /// Total size in bits
-        SizeBits: int
-        /// Data size in bits (excludes padding at end)
-        DataSizeBits: int
-        /// Required alignment in bits
-        AlignmentBits: int
-        /// Per-field offsets in bits (order matches FieldDecl order)
-        FieldOffsetsBits: int list
     }
 
     // =========================================================================
@@ -546,10 +573,80 @@ module CppParser =
 
         match name, fields with
         | Some n, _ when not (String.IsNullOrEmpty(n)) ->
-            Some { Name = n; Fields = fields; Documentation = documentation; IsUnion = isUnion; Attributes = attributes }
+            Some { Name = n; Fields = fields; Documentation = documentation; IsUnion = isUnion; Attributes = attributes; Anonymous = None; Measured = None }
         | _, fs when not fs.IsEmpty ->
-            Some { Name = ""; Fields = fields; Documentation = documentation; IsUnion = isUnion; Attributes = attributes }
+            Some { Name = ""; Fields = fields; Documentation = documentation; IsUnion = isUnion; Attributes = attributes; Anonymous = None; Measured = None }
         | _ -> None
+
+    /// Clang spells the type of a field declared with an unnamed record as
+    /// `struct (unnamed at path:line:col)` (or `union`), possibly cv-qualified or with an
+    /// array extent; `loc` is the unnamed record's own location.
+    let private unnamedRecordSpelling =
+        System.Text.RegularExpressions.Regex(@"^(?<pre>.*?)\b(?<tag>struct|union) \(unnamed at (?<loc>[^()]+)\)(?<post>.*)$")
+
+    /// A clang `path:line:col` location with its path made absolute against the working
+    /// directory: clang spells one file `x.h`, `./x.h` or `././x.h` depending on how the
+    /// translation unit reached it, and every clang Farscape runs shares this directory.
+    let clangLocation (location: string) : (string * int * int) option =
+        let parts = location.Split(':')
+        if parts.Length < 3 then None
+        else
+            match Int32.TryParse parts.[parts.Length - 2], Int32.TryParse parts.[parts.Length - 1] with
+            | (true, line), (true, col) ->
+                let path = String.Join(":", parts.[0 .. parts.Length - 3])
+                let full = try Path.GetFullPath path with _ -> path
+                Some (full, line, col)
+            | _ -> None
+
+    /// Name the unnamed records a named record's fields are typed with (issue #159). Clang
+    /// emits each unnamed RecordDecl immediately before the FieldDecl declared with it; that
+    /// declaration is taken for the field only when its tag and its column (and its line, when
+    /// clang prints one) are the location the field's type spells. The record becomes its own
+    /// declaration named `anonymousRecordName parent field`, the field is respelled to name it,
+    /// and records nested in it are named the same way from its generated name. A field whose
+    /// unnamed record cannot be paired this way keeps clang's spelling, which no resolver
+    /// represents, so its use is refused rather than flattened or guessed.
+    let private nameAnonymousRecords (parent: string) (node: JsonValue) (record: StructDecl) : StructDecl * StructDecl list =
+        let position (declaration: JsonValue) (key: string) =
+            getObject declaration "loc" |> Option.bind (fun loc ->
+                match getObject loc "expansionLoc" with
+                | Some expansion -> getInt64 expansion key
+                | None -> getInt64 loc key)
+        let rec name (parent: string) (node: JsonValue) (record: StructDecl) : StructDecl * StructDecl list =
+            let nested = ResizeArray<StructDecl>()
+            let respelled = System.Collections.Generic.Dictionary<string, string>()
+            let mutable unnamed : JsonValue option = None
+            for child in getArray node "inner" do
+                match getStringOr child "kind" "" with
+                | "RecordDecl" when getStringOr child "name" "" = "" && getBool child "completeDefinition" ->
+                    unnamed <- Some child
+                | "FieldDecl" when not (getBool child "isImplicit") ->
+                    let field = getStringOr child "name" ""
+                    let spelled = unnamedRecordSpelling.Match(getQualType child)
+                    if field <> "" && spelled.Success then
+                        match unnamed, clangLocation spelled.Groups.["loc"].Value with
+                        | Some declaration, Some (_, line, col)
+                            when getStringOr declaration "tagUsed" "struct" = spelled.Groups.["tag"].Value
+                                 && position declaration "col" = Some (int64 col)
+                                 && (position declaration "line" |> Option.forall ((=) (int64 line))) ->
+                            match processRecordDecl declaration with
+                            | Some declared ->
+                                let generated = anonymousRecordName parent field
+                                let origin = { Parent = parent; Field = field; Location = spelled.Groups.["loc"].Value }
+                                let named, deeper = name generated declaration { declared with Name = generated; Anonymous = Some origin }
+                                nested.Add named
+                                nested.AddRange deeper
+                                respelled.[field] <- spelled.Groups.["pre"].Value + spelled.Groups.["tag"].Value + " " + generated + spelled.Groups.["post"].Value
+                            | None -> ()
+                        | _ -> ()
+                | _ -> ()
+            let fields =
+                record.Fields |> List.map (fun f ->
+                    match respelled.TryGetValue f.Name with
+                    | true, spelling -> { parseFieldType spelling with Name = f.Name; IsBitfield = f.IsBitfield; BitWidth = f.BitWidth; Attributes = f.Attributes }
+                    | _ -> f)
+            { record with Fields = fields }, List.ofSeq nested
+        name parent node record
 
     /// Extract the explicit value from an EnumConstantDecl AST node, if present.
     /// Returns None when the enum constant has no initializer (implicit sequential value).
@@ -633,8 +730,9 @@ module CppParser =
         : Declaration list * Set<string> * Declaration list =
 
         let results = ResizeArray<Declaration>()
-        // Enums named only by a typedef (`typedef enum { ... } T;`): spelled `T`, not `enum T`.
-        let typedefNamedEnums = System.Collections.Generic.HashSet<string>()
+        // Enums and records named only by a typedef (`typedef enum { ... } T;`,
+        // `typedef union { ... } T;`): spelled `T`, not `enum T` or `union T`.
+        let typedefNamedTags = System.Collections.Generic.HashSet<string>()
         // Typedefs and enums this unit's own parse sees through its includes but whose files
         // lie outside the library boundary: facts of this same translation unit, kept for
         // resolving its own declarations, never emitted as its declarations.
@@ -650,19 +748,26 @@ module CppParser =
             yield node
             for child in getArray node "inner" do yield! descendants child
         }
+        // Only the typedef whose own type is the declaration names it: its type node, through
+        // elaboration and qualifiers only. A later typedef that merely mentions the record
+        // (`typedef fx_vec_t (*fx_vec_map)(fx_vec_t)`, a pointer typedef) never renames it, and
+        // the first naming typedef wins.
+        let rec ownTypeNodes (node: JsonValue) = seq {
+            match getStringOr node "kind" "" with
+            | "RecordType" | "EnumType" -> yield node
+            | "ElaboratedType" | "QualType" -> for child in getArray node "inner" do yield! ownTypeNodes child
+            | _ -> ()
+        }
         let anonymousRecordNames =
             descendants root
             |> Seq.filter (fun node -> getStringOr node "kind" "" = "TypedefDecl")
             |> Seq.collect (fun node ->
                 let name = getStringOr node "name" ""
-                descendants node |> Seq.choose (fun child ->
-                    let kind = getStringOr child "kind" ""
-                    if kind <> "RecordType" && kind <> "EnumType" then None
-                    else
-                        getObject child "decl" |> Option.bind (fun decl ->
-                            if getStringOr decl "name" "" <> "" then None
-                            else getString decl "id" |> Option.map (fun id -> id, name))))
-            |> Map.ofSeq
+                getArray node "inner" |> Seq.collect ownTypeNodes |> Seq.choose (fun child ->
+                    getObject child "decl" |> Option.bind (fun decl ->
+                        if getStringOr decl "name" "" <> "" then None
+                        else getString decl "id" |> Option.map (fun id -> id, name))))
+            |> Seq.fold (fun (acc: Map<string, string>) (id, name) -> if acc.ContainsKey id then acc else acc.Add(id, name)) Map.empty
 
         if verbose then
             match includeRoot with
@@ -739,8 +844,16 @@ module CppParser =
                     | Some structDecl ->
                         let name =
                             if structDecl.Name <> "" then structDecl.Name
-                            else getString node "id" |> Option.bind (fun id -> Map.tryFind id anonymousRecordNames) |> Option.defaultValue ""
-                        results.Add(Struct { structDecl with Name = name })
+                            else
+                                let named = getString node "id" |> Option.bind (fun id -> Map.tryFind id anonymousRecordNames) |> Option.defaultValue ""
+                                if named <> "" then typedefNamedTags.Add named |> ignore
+                                named
+                        if name = "" then results.Add(Struct structDecl)
+                        else
+                            // Unnamed records its fields are typed with become declarations of their own.
+                            let named, nested = nameAnonymousRecords name node { structDecl with Name = name }
+                            results.Add(Struct named)
+                            for record in nested do results.Add(Struct record)
                     | None -> ()
 
                 | "EnumDecl" ->
@@ -750,7 +863,7 @@ module CppParser =
                             if enumDecl.Name <> "" then enumDecl.Name
                             else
                                 let named = getString node "id" |> Option.bind (fun id -> Map.tryFind id anonymousRecordNames) |> Option.defaultValue ""
-                                if named <> "" then typedefNamedEnums.Add named |> ignore
+                                if named <> "" then typedefNamedTags.Add named |> ignore
                                 named
                         results.Add(Enum { enumDecl with Name = name })
                     | None -> ()
@@ -895,7 +1008,7 @@ module CppParser =
                                 if enumDecl.Name <> "" then enumDecl.Name
                                 else
                                     let named = getString node "id" |> Option.bind (fun id -> Map.tryFind id anonymousRecordNames) |> Option.defaultValue ""
-                                    if named <> "" then typedefNamedEnums.Add named |> ignore
+                                    if named <> "" then typedefNamedTags.Add named |> ignore
                                     named
                             if name <> "" then included.Add(Enum { enumDecl with Name = name })
                         | None -> ()
@@ -923,7 +1036,7 @@ module CppParser =
                 | _ -> false)
             |> Seq.distinctBy (function Enum e -> "enum " + e.Name | Typedef t -> "typedef " + t.Name | _ -> "")
             |> List.ofSeq
-        results, Set.ofSeq typedefNamedEnums, included
+        results, Set.ofSeq typedefNamedTags, included
 
     // =========================================================================
     // Macro Parsing
@@ -1111,9 +1224,11 @@ module CppParser =
                 do! pSpaces
                 do! pstring "Type: " >>% ()
                 do! optional ((pstring "struct " <|> pstring "union ") >>% ()) >>% ()
-                let! name = many1Chars (satisfyL (fun c -> c <> '\n' && c <> '\r' && c <> ' ') "name char")
+                // The whole rest of the line: an unnamed nested record is spelled
+                // `Parent::(unnamed at path:line:col)`, which a first-space cut would collapse.
+                let! name = many1Chars (satisfyL (fun c -> c <> '\n' && c <> '\r') "name char")
                 do! pSkipLine
-                return name
+                return name.TrimEnd()
             }
 
         static let pIntField label =
@@ -1186,7 +1301,13 @@ module CppParser =
     /// Each record layout block is preceded by "*** Dumping AST Record Layout".
     /// Text before the first marker is clang output, not a layout block.
     /// A marked block that cannot be parsed refuses the entire measurement.
-    let parseRecordLayouts (stderr: string) : Result<Map<string, StructLayoutInfo>, string> =
+    let rec parseRecordLayouts (stderr: string) : Result<Map<string, StructLayoutInfo>, string> =
+        parseRecordLayoutBlocks stderr
+        |> Result.map (List.fold (fun layouts (layout: StructLayoutInfo) -> Map.add layout.Name layout layouts) Map.empty)
+
+    /// Every record layout block of a clang dump, in dump order. A name clang dumps twice
+    /// (two records it spells alike) appears twice, so a consumer can tell them apart.
+    and parseRecordLayoutBlocks (stderr: string) : Result<StructLayoutInfo list, string> =
         let blocks = stderr.Split("*** Dumping AST Record Layout")
         let rec outOfRange = function
             | ErrorType.Message "Integer out of range." -> true
@@ -1201,7 +1322,7 @@ module CppParser =
                     Error $"Record layout block {ordinal} is empty."
                 else
                     match LP.LayoutBlock (Reader.ofString trimmed ()) with
-                    | Ok result -> collect (ordinal + 1) (Map.add result.Parsed.Name result.Parsed layouts)
+                    | Ok result -> collect (ordinal + 1) (result.Parsed :: layouts)
                     | Error error ->
                         let name =
                             match LP.StructName (Reader.ofString trimmed ()) with
@@ -1220,7 +1341,7 @@ module CppParser =
                             else ""
                         let excerpt = trimmed.Split([| '\n'; '\r' |], StringSplitOptions.RemoveEmptyEntries) |> Array.truncate 6 |> String.concat " | "
                         Error $"Record layout block {ordinal}{name} failed at '{line}': {error.Errors}.{range} Block: {excerpt}"
-        collect 1 Map.empty
+        collect 1 [] |> Result.map List.rev
 
     // =========================================================================
     // Clang Invocation
@@ -1590,6 +1711,262 @@ module CppParser =
             | decl -> decl)
 
     // =========================================================================
+    // Anonymous Record Measurement (clang lays out each unnamed nested record)
+    // =========================================================================
+
+    /// Measure every anonymous record of a parsed unit, and every record enclosing one, with
+    /// clang in that same unit (issue #159). The probe includes the header under the parse's
+    /// own flags and takes `sizeof` of each outermost named enclosing record (by its typedef
+    /// name when C names it only by a typedef), which makes clang lay out it and every record
+    /// nested in it; `-fdump-record-layouts-simple` prints those layouts, the same dump measured
+    /// ABI-critical layouts come from. An enclosing record is the dump block of its own name; an
+    /// anonymous record is the block clang names `Parent::(unnamed at path:line:col)` at the
+    /// location its field's type spells. A record with no such block, or with two blocks of
+    /// different layouts (two unnamed records one macro expansion spells at one location), stays
+    /// unmeasured, and the generator refuses it (FS9113): an anonymous record's layout is never
+    /// computed from its declared fields. A batch clang cannot compile is measured one record at
+    /// a time.
+    let measureAnonymousRecords (options: HeaderParserOptions) (typedefNamed: Set<string>) (declarations: Declaration list)
+        : Declaration list =
+        let records = declarations |> List.choose (function Struct s when s.Name <> "" -> Some s | _ -> None)
+        let anonymous = records |> List.filter (fun s -> s.Anonymous.IsSome)
+        if anonymous.IsEmpty then declarations
+        else
+        let byName = records |> List.rev |> List.map (fun s -> s.Name, s) |> Map.ofList
+        let rec outermost (visited: Set<string>) (s: StructDecl) =
+            match s.Anonymous with
+            | None -> Some s
+            | Some origin when not (visited.Contains origin.Parent) ->
+                byName.TryFind origin.Parent |> Option.bind (outermost (visited.Add s.Name))
+            | Some _ -> None
+        let roots = anonymous |> List.choose (outermost Set.empty) |> List.distinctBy _.Name
+        let spelling (s: StructDecl) =
+            if typedefNamed.Contains s.Name then s.Name
+            elif s.IsUnion then "union " + s.Name
+            else "struct " + s.Name
+        let tempDir = Path.Combine(Path.GetTempPath(), "farscape-layout")
+        Directory.CreateDirectory(tempDir) |> ignore
+        let probe (batch: StructDecl list) : Result<StructLayoutInfo list, string> =
+            let tempFile = Path.Combine(tempDir, "_farscape_record_probe_" + Guid.NewGuid().ToString("N") + ".c")
+            try
+                let body = batch |> List.mapi (fun i s -> $"char _fs_record_{i}[sizeof({spelling s})];") |> String.concat "\n"
+                File.WriteAllText(tempFile, $"#include \"{Path.GetFullPath options.HeaderFile}\"\n{body}\n")
+                runClang (buildClangArgs options) ["-Xclang"; "-fdump-record-layouts-simple"; "-fsyntax-only"; tempFile] options.Verbose
+                |> Result.bind parseRecordLayoutBlocks
+            finally
+                try File.Delete tempFile with _ -> ()
+        let blocks =
+            match probe roots with
+            | Ok blocks -> blocks
+            | Error _ -> roots |> List.collect (fun root -> match probe [root] with Ok blocks -> blocks | Error _ -> [])
+        let unnamedAt (dumpName: string) =
+            let marker = "(unnamed at "
+            let at = dumpName.LastIndexOf marker
+            if at < 0 || not (dumpName.EndsWith ")") then None
+            else clangLocation (dumpName.Substring(at + marker.Length, dumpName.Length - at - marker.Length - 1))
+        let measuredOf (s: StructDecl) =
+            let candidates =
+                match s.Anonymous with
+                | Some origin ->
+                    match clangLocation origin.Location with
+                    | Some location -> blocks |> List.filter (fun block -> unnamedAt block.Name = Some location)
+                    | None -> []
+                | None -> blocks |> List.filter (fun block -> block.Name = s.Name)
+            match candidates |> List.distinctBy (fun l -> l.SizeBits, l.DataSizeBits, l.AlignmentBits, l.FieldOffsetsBits) with
+            | [ layout ] -> Some { layout with Name = s.Name }
+            | _ -> None
+        let measured = Set.ofList ((roots |> List.map _.Name) @ (anonymous |> List.map _.Name))
+        declarations |> List.map (function
+            | Struct s when s.Name <> "" && measured.Contains s.Name -> Struct { s with Measured = measuredOf s }
+            | decl -> decl)
+
+    /// The names Farscape gives anonymous records must name nothing else in their unit: no
+    /// other record, typedef or enum, own or reached through an include, and no other
+    /// anonymous record (`a_b` + `c` and `a` + `b_c`). Otherwise the unit is refused (FS9114).
+    let anonymousNameCollisions (header: string) (declarations: Declaration list) : string list =
+        let generated = declarations |> List.choose (function Struct s when s.Anonymous.IsSome -> Some s | _ -> None)
+        if generated.IsEmpty then []
+        else
+        let others =
+            declarations |> List.choose (function
+                | Struct s when s.Name <> "" && s.Anonymous.IsNone && not s.Fields.IsEmpty -> Some (s.Name, "record")
+                | Struct s when s.Name <> "" && s.Anonymous.IsNone -> Some (s.Name, "record declaration")
+                | Typedef t -> Some (t.Name, "typedef")
+                | Enum e when e.Name <> "" -> Some (e.Name, "enum")
+                | _ -> None)
+        let describe (s: StructDecl) =
+            match s.Anonymous with
+            | Some o -> $"the unnamed record of field '{o.Field}' of '{o.Parent}' at {o.Location}"
+            | None -> s.Name
+        generated
+        |> List.groupBy _.Name
+        |> List.choose (fun (name, named) ->
+            let clashes =
+                (named |> List.distinctBy (fun s -> s.Anonymous) |> List.map describe)
+                @ (others |> List.filter (fun (other, _) -> other = name) |> List.distinct |> List.map (fun (_, kind) -> $"a {kind}"))
+            if clashes.Length < 2 then None
+            else
+                let listed = clashes |> String.concat "; "
+                Some $"{Diagnostics.AnonymousNameCollision}: the generated record name '{name}' in '{header}' names more than one declaration: {listed}. A generated name must name one record.")
+
+    // =========================================================================
+    // Clang Built-in Type Aliases in Results (clang canonicalizes and measures them)
+    // =========================================================================
+
+    /// A type name clang spells as a function's result that no declaration of the unit names
+    /// (#171): clang's predefined sugar such as `__size_t`, which clang gives the library
+    /// functions it knows (`strlen`) and which source cannot name. `Canonical` is clang's
+    /// canonical type of that result with the size and signedness clang measured for it, or
+    /// the reason clang gave none.
+    type ClangTypeAlias = {
+        Name: string
+        /// The first function whose result clang spells with the alias.
+        Function: string
+        Canonical: Result<string * EnumRepresentation, AliasFailure>
+    }
+
+    /// Why clang gave a result alias no canonical type. The probe types an unevaluated call,
+    /// so it reads results of functions whose by-value parameters are complete types (no
+    /// arguments, fixed arguments and the fixed arguments of a variadic function); a function
+    /// taking an incomplete type by value cannot be called, even unevaluated.
+    and AliasFailure =
+        /// A by-value parameter's type is incomplete in the unit: clang refuses `sizeof` of it.
+        | IncompleteParameter of parameter: string * spelled: string * reason: string
+        /// Clang refused the probe for another reason (the name hidden by an object-like macro,
+        /// a result clang cannot measure); `reason` is clang's first error.
+        | ProbeRefused of reason: string
+
+    /// C's own type keywords: never aliases.
+    let private cTypeKeywords =
+        set [ "void"; "char"; "short"; "int"; "long"; "float"; "double"; "signed"; "unsigned"; "_Bool"; "bool"
+              "wchar_t"; "char8_t"; "char16_t"; "char32_t"; "__int128"; "_Float16"; "_Float32"; "_Float64"
+              "_Float128"; "__float128"; "__fp16"; "__bf16"; "_Complex" ]
+
+    /// Read every result alias of a parsed unit through clang, in that same unit and under the
+    /// parse's own flags. A function's result is an alias candidate when its spelling, without
+    /// cv-qualifiers, is one identifier that is no C type keyword and that no typedef, record or
+    /// enum of the unit (its own or reached through an include) declares. For each candidate
+    /// function the probe declares `__typeof__((f)(args))` (the name parenthesized, so no
+    /// function-like macro expands, and each argument `*(__typeof__(T) *)0`, never evaluated),
+    /// a `sizeof` array of it and the sign array `((R)-1 < 0) ? 1 : 2`, and reads clang's own
+    /// canonical type and evaluations back from its AST. One alias name must canonicalize and
+    /// measure identically through every function that spells it. A candidate clang cannot
+    /// evaluate keeps the reason, and a use of it is refused (FS9117).
+    let measureResultAliases (options: HeaderParserOptions) (declarations: Declaration list) (included: Declaration list)
+        : ClangTypeAlias list =
+        let declared =
+            (declarations @ included) |> List.choose (function
+                | Typedef t -> Some t.Name
+                | Struct s when s.Name <> "" -> Some s.Name
+                | Enum e when e.Name <> "" -> Some e.Name
+                | Class c -> Some c.Name
+                | _ -> None)
+            |> Set.ofList
+        let identifier = System.Text.RegularExpressions.Regex(@"^[A-Za-z_][A-Za-z0-9_]*$")
+        let candidates =
+            declarations
+            |> List.choose (function
+                | Function f ->
+                    let spelled = f.ReturnType.Replace("const ", "").Replace("volatile ", "").Trim()
+                    if identifier.IsMatch spelled && not (cTypeKeywords.Contains spelled) && not (declared.Contains spelled)
+                    then Some (spelled, f) else None
+                | _ -> None)
+            |> List.distinctBy (fun (_, f) -> f.Name)
+        if candidates.IsEmpty then []
+        else
+        let tempDir = Path.Combine(Path.GetTempPath(), "farscape-alias")
+        Directory.CreateDirectory(tempDir) |> ignore
+        let call (f: FunctionDecl) =
+            let args = f.Parameters |> List.map (fun (_, t) -> $"*(__typeof__({t}) *)0") |> String.concat ", "
+            $"__typeof__(({f.Name})({args}))"
+        let firstError (text: string) =
+            let at = text.IndexOf("error: ")
+            if at < 0 then text.Trim()
+            else
+                let rest = text.Substring(at + 7)
+                match rest.IndexOfAny([| '\n'; '\r' |]) with
+                | -1 -> rest.Trim()
+                | stop -> rest.Substring(0, stop).Trim()
+        let probe (batch: (int * FunctionDecl) list) : Result<Map<int, string * EnumRepresentation>, string> =
+            let tempFile = Path.Combine(tempDir, "_farscape_alias_probe_" + Guid.NewGuid().ToString("N") + ".c")
+            try
+                let body =
+                    batch |> List.map (fun (i, f) ->
+                        let result = call f
+                        $"{result} _fs_alias_{i}; char _fs_alias_size_{i}[sizeof({result})]; char _fs_alias_sign_{i}[(({result})-1 < 0) ? 1 : 2];")
+                    |> String.concat "\n"
+                File.WriteAllText(tempFile, $"#include \"{Path.GetFullPath options.HeaderFile}\"\n{body}\n")
+                match runClang (buildClangArgs options) ["-Xclang"; "-ast-dump"; "-Xclang"; "-ast-dump-filter=_fs_alias_"; "-fsyntax-only"; tempFile] options.Verbose with
+                | Error error -> Error (firstError error)
+                | Ok output ->
+                    let lines = output.Split([| '\n'; '\r' |], StringSplitOptions.RemoveEmptyEntries)
+                    let sizes = parseEnumProbe (output.Replace(" _fs_alias_", " _fs_enum_"))
+                    batch |> List.fold (fun state (i, f) ->
+                        state |> Result.bind (fun (acc: Map<int, string * EnumRepresentation>) ->
+                            let canonical =
+                                lines |> Array.tryPick (fun line ->
+                                    let marker = $" _fs_alias_{i} '"
+                                    let at = line.IndexOf marker
+                                    if not (line.Contains "VarDecl") || at < 0 then None
+                                    else
+                                        let typeText = line.Substring(at + marker.Length - 1)
+                                        // `'sugared':'canonical'`, or one quoted type already canonical.
+                                        let parts = typeText.Split([| "':'" |], StringSplitOptions.None)
+                                        let last = parts.[parts.Length - 1].TrimStart('\'')
+                                        match last.IndexOf('\'') with
+                                        | -1 -> None
+                                        | close -> Some (last.Substring(0, close)))
+                            match canonical, sizes.TryFind $"_fs_enum_size_{i}", sizes.TryFind $"_fs_enum_sign_{i}" with
+                            | Some c, Some bytes, Some sign when sign = 1 || sign = 2 ->
+                                Ok (acc.Add(i, (c, { Bits = bytes * 8; IsSigned = (sign = 1) })))
+                            | _ -> Error $"clang reported no canonical type and measurement for the result of '{f.Name}'")) (Ok Map.empty)
+            finally
+                try File.Delete tempFile with _ -> ()
+        let indexed = candidates |> List.mapi (fun i (_, f) -> i, f)
+        // The first by-value parameter clang cannot take `sizeof` of: an incomplete type.
+        let incompleteParameter (f: FunctionDecl) =
+            f.Parameters |> List.tryPick (fun (name, t) ->
+                if t.Contains '*' || t.Contains '(' || t.Contains '[' || t.Contains '&' then None
+                else
+                    let tempFile = Path.Combine(tempDir, "_farscape_alias_param_" + Guid.NewGuid().ToString("N") + ".c")
+                    try
+                        File.WriteAllText(tempFile, $"#include \"{Path.GetFullPath options.HeaderFile}\"\nchar _fs_alias_param[sizeof({t})];\n")
+                        match runClang (buildClangArgs options) ["-fsyntax-only"; tempFile] options.Verbose with
+                        | Error reason -> Some (IncompleteParameter (name, t, firstError reason))
+                        | Ok _ -> None
+                    finally
+                        try File.Delete tempFile with _ -> ())
+        let results : Map<int, Result<string * EnumRepresentation, AliasFailure>> =
+            match probe indexed with
+            | Ok facts -> facts |> Map.map (fun _ fact -> Ok fact)
+            | Error _ ->
+                indexed |> List.map (fun (i, f) ->
+                    i, (match probe [(i, f)] with
+                        | Ok facts when facts.ContainsKey i -> Ok facts.[i]
+                        | Ok _ -> Error (ProbeRefused $"clang reported no canonical type and measurement for the result of '{f.Name}'")
+                        | Error reason ->
+                            match incompleteParameter f with
+                            | Some failure -> Error failure
+                            | None -> Error (ProbeRefused $"clang could not evaluate the result type of '{f.Name}' at file scope: {reason}")))
+                |> Map.ofList
+        candidates
+        |> List.mapi (fun i (name, f) -> name, f.Name, results.[i])
+        |> List.groupBy (fun (name, _, _) -> name)
+        |> List.map (fun (name, uses) ->
+            let _, first, firstResult = List.head uses
+            let canonical =
+                match uses |> List.tryPick (fun (_, f, r) -> match r with Error reason -> Some (f, reason) | Ok _ -> None) with
+                | Some (_, reason) -> Error reason
+                | None ->
+                    match uses |> List.map (fun (_, _, r) -> r) |> List.distinct with
+                    | [ single ] -> single
+                    | _ ->
+                        let listed = uses |> List.map (fun (_, f, r) -> match r with Ok (c, m) -> $"'{f}': {c} ({m.Bits}-bit)" | Error _ -> $"'{f}'") |> String.concat ", "
+                        Error (ProbeRefused $"clang gives the results that spell it different canonical types: {listed}")
+            ignore firstResult
+            { Name = name; Function = first; Canonical = canonical })
+
+    // =========================================================================
     // Include Tree Discovery + Macro Documentation Enrichment
     // =========================================================================
 
@@ -1659,6 +2036,8 @@ module CppParser =
         /// through includes outside the library boundary; facts for resolving this unit's
         /// declarations, never declarations of the unit.
         Included: Declaration list
+        /// Clang built-in type aliases this unit's function results spell, read through clang.
+        Aliases: ClangTypeAlias list
     }
 
     /// Parse a C/C++ header file and extract all declarations including macros
@@ -1680,10 +2059,15 @@ module CppParser =
                     let root = JsonValue.Parse(jsonOutput)
                     let targetFile = Path.GetFileName(options.HeaderFile)
 
-                    let declarations, typedefNamedEnums, included = walkAst root targetFile options.IncludeRoot options.Verbose (enrichNonNullAttributes options)
+                    let declarations, typedefNamedTags, included = walkAst root targetFile options.IncludeRoot options.Verbose (enrichNonNullAttributes options)
                     // Included enums are measured in this same unit, with its own enums.
-                    let measured = measureEnums options typedefNamedEnums (declarations @ included)
+                    let measured = measureEnums options typedefNamedTags (declarations @ included)
                     let declarations, included = List.splitAt declarations.Length measured
+                    match anonymousNameCollisions options.HeaderFile (declarations @ included) with
+                    | [] -> ()
+                    | collisions -> raise (AnonymousNameCollision (String.concat " " collisions))
+                    // Anonymous records, and the records enclosing them, are measured in this same unit.
+                    let declarations = measureAnonymousRecords options typedefNamedTags declarations
 
                     if options.Verbose then
                         printfn "[CppParser] Extracted %d AST declarations" (List.length declarations)
@@ -1722,13 +2106,15 @@ module CppParser =
                         Declarations = declarations
                         Macros = macros
                         Included = included
+                        Aliases = measureResultAliases options declarations included
                     }
-                with ex ->
-                    Error $"Failed to parse clang output: {ex.Message}"
+                with
+                | AnonymousNameCollision reason -> Error reason
+                | ex -> Error $"Failed to parse clang output: {ex.Message}"
 
     /// Parse a C/C++ header as one translation unit: its declarations (with macros), and the
     /// typedefs and enums its parse reaches through includes outside the library boundary.
-    let parseHeaderUnit (options: HeaderParserOptions) : Result<Declaration list * Declaration list, string> =
+    let parseHeaderUnit (options: HeaderParserOptions) : Result<Declaration list * Declaration list * ClangTypeAlias list, string> =
         match parseHeaderFull options with
         | Error err -> Error err
         | Ok result ->
@@ -1736,7 +2122,7 @@ module CppParser =
             if allDecls.IsEmpty then
                 Error $"Parse succeeded but no declarations found in {Path.GetFileName(options.HeaderFile)}."
             else
-                Ok (allDecls, result.Included)
+                Ok (allDecls, result.Included, result.Aliases)
 
     /// Parse a C/C++ header file and extract declarations (backward compatible)
     let parseHeader (options: HeaderParserOptions) : Result<Declaration list, string> =

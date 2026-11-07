@@ -39,10 +39,10 @@ let mkEnumValWithDoc name value doc : CppParser.EnumValue =
     { Name = name; Value = value; Documentation = Some doc }
 
 let mkStruct name fields doc : CppParser.StructDecl =
-    { Name = name; Fields = fields; Documentation = doc; IsUnion = false; Attributes = [] }
+    { Name = name; Fields = fields; Documentation = doc; IsUnion = false; Attributes = []; Anonymous = None; Measured = None }
 
 let mkStructSimple name : CppParser.StructDecl =
-    { Name = name; Fields = []; Documentation = None; IsUnion = false; Attributes = [] }
+    { Name = name; Fields = []; Documentation = None; IsUnion = false; Attributes = []; Anonymous = None; Measured = None }
 
 let mkField name typ : CppParser.FieldDecl =
     { Name = name; Type = typ; IsConst = false; IsVolatile = false; IsArray = false; ArraySize = None
@@ -135,6 +135,14 @@ let fixturePath (relative: string) =
 let rec withPilotSections (headers: string list) (library: string list) (options: string list) (functions: string list)
                           (ns: string list) (trailing: string list)
                           (check: Result<BindingGenerator.GenerationResult, string> -> string -> unit) =
+    withPilotGenerating (fun project -> BindingGenerator.generateFromProject project false false Types.LP64)
+        headers library options functions ns trailing check
+
+/// `withPilotSections` generating through `generate` (the written pilot's path to a result).
+and withPilotGenerating (generate: string -> Result<BindingGenerator.GenerationResult, string>)
+                        (headers: string list) (library: string list) (options: string list) (functions: string list)
+                        (ns: string list) (trailing: string list)
+                        (check: Result<BindingGenerator.GenerationResult, string> -> string -> unit) =
     let dir = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "artifacts", "pilot-fixture-tests", System.Guid.NewGuid().ToString("N")))
     let output = System.IO.Path.Combine(dir, "output")
     System.IO.Directory.CreateDirectory(output) |> ignore
@@ -148,7 +156,7 @@ let rec withPilotSections (headers: string list) (library: string list) (options
               "functions = [" + quoted functions + "]" ] @ ns @ trailing
         let project = System.IO.Path.Combine(dir, "fixture.pilot.toml")
         System.IO.File.WriteAllText(project, String.concat "\n" pilot)
-        check (BindingGenerator.generateFromProject project false false Types.LP64) output
+        check (generate project) output
     finally
         System.IO.Directory.Delete(dir, true)
 
@@ -156,3 +164,22 @@ let rec withPilotSections (headers: string list) (library: string list) (options
 and withPilot (headers: string list) (options: string list) (functions: string list)
               (check: Result<BindingGenerator.GenerationResult, string> -> string -> unit) =
     withPilotSections headers [] options functions [] [] check
+
+/// Clang's own answer, independent of its record layout dump: compile `header` with each
+/// `assertion` as a `_Static_assert` (`sizeof`, `_Alignof`, `offsetof`) and fail with clang's
+/// diagnostics unless every one holds.
+let clangConfirms (header: string) (assertions: string list) =
+    let probe = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "farscape-confirm-" + System.Guid.NewGuid().ToString("N") + ".c")
+    try
+        let body = assertions |> List.map (fun a -> $"_Static_assert({a}, \"{a.Replace('\"', '\'')}\");") |> String.concat "\n"
+        System.IO.File.WriteAllText(probe, $"#include <stddef.h>\n#include \"{header}\"\n{body}\n")
+        let info = System.Diagnostics.ProcessStartInfo("clang", $"-fsyntax-only {probe}")
+        info.RedirectStandardError <- true
+        info.RedirectStandardOutput <- true
+        use proc = System.Diagnostics.Process.Start info
+        let errors = proc.StandardError.ReadToEnd()
+        proc.StandardOutput.ReadToEnd() |> ignore
+        proc.WaitForExit()
+        if proc.ExitCode <> 0 then failwithf "clang does not confirm the layout of %s: %s" header errors
+    finally
+        try System.IO.File.Delete probe with _ -> ()

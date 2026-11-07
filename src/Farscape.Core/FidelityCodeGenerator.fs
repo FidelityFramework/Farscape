@@ -502,8 +502,40 @@ module FidelityCodeGenerator =
             failwith $"{Diagnostics.GirTypeUndeclared}: {where}: C type '{name}' is declared by no pilot unit; a GIR spelling cannot supply its representation."
 
     /// Resolve a C type under the context.
+    /// The record a by-value C type names, through its unit's typedef chain: a C struct or
+    /// union the pilot defines (its fields are declared), cited by the name of its layout
+    /// module, or a C++ class. A tag spelling (`struct X`) is a record name; a bare name is a
+    /// typedef when the unit declares one, else a record name. None when the type reaches
+    /// neither: a record only forward-declared, or defined outside the pilot's declarations.
+    let byValueRecordOf (ctx: GenerationContext) (cType: string) : (string * string) option =
+        let rec follow (visited: Set<string>) (spelling: string) =
+            if spelling.Contains '*' || spelling.Contains '(' || spelling.Contains '&' || spelling.Contains '[' then None
+            else
+            let name = TypeMapper.cleanTypeName spelling
+            let bare = spelling.Replace("const ", "").Replace("volatile ", "").Trim()
+            let record () =
+                match ctx.Structs.TryFind name with
+                | Some s when not s.Fields.IsEmpty -> Some (name, if s.IsUnion then "union" else "struct")
+                | _ when ctx.KnownClasses.ContainsKey name -> Some (name, "C++ class")
+                | _ -> None
+            if bare.StartsWith "struct " || bare.StartsWith "union " || bare.StartsWith "class " then record ()
+            else
+                match ctx.TypedefMap.TryFind name with
+                | Some underlying when not (visited.Contains name) -> follow (visited.Add name) underlying
+                | _ -> record ()
+        follow Set.empty cType
+
+    /// A C type under the context. A by-value spelling that names a typedef of a defined C
+    /// struct or union (`typedef struct __pthread_internal_list {…} __pthread_list_t`, #172)
+    /// resolves to that record, by the name of its layout module, so fields, signatures and
+    /// descriptors all see the record the typedef stands for.
     let private resolveIn (ctx: GenerationContext) (cType: string) : ResolvedCType =
-        resolveCType ctx.TypedefMap ctx.DataModel ctx.OpaqueHandles ctx.Delegates ctx.Enums cType
+        match resolveCType ctx.TypedefMap ctx.DataModel ctx.OpaqueHandles ctx.Delegates ctx.Enums cType with
+        | Unresolved name ->
+            match byValueRecordOf ctx cType with
+            | Some (record, ("struct" | "union")) -> Unresolved record
+            | _ -> Unresolved name
+        | resolved -> resolved
 
     // =========================================================================
     // Declaration Generation Helpers (produce FsDecl, not strings)
@@ -568,19 +600,43 @@ module FidelityCodeGenerator =
     let private quoteString (s: string) =
         "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
 
-    /// The `TypeRef` source and the provenance note of one parameter or return.
-    let private abiClaim (ctx: GenerationContext) (cType: string) : string * string =
+    /// How a descriptor claims a parameter's or result's type: its representation, a by-value
+    /// enum without a clang measurement (FS9103), a by-value record cited by name, or a type
+    /// that resolves through no typedef, record or profile entry (FS9115). A descriptor never
+    /// carries an unknown width.
+    type DescriptorClaim =
+        | Represented of TypeMapper.AbiRepr
+        | UnmeasuredEnum
+        | RecordByValue of name: string * kind: string
+        | ResolvesNowhere
+
+    let descriptorClaimOf (ctx: GenerationContext) (cType: string) : DescriptorClaim =
         let resolved = resolveIn ctx cType
         match abiReprOf ctx.DataModel cType resolved with
-        | Some r -> DescriptorGenerator.typeRefSource r, DescriptorGenerator.widthProvenance ctx.DataModel r
+        | Some r -> Represented r
         | None ->
-            let name = match resolved with Unresolved n -> n | _ -> cType
             // A by-value enum never crosses with an unknown width: measured or refused.
             let isEnum (text: string) = text.Replace("const ", "").Replace("volatile ", "").Trim().StartsWith "enum "
             let chain = ctx.TypedefMap |> Map.tryFind (TypeMapper.cleanTypeName cType) |> Option.defaultValue cType
-            if not (cType.Contains '*') && (isEnum cType || (isEnum chain && not (chain.Contains '*'))) then
-                failwith $"{Diagnostics.EnumUnmeasured}: by-value enum type '{cType}' has no clang measurement in its declaring unit; a descriptor cannot carry an unknown width."
-            $"Named {quoteString name}", $"width unknown: no representation for {name}"
+            if not (cType.Contains '*') && (isEnum cType || (isEnum chain && not (chain.Contains '*'))) then UnmeasuredEnum
+            else
+                match byValueRecordOf ctx cType with
+                | Some (name, kind) -> RecordByValue (name, kind)
+                | None -> ResolvesNowhere
+
+    /// The `TypeRef` source and the provenance note of one parameter or return. The last
+    /// guard before emission: the pilot is refused before any binding is written
+    /// (`BindingGenerator.requireRepresentedDescriptorTypes`) for the same claims, there
+    /// naming the declaration and its unit.
+    let private abiClaim (ctx: GenerationContext) (cType: string) : string * string =
+        match descriptorClaimOf ctx cType with
+        | Represented r -> DescriptorGenerator.typeRefSource r, DescriptorGenerator.widthProvenance ctx.DataModel r
+        | UnmeasuredEnum ->
+            failwith $"{Diagnostics.EnumUnmeasured}: by-value enum type '{cType}' has no clang measurement in its declaring unit; a descriptor cannot carry an unknown width."
+        | RecordByValue (name, "C++ class") -> $"Named {quoteString name}", $"record: C++ class {name}, no width of its own"
+        | RecordByValue (name, kind) -> $"Named {quoteString name}", $"record: {kind} {name}, laid out by {name}.Descriptor"
+        | ResolvesNowhere ->
+            failwith $"{Diagnostics.ByValueTypeUnresolved}: by-value type '{cType}' resolves through no typedef, record or profile entry of its declaring unit; a descriptor cannot carry an unknown width."
 
     /// The Layer 2 `Expr<FunctionDescriptor>` quotation beside an extern (platform-bindings.md,
     /// "Binding Libraries"): the C name, each parameter's and the return's ABI representation
@@ -667,6 +723,28 @@ module FidelityCodeGenerator =
                                 "CallingConvention", Identifier "CDecl"
                                 "OwnershipTransfer", Identifier "Undeclared" ] ])) ]
                 index, recordName, declarations)) |> List.choose id
+
+    /// Every type a function's descriptors claim, with the site that claims it: each parameter
+    /// (the pointee a reference projection passes) and the result of its `FunctionDescriptor`,
+    /// and each argument and result of the `CallbackDescriptor` of every callback parameter.
+    /// These are all the `abiClaim` sites a claim can fail at: a callback invocation entry
+    /// admits only ordered integers and void before it claims.
+    let descriptorTypeSites (ctx: GenerationContext) (func: CppParser.FunctionDecl) : (string * string) list =
+        let ctx = inFunctionUnit ctx func
+        let parameters =
+            func.Parameters |> List.mapi (fun index (name, cType) ->
+                let reference, _ = referencePassing (ctx.Bindings |> Map.tryFind func.Name) index cType
+                let element = ctx.Bindings |> Map.tryFind func.Name |> Option.bind (fun b -> List.tryItem index b.ReferenceElements) |> Option.filter ((<>) "")
+                let represented = if reference then element |> Option.defaultWith (fun () -> cType.Substring(0, cType.LastIndexOf('*')).Trim()) else cType
+                $"parameter '{name}'", represented)
+        let callbacks =
+            func.Parameters |> List.collect (fun (name, cType) ->
+                match resolveCallbackNativeSignature ctx cType with
+                | Some (ret, args) ->
+                    (args |> List.map (fun (arg, t) -> $"argument '{arg}' of callback parameter '{name}'", t))
+                    @ [ $"result of callback parameter '{name}'", ret ]
+                | None -> [])
+        parameters @ [ "result", func.ReturnType ] @ callbacks
 
     /// Render a supplied result promise against the exact emitted declaration.
     /// ABI widths and placeholder bodies provide no behavioral contract.
@@ -1142,7 +1220,7 @@ module FidelityCodeGenerator =
                 let storage : CppParser.FieldDecl =
                     { Name = "Storage"; Type = "unsigned char"; IsConst = false; IsVolatile = false
                       IsArray = true; ArraySize = Some size; IsBitfield = false; BitWidth = None; Attributes = [] }
-                { s with Fields = [storage] }, ctx.StructLayouts.Add(s.Name, { layout with FieldOffsetsBits = [0] })
+                { s with Fields = [storage]; Measured = None }, ctx.StructLayouts.Add(s.Name, { layout with FieldOffsetsBits = [0] })
             | _ -> s, ctx.StructLayouts
         // Field spellings resolve through the declaring unit's own typedef chain.
         let unitCtx = inUnitOf "struct" s.Name ctx

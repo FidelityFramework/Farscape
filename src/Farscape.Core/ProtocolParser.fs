@@ -255,6 +255,8 @@ module ProtocolParser =
                 Documentation = Some $"Event listener for {iface.Name}"
                 IsUnion = false
                 Attributes = []
+                Anonymous = None
+                Measured = None
             })
 
     /// The wire representation of a protocol enum, read from the protocol's own declarations.

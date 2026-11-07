@@ -1546,10 +1546,12 @@ let ``ABI critical layouts are measured in the declaring header's translation un
         System.IO.File.WriteAllText(project, pilot)
         let expectedRefusal =
             match shape with
+            // Divergent definitions are refused by record agreement (#161) before any layout is
+            // measured, whether or not the record is ABI-critical.
             | "conflict" | "typedef-conflict" ->
-                Some (sprintf "Binding generation failed: ABI-critical storage 'X' is declared differently by '%s' and '%s'; one declaration per pilot is required." a b)
+                Some (sprintf "Binding generation failed: FS9116: record 'X' is defined differently by the pilot's headers: '%s' (struct X { int a; int b }); '%s' (struct X { long a; long b }); first difference at field 1 'a': 'int a' in '%s', 'long a' in '%s'. One definition per pilot is required. No bindings were written." a b a b)
             | "nested-conflict" ->
-                Some (sprintf "Binding generation failed: ABI-critical storage 'X' is measured in '%s', but its nested record 'Inner' is declared differently by '%s' and that header; one declaration per pilot is required." b a)
+                Some (sprintf "Binding generation failed: FS9116: record 'Inner' is defined differently by the pilot's headers: '%s' (struct Inner { int a; int b }); '%s' (struct Inner { long a; long b }); first difference at field 1 'a': 'int a' in '%s', 'long a' in '%s'. One definition per pilot is required. No bindings were written." a b a b)
             | "pack-conflict" ->
                 Some (sprintf "Binding generation failed: ABI-critical storage 'X' measures differently in '%s' (5 bytes, alignment 1) and '%s' (6 bytes, alignment 2); one effective layout per pilot is required." a b)
             | "field-typedef-conflict" ->
@@ -1847,3 +1849,31 @@ let ``a descriptor never carries an unknown width for a by-value enum`` () =
     let context = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
     let error = Assert.ThrowsAny<exn>(fun () -> FidelityCodeGenerator.generateModule context Set.empty declarations "Test.Ghost" "c" "ghost" [] |> ignore)
     Assert.Equal("FS9103: by-value enum type 'enum fx_ghost' has no clang measurement in its declaring unit; a descriptor cannot carry an unknown width.", error.Message)
+
+// ═══════════════════════════════════════════════════════════════════
+// No descriptor carries an unknown width (issue #162)
+// ═══════════════════════════════════════════════════════════════════
+
+[<Fact>]
+let ``a descriptor never carries an unknown width for a by-value type that resolves nowhere`` () =
+    // fx_nowhere_t names no typedef, record or profile row: the descriptor is refused.
+    let declarations = [ CppParser.Declaration.Function (mkFunc "fx_take_nowhere" "int" ["value", "fx_nowhere_t"]) ]
+    let context = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
+    let error = Assert.ThrowsAny<exn>(fun () -> FidelityCodeGenerator.generateModule context Set.empty declarations "Test.Nowhere" "c" "nowhere" [] |> ignore)
+    Assert.Equal("FS9115: by-value type 'fx_nowhere_t' resolves through no typedef, record or profile entry of its declaring unit; a descriptor cannot carry an unknown width.", error.Message)
+
+[<Fact>]
+let ``a by-value record is claimed by the record a typedef chain reaches`` () =
+    let point = mkStruct "fx_point" [mkField "x" "int"; mkField "y" "int"] None
+    let declarations =
+        [ CppParser.Declaration.Struct point
+          CppParser.Declaration.Struct (mkStructSimple "fx_forward")
+          CppParser.Declaration.Typedef (mkTypedef "fx_point_t" "struct fx_point")
+          CppParser.Declaration.Typedef (mkTypedef "fx_alias_t" "fx_point_t") ]
+    let context = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
+    let claim = FidelityCodeGenerator.descriptorClaimOf context
+    Assert.Equal(FidelityCodeGenerator.RecordByValue ("fx_point", "struct"), claim "struct fx_point")
+    Assert.Equal(FidelityCodeGenerator.RecordByValue ("fx_point", "struct"), claim "const fx_alias_t")
+    // A record only forward-declared has no layout to cite.
+    Assert.Equal(FidelityCodeGenerator.ResolvesNowhere, claim "struct fx_forward")
+    Assert.Equal(FidelityCodeGenerator.ResolvesNowhere, claim "fx_missing_t")
