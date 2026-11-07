@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Wayland enum entry values in every form the message definition language gives (#160):
+     decimal, 0x hexadecimal and 0-prefixed octal, each optionally negated by `-` as the C
+     wayland-scanner emits negates it, up to the signed 64-bit carrier's bounds. -->
+<protocol name="fx_values">
+  <interface name="fx_shape" version="1">
+    <enum name="kind">
+      <entry name="zero" value="0"/>
+      <entry name="one" value="1"/>
+      <entry name="minus_one" value="-1"/>
+      <entry name="hex_zero" value="0x0"/>
+      <entry name="upper_hex" value="0X1F"/>
+      <entry name="fourcc" value="0x20203843"/>
+      <entry name="uint32_max" value="0xffffffff"/>
+      <entry name="int64_max_hex" value="0x7fffffffffffffff"/>
+      <entry name="int64_max" value="9223372036854775807"/>
+      <entry name="octal_eight" value="010"/>
+      <entry name="octal_zero" value="00"/>
+      <entry name="octal_mode" value="0755"/>
+      <entry name="int64_max_octal" value="0777777777777777777777"/>
+      <entry name="neg_octal" value="-010"/>
+      <entry name="neg_hex" value="-0x1"/>
+      <entry name="neg_zero" value="-0"/>
+      <entry name="neg_int_hex" value="-0x7fffffff"/>
+      <entry name="neg_long_hex" value="-0x100000000"/>
+      <entry name="min_decimal" value="-9223372036854775807"/>
+      <entry name="min_hex" value="-0x7fffffffffffffff"/>
+      <entry name="min_octal" value="-0777777777777777777777"/>
+    </enum>
+    <request name="set">
+      <arg name="kind" type="int" enum="kind"/>
+    </request>
+  </interface>
+</protocol>

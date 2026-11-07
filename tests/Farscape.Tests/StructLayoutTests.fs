@@ -259,7 +259,7 @@ module GeneratorDispatch =
         let origin : CppParser.AnonymousRecordOrigin = { Parent = "P"; Field = "halves"; Location = "p.h:3:5"; Member = false }
         let halves = { mkStruct "P_halves" [mkField "low" "int"; mkField "high" "int"] None with Anonymous = Some origin }
         let source = attributeLayoutSource [halves] Map.empty
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source halves |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.structDecls source halves |> ignore)
         Assert.Equal("FS9113: anonymous record 'P_halves' (field 'halves' of 'P', declared at p.h:3:5) has no clang-measured layout in its declaring unit; its layout is never computed from its declared fields.", error.Message)
         // With the measurement its declaring unit's parse recorded, it is emitted at clang's offsets.
         let measured = { halves with Measured = Some (mkLayout "P_halves" 64 32 [0; 32]) }

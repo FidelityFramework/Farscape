@@ -12,9 +12,14 @@ module PkgConfig =
 
     /// A pkg-config module name: letters, digits and `_ . + -`, not starting with `-`
     /// (`gtk+-3.0`, `webkit2gtk-4.1`). Anything else is refused (FS9125).
-    let moduleNameRefusal (name: string) : string option =
+    /// A module name and pkg-config's output are command-line and tool input, not header
+    /// declarations, so their refusals have no source position (#184).
+    let moduleNameRefusal (name: string) : Diagnostics.Diagnostic option =
         if Text.RegularExpressions.Regex.IsMatch(name, @"\A[A-Za-z0-9_][A-Za-z0-9_.+\-]*\z") then None
-        else Some $"{Diagnostics.PkgConfigModuleMalformed}: pkg-config module name '{name}' is not a module name (letters, digits and _ . + -, not starting with -); it reaches pkg-config as one argument and carries no option."
+        else
+            Some (Diagnostics.diagnostic Diagnostics.PkgConfigModuleMalformed
+                    $"pkg-config module name '{name}' is not a module name (letters, digits and _ . + -, not starting with -); it reaches pkg-config as one argument and carries no option."
+                    (Diagnostics.Located.Unknown "a pkg-config module name is command-line input, not a header declaration"))
 
     /// The words of pkg-config output under POSIX shell quoting, without any expansion: blanks
     /// separate words, a backslash escapes the next character (pkg-config escapes a space in a
@@ -73,9 +78,11 @@ module PkgConfig =
     /// The include paths and defines of one module's `--cflags` output, in order, or the refusal
     /// of the first word that is neither (FS9126), of a malformed define (FS9124), or of output
     /// that does not split into words (FS9126).
-    let parseCflags (moduleName: string) (output: string) : Result<string list * string list, string> =
+    let parseCflagsDiagnosed (moduleName: string) (output: string) : Result<string list * string list, Diagnostics.Diagnostic> =
         let refuse (detail: string) =
-            Error $"{Diagnostics.PkgConfigFlagRefused}: pkg-config --cflags for '{moduleName}' {detail}; a pilot carries only include paths and defines, so the output is refused rather than dropped or reinterpreted."
+            Error (Diagnostics.diagnostic Diagnostics.PkgConfigFlagRefused
+                     $"pkg-config --cflags for '{moduleName}' {detail}; a pilot carries only include paths and defines, so the output is refused rather than dropped or reinterpreted."
+                     (Diagnostics.Located.Unknown $"pkg-config --cflags output for '{moduleName}' is tool output, not a header declaration"))
         match words output with
         | None -> refuse $"ends inside a quotation or an escape: '{output.Trim()}'"
         | Some tokens ->
@@ -91,11 +98,15 @@ module PkgConfig =
                 | token :: _ -> refuse $"gives '{token}', which is not -I<path> or -D<define>"
             classify [] [] tokens
 
+    /// `parseCflagsDiagnosed`, reporting a refusal as its text.
+    let parseCflags (moduleName: string) (output: string) : Result<string list * string list, string> =
+        parseCflagsDiagnosed moduleName output |> Result.mapError Diagnostics.render
+
     /// Run `pkg-config --cflags <moduleName>` with `environment` added to its own, and read its
-    /// include paths and defines.
-    let run (environment: (string * string) list) (moduleName: string) : Result<string list * string list, string> =
+    /// include paths and defines. A failure carries its diagnostic when it is an FS91xx refusal.
+    let runDiagnosed (environment: (string * string) list) (moduleName: string) : Result<string list * string list, Diagnostics.Refusal> =
         match moduleNameRefusal moduleName with
-        | Some refusal -> Error refusal
+        | Some refusal -> Error (Diagnostics.refusalOf refusal)
         | None ->
             try
                 let info = ProcessLaunch.startInfo "pkg-config" ["--cflags"; moduleName]
@@ -104,10 +115,17 @@ module PkgConfig =
                 let output = proc.StandardOutput.ReadToEnd()
                 let stderr = proc.StandardError.ReadToEnd().Trim()
                 proc.WaitForExit()
-                if proc.ExitCode <> 0 then Error $"pkg-config failed for '{moduleName}': {stderr}"
-                else parseCflags moduleName output
+                if proc.ExitCode <> 0 then Error (Diagnostics.uncoded $"pkg-config failed for '{moduleName}': {stderr}")
+                else parseCflagsDiagnosed moduleName output |> Result.mapError Diagnostics.refusalOf
             with ex ->
-                Error $"Failed to run pkg-config: {ex.Message}"
+                Error (Diagnostics.uncoded $"Failed to run pkg-config: {ex.Message}")
+
+    /// `runDiagnosed`, reporting a failure as its text.
+    let run (environment: (string * string) list) (moduleName: string) : Result<string list * string list, string> =
+        runDiagnosed environment moduleName |> Result.mapError _.Text
+
+    /// `runDiagnosed` with pkg-config's own environment.
+    let resolveDiagnosed (moduleName: string) = runDiagnosed [] moduleName
 
     /// `run` with pkg-config's own environment.
     let resolve (moduleName: string) = run [] moduleName

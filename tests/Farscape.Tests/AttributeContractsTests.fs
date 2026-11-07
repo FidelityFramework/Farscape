@@ -189,7 +189,7 @@ let ``a may_alias record without a clang measurement is refused, not laid out fr
           Shape = function
             | "int" -> DescriptorGenerator.ScalarField { Family = TypeMapper.Signed; Bits = 32; Stratum = TypeMapper.Declared; CType = "int" }
             | spelling -> DescriptorGenerator.UnknownField spelling }
-    let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source record |> ignore)
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.structDecls source record |> ignore)
     Assert.Equal(
         "FS9121: struct 'fx_addr' carries layout-neutral attribute 'MayAliasAttr', but clang has no measurement of it in its declaring unit, which the contract is confirmed against together with clang's measurement of its copy without the attribute; the contract that 'MayAliasAttr' moves no byte is unconfirmed.",
         error.Message)
@@ -207,7 +207,7 @@ let ``a may_alias record clang measures unlike its copy without the attribute is
           Shape = function
             | "int" -> DescriptorGenerator.ScalarField { Family = TypeMapper.Signed; Bits = 32; Stratum = TypeMapper.Declared; CType = "int" }
             | spelling -> DescriptorGenerator.UnknownField spelling }
-    let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source record |> ignore)
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.structDecls source record |> ignore)
     Assert.Equal(
         "FS9121: struct 'fx_addr' carries layout-neutral attribute 'MayAliasAttr', but clang measures it at 8 bytes, alignment 4, offsets 0, 4 and its copy without the attribute at 16 bytes, alignment 8, offsets 0, 8; the contract that 'MayAliasAttr' moves no byte is unconfirmed.",
         error.Message)
@@ -232,7 +232,7 @@ let ``a may_alias record whose two clang measurements differ only in a field off
             Measured = Some (mkLayout "fx_addr" 64 32 [0; 32])
             Unattributed = Some (CppParser.UnattributedMeasured (mkLayout "fx_addr" 64 32 [0; 0])) }
     let declarations = [ CppParser.Declaration.Struct record ]
-    let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore)
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore)
     Assert.Equal(
         "FS9121: struct 'fx_addr' carries layout-neutral attribute 'MayAliasAttr', but clang measures it at 8 bytes, alignment 4, offsets 0, 4 and its copy without the attribute at 8 bytes, alignment 4, offsets 0, 0; the contract that 'MayAliasAttr' moves no byte is unconfirmed.",
         error.Message)
@@ -246,7 +246,7 @@ let ``a may_alias record whose two clang measurements differ only in alignment i
             Measured = Some (mkLayout "fx_addr" 64 32 [0; 32])
             Unattributed = Some (CppParser.UnattributedMeasured (mkLayout "fx_addr" 64 64 [0; 32])) }
     let declarations = [ CppParser.Declaration.Struct record ]
-    let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore)
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore)
     Assert.Equal(
         "FS9121: struct 'fx_addr' carries layout-neutral attribute 'MayAliasAttr', but clang measures it at 8 bytes, alignment 4, offsets 0, 4 and its copy without the attribute at 8 bytes, alignment 8, offsets 0, 4; the contract that 'MayAliasAttr' moves no byte is unconfirmed.",
         error.Message)
@@ -260,7 +260,7 @@ let ``a may_alias record whose two clang measurements differ only in size is ref
             Measured = Some (mkLayout "fx_addr" 64 32 [0; 32])
             Unattributed = Some (CppParser.UnattributedMeasured (mkLayout "fx_addr" 96 32 [0; 32])) }
     let declarations = [ CppParser.Declaration.Struct record ]
-    let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore)
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore)
     Assert.Equal(
         "FS9121: struct 'fx_addr' carries layout-neutral attribute 'MayAliasAttr', but clang measures it at 8 bytes, alignment 4, offsets 0, 4 and its copy without the attribute at 12 bytes, alignment 4, offsets 0, 4; the contract that 'MayAliasAttr' moves no byte is unconfirmed.",
         error.Message)

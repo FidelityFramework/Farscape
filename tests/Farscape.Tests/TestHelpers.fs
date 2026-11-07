@@ -2,19 +2,28 @@ module TestHelpers
 
 open Farscape.Core
 
+// ─── Diagnostics helpers ───
+
+/// The provenance of a declaration a test constructs: no clang parse located it.
+let constructed = Diagnostics.unlocated "constructed by a test, without a clang parse"
+
+/// A refusal-carrying result read as the text Farscape prints for it (#184).
+let refusalText (result: Result<'a, Diagnostics.Refusal>) : Result<'a, string> =
+    result |> Result.mapError (fun r -> r.Text)
+
 // ─── Function declaration helpers ───
 
 let mkFunc name retType parms : CppParser.FunctionDecl =
     { Name = name; ReturnType = retType; Parameters = parms; Documentation = None
-      IsVirtual = false; IsStatic = false; IsInline = false; Attributes = []; MangledName = None }
+      IsVirtual = false; IsStatic = false; IsInline = false; Attributes = []; MangledName = None; Location = constructed }
 
 let mkFuncWithAttrs name retType parms attrs : CppParser.FunctionDecl =
     { Name = name; ReturnType = retType; Parameters = parms; Documentation = None
-      IsVirtual = false; IsStatic = false; IsInline = false; Attributes = attrs; MangledName = None }
+      IsVirtual = false; IsStatic = false; IsInline = false; Attributes = attrs; MangledName = None; Location = constructed }
 
 let mkFuncWithDoc name retType parms doc : CppParser.FunctionDecl =
     { Name = name; ReturnType = retType; Parameters = parms; Documentation = doc
-      IsVirtual = false; IsStatic = false; IsInline = false; Attributes = []; MangledName = None }
+      IsVirtual = false; IsStatic = false; IsInline = false; Attributes = []; MangledName = None; Location = constructed }
 
 // ─── Typedef / Enum / Struct helpers ───
 
@@ -22,7 +31,7 @@ let mkTypedef name underlying : CppParser.TypedefInfo =
     { Name = name; UnderlyingType = underlying; Documentation = None; Attributes = [] }
 
 let mkEnum name values doc : CppParser.EnumDecl =
-    { Name = name; Values = values; Documentation = doc; UnderlyingType = None; Representation = CppParser.ClangUnmeasured }
+    { Name = name; Values = values; Documentation = doc; UnderlyingType = None; Representation = CppParser.ClangUnmeasured; Location = constructed }
 
 /// A synthetic C enum carrying a clang measurement, for tests that are not about measurement;
 /// it cannot evidence the production measurement path (`CppParser.measureEnums`).
@@ -30,7 +39,7 @@ let mkMeasuredEnum name values bits isSigned : CppParser.EnumDecl =
     { mkEnum name values None with Representation = CppParser.ClangMeasured { Bits = bits; IsSigned = isSigned } }
 
 let mkEnumSimple name : CppParser.EnumDecl =
-    { Name = name; Values = []; Documentation = None; UnderlyingType = None; Representation = CppParser.ClangUnmeasured }
+    { Name = name; Values = []; Documentation = None; UnderlyingType = None; Representation = CppParser.ClangUnmeasured; Location = constructed }
 
 let mkEnumVal name value : CppParser.EnumValue =
     { Name = name; Value = value; Documentation = None }
@@ -40,11 +49,11 @@ let mkEnumValWithDoc name value doc : CppParser.EnumValue =
 
 let mkStruct name fields doc : CppParser.StructDecl =
     { Name = name; Fields = fields; Documentation = doc; IsUnion = false; Attributes = []; Anonymous = None; Measured = None; Unattributed = None
-      UnnamedBitFields = []; TypedefAttributes = [] }
+      UnnamedBitFields = []; TypedefAttributes = []; Location = constructed }
 
 let mkStructSimple name : CppParser.StructDecl =
     { Name = name; Fields = []; Documentation = None; IsUnion = false; Attributes = []; Anonymous = None; Measured = None; Unattributed = None
-      UnnamedBitFields = []; TypedefAttributes = [] }
+      UnnamedBitFields = []; TypedefAttributes = []; Location = constructed }
 
 let mkField name typ : CppParser.FieldDecl =
     { Name = name; Type = typ; IsConst = false; IsVolatile = false; IsArray = false; ArraySize = None

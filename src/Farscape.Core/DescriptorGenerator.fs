@@ -204,10 +204,10 @@ module DescriptorGenerator =
         // record without them; the descriptor of `T` would carry the record's layout (#175).
         match s.TypedefAttributes |> List.tryFind (fun a -> a.Site = CppParser.RecordName) with
         | Some a ->
-            invalidOp $"{Diagnostics.TypedefNamingAttribute}: {kind} '{s.Name}' is named by typedef '{a.Typedef}', which carries {classified a.Attribute.Kind}; clang's record layout dump measures the record, not the typedef that names it, so '{s.Name}' has no measured layout as the type its name spells."
+            Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.TypedefNamingAttribute $"{kind} '{s.Name}' is named by typedef '{a.Typedef}', which carries {classified a.Attribute.Kind}; clang's record layout dump measures the record, not the typedef that names it, so '{s.Name}' has no measured layout as the type its name spells." s.Location.Location)
         | None -> ()
         let unconfirmed detail =
-            invalidOp $"{Diagnostics.LayoutNeutralUnconfirmed}: {kind} '{s.Name}' carries layout-neutral attribute '{neutralKinds}', {detail}; the contract that '{neutralKinds}' moves no byte is unconfirmed."
+            Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.LayoutNeutralUnconfirmed $"{kind} '{s.Name}' carries layout-neutral attribute '{neutralKinds}', {detail}; the contract that '{neutralKinds}' moves no byte is unconfirmed." s.Location.Location)
         let layoutText (sizeBits: int) (alignmentBits: int) (offsetsBits: int list) =
             $"{sizeBits / 8} bytes, alignment {alignmentBits / 8}, offsets {offsetsText (offsetsBits |> List.map (fun bits -> bits / 8))}"
         let confirmNeutral (measured: CppParser.StructLayoutInfo) =
@@ -237,7 +237,7 @@ module DescriptorGenerator =
         match measuredLayout with
         | None when s.Anonymous.IsSome ->
             let origin = s.Anonymous.Value
-            invalidOp $"{Diagnostics.AnonymousRecordUnmeasured}: anonymous record '{s.Name}' ({CppParser.describeOrigin origin}, declared at {origin.Location}) has no clang-measured layout in its declaring unit; its layout is never computed from its declared fields."
+            Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.AnonymousRecordUnmeasured $"anonymous record '{s.Name}' ({CppParser.describeOrigin origin}, declared at {origin.Location}) has no clang-measured layout in its declaring unit; its layout is never computed from its declared fields." s.Location.Location)
         | Some measured ->
             let size, alignment = validateMeasuredLayout s measured
             let offsets =
@@ -270,13 +270,13 @@ module DescriptorGenerator =
             // to its type's boundary (#176); only clang's layout places either.
             match s.UnnamedBitFields with
             | b :: _ ->
-                invalidOp $"{Diagnostics.UnnamedBitFieldUnmeasured}: {kind} '{s.Name}' carries {CppParser.describeUnnamedBitField b}, which moves bytes natural alignment of the declared field types cannot place, and clang has no measurement of '{s.Name}' in its declaring unit; an unnamed bit-field is never dropped from its record."
+                Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.UnnamedBitFieldUnmeasured $"{kind} '{s.Name}' carries {CppParser.describeUnnamedBitField b}, which moves bytes natural alignment of the declared field types cannot place, and clang has no measurement of '{s.Name}' in its declaring unit; an unnamed bit-field is never dropped from its record." s.Location.Location)
             | [] -> ()
             // A typedef attribute a field's type reaches (`aligned(8)` on the field's typedef)
             // moves the field; only clang's layout places it (#175).
             match s.TypedefAttributes |> List.tryPick (fun a -> match a.Site with CppParser.FieldType field -> Some (field, a) | CppParser.RecordName -> None) with
             | Some (field, a) ->
-                invalidOp $"{Diagnostics.TypedefAttributeUnmeasured}: {kind} '{s.Name}' field '{field}' has a type reaching typedef '{a.Typedef}', which carries {classified a.Attribute.Kind}, and clang has no measurement of '{s.Name}' in its declaring unit; natural alignment of the declared field types never stands in for the typedef's attribute."
+                Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.TypedefAttributeUnmeasured $"{kind} '{s.Name}' field '{field}' has a type reaching typedef '{a.Typedef}', which carries {classified a.Attribute.Kind}, and clang has no measurement of '{s.Name}' in its declaring unit; natural alignment of the declared field types never stands in for the typedef's attribute." s.Location.Location)
             | None -> ()
             let fieldExtent fieldName count shape : int * int =
                 match shape with

@@ -20,7 +20,7 @@ let ``a macro defined differently by two headers is refused by name, value and h
     let headers = [ "a.h", false, [macro "X" "1"]; "b.h", false, [macro "X" "2"]; "c.h", false, [macro "X" "1"; macro "Y" "3"] ]
     Assert.Equal(
         Error "FS9101: macro 'X' is defined differently by the pilot's headers: '1' in 'a.h', 'c.h'; '2' in 'b.h'. One definition per pilot is required. No bindings were written.",
-        BindingGenerator.agreeMacros headers)
+        (BindingGenerator.agreeMacros headers |> refusalText))
 
 [<Fact>]
 let ``function-like macros agree only when parameters and replacement agree`` () =
@@ -29,7 +29,7 @@ let ``function-like macros agree only when parameters and replacement agree`` ()
     Assert.Equal(Ok (), BindingGenerator.agreeMacros [ "a.h", false, [fn "F" ["x"] "((x)+1)"]; "b.h", false, [fn "F" ["x"] "((x)+1)"] ])
     Assert.Equal(
         Error "FS9101: macro 'F' is defined differently by the pilot's headers: '(x) ((x)+1)' in 'a.h'; '(y) ((x)+1)' in 'b.h'. One definition per pilot is required. No bindings were written.",
-        BindingGenerator.agreeMacros [ "a.h", false, [fn "F" ["x"] "((x)+1)"]; "b.h", false, [fn "F" ["y"] "((x)+1)"] ])
+        (BindingGenerator.agreeMacros [ "a.h", false, [fn "F" ["x"] "((x)+1)"]; "b.h", false, [fn "F" ["y"] "((x)+1)"] ] |> refusalText))
 
 [<Fact>]
 let ``macro definitions are compared as preprocessing tokens`` () =
@@ -41,11 +41,11 @@ let ``macro definitions are compared as preprocessing tokens`` () =
     // Different spellings of one value are not assumed equivalent.
     Assert.Equal(
         Error "FS9101: macro 'X' is defined differently by the pilot's headers: '0x10' in 'a.h'; '16' in 'b.h'. One definition per pilot is required. No bindings were written.",
-        BindingGenerator.agreeMacros [ "a.h", false, [macro "X" "0x10"]; "b.h", false, [macro "X" "16"] ])
+        (BindingGenerator.agreeMacros [ "a.h", false, [macro "X" "0x10"]; "b.h", false, [macro "X" "16"] ] |> refusalText))
     // Whitespace inside a string literal is part of the token.
     Assert.Equal(
         Error "FS9101: macro 'S' is defined differently by the pilot's headers: '\"a b\"' in 'a.h'; '\"a  b\"' in 'b.h'. One definition per pilot is required. No bindings were written.",
-        BindingGenerator.agreeMacros [ "a.h", false, [macro "S" "\"a b\""]; "b.h", false, [macro "S" "\"a  b\""] ])
+        (BindingGenerator.agreeMacros [ "a.h", false, [macro "S" "\"a b\""]; "b.h", false, [macro "S" "\"a  b\""] ] |> refusalText))
 
 [<Fact>]
 let ``prefixed literals are one preprocessing token`` () =
@@ -58,7 +58,7 @@ let ``prefixed literals are one preprocessing token`` () =
     Assert.Equal<string list>(["Lx"; "\"x\""], BindingGenerator.macroTokens false "Lx\"x\"")
     Assert.Equal(
         Error "FS9101: macro 'W' is defined differently by the pilot's headers: 'L\"x\"' in 'a.h'; 'L \"x\"' in 'b.h'. One definition per pilot is required. No bindings were written.",
-        BindingGenerator.agreeMacros [ "a.h", false, [macro "W" "L\"x\""]; "b.h", false, [macro "W" "L \"x\""] ])
+        (BindingGenerator.agreeMacros [ "a.h", false, [macro "W" "L\"x\""]; "b.h", false, [macro "W" "L \"x\""] ] |> refusalText))
     Assert.Equal(Ok (), BindingGenerator.agreeMacros [ "a.h", false, [macro "W" "( L'x' , u8\"y\" )"]; "b.h", false, [macro "W" "(L'x',u8\"y\")"] ])
 
 [<Fact>]
@@ -75,7 +75,7 @@ let ``pp-numbers follow the unit's language`` () =
     Assert.Equal<string list>(["R"; "\"(x)\""; "\"s\""; "_k"], BindingGenerator.macroTokens false "R\"(x)\" \"s\"_k")
     Assert.Equal(
         Error "FS9101: macro 'N' is defined differently by the pilot's headers: '1'2'3' in 'a.hpp'; '1 '2' 3' in 'b.hpp'. One definition per pilot is required. No bindings were written.",
-        BindingGenerator.agreeMacros [ "a.hpp", true, [macro "N" "1'2'3"]; "b.hpp", true, [macro "N" "1 '2' 3"] ])
+        (BindingGenerator.agreeMacros [ "a.hpp", true, [macro "N" "1'2'3"]; "b.hpp", true, [macro "N" "1 '2' 3"] ] |> refusalText))
     Assert.Equal(Ok (), BindingGenerator.agreeMacros [ "a.h", false, [macro "N" "1'2'3"]; "b.h", false, [macro "N" "1 '2' 3"] ])
 
 [<Fact>]
@@ -696,7 +696,7 @@ let ``identical record definitions from several headers merge`` () =
 let ``a record defined differently is refused naming each header and the first differing field`` () =
     let base' = record "R" [mkField "a" "int"; mkField "b" "long"]
     let refused (other: CppParser.Declaration) (expected: string) =
-        Assert.Equal(Error (expected + " No bindings were written."), BindingGenerator.agreeRecords [ "a.h", [base']; "b.h", [other]; "c.h", [base'] ])
+        Assert.Equal(Error (expected + " No bindings were written."), BindingGenerator.agreeRecords [ "a.h", [base']; "b.h", [other]; "c.h", [base'] ] |> refusalText)
     refused (record "R" [mkField "a" "int"; mkField "b" "long"; mkField "c" "int"])
         "FS9116: record 'R' is defined differently by the pilot's headers: 'a.h', 'c.h' (struct R { int a; long b }); 'b.h' (struct R { int a; long b; int c }); first difference at field 3 'c': absent in 'a.h', 'int c' in 'b.h'. One definition per pilot is required."
     refused (CppParser.Declaration.Struct { mkStruct "R" [mkField "a" "int"; mkField "b" "long"] None with IsUnion = true })
@@ -710,7 +710,7 @@ let ``a record defined alike but measured differently is refused`` () =
         CppParser.Declaration.Struct { mkStruct "R" [mkField "a" "char"; mkField "b" "int"] None with Measured = Some (mkLayout "R" size 32 offsets) }
     Assert.Equal(
         Error "FS9116: record 'R' (struct R { char a; int b }) is measured differently by the pilot's headers: 'a.h'; 'b.h'; first difference at field 'b': clang-measured offset 4 in 'a.h', 1 in 'b.h'. One definition per pilot is required. No bindings were written.",
-        BindingGenerator.agreeRecords [ "a.h", [measured [0; 32] 64]; "b.h", [measured [0; 8] 40] ])
+        (BindingGenerator.agreeRecords [ "a.h", [measured [0; 32] 64]; "b.h", [measured [0; 8] 40] ] |> refusalText))
 
 [<Fact>]
 let ``clang-parsed headers defining one record alike generate it once`` () =

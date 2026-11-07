@@ -215,14 +215,14 @@ module FidelityCodeGenerator =
                 else 0L, (if m.Bits >= 64 then System.Int64.MaxValue else (1L <<< m.Bits) - 1L)
             match e.Values |> List.tryFind (fun v -> v.Value < lower || v.Value > upper) with
             | Some v ->
-                failwith $"{code}: enumerator '{v.Name}' of enum '{e.Name}' has value {v.Value}, which {source} {describe m.IsSigned m.Bits} representation cannot hold."
+                Diagnostics.refuse (Diagnostics.diagnostic code $"enumerator '{v.Name}' of enum '{e.Name}' has value {v.Value}, which {source} {describe m.IsSigned m.Bits} representation cannot hold." e.Location.Location)
             | None -> ()
         let integer (m: CppParser.EnumRepresentation) = if m.IsSigned then TypeMapper.Signed else TypeMapper.Unsigned
         match e.Representation with
         | CppParser.ClangUnmeasured ->
-            failwith $"{Diagnostics.EnumUnmeasured}: enum '{e.Name}' has no clang measurement of its representation in its declaring unit; its width cannot be inferred."
+            Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.EnumUnmeasured $"enum '{e.Name}' has no clang measurement of its representation in its declaring unit; its width cannot be inferred." e.Location.Location)
         | CppParser.ProtocolUndeclared reason ->
-            failwith $"{Diagnostics.ProtocolEnumUndeclared}: protocol enum '{e.Name}' has no declared wire type: {reason}."
+            Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.ProtocolEnumUndeclared $"protocol enum '{e.Name}' has no declared wire type: {reason}." e.Location.Location)
         | CppParser.ProtocolWire (m, _evidence) ->
             requireValuesFit m Diagnostics.ProtocolEnumValueConflict "its protocol's declared"
             { Family = integer m
@@ -237,8 +237,8 @@ module FidelityCodeGenerator =
                 match declaredScalar underlying with
                 | Some r when r.Family = TypeMapper.Signed || r.Family = TypeMapper.Unsigned || r.Family = TypeMapper.Bool ->
                     if r.Bits <> m.Bits || (r.Family = TypeMapper.Signed) <> m.IsSigned then
-                        failwith $"{Diagnostics.EnumReprConflict}: enum '{e.Name}' declares underlying type '{underlying}' ({describe (r.Family = TypeMapper.Signed) r.Bits}), but clang measured {describe m.IsSigned m.Bits}."
-                | _ -> failwith $"{Diagnostics.EnumUnderlyingUnrepresented}: enum '{e.Name}' declares underlying type '{underlying}', which has no integer representation under {model}."
+                        Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.EnumReprConflict $"enum '{e.Name}' declares underlying type '{underlying}' ({describe (r.Family = TypeMapper.Signed) r.Bits}), but clang measured {describe m.IsSigned m.Bits}." e.Location.Location)
+                | _ -> Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.EnumUnderlyingUnrepresented $"enum '{e.Name}' declares underlying type '{underlying}', which has no integer representation under {model}." e.Location.Location)
             requireValuesFit m Diagnostics.EnumValueConflict "clang's measured"
             { Family = integer m
               Bits = m.Bits
@@ -262,7 +262,14 @@ module FidelityCodeGenerator =
                                (declared: TypeMapper.AbiRepr option) (profile: TypeMapper.AbiRepr) =
         let unitRepr = declared |> Option.map describeRepr |> Option.defaultValue "no scalar representation"
         let by = match unit with Some header -> $"'{header}'" | None -> "its translation unit"
-        $"{Diagnostics.TypedefProfileConflict}: typedef '{name}' is declared by {by} as '{underlying}' ({unitRepr}), but the {model} profile row for '{name}' is {describeRepr profile}; the unit's declaration and the profile must agree."
+        // The parse keeps typedefs without clang locations, so the unit is the known source.
+        let source =
+            match unit with
+            | Some header -> Diagnostics.inFile header $"Farscape's parse keeps no clang location for typedef '{name}'"
+            | None -> Diagnostics.Located.Unknown $"the resolver sees typedef '{name}' without its declaring unit"
+        Diagnostics.diagnostic Diagnostics.TypedefProfileConflict
+            $"typedef '{name}' is declared by {by} as '{underlying}' ({unitRepr}), but the {model} profile row for '{name}' is {describeRepr profile}; the unit's declaration and the profile must agree."
+            source
 
     /// The profile row of a scalar spelling, checked against the unit's own typedef chain for
     /// that name: the row stands when the chain's family and bits agree with it (or the unit
@@ -325,7 +332,7 @@ module FidelityCodeGenerator =
             match checkProfileRow model typedefMap recur baseType with
             | Ok row -> row
             | Error (name, underlying, declared, profile) ->
-                failwith (typedefProfileConflict model None name underlying declared profile)
+                Diagnostics.refuse (typedefProfileConflict model None name underlying declared profile)
         // A pointer's pointee: a scalar's spelling, a named type, or what a typedef stands for
         let pointee (baseType: string) : FsType =
             match tableScalar baseType with
@@ -402,7 +409,7 @@ module FidelityCodeGenerator =
     /// declares as a typedef, resolved through the unit's typedef map, must agree with its
     /// profile row. Returns the refusals, naming the unit, for names whose chain disagrees.
     let unitProfileConflicts (model: PlatformABI) (unit: string) (typedefMap: Map<string, string>)
-                             (enums: Map<string, CppParser.EnumDecl>) (declaredNames: string list) : string list =
+                             (enums: Map<string, CppParser.EnumDecl>) (declaredNames: string list) : Diagnostics.Diagnostic list =
         let resolve = resolveCType typedefMap model Set.empty Map.empty enums
         declaredNames |> List.distinct |> List.choose (fun name ->
             match checkProfileRow model typedefMap resolve name with
@@ -496,10 +503,17 @@ module FidelityCodeGenerator =
             | [ _ ] -> withUnitFacts first ctx
             | _ ->
                 let described = resolutions |> List.map (fun (header, resolved) -> $"'{header}' ({describe resolved})") |> String.concat ", "
-                failwith $"{Diagnostics.GirTypeDivergent}: {where}: C type '{name}' is declared differently by {described}; one declaration per pilot is required."
+                let unlocated = "Farscape's parse keeps no clang location for the declarations a GIR-named type resolves through"
+                Diagnostics.diagnostic Diagnostics.GirTypeDivergent
+                    $"{where}: C type '{name}' is declared differently by {described}; one declaration per pilot is required."
+                    (Diagnostics.inFile (fst (List.head resolutions)) unlocated)
+                |> Diagnostics.withRelated (resolutions |> List.tail |> List.map (fun (header, _) -> { Diagnostics.SourceLocation.Path = header; Diagnostics.SourceLocation.Position = Diagnostics.Located.Unknown unlocated }))
+                |> Diagnostics.refuse
         | _ when (TypeMapper.tryScalar ctx.DataModel name).IsSome -> withUnitFacts { Typedefs = Map.empty; Enums = Map.empty; OpaqueHandles = Set.empty } ctx
         | _ ->
-            failwith $"{Diagnostics.GirTypeUndeclared}: {where}: C type '{name}' is declared by no pilot unit; a GIR spelling cannot supply its representation."
+            Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.GirTypeUndeclared
+                                    $"{where}: C type '{name}' is declared by no pilot unit; a GIR spelling cannot supply its representation."
+                                    (Diagnostics.Located.Unknown $"no pilot header declares C type '{name}'; the pilot's introspection data names it"))
 
     /// Resolve a C type under the context.
     /// The record a by-value C type names, through its unit's typedef chain: a C struct or
@@ -632,11 +646,15 @@ module FidelityCodeGenerator =
         match descriptorClaimOf ctx cType with
         | Represented r -> DescriptorGenerator.typeRefSource r, DescriptorGenerator.widthProvenance ctx.DataModel r
         | UnmeasuredEnum ->
-            failwith $"{Diagnostics.EnumUnmeasured}: by-value enum type '{cType}' has no clang measurement in its declaring unit; a descriptor cannot carry an unknown width."
+            Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.EnumUnmeasured
+                                    $"by-value enum type '{cType}' has no clang measurement in its declaring unit; a descriptor cannot carry an unknown width."
+                                    (Diagnostics.Located.Unknown $"the descriptor guard sees type '{cType}' without the declaration that uses it"))
         | RecordByValue (name, "C++ class") -> $"Named {quoteString name}", $"record: C++ class {name}, no width of its own"
         | RecordByValue (name, kind) -> $"Named {quoteString name}", $"record: {kind} {name}, laid out by {name}.Descriptor"
         | ResolvesNowhere ->
-            failwith $"{Diagnostics.ByValueTypeUnresolved}: by-value type '{cType}' resolves through no typedef, record or profile entry of its declaring unit; a descriptor cannot carry an unknown width."
+            Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.ByValueTypeUnresolved
+                                    $"by-value type '{cType}' resolves through no typedef, record or profile entry of its declaring unit; a descriptor cannot carry an unknown width."
+                                    (Diagnostics.Located.Unknown $"the descriptor guard sees type '{cType}' without the declaration that uses it"))
 
     /// The Layer 2 `Expr<FunctionDescriptor>` quotation beside an extern (platform-bindings.md,
     /// "Binding Libraries"): the C name, each parameter's and the return's ABI representation

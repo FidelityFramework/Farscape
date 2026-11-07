@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Wayland enum entry values the message definition language does not give (#160): not
+     decimal, hexadecimal or octal, malformed octal, outside the signed 64-bit carrier, or a
+     negation the C wayland-scanner emits does not make negative. Each is refused by name,
+     never read as 0. -->
+<protocol name="fx_malformed">
+  <interface name="fx_shape" version="1">
+    <enum name="kind">
+      <entry name="good" value="2"/>
+      <entry name="suffixed" value="1u"/>
+      <entry name="octal_eight_digit" value="08"/>
+      <entry name="octal_nine_digit" value="0719"/>
+      <entry name="octal_wide" value="01000000000000000000000"/>
+      <entry name="spaced" value=" 1"/>
+      <entry name="wide" value="0xFFFFFFFFFFFFFFFF"/>
+      <entry name="empty" value=""/>
+      <entry name="absent"/>
+      <entry name="double_sign" value="--1"/>
+      <entry name="bare_sign" value="-"/>
+      <entry name="spaced_sign" value="- 1"/>
+      <entry name="neg_octal_digit" value="-08"/>
+      <entry name="neg_unsigned_int_hex" value="-0x80000000"/>
+      <entry name="neg_unsigned_long_hex" value="-0x8000000000000000"/>
+      <entry name="neg_unsigned_octal" value="-01000000000000000000000"/>
+      <entry name="neg_untyped_decimal" value="-9223372036854775808"/>
+      <entry name="neg_wide_hex" value="-0x10000000000000000"/>
+      <entry name="binary" value="0b1"/>
+    </enum>
+    <request name="set">
+      <arg name="kind" type="int" enum="kind"/>
+    </request>
+  </interface>
+</protocol>

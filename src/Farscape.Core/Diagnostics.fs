@@ -35,8 +35,16 @@ namespace Farscape.Core
 /// | FS9127 | a field's type reaches an attributed typedef, and clang has no layout of it   |
 /// | FS9128 | a typedef naming a record carries an attribute its record layout dump omits   |
 /// | FS9129 | a record carries an unnamed bit-field, and clang has no layout of it          |
+/// | FS9130 | a protocol enum entry's value is no (negated) C integer constant in int64     |
 ///
 /// Each refusal reason has exactly one code and each code one reason.
+///
+/// Every refusal is built as a `Diagnostic` (#184): its code, its message, its severity, where
+/// in a header or protocol file its cause is declared (or the exact reason that is unknown), and
+/// the pilot file and key whose input caused it. A `Refusal` carries the diagnostics of one
+/// failure with the exact text Farscape prints for it; `RefusalException` carries a refusal
+/// raised from inside generation. The text is `render` of each diagnostic, so the structure
+/// changes nothing a caller reads as text.
 module Diagnostics =
 
     [<Literal>]
@@ -125,3 +133,125 @@ module Diagnostics =
 
     [<Literal>]
     let UnnamedBitFieldUnmeasured = "FS9129" // unnamed bit-field in a record without a clang layout (#176)
+
+    [<Literal>]
+    let ProtocolEnumValueMalformed = "FS9130" // protocol enum entry value no (negated) decimal, hex or octal C constant in int64 (#160)
+
+    // =========================================================================
+    // Structured diagnostics (#184)
+    // =========================================================================
+
+    /// How a diagnostic stops generation. Every FS91xx refusal is an `Error`.
+    [<RequireQualifiedAccess>]
+    type Severity =
+        | Error
+        | Warning
+
+    /// A fact a diagnostic carries, or the exact reason it is unknown. A location is never
+    /// invented: where clang (or the reader) gives none, the reason says so.
+    [<RequireQualifiedAccess>]
+    type Located<'T> =
+        | Known of 'T
+        | Unknown of reason: string
+
+    /// A position in a source file as clang gives it: 1-based line and byte column.
+    type SourcePosition = { Line: int; Column: int }
+
+    /// Where a refusal's cause is declared: the header (or protocol file) path, and the
+    /// position in it when one is known.
+    type SourceLocation = { Path: string; Position: Located<SourcePosition> }
+
+    /// The pilot input that caused a refusal: the `.pilot.toml` file and the TOML key (dotted,
+    /// `library.defines`) whose value the refusal names.
+    type PilotLocation = { PilotFile: string; Key: string }
+
+    /// One structured refusal (#184).
+    type Diagnostic = {
+        /// The FS91xx code.
+        Code: string
+        /// The refusal's text after its code; `render` gives the text Farscape prints.
+        Message: string
+        Severity: Severity
+        /// Where the declaration that caused the refusal is written, or why that is unknown.
+        Source: Located<SourceLocation>
+        /// Further declarations the refusal names, in the order it names them (a record or enum
+        /// declared differently by several headers names each of them).
+        Related: SourceLocation list
+        /// The pilot file and key, when pilot input caused the refusal; None otherwise.
+        Pilot: PilotLocation option
+    }
+
+    /// The text Farscape prints for a diagnostic: `CODE: message`.
+    let render (d: Diagnostic) = d.Code + ": " + d.Message
+
+    /// An FS91xx refusal with the given source and no pilot location.
+    let diagnostic (code: string) (message: string) (source: Located<SourceLocation>) : Diagnostic =
+        { Code = code; Message = message; Severity = Severity.Error; Source = source; Related = []; Pilot = None }
+
+    /// A source that is known only by its file: `reason` says why no position is known.
+    let inFile (path: string) (reason: string) : Located<SourceLocation> =
+        Located.Known { Path = path; Position = Located.Unknown reason }
+
+    /// The diagnostic with the given pilot cause.
+    let withPilot (pilot: PilotLocation) (d: Diagnostic) = { d with Pilot = Some pilot }
+
+    /// The diagnostic with further named declarations.
+    let withRelated (related: SourceLocation list) (d: Diagnostic) = { d with Related = related }
+
+    /// The diagnostics of one failure and the exact text Farscape prints for it. A failure
+    /// that is no FS91xx refusal carries no diagnostics, only its text.
+    type Refusal = { Diagnostics: Diagnostic list; Text: string }
+
+    /// One diagnostic's refusal: its text is `render` of it.
+    let refusalOf (d: Diagnostic) : Refusal = { Diagnostics = [ d ]; Text = render d }
+
+    /// Several diagnostics' refusal, as the pilot checks report them: each rendered, joined by
+    /// spaces, followed by `suffix`.
+    let refusalsOf (ds: Diagnostic list) (suffix: string) : Refusal =
+        { Diagnostics = ds; Text = String.concat " " (ds |> List.map render) + suffix }
+
+    /// A failure that is no FS91xx refusal: its text only.
+    let uncoded (text: string) : Refusal = { Diagnostics = []; Text = text }
+
+    /// The refusal with `prefix` before its text, as an enclosing step reports it.
+    let prefixed (prefix: string) (r: Refusal) = { r with Text = prefix + r.Text }
+
+    /// The refusal with `suffix` after its text.
+    let suffixed (suffix: string) (r: Refusal) = { r with Text = r.Text + suffix }
+
+    /// The diagnostics of several refusals, with their texts joined by `separator`.
+    let joined (separator: string) (rs: Refusal list) : Refusal =
+        { Diagnostics = rs |> List.collect _.Diagnostics; Text = rs |> List.map _.Text |> String.concat separator }
+
+    /// Each diagnostic of the refusal mapped by `f`; the text is unchanged.
+    let mapDiagnostics (f: Diagnostic -> Diagnostic) (r: Refusal) = { r with Diagnostics = r.Diagnostics |> List.map f }
+
+    /// A refusal raised from inside generation; its message is the refusal's text.
+    type RefusalException(refusal: Refusal) =
+        inherit System.Exception(refusal.Text)
+        member _.Refusal = refusal
+
+    /// Raise a refusal.
+    let raiseRefusal (r: Refusal) : 'T = raise (RefusalException r)
+
+    /// Raise one diagnostic's refusal.
+    let refuse (d: Diagnostic) : 'T = raiseRefusal (refusalOf d)
+
+    /// Where a declaration is written, as clang (or the reader that produced it) gives it. It
+    /// is the declaration's provenance, not part of its shape: two declarations that differ only
+    /// in where they are written compare equal, so every check that compares declarations (the
+    /// divergence checks, the merge) compares what they declare, as before locations were kept.
+    [<CustomEquality; CustomComparison>]
+    type Provenance =
+        | Provenance of Located<SourceLocation>
+        member this.Location = match this with Provenance location -> location
+        override _.Equals(other: obj) = other :? Provenance
+        override _.GetHashCode() = 0
+        interface System.IComparable with
+            member _.CompareTo(other: obj) =
+                match other with
+                | :? Provenance -> 0
+                | _ -> invalidArg "other" "a Provenance compares only with a Provenance"
+
+    /// The provenance of a declaration no reader located; `reason` says why.
+    let unlocated (reason: string) = Provenance (Located.Unknown reason)

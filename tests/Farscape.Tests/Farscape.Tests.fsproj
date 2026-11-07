@@ -40,6 +40,7 @@
     <Compile Include="MappedReturnTests.fs" />
     <Compile Include="IntrospectionTests.fs" />
     <Compile Include="BindingGeneratorTests.fs" />
+    <Compile Include="DiagnosticsTests.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

@@ -211,6 +211,10 @@ module BindingGenerator =
                 | names -> Some (header, names))
             |> Ok
 
+    /// The known locations among `sources`, in order: a refusal's related declarations.
+    let private knownLocations (sources: Diagnostics.Located<Diagnostics.SourceLocation> list) =
+        sources |> List.choose (function Diagnostics.Located.Known l -> Some l | Diagnostics.Located.Unknown _ -> None)
+
     /// One effective layout per storage: a record measured in several declaring units must
     /// measure identically in each, or the pilot is refused by name and headers.
     let agreeMeasurements (measured: (string * Map<string, CppParser.StructLayoutInfo>) list)
@@ -242,17 +246,18 @@ module BindingGenerator =
     /// the pilot is refused before any binding is written, naming the enum, the using
     /// declaration and the unit; a width-unknown descriptor is never emitted for it.
     let requireMeasuredEnumUses (included: Map<string, CppParser.Declaration list>)
-                                (headers: (string * CppParser.Declaration list) list) : Result<unit, string> =
+                                (headers: (string * CppParser.Declaration list) list) : Result<unit, Diagnostics.Refusal> =
         let refusals =
             headers |> List.collect (fun (header, decls) ->
                 let facts = unitFactsWith included header decls
+                // Each use with the location of the declaration making it.
                 let uses =
                     decls |> List.collect (function
-                        | CppParser.Declaration.Function f -> (f.ReturnType :: (f.Parameters |> List.map snd)) |> List.map (fun t -> $"function '{f.Name}'", t)
-                        | CppParser.Declaration.Struct s -> s.Fields |> List.map (fun field -> $"record '{s.Name}' field '{field.Name}'", field.Type)
-                        | CppParser.Declaration.Typedef t -> [ $"typedef '{t.Name}'", t.UnderlyingType ]
+                        | CppParser.Declaration.Function f -> (f.ReturnType :: (f.Parameters |> List.map snd)) |> List.map (fun t -> $"function '{f.Name}'", t, f.Location.Location)
+                        | CppParser.Declaration.Struct s -> s.Fields |> List.map (fun field -> $"record '{s.Name}' field '{field.Name}'", field.Type, s.Location.Location)
+                        | CppParser.Declaration.Typedef t -> [ $"typedef '{t.Name}'", t.UnderlyingType, Diagnostics.inFile header $"Farscape's parse keeps no clang location for typedef '{t.Name}'" ]
                         | _ -> [])
-                uses |> List.choose (fun (user, spelling) ->
+                uses |> List.choose (fun (user, spelling, source) ->
                     if spelling.Contains('*') || spelling.Contains('(') || spelling.Contains('&') then None
                     else
                         let element = match CppParser.classifyFieldDeclarator spelling with
@@ -273,26 +278,26 @@ module BindingGenerator =
                             match facts.Enums.TryFind name |> Option.map _.Representation with
                             | Some (CppParser.ClangMeasured _) -> None
                             | _ ->
-                                Some $"{Diagnostics.EnumUnmeasured}: enum '{name}' is used by value by {user} in '{header}', but that unit's clang parse has no measurement of it; its width cannot be inferred."))
-        match refusals |> List.distinct with
+                                Some (Diagnostics.diagnostic Diagnostics.EnumUnmeasured $"enum '{name}' is used by value by {user} in '{header}', but that unit's clang parse has no measurement of it; its width cannot be inferred." source)))
+        match refusals |> List.distinctBy Diagnostics.render with
         | [] -> Ok ()
-        | refusals -> Error (String.concat " " refusals + " No bindings were written.")
+        | refusals -> Error (Diagnostics.refusalsOf refusals " No bindings were written.")
 
     /// No anonymous record without a clang measurement in the unit that declares it (#159).
     /// Every record a header's own parse named from its parent and field (glibc's
     /// `__atomic_wide_counter.__value32`) must carry the layout clang measured in that unit;
     /// otherwise the pilot is refused before any binding is written, naming the record, its
     /// parent, field and location, and the unit. Its layout is never computed from its fields.
-    let requireMeasuredAnonymousRecords (headers: (string * CppParser.Declaration list) list) : Result<unit, string> =
+    let requireMeasuredAnonymousRecords (headers: (string * CppParser.Declaration list) list) : Result<unit, Diagnostics.Refusal> =
         let refusals =
             headers |> List.collect (fun (header, decls) ->
                 decls |> List.choose (function
                     | CppParser.Declaration.Struct ({ Anonymous = Some origin; Measured = None } as s) ->
-                        Some $"{Diagnostics.AnonymousRecordUnmeasured}: anonymous record '{s.Name}' ({CppParser.describeOrigin origin}, declared at {origin.Location}) has no clang-measured layout in '{header}'; its layout is never computed from its declared fields."
+                        Some (Diagnostics.diagnostic Diagnostics.AnonymousRecordUnmeasured $"anonymous record '{s.Name}' ({CppParser.describeOrigin origin}, declared at {origin.Location}) has no clang-measured layout in '{header}'; its layout is never computed from its declared fields." s.Location.Location)
                     | _ -> None))
-        match refusals |> List.distinct with
+        match refusals |> List.distinctBy Diagnostics.render with
         | [] -> Ok ()
-        | refusals -> Error (String.concat " " refusals + " No bindings were written.")
+        | refusals -> Error (Diagnostics.refusalsOf refusals " No bindings were written.")
 
     /// No descriptor carries an unknown width (#162). Every type the descriptors of an emitted
     /// function claim (`FidelityCodeGenerator.descriptorTypeSites`: parameters, result, and the
@@ -305,7 +310,7 @@ module BindingGenerator =
     /// unit.
     let requireRepresentedDescriptorTypes (ctx: FidelityCodeGenerator.GenerationContext)
                                           (headers: (string * CppParser.Declaration list) list)
-                                          (functions: CppParser.FunctionDecl list) : Result<unit, string> =
+                                          (functions: CppParser.FunctionDecl list) : Result<unit, Diagnostics.Refusal> =
         let unitOf (f: CppParser.FunctionDecl) =
             let symbol = ctx.Bindings |> Map.tryFind f.Name |> Option.map _.Symbol |> Option.defaultValue f.Name
             headers |> List.tryPick (fun (header, decls) ->
@@ -321,16 +326,16 @@ module BindingGenerator =
                 |> List.choose (fun (site, cType) ->
                     match FidelityCodeGenerator.descriptorClaimOf unit cType with
                     | FidelityCodeGenerator.ResolvesNowhere ->
-                        Some $"{Diagnostics.ByValueTypeUnresolved}: by-value type '{cType}' of the {site} of function '{f.Name}' in '{unitOf f}' resolves through no typedef, record or profile entry of that unit; a descriptor cannot carry an unknown width."
+                        Some (Diagnostics.diagnostic Diagnostics.ByValueTypeUnresolved $"by-value type '{cType}' of the {site} of function '{f.Name}' in '{unitOf f}' resolves through no typedef, record or profile entry of that unit; a descriptor cannot carry an unknown width." f.Location.Location)
                     // A descriptor citing a record names X.Descriptor, and the binding names the
                     // record's type: both exist only for a declared value struct (its record
                     // type and layout module are emitted in every mode).
                     | FidelityCodeGenerator.RecordByValue (record, ("struct" | "union" as kind)) when not (ctx.ValueStructs.Contains record) ->
-                        Some $"{Diagnostics.RecordWithoutValueType}: {kind} '{record}' is the type of the {site} of function '{f.Name}' in '{unitOf f}', but the pilot declares no value type for it, so neither its record type nor {record}.Descriptor would be emitted for the binding that cites them; declare it in [options] value_structs."
+                        Some (Diagnostics.diagnostic Diagnostics.RecordWithoutValueType $"{kind} '{record}' is the type of the {site} of function '{f.Name}' in '{unitOf f}', but the pilot declares no value type for it, so neither its record type nor {record}.Descriptor would be emitted for the binding that cites them; declare it in [options] value_structs." f.Location.Location)
                     | _ -> None))
-        match refusals |> List.distinct with
+        match refusals |> List.distinctBy Diagnostics.render with
         | [] -> Ok ()
-        | refusals -> Error (String.concat " " refusals + " No bindings were written.")
+        | refusals -> Error (Diagnostics.refusalsOf refusals " No bindings were written.")
 
     /// The typedef facts of a unit's canonicalized result aliases (#171): `__size_t` stands for
     /// clang's canonical type of the results that spell it (`unsigned long`). An alias clang
@@ -351,7 +356,7 @@ module BindingGenerator =
     let requireCanonicalAliasesAgainst (rowOf: string -> TypeMapper.AbiRepr option) (model: PlatformABI)
                                         (aliases: Map<string, CppParser.ClangTypeAlias list>)
                                         (headers: (string * CppParser.Declaration list) list)
-                                        (functions: CppParser.FunctionDecl list) : Result<unit, string> =
+                                        (functions: CppParser.FunctionDecl list) : Result<unit, Diagnostics.Refusal> =
         let describe (signed: bool) (bits: int) = (if signed then "signed " else "unsigned ") + string bits + "-bit"
         let declaresIn (f: CppParser.FunctionDecl) (decls: CppParser.Declaration list) =
             decls |> List.exists (function
@@ -360,12 +365,12 @@ module BindingGenerator =
         let check (f: CppParser.FunctionDecl) (header: string) (alias: CppParser.ClangTypeAlias) =
             match alias.Canonical with
             | Error (CppParser.ProbeRefused reason) ->
-                Some $"{Diagnostics.AliasUncanonicalized}: type '{alias.Name}' of the result of function '{f.Name}' in '{header}' is a clang built-in alias that no declaration of that unit names, and clang gives no canonical type for it: {reason}."
+                Some (Diagnostics.diagnostic Diagnostics.AliasUncanonicalized $"type '{alias.Name}' of the result of function '{f.Name}' in '{header}' is a clang built-in alias that no declaration of that unit names, and clang gives no canonical type for it: {reason}." f.Location.Location)
             | Error (CppParser.IncompleteParameter (parameter, spelled, reason)) ->
-                Some $"{Diagnostics.AliasIncompleteParameter}: type '{alias.Name}' of the result of function '{f.Name}' in '{header}' is a clang built-in alias that no declaration of that unit names, and its canonical type cannot be read: clang cannot type a call of '{f.Name}', whose parameter '{parameter}' takes incomplete type '{spelled}' by value ({reason})."
+                Some (Diagnostics.diagnostic Diagnostics.AliasIncompleteParameter $"type '{alias.Name}' of the result of function '{f.Name}' in '{header}' is a clang built-in alias that no declaration of that unit names, and its canonical type cannot be read: clang cannot type a call of '{f.Name}', whose parameter '{parameter}' takes incomplete type '{spelled}' by value ({reason})." f.Location.Location)
             | Ok (canonical, measured) ->
                 let conflict rowText measuredText =
-                    Some $"{Diagnostics.AliasMeasurementConflict}: clang measures the result of function '{f.Name}' in '{header}' ('{alias.Name}', canonically '{canonical}') as {measuredText}, but the {model} profile row for '{canonical}' is {rowText}; the profile and the target must agree."
+                    Some (Diagnostics.diagnostic Diagnostics.AliasMeasurementConflict $"clang measures the result of function '{f.Name}' in '{header}' ('{alias.Name}', canonically '{canonical}') as {measuredText}, but the {model} profile row for '{canonical}' is {rowText}; the profile and the target must agree." f.Location.Location)
                 match rowOf canonical with
                 | Some row when row.Family = TypeMapper.Signed || row.Family = TypeMapper.Unsigned ->
                     let rowSigned = (row.Family = TypeMapper.Signed)
@@ -387,9 +392,9 @@ module BindingGenerator =
                     aliases |> Map.tryFind header |> Option.defaultValue []
                     |> List.tryFind (fun a -> a.Name = spelled)
                     |> Option.bind (check f header)))
-        match refusals |> List.distinct with
+        match refusals |> List.distinctBy Diagnostics.render with
         | [] -> Ok ()
-        | refusals -> Error (String.concat " " refusals + " No bindings were written.")
+        | refusals -> Error (Diagnostics.refusalsOf refusals " No bindings were written.")
 
     /// `requireCanonicalAliasesAgainst` with the profile's own scalar rows under `model`.
     let requireCanonicalAliases (model: PlatformABI) aliases headers functions =
@@ -459,7 +464,7 @@ module BindingGenerator =
     /// unit's own typedef map and is compared with the row.
     /// This holds for every unit, whichever declarations a namespace later selects.
     let agreeUnitProfileTypedefs (model: PlatformABI) (included: Map<string, CppParser.Declaration list>)
-                                 (headers: (string * CppParser.Declaration list) list) : Result<unit, string> =
+                                 (headers: (string * CppParser.Declaration list) list) : Result<unit, Diagnostics.Refusal> =
         let conflicts =
             headers |> List.collect (fun (header, decls) ->
                 let own = decls |> List.choose (function CppParser.Declaration.Typedef t -> Some t.Name | _ -> None)
@@ -468,7 +473,7 @@ module BindingGenerator =
                 FidelityCodeGenerator.unitProfileConflicts model header facts.Typedefs facts.Enums own)
         match conflicts with
         | [] -> Ok ()
-        | conflicts -> Error (String.concat " " conflicts)
+        | conflicts -> Error (Diagnostics.refusalsOf conflicts "")
 
     /// One definition per enum name per pilot. Each header's unit declares its enums with the
     /// representation clang measured in that unit; two units declaring one name must agree on
@@ -476,7 +481,7 @@ module BindingGenerator =
     /// the pilot is refused naming each distinct definition and every header giving it. Checked
     /// while the declaration lists are still paired with their headers, before the merge keeps
     /// the first; past this check the merged enum facts agree with every declaring unit.
-    let agreeEnums (included: Map<string, CppParser.Declaration list>) (headers: (string * CppParser.Declaration list) list) : Result<unit, string> =
+    let agreeEnums (included: Map<string, CppParser.Declaration list>) (headers: (string * CppParser.Declaration list) list) : Result<unit, Diagnostics.Refusal> =
         let describe (e: CppParser.EnumDecl) =
             let repr =
                 match e.Representation with
@@ -494,6 +499,7 @@ module BindingGenerator =
         let divergent =
             names |> List.choose (fun name ->
                 let givers = perHeader |> List.choose (fun (header, enums) -> enums.TryFind name |> Option.map (fun e -> identity e, describe e, header))
+                let locations = perHeader |> List.choose (fun (_, enums) -> enums.TryFind name |> Option.map (fun e -> e.Location.Location))
                 let keys = givers |> List.map (fun (k, _, _) -> k) |> List.distinct
                 if keys.Length < 2 then None
                 else
@@ -504,9 +510,11 @@ module BindingGenerator =
                             let hs = same |> List.map (fun (_, _, h) -> $"'{h}'") |> String.concat ", "
                             $"{hs} ({text})")
                         |> String.concat "; "
-                    Some $"{Diagnostics.EnumDivergent}: enum '{name}' is declared differently by the pilot's headers: {described}. One declaration per pilot is required.")
+                    Diagnostics.diagnostic Diagnostics.EnumDivergent $"enum '{name}' is declared differently by the pilot's headers: {described}. One declaration per pilot is required." (List.head locations)
+                    |> Diagnostics.withRelated (knownLocations (List.tail locations))
+                    |> Some)
         if divergent.IsEmpty then Ok ()
-        else Error (String.concat " " divergent + " No bindings were written.")
+        else Error (Diagnostics.refusalsOf divergent " No bindings were written.")
 
     /// One definition per record name per pilot (#161). Each header's unit declares its records
     /// as its own clang parse sees them; two units defining one struct or union name must agree
@@ -517,7 +525,7 @@ module BindingGenerator =
     /// definition differs from the first. A forward declaration (no fields) is not a definition.
     /// Checked while declaration lists are still paired with their headers, before the merge
     /// keeps the first definition; identical definitions merge.
-    let agreeRecords (headers: (string * CppParser.Declaration list) list) : Result<unit, string> =
+    let agreeRecords (headers: (string * CppParser.Declaration list) list) : Result<unit, Diagnostics.Refusal> =
         let definitionsOf (decls: CppParser.Declaration list) =
             (Map.empty, decls) ||> List.fold (fun acc decl ->
                 match decl with
@@ -583,6 +591,12 @@ module BindingGenerator =
         let divergent =
             names |> List.choose (fun name ->
                 let givers = perHeader |> List.choose (fun (header, defs) -> defs.TryFind name |> Option.map (fun s -> header, s))
+                // The first definition is the source; every other definition follows it.
+                let refused message =
+                    let locations = givers |> List.map (fun (_, s) -> s.Location.Location)
+                    Diagnostics.diagnostic Diagnostics.RecordDivergent message (List.head locations)
+                    |> Diagnostics.withRelated (knownLocations (List.tail locations))
+                    |> Some
                 let identity (s: CppParser.StructDecl) = kindOf s, s.Fields |> List.map fieldText, attributes s.Attributes, paddingText s, typedefText s
                 let shapes = givers |> List.groupBy (fun (_, s) -> identity s) |> List.map snd
                 match shapes with
@@ -595,15 +609,15 @@ module BindingGenerator =
                         let (h1, s1, m1) = List.head firstGroup
                         let differences = rest |> List.map (fun g -> let (h, _, m) = List.head g in measuredDifference (h1, s1, m1) (h, m)) |> String.concat "; "
                         let listed = (firstGroup :: rest) |> List.map (fun g -> g |> List.map (fun (h, _, _) -> $"'{h}'") |> String.concat ", ") |> String.concat "; "
-                        Some $"{Diagnostics.RecordDivergent}: record '{name}' ({describe s1}) is measured differently by the pilot's headers: {listed}; first difference at {differences}. One definition per pilot is required."
+                        refused $"record '{name}' ({describe s1}) is measured differently by the pilot's headers: {listed}; first difference at {differences}. One definition per pilot is required."
                 | [] -> None
                 | firstGroup :: rest ->
                     let first = List.head firstGroup
                     let described = shapes |> List.map (fun group -> $"{headersOf group} ({describe (snd (List.head group))})") |> String.concat "; "
                     let differences = rest |> List.map (fun group -> firstDifference first (List.head group)) |> String.concat "; "
-                    Some $"{Diagnostics.RecordDivergent}: record '{name}' is defined differently by the pilot's headers: {described}; first difference at {differences}. One definition per pilot is required.")
+                    refused $"record '{name}' is defined differently by the pilot's headers: {described}; first difference at {differences}. One definition per pilot is required.")
         if divergent.IsEmpty then Ok ()
-        else Error (String.concat " " divergent + " No bindings were written.")
+        else Error (Diagnostics.refusalsOf divergent " No bindings were written.")
 
     /// The preprocessing tokens of a replacement list (C11 6.4, C++ [lex.pptoken]): identifiers,
     /// pp-numbers, character and string literals with their encoding prefix (`L`, `u`, `U`,
@@ -683,7 +697,7 @@ module BindingGenerator =
     /// disagreeing definitions is refused here, while the declaration lists are still paired
     /// with their headers, naming the macro, each distinct definition (as first spelled) and
     /// every header that gives it. Agreeing definitions merge silently.
-    let agreeMacros (headers: (string * bool * CppParser.Declaration list) list) : Result<unit, string> =
+    let agreeMacros (headers: (string * bool * CppParser.Declaration list) list) : Result<unit, Diagnostics.Refusal> =
         let definition cpp (m: CppParser.MacroDecl) =
             match m.Kind with
             | CppParser.FunctionLike (args, body) -> (Some args, macroTokens cpp body), "(" + String.concat ", " args + ") " + body
@@ -709,9 +723,15 @@ module BindingGenerator =
                             let hs = same |> List.map (fun (_, _, h) -> $"'{h}'") |> String.concat ", "
                             $"'{spelling}' in {hs}")
                         |> String.concat "; "
-                    Some $"{Diagnostics.MacroDivergent}: macro '{name}' is defined differently by the pilot's headers: {described}. One definition per pilot is required.")
+                    // `clang -E -dM` lists macro definitions without locations: each defining
+                    // header is known, no line in it.
+                    let unlocated = $"clang -E -dM gives macro '{name}' no location"
+                    let defining = givers |> List.map (fun (_, _, header) -> header)
+                    Diagnostics.diagnostic Diagnostics.MacroDivergent $"macro '{name}' is defined differently by the pilot's headers: {described}. One definition per pilot is required." (Diagnostics.inFile (List.head defining) unlocated)
+                    |> Diagnostics.withRelated (defining |> List.tail |> List.map (fun header -> { Diagnostics.SourceLocation.Path = header; Diagnostics.SourceLocation.Position = Diagnostics.Located.Unknown unlocated }))
+                    |> Some)
         if divergent.IsEmpty then Ok ()
-        else Error (String.concat " " divergent + " No bindings were written.")
+        else Error (Diagnostics.refusalsOf divergent " No bindings were written.")
 
     type GenerationOptions = {
         HeaderFile: FileInfo
@@ -976,25 +996,26 @@ module BindingGenerator =
     /// Shared types (referenced by 2+ namespaces) go into a root Types.clef.
     /// Supports multi-header projects: parses each header independently, merges with dedup.
     /// When generateWrappers is true, also generates Layer 2 idiomatic wrappers.
-    let private generateFromProjectCore (aliasRows: string -> TypeMapper.AbiRepr option) (projectPath: string) (verbose: bool) (generateWrappers: bool) (dataModel: PlatformABI) : Result<GenerationResult, string> =
+    let private generateFromProjectCore (aliasRows: string -> TypeMapper.AbiRepr option) (projectPath: string) (verbose: bool) (generateWrappers: bool) (dataModel: PlatformABI) : Result<GenerationResult, Diagnostics.Refusal> =
+        let uncoded = Diagnostics.uncoded
         match PilotSerializer.loadFromFile projectPath with
-        | Error e -> Error $"Failed to load project: {e}"
+        | Error e -> Error (uncoded $"Failed to load project: {e}")
         | Ok _ when dataModel <> PlatformABI.LP64 ->
-            Error "Project generation currently declares a Linux x86_64 LP64 target. A different ABI requires an explicit target, header/sysroot and link contract; emitting it with the Linux manifest would be incorrect. No bindings were written."
+            Error (uncoded "Project generation currently declares a Linux x86_64 LP64 target. A different ABI requires an explicit target, header/sysroot and link contract; emitting it with the Linux manifest would be incorrect. No bindings were written.")
         | Ok project when project.Options |> Option.exists (fun opts -> opts.NativePointerSurface) ->
-            Error "experimental_native_pointer_surface exposes addresses in Clef source and violates the FFI boundary contract. Remove this option and declare CHandle, callback, reference and ownership projections in the pilot. No bindings were written."
+            Error (uncoded "experimental_native_pointer_surface exposes addresses in Clef source and violates the FFI boundary contract. Remove this option and declare CHandle, callback, reference and ownership projections in the pilot. No bindings were written.")
         | Ok project when not project.Library.XmlProtocols.IsEmpty
                           && not (project.Options |> Option.exists (fun opts -> opts.TypedProtocol)) ->
-            Error "XML protocol generation requires options.typed_protocol = true. The legacy protocol generator exposes pointer operations in Clef source. No bindings were written."
+            Error (uncoded "XML protocol generation requires options.typed_protocol = true. The legacy protocol generator exposes pointer operations in Clef source. No bindings were written.")
         | Ok project when generateWrappers && (project.ErrorConventions |> Option.exists (fun spec -> spec.Default = PilotTypes.Errno)) ->
-            Error "errno wrappers require a declared native scalar accessor; an opaque errno handle cannot be dereferenced in Clef. No bindings were written."
+            Error (uncoded "errno wrappers require a declared native scalar accessor; an opaque errno handle cannot be dereferenced in Clef. No bindings were written.")
         | Ok project when generateWrappers && (project.ErrorConventions |> Option.exists (fun spec -> match spec.Default with PilotTypes.NullWithReason _ -> true | _ -> false)) ->
-            Error "null_with_reason wrappers require the declared reason return type and a native text extent/ownership projection. An assumed error-text handle is not an admitted contract. No bindings were written."
+            Error (uncoded "null_with_reason wrappers require the declared reason return type and a native text extent/ownership projection. An assumed error-text handle is not an admitted contract. No bindings were written.")
         | Ok project ->
             // Each define reaches clang as one -D argument; a define that is not NAME or
             // NAME=VALUE is refused before any header is parsed (#178).
             match CppParser.requireWellFormedDefines project.Library.Defines with
-            | Error refusal -> Error (refusal + " No bindings were written.")
+            | Error refusal -> Error (Diagnostics.suffixed " No bindings were written." refusal)
             | Ok () ->
             let projectDir = Path.GetDirectoryName(Path.GetFullPath(projectPath))
             let outputDir =
@@ -1014,13 +1035,13 @@ module BindingGenerator =
                     if project.Options |> Option.exists (fun opts -> opts.NativePointerSurface || opts.CHeaderMode) then
                         // Native carrier pilots bind the C ABI. pthread.h also contains guarded
                         // C++ cleanup classes, which must not turn its public unions into C++ PODs.
-                        CppParser.parseHeaderUnit {
+                        CppParser.parseHeaderUnitDiagnosed {
                             HeaderFile = headerPath; IncludePaths = project.Library.IncludePaths
                             Defines = project.Library.Defines; IncludeRoot = includeRoot
                             MacroPrefixes = project.Library.MacroPrefixes; IncludeMacros = true
                             Verbose = verbose; CppMode = false }
                     else
-                        CppParser.parseHeaderUnit {
+                        CppParser.parseHeaderUnitDiagnosed {
                             HeaderFile = headerPath; IncludePaths = project.Library.IncludePaths
                             Defines = project.Library.Defines; IncludeRoot = includeRoot
                             MacroPrefixes = project.Library.MacroPrefixes; IncludeMacros = true
@@ -1028,20 +1049,18 @@ module BindingGenerator =
 
             let headerErrors = headerResults |> List.choose (function Error e -> Some e | _ -> None)
             if not headerErrors.IsEmpty then
-                let msg = String.concat "; " headerErrors
-                Error $"Failed to parse headers: {msg}"
+                Error (Diagnostics.prefixed "Failed to parse headers: " (Diagnostics.joined "; " headerErrors))
 
             // Parse XML protocol files (protocol-defined APIs with marshal dispatch)
             else
             let xmlResults =
                 project.Library.XmlProtocols |> List.map (fun xmlPath ->
                     logVerbose $"Parsing XML protocol: {xmlPath}" verbose
-                    ProtocolParser.parseFile xmlPath)
+                    ProtocolParser.parseFileDiagnosed xmlPath)
 
             let xmlErrors = xmlResults |> List.choose (function Error e -> Some e | _ -> None)
             if not xmlErrors.IsEmpty then
-                let msg = String.concat "; " xmlErrors
-                Error $"Failed to parse XML protocols: {msg}"
+                Error (Diagnostics.prefixed "Failed to parse XML protocols: " (Diagnostics.joined "; " xmlErrors))
             else
 
                 let headerDeclLists = headerResults |> List.choose (function Ok (d, _, _) -> Some d | _ -> None)
@@ -1060,11 +1079,11 @@ module BindingGenerator =
                 // Each header is tokenized in the language it was parsed in.
                 let cHeaders = project.Options |> Option.exists (fun opts -> opts.NativePointerSurface || opts.CHeaderMode)
                 let units = List.zip project.Library.Headers headerDeclLists
-                agreeMacros (units |> List.map (fun (header, decls) -> header, (not cHeaders && CppParser.detectCppMode header), decls)) |> Result.defaultWith failwith
-                agreeEnums included units |> Result.defaultWith failwith
-                requireMeasuredEnumUses included units |> Result.defaultWith failwith
-                agreeRecords units |> Result.defaultWith failwith
-                requireMeasuredAnonymousRecords units |> Result.defaultWith failwith
+                agreeMacros (units |> List.map (fun (header, decls) -> header, (not cHeaders && CppParser.detectCppMode header), decls)) |> Result.defaultWith Diagnostics.raiseRefusal
+                agreeEnums included units |> Result.defaultWith Diagnostics.raiseRefusal
+                requireMeasuredEnumUses included units |> Result.defaultWith Diagnostics.raiseRefusal
+                agreeRecords units |> Result.defaultWith Diagnostics.raiseRefusal
+                requireMeasuredAnonymousRecords units |> Result.defaultWith Diagnostics.raiseRefusal
                 let xmlProtocols = xmlResults |> List.choose (function Ok p -> Some p | _ -> None)
 
                 // GObject introspection data: the source of signal entry signatures (IntrospectionParser)
@@ -1097,7 +1116,7 @@ module BindingGenerator =
                 let unitTypedefMaps =
                     unitTypedefMaps included declarations (List.zip project.Library.Headers headerDeclLists)
                         (projections |> List.map (fun binding -> binding.Name, binding.Symbol))
-                agreeUnitProfileTypedefs dataModel included (List.zip project.Library.Headers headerDeclLists) |> Result.defaultWith failwith
+                agreeUnitProfileTypedefs dataModel included (List.zip project.Library.Headers headerDeclLists) |> Result.defaultWith Diagnostics.raiseRefusal
                 if generateWrappers then
                     let callbacks = project.Callbacks |> Option.defaultWith (fun () -> PilotAnalyzer.discoverCallbacks declarations)
                     if not callbacks.ListenerStructs.IsEmpty then
@@ -1216,9 +1235,9 @@ module BindingGenerator =
                         | _ -> None)
                     |> List.distinct
                 requireCanonicalAliasesAgainst aliasRows dataModel resultAliases (List.zip project.Library.Headers headerDeclLists) emittedFunctions
-                |> Result.defaultWith failwith
+                |> Result.defaultWith Diagnostics.raiseRefusal
                 requireRepresentedDescriptorTypes ctx (List.zip project.Library.Headers headerDeclLists) emittedFunctions
-                |> Result.defaultWith failwith
+                |> Result.defaultWith Diagnostics.raiseRefusal
 
                 // Derive common namespace prefix for the project
                 let nsPrefix = deriveNamespacePrefix project
@@ -1716,15 +1735,51 @@ module BindingGenerator =
                     Advisories = advisories
                 }
 
+    /// The pilot key whose input causes each refusal code that pilot input causes (#184): a
+    /// malformed define is a `[library] defines` entry, a record without a value type is
+    /// missing from `[options] value_structs`, and a GIR-named C type comes from the
+    /// `[library] introspection` files.
+    let pilotKeyOf (code: string) : string option =
+        match code with
+        | Diagnostics.DefineMalformed -> Some "library.defines"
+        | Diagnostics.RecordWithoutValueType -> Some "options.value_structs"
+        | Diagnostics.GirTypeUndeclared | Diagnostics.GirTypeDivergent -> Some "library.introspection"
+        | _ -> None
+
+    /// A project generation's failure: an FS91xx refusal raised inside generation keeps its
+    /// diagnostics, any other failure keeps its text, both after "Binding generation failed: ";
+    /// a failure the pilot checks report directly keeps its text as it is. Each diagnostic a
+    /// pilot key causes carries the pilot file and that key.
+    let private projectFailure (projectPath: string) (run: unit -> Result<GenerationResult, Diagnostics.Refusal>) =
+        let failure =
+            try run ()
+            with
+            | :? Diagnostics.RefusalException as refused -> Error (Diagnostics.prefixed "Binding generation failed: " refused.Refusal)
+            | ex -> Error (Diagnostics.uncoded $"Binding generation failed: {ex.Message}")
+        let pilotFile = Path.GetFullPath projectPath
+        failure |> Result.mapError (Diagnostics.mapDiagnostics (fun d ->
+            match d.Pilot, pilotKeyOf d.Code with
+            | None, Some key -> Diagnostics.withPilot { PilotFile = pilotFile; Key = key } d
+            | _ -> d))
+
+    /// Generate bindings from a `.pilot.toml` project. A failure carries the structured
+    /// diagnostics of its FS91xx refusals (#184), with the exact text `generateFromProject`
+    /// reports as its `Text`: the public surface an editor reads refusals from.
+    let generateFromProjectDiagnosed projectPath verbose generateWrappers dataModel : Result<GenerationResult, Diagnostics.Refusal> =
+        projectFailure projectPath (fun () -> generateFromProjectCore (TypeMapper.tryScalar dataModel) projectPath verbose generateWrappers dataModel)
+
     /// Surface-contract failures are generation diagnostics, not uncaught tooling exceptions.
     let generateFromProject projectPath verbose generateWrappers dataModel =
-        try generateFromProjectCore (TypeMapper.tryScalar dataModel) projectPath verbose generateWrappers dataModel
-        with ex -> Error $"Binding generation failed: {ex.Message}"
+        generateFromProjectDiagnosed projectPath verbose generateWrappers dataModel |> Result.mapError _.Text
+
+    /// `generateFromProjectDiagnosed` with the profile rows clang's alias measurements are
+    /// checked against (FS9118) supplied, everything else unchanged.
+    let generateFromProjectCheckingAliasesAgainstDiagnosed (aliasRows: string -> TypeMapper.AbiRepr option) projectPath verbose generateWrappers dataModel =
+        projectFailure projectPath (fun () -> generateFromProjectCore aliasRows projectPath verbose generateWrappers dataModel)
 
     /// `generateFromProject` with the profile rows clang's alias measurements are checked
     /// against (FS9118) supplied, everything else unchanged. On an LP64 host every integer row
     /// agrees with clang, so a contradiction is shown end to end only against a deliberately
     /// wrong row.
     let generateFromProjectCheckingAliasesAgainst (aliasRows: string -> TypeMapper.AbiRepr option) projectPath verbose generateWrappers dataModel =
-        try generateFromProjectCore aliasRows projectPath verbose generateWrappers dataModel
-        with ex -> Error $"Binding generation failed: {ex.Message}"
+        generateFromProjectCheckingAliasesAgainstDiagnosed aliasRows projectPath verbose generateWrappers dataModel |> Result.mapError _.Text

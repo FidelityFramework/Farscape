@@ -64,6 +64,8 @@ module CppParser =
         /// Present for C++ methods, constructors, and destructors; None for C functions
         /// (which use unmangled names directly).
         MangledName: string option
+        /// Where clang locates the declaration (#184); not part of its shape.
+        Location: Diagnostics.Provenance
     }
 
     // =========================================================================
@@ -177,6 +179,9 @@ module CppParser =
         /// The attributes of the typedefs its fields' types reach, and of a typedef naming it, in
         /// its declaring unit (#175, `typedefAttributesOf`).
         TypedefAttributes: TypedefAttribute list
+        /// Where clang locates the record (#184): its declaration, or for a record C leaves
+        /// unnamed the location clang spells for it. Not part of its shape.
+        Location: Diagnostics.Provenance
     }
 
     /// A measured layout's offsets of the record's fields: clang's member offsets without those
@@ -209,11 +214,11 @@ module CppParser =
         else $"field '{origin.Field}' of '{origin.Parent}'"
 
     /// A unit whose generated anonymous record names collide (FS9114); carries the refusal.
-    exception AnonymousNameCollision of string
+    exception AnonymousNameCollision of Diagnostics.Refusal
 
     /// A unit with an anonymous member Farscape cannot represent (FS9122) or whose generated
     /// member name names another member (FS9123); carries the refusal.
-    exception AnonymousMemberRefused of string
+    exception AnonymousMemberRefused of Diagnostics.Diagnostic
 
     /// Represents a C/C++ enum value with signed support
     type EnumValue = {
@@ -254,6 +259,8 @@ module CppParser =
         /// The representation's provenance: clang's measurement in the declaring unit, or the
         /// protocol's declared wire type.
         Representation: EnumRepresentationSource
+        /// Where clang (or the protocol reader) locates the enum (#184); not part of its shape.
+        Location: Diagnostics.Provenance
     }
 
     /// Represents a C/C++ typedef declaration
@@ -596,7 +603,7 @@ module CppParser =
         |> List.ofSeq
 
     /// Process FunctionDecl AST node
-    let private processFunctionDecl (node: JsonValue) : FunctionDecl option =
+    let private processFunctionDecl (location: Diagnostics.Provenance) (node: JsonValue) : FunctionDecl option =
         match getString node "name" with
         | None | Some "" -> None
         | Some name ->
@@ -627,6 +634,7 @@ module CppParser =
                 IsInline = isInline
                 Attributes = attributes
                 MangledName = mangledName
+                Location = location
             }
 
     /// The constant width clang gives a bit-field FieldDecl.
@@ -668,7 +676,7 @@ module CppParser =
         |> List.ofSeq
 
     /// Process RecordDecl (struct/union) AST node
-    let private processRecordDecl (node: JsonValue) : StructDecl option =
+    let private processRecordDecl (location: Diagnostics.Provenance) (node: JsonValue) : StructDecl option =
         let name = getString node "name"
         let tagUsed = getStringOr node "tagUsed" "struct"
         let isUnion = tagUsed = "union"
@@ -686,10 +694,10 @@ module CppParser =
         match name, fields with
         | Some n, _ when not (String.IsNullOrEmpty(n)) ->
             Some { Name = n; Fields = fields; Documentation = documentation; IsUnion = isUnion; Attributes = attributes; Anonymous = None; Measured = None; Unattributed = None
-                   UnnamedBitFields = padding; TypedefAttributes = [] }
+                   UnnamedBitFields = padding; TypedefAttributes = []; Location = location }
         | _, fs when not fs.IsEmpty ->
             Some { Name = ""; Fields = fields; Documentation = documentation; IsUnion = isUnion; Attributes = attributes; Anonymous = None; Measured = None; Unattributed = None
-                   UnnamedBitFields = padding; TypedefAttributes = [] }
+                   UnnamedBitFields = padding; TypedefAttributes = []; Location = location }
         | _ -> None
 
     /// Clang spells the type of a field declared with an unnamed record as
@@ -717,6 +725,66 @@ module CppParser =
                 let full = try Path.GetFullPath path with _ -> path
                 Some (full, line, col)
             | _ -> None
+
+    /// A clang `path:line:col` location as a diagnostic source (#184).
+    let clangSourceLocation (location: string) : Diagnostics.Located<Diagnostics.SourceLocation> =
+        match clangLocation location with
+        | Some (path, line, col) ->
+            Diagnostics.Located.Known { Path = path; Position = Diagnostics.Located.Known { Line = line; Column = col } }
+        | None -> Diagnostics.Located.Unknown $"clang spells no path:line:col location for it ('{location}')"
+
+    /// Clang's location of a declaration node (#184), read from its `loc`: the file (clang
+    /// writes it only when it changes, so `currentFile` carries it otherwise) and the byte offset,
+    /// from which the line and column are counted in that file. It is kept only when the token
+    /// clang gives at that offset is the declaration's own name (for a declaration C leaves
+    /// unnamed, its tag keyword) and clang's column, where it writes one, agrees; otherwise the
+    /// reason is kept and no location is invented. A declaration clang locates inside a macro
+    /// expansion is not located.
+    let private nodeProvenance (files: System.Collections.Generic.Dictionary<string, (byte[] * int[]) option>)
+                               (currentFile: string option) (node: JsonValue) : Diagnostics.Provenance =
+        let expected =
+            match getStringOr node "name" "" with
+            | "" -> if getStringOr node "kind" "" = "EnumDecl" then "enum" else getStringOr node "tagUsed" "struct"
+            | name -> name
+        match getObject node "loc" with
+        | None -> Diagnostics.unlocated $"clang gives declaration '{expected}' no location"
+        | Some loc when (getObject loc "spellingLoc").IsSome || (getObject loc "expansionLoc").IsSome ->
+            Diagnostics.unlocated $"clang locates declaration '{expected}' inside a macro expansion"
+        | Some loc ->
+            match (match getString loc "file" with Some f -> Some f | None -> currentFile), getInt64 loc "offset", getInt64 loc "tokLen" with
+            | Some file, Some offset, Some tokLen ->
+                let path = try Path.GetFullPath file with _ -> file
+                let text =
+                    match files.TryGetValue path with
+                    | true, cached -> cached
+                    | _ ->
+                        let read =
+                            try
+                                let bytes = File.ReadAllBytes path
+                                let starts = [| yield 0; for i in 0 .. bytes.Length - 1 do if bytes.[i] = byte '\n' then yield i + 1 |]
+                                Some (bytes, starts)
+                            with _ -> None
+                        files.[path] <- read
+                        read
+                match text with
+                | None -> Diagnostics.unlocated $"clang locates declaration '{expected}' in '{path}', which cannot be read to confirm the location"
+                | Some (bytes, starts) ->
+                    let offset, tokLen = int offset, int tokLen
+                    if offset < 0 || tokLen < 0 || offset + tokLen > bytes.Length then
+                        Diagnostics.unlocated $"clang's offset {offset} for declaration '{expected}' lies outside '{path}'"
+                    else
+                        let token = System.Text.Encoding.UTF8.GetString(bytes, offset, tokLen)
+                        // The last line start at or before the offset.
+                        let index = match Array.BinarySearch(starts, offset) with i when i >= 0 -> i | i -> ~~~i - 1
+                        let line, column = index + 1, offset - starts.[index] + 1
+                        if token <> expected then
+                            Diagnostics.unlocated $"clang's location for declaration '{expected}' in '{path}' (offset {offset}) spells '{token}'"
+                        elif getInt64 loc "col" |> Option.exists (fun col -> int col <> column) then
+                            Diagnostics.unlocated $"clang's column for declaration '{expected}' in '{path}' disagrees with its offset {offset}"
+                        else
+                            Diagnostics.Provenance (Diagnostics.Located.Known { Path = path; Position = Diagnostics.Located.Known { Line = line; Column = column } })
+            | None, _, _ -> Diagnostics.unlocated $"clang names no file for declaration '{expected}'"
+            | _ -> Diagnostics.unlocated $"clang gives declaration '{expected}' no offset"
 
     /// Name the unnamed records a named record's fields are typed with (issue #159). Clang
     /// emits each unnamed RecordDecl immediately before the FieldDecl declared with it; that
@@ -775,7 +843,7 @@ module CppParser =
                         let paired =
                             match unnamed with
                             | Some declaration when spelled.Success && pairs declaration spelled.Groups.["tag"].Value spelled.Groups.["loc"].Value ->
-                                processRecordDecl declaration |> Option.map (fun record -> declaration, record)
+                                processRecordDecl (Diagnostics.Provenance (clangSourceLocation spelled.Groups.["loc"].Value)) declaration |> Option.map (fun record -> declaration, record)
                             | _ -> None
                         match paired with
                         | Some (declaration, inner) ->
@@ -794,11 +862,11 @@ module CppParser =
                     let spelled = anonymousMemberSpelling.Match clangType
                     let location = if spelled.Success then spelled.Groups.["loc"].Value else ""
                     if memberNames.Contains field then
-                        raise (AnonymousMemberRefused $"{Diagnostics.AnonymousMemberNameCollision}: the generated member name '{field}' of the anonymous member of '{parent}' declared at {location} in '{header}' names another member of that record. A generated name must name one member.")
+                        raise (AnonymousMemberRefused (Diagnostics.diagnostic Diagnostics.AnonymousMemberNameCollision $"the generated member name '{field}' of the anonymous member of '{parent}' declared at {location} in '{header}' names another member of that record. A generated name must name one member." (clangSourceLocation location)))
                     let paired =
                         match unnamed with
                         | Some declaration when spelled.Success && pairs declaration spelled.Groups.["tag"].Value location ->
-                            processRecordDecl declaration |> Option.map (fun record -> declaration, record)
+                            processRecordDecl (Diagnostics.Provenance (clangSourceLocation location)) declaration |> Option.map (fun record -> declaration, record)
                         | _ -> None
                     match paired with
                     | Some (declaration, inner) ->
@@ -810,7 +878,10 @@ module CppParser =
                         let spelling = spelled.Groups.["pre"].Value + spelled.Groups.["tag"].Value + " " + generated
                         fields.Add { parseFieldType spelling with Name = field; Attributes = extractAttributes child }
                     | None ->
-                        raise (AnonymousMemberRefused $"{Diagnostics.AnonymousMemberUnrepresented}: an anonymous member of '{parent}' in '{header}', of clang type '{clangType}', cannot be paired with a record clang declares for it, so '{parent}' has no representation of it. An anonymous member is never dropped from its record.")
+                        // Clang's spelling locates the anonymous member's record; without it, the
+                        // enclosing record's location stands for the refusal's source.
+                        let source = if spelled.Success then clangSourceLocation location else record.Location.Location
+                        raise (AnonymousMemberRefused (Diagnostics.diagnostic Diagnostics.AnonymousMemberUnrepresented $"an anonymous member of '{parent}' in '{header}', of clang type '{clangType}', cannot be paired with a record clang declares for it, so '{parent}' has no representation of it. An anonymous member is never dropped from its record." source))
                 | _ -> ()
             { record with Fields = List.ofSeq fields }, List.ofSeq nested
         name parent node record
@@ -819,13 +890,13 @@ module CppParser =
     /// Returns None when the enum constant has no initializer (implicit sequential value).
     /// A value clang reports that the signed 64-bit carrier cannot hold (an unsigned 64-bit
     /// enumerator above 2^63-1) is refused rather than read as an implicit successor.
-    let private extractEnumConstantValue (node: JsonValue) : int64 option =
+    let private extractEnumConstantValue (enumLocation: Diagnostics.Provenance) (node: JsonValue) : int64 option =
         let value (element: JsonValue) =
             match getInt64 element "value", getString element "value" with
             | Some v, _ -> Some v
             | None, Some text when text <> "" ->
                 let name = getStringOr node "name" "<unnamed>"
-                failwith $"{Diagnostics.EnumValueRange}: enumerator '{name}' has value {text}, outside the signed 64-bit range the enum representation carries; a wider enumerator representation contract is required."
+                Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.EnumValueRange $"enumerator '{name}' has value {text}, outside the signed 64-bit range the enum representation carries; a wider enumerator representation contract is required." enumLocation.Location)
             | None, _ -> None
         getArray node "inner"
         |> Seq.tryPick (fun inner ->
@@ -837,7 +908,7 @@ module CppParser =
                 |> Seq.tryPick value)
 
     /// Process EnumDecl AST node
-    let private processEnumDecl (node: JsonValue) : EnumDecl option =
+    let private processEnumDecl (location: Diagnostics.Provenance) (node: JsonValue) : EnumDecl option =
         let name = getString node "name"
         let documentation = extractDocumentation node
         // Process enum constants with auto-increment for implicit values.
@@ -854,7 +925,7 @@ module CppParser =
                 | None | Some "" -> ()
                 | Some constName ->
                     let value =
-                        match extractEnumConstantValue constNode with
+                        match extractEnumConstantValue location constNode with
                         | Some explicit -> explicit
                         | None -> nextValue
                     nextValue <- value + 1L
@@ -868,9 +939,9 @@ module CppParser =
 
         match name, values with
         | Some n, _ when not (String.IsNullOrEmpty(n)) ->
-            Some { Name = n; Values = values; Documentation = documentation; UnderlyingType = underlyingType; Representation = ClangUnmeasured }
+            Some { Name = n; Values = values; Documentation = documentation; UnderlyingType = underlyingType; Representation = ClangUnmeasured; Location = location }
         | _, vs when not vs.IsEmpty ->
-            Some { Name = ""; Values = values; Documentation = documentation; UnderlyingType = underlyingType; Representation = ClangUnmeasured }
+            Some { Name = ""; Values = values; Documentation = documentation; UnderlyingType = underlyingType; Representation = ClangUnmeasured; Location = location }
         | _ -> None
 
     /// Process TypedefDecl AST node
@@ -907,8 +978,11 @@ module CppParser =
         // resolving its own declarations, never emitted as its declarations.
         let included = ResizeArray<Declaration>()
         let mutable currentFile: string option = None
+        // Each file clang locates a declaration in, read once to count its lines (#184).
+        let files = System.Collections.Generic.Dictionary<string, (byte[] * int[]) option>()
+        let located node = nodeProvenance files currentFile node
         let processFunction scope node =
-            processFunctionDecl node |> Option.map (enrichFunction scope node)
+            processFunctionDecl (located node) node |> Option.map (enrichFunction scope node)
 
         // Clang emits an anonymous typedef union or enum as a RecordDecl or EnumDecl followed
         // by a TypedefDecl whose RecordType or EnumType points back to that declaration.
@@ -1009,7 +1083,7 @@ module CppParser =
                     | None -> ()
 
                 | "RecordDecl" ->
-                    match processRecordDecl node with
+                    match processRecordDecl (located node) node with
                     | Some structDecl ->
                         let name =
                             if structDecl.Name <> "" then structDecl.Name
@@ -1026,7 +1100,7 @@ module CppParser =
                     | None -> ()
 
                 | "EnumDecl" ->
-                    match processEnumDecl node with
+                    match processEnumDecl (located node) node with
                     | Some enumDecl ->
                         let name =
                             if enumDecl.Name <> "" then enumDecl.Name
@@ -1090,7 +1164,7 @@ module CppParser =
                         |> Seq.tryFind (fun inner ->
                             getStringOr inner "kind" "" = "FieldDecl" && getBool inner "isImplicit" && getStringOr inner "name" "" = "")
                         |> Option.iter (fun inner ->
-                            raise (AnonymousMemberRefused $"{Diagnostics.AnonymousMemberUnrepresented}: C++ record '{name}' in '{header}' has an anonymous member of clang type '{getQualType inner}'; the C++ record path does not represent anonymous members, and none is dropped from its record."))
+                            raise (AnonymousMemberRefused (Diagnostics.diagnostic Diagnostics.AnonymousMemberUnrepresented $"C++ record '{name}' in '{header}' has an anonymous member of clang type '{getQualType inner}'; the C++ record path does not represent anonymous members, and none is dropped from its record." (located node).Location)))
 
                         let fields =
                             innerNodes
@@ -1179,7 +1253,7 @@ module CppParser =
                 if not isImplicit then
                     match kind with
                     | "EnumDecl" ->
-                        match processEnumDecl node with
+                        match processEnumDecl (located node) node with
                         | Some enumDecl ->
                             let name =
                                 if enumDecl.Name <> "" then enumDecl.Name
@@ -1527,15 +1601,20 @@ module CppParser =
     /// A pilot define is `NAME` or `NAME=VALUE`, with `NAME` a C identifier and a one-line
     /// `VALUE` (#178). It reaches clang as exactly one `-D` argument, so it can carry no other
     /// option; anything else is refused before any parse (FS9124), quoting the define.
-    let defineRefusal (define: string) : string option =
+    /// A define is pilot, command-line or pkg-config input, never a header declaration, so its refusal has
+    /// no source position; a pilot's refusal carries the pilot key (`BindingGenerator`).
+    let defineRefusal (define: string) : Diagnostics.Diagnostic option =
         if System.Text.RegularExpressions.Regex.IsMatch(define, @"\A[A-Za-z_][A-Za-z0-9_]*(=[^\r\n\x00]*)?\z") then None
-        else Some $"{Diagnostics.DefineMalformed}: define '{define}' is not NAME or NAME=VALUE with NAME a C identifier; a define reaches clang as one -D argument and carries no other option."
+        else
+            Some (Diagnostics.diagnostic Diagnostics.DefineMalformed
+                    $"define '{define}' is not NAME or NAME=VALUE with NAME a C identifier; a define reaches clang as one -D argument and carries no other option."
+                    (Diagnostics.Located.Unknown "a define is pilot, command-line or pkg-config input, not a header declaration"))
 
     /// Every malformed define of a list, refused together, or Ok.
-    let requireWellFormedDefines (defines: string list) : Result<unit, string> =
-        match defines |> List.choose defineRefusal |> List.distinct with
+    let requireWellFormedDefines (defines: string list) : Result<unit, Diagnostics.Refusal> =
+        match defines |> List.choose defineRefusal |> List.distinctBy Diagnostics.render with
         | [] -> Ok ()
-        | refusals -> Error (String.concat " " refusals)
+        | refusals -> Error (Diagnostics.refusalsOf refusals "")
 
     /// A clang process whose arguments are each exactly one argument (#178).
     let private clangStartInfo (args: string seq) = ProcessLaunch.startInfo "clang" args
@@ -1750,7 +1829,7 @@ module CppParser =
         : Result<Map<string, StructLayoutInfo>, string> =
 
         match requireWellFormedDefines defines with
-        | Error refusal -> Error refusal
+        | Error refusal -> Error refusal.Text
         | Ok () ->
         if structNames.IsEmpty then Ok Map.empty
         else
@@ -2086,7 +2165,7 @@ module CppParser =
     /// The names Farscape gives anonymous records must name nothing else in their unit: no
     /// other record, typedef or enum, own or reached through an include, and no other
     /// anonymous record (`a_b` + `c` and `a` + `b_c`). Otherwise the unit is refused (FS9114).
-    let anonymousNameCollisions (header: string) (declarations: Declaration list) : string list =
+    let anonymousNameCollisions (header: string) (declarations: Declaration list) : Diagnostics.Diagnostic list =
         let generated = declarations |> List.choose (function Struct s when s.Anonymous.IsSome -> Some s | _ -> None)
         if generated.IsEmpty then []
         else
@@ -2105,13 +2184,20 @@ module CppParser =
         generated
         |> List.groupBy _.Name
         |> List.choose (fun (name, named) ->
+            let records = named |> List.distinctBy (fun s -> s.Anonymous)
             let clashes =
-                (named |> List.distinctBy (fun s -> s.Anonymous) |> List.map describe)
+                (records |> List.map describe)
                 @ (others |> List.filter (fun (other, _) -> other = name) |> List.distinct |> List.map (fun (_, kind) -> $"a {kind}"))
             if clashes.Length < 2 then None
             else
                 let listed = clashes |> String.concat "; "
-                Some $"{Diagnostics.AnonymousNameCollision}: the generated record name '{name}' in '{header}' names more than one declaration: {listed}. A generated name must name one record.")
+                // The first generated record is the source; the others the refusal names follow.
+                let related = records |> List.tail |> List.choose (fun s -> match s.Location.Location with Diagnostics.Located.Known l -> Some l | _ -> None)
+                Diagnostics.diagnostic Diagnostics.AnonymousNameCollision
+                    $"the generated record name '{name}' in '{header}' names more than one declaration: {listed}. A generated name must name one record."
+                    (List.head records).Location.Location
+                |> Diagnostics.withRelated related
+                |> Some)
 
     // =========================================================================
     // Clang Built-in Type Aliases in Results (clang canonicalizes and measures them)
@@ -2338,20 +2424,22 @@ module CppParser =
         Aliases: ClangTypeAlias list
     }
 
-    /// Parse a C/C++ header file and extract all declarations including macros
-    let parseHeaderFull (options: HeaderParserOptions) : Result<ParseResult, string> =
+    /// Parse a C/C++ header file and extract all declarations including macros. A failure
+    /// carries the diagnostics of each FS91xx refusal with the exact text `parseHeaderFull`
+    /// reports (#184).
+    let parseHeaderFullDiagnosed (options: HeaderParserOptions) : Result<ParseResult, Diagnostics.Refusal> =
         match requireWellFormedDefines options.Defines with
         | Error refusal -> Error refusal
         | Ok () ->
         if not (File.Exists(options.HeaderFile)) then
-            Error $"Header file not found: {options.HeaderFile}"
+            Error (Diagnostics.uncoded $"Header file not found: {options.HeaderFile}")
         else
             if options.Verbose then
                 printfn "[CppParser] Parsing header: %s" options.HeaderFile
 
             // Pass 1: AST for structs, enums, typedefs, functions
             match runClangAst options with
-            | Error err -> Error err
+            | Error err -> Error (Diagnostics.uncoded err)
             | Ok jsonOutput ->
                 try
                     if options.Verbose then
@@ -2366,7 +2454,7 @@ module CppParser =
                     let declarations, included = List.splitAt declarations.Length measured
                     match anonymousNameCollisions options.HeaderFile (declarations @ included) with
                     | [] -> ()
-                    | collisions -> raise (AnonymousNameCollision (String.concat " " collisions))
+                    | collisions -> raise (AnonymousNameCollision (Diagnostics.refusalsOf collisions ""))
                     // Each record's typedef attributes, from this unit's typedefs (#175).
                     let declarations = annotateTypedefAttributes typedefNamedTags (declarations @ included) declarations
                     // Anonymous records, the records enclosing them, records carrying a
@@ -2415,9 +2503,14 @@ module CppParser =
                         Aliases = measureResultAliases options declarations included
                     }
                 with
-                | AnonymousNameCollision reason -> Error reason
-                | AnonymousMemberRefused reason -> Error reason
-                | ex -> Error $"Failed to parse clang output: {ex.Message}"
+                | AnonymousNameCollision refusal -> Error refusal
+                | AnonymousMemberRefused d -> Error (Diagnostics.refusalOf d)
+                | :? Diagnostics.RefusalException as refused -> Error (Diagnostics.prefixed "Failed to parse clang output: " refused.Refusal)
+                | ex -> Error (Diagnostics.uncoded $"Failed to parse clang output: {ex.Message}")
+
+    /// Parse a C/C++ header file and extract all declarations including macros
+    let parseHeaderFull (options: HeaderParserOptions) : Result<ParseResult, string> =
+        parseHeaderFullDiagnosed options |> Result.mapError _.Text
 
     /// The declarations Farscape reads from one clang JSON AST of `header` (`clang -Xclang
     /// -ast-dump=json`), named and refused as a parse names and refuses them (FS9114, FS9122,
@@ -2432,21 +2525,25 @@ module CppParser =
             let declarations, typedefNamed, included = walkAst root header (Path.GetFileName header) None false (fun _ _ f -> f)
             match anonymousNameCollisions header (declarations @ included) with
             | [] -> Ok (annotateTypedefAttributes typedefNamed (declarations @ included) declarations)
-            | collisions -> Error (String.concat " " collisions)
+            | collisions -> Error (Diagnostics.refusalsOf collisions "").Text
         with
-        | AnonymousMemberRefused reason -> Error reason
+        | AnonymousMemberRefused d -> Error (Diagnostics.render d)
 
     /// Parse a C/C++ header as one translation unit: its declarations (with macros), and the
     /// typedefs and enums its parse reaches through includes outside the library boundary.
-    let parseHeaderUnit (options: HeaderParserOptions) : Result<Declaration list * Declaration list * ClangTypeAlias list, string> =
-        match parseHeaderFull options with
+    let parseHeaderUnitDiagnosed (options: HeaderParserOptions) : Result<Declaration list * Declaration list * ClangTypeAlias list, Diagnostics.Refusal> =
+        match parseHeaderFullDiagnosed options with
         | Error err -> Error err
         | Ok result ->
             let allDecls = result.Declarations @ (result.Macros |> List.map Macro)
             if allDecls.IsEmpty then
-                Error $"Parse succeeded but no declarations found in {Path.GetFileName(options.HeaderFile)}."
+                Error (Diagnostics.uncoded $"Parse succeeded but no declarations found in {Path.GetFileName(options.HeaderFile)}.")
             else
                 Ok (allDecls, result.Included, result.Aliases)
+
+    /// `parseHeaderUnitDiagnosed`, reporting a failure as its text.
+    let parseHeaderUnit (options: HeaderParserOptions) : Result<Declaration list * Declaration list * ClangTypeAlias list, string> =
+        parseHeaderUnitDiagnosed options |> Result.mapError _.Text
 
     /// Parse a C/C++ header file and extract declarations (backward compatible)
     let parseHeader (options: HeaderParserOptions) : Result<Declaration list, string> =

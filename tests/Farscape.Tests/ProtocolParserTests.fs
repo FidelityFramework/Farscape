@@ -617,3 +617,106 @@ let ``a parsed protocol enum value beyond its wire type is refused with its own 
     let error = Assert.ThrowsAny<exn>(fun () ->
         FidelityCodeGenerator.resolveCType ctx.TypedefMap ctx.DataModel ctx.OpaqueHandles ctx.Delegates ctx.Enums "wl_shm_format" |> ignore)
     Assert.Equal("FS9107: enumerator 'wide' of enum 'wl_shm_format' has value 4294967296, which its protocol's declared unsigned 32-bit representation cannot hold.", error.Message)
+
+// =============================================================================
+// Enum entry values (issue #160): decimal, 0x hexadecimal or 0-prefixed octal, each optionally
+// negated, the forms the Wayland message definition language gives, read as the C
+// wayland-scanner emits reads them, or the protocol is refused (FS9130) naming the protocol, enum, entry and text.
+// An entry value is never read as 0.
+// =============================================================================
+
+let private protocolFixture (name: string) = TestHelpers.fixturePath ("protocol-values/" + name)
+
+[<Fact>]
+let ``every entry value form the protocol definition gives is read exactly`` () =
+    match ProtocolParser.parseFileDiagnosed (protocolFixture "values.xml") with
+    | Error refusal -> failwith refusal.Text
+    | Ok protocol ->
+        let values =
+            ProtocolParser.toTypeDeclarations protocol |> List.pick (function
+                | CppParser.Declaration.Enum e when e.Name = "fx_shape_kind" -> Some (e.Values |> List.map (fun v -> v.Name, v.Value))
+                | _ -> None)
+        Assert.Equal<(string * int64) list>(
+            [ "zero", 0L; "one", 1L; "minus_one", -1L; "hex_zero", 0L; "upper_hex", 31L; "fourcc", 0x20203843L
+              "uint32_max", 4294967295L; "int64_max_hex", System.Int64.MaxValue; "int64_max", System.Int64.MaxValue
+              "octal_eight", 8L; "octal_zero", 0L; "octal_mode", 493L; "int64_max_octal", System.Int64.MaxValue
+              "neg_octal", -8L; "neg_hex", -1L; "neg_zero", 0L; "neg_int_hex", -2147483647L; "neg_long_hex", -4294967296L
+              "min_decimal", -System.Int64.MaxValue; "min_hex", -System.Int64.MaxValue; "min_octal", -System.Int64.MaxValue ],
+            values)
+
+[<Fact>]
+let ``clang reads every admitted entry value as the parser does, and every refused negation as non-negative`` () =
+    // An independent oracle: the C wayland-scanner emits is each value verbatim, so clang's
+    // constant evaluation of the same text must give the parser's value; a negation the parser
+    // refuses as wrapping must not be negative in C.
+    let protocol =
+        match ProtocolParser.parseFileDiagnosed (protocolFixture "values.xml") with
+        | Ok p -> p
+        | Error refusal -> failwith refusal.Text
+    let admitted =
+        [ for iface in protocol.Interfaces do
+            for enum in iface.Enums do
+                for entry in enum.Entries do
+                    match ProtocolParser.entryValue entry.Value with
+                    | Ok v ->
+                        // C has no literal for Int64.MinValue; none is admitted.
+                        yield $"({entry.Value}) == ({v}LL) && ((({entry.Value}) < 0) == ({v}LL < 0))"
+                    | Error why -> failwith why ]
+    let wrapped = [ "-0x80000000"; "-0x8000000000000000"; "-01000000000000000000000" ] |> List.map (fun t -> $"({t}) > 0")
+    let header = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "farscape-entry-values-" + System.Guid.NewGuid().ToString("N") + ".h")
+    try
+        System.IO.File.WriteAllText(header, "/* entry values as wayland-scanner emits them */\n")
+        TestHelpers.clangConfirms header (admitted @ wrapped)
+    finally
+        System.IO.File.Delete header
+
+[<Fact>]
+let ``an entry value the protocol definition does not give refuses the protocol by name`` () =
+    let path = protocolFixture "malformed.xml"
+    let refused entry why = $"FS9130: protocol 'fx_malformed' enum 'fx_shape.kind' entry '{entry}' has {why}; an entry value is never read as 0."
+    let form text = $"value '{text}', which is not a decimal, 0x hexadecimal or 0-prefixed octal integer, optionally negated, the forms the Wayland protocol definition gives an entry value in"
+    let unsignedNegation text constant = $"value '{text}', whose constant '{constant}' C types as unsigned (C11 6.4.4.1), so the negation wayland-scanner emits wraps (C11 6.2.5) instead of giving a negative value"
+    let octal text = $"value '{text}', which begins with 0 as an octal integer does but has a digit outside 0-7"
+    let outside text = $"value '{text}', outside the signed 64-bit range enum values carry"
+    let expected =
+        [ refused "suffixed" (form "1u")
+          refused "octal_eight_digit" (octal "08")
+          refused "octal_nine_digit" (octal "0719")
+          refused "octal_wide" (outside "01000000000000000000000")
+          refused "spaced" (form " 1")
+          refused "wide" (outside "0xFFFFFFFFFFFFFFFF")
+          refused "empty" (form "")
+          refused "absent" "no value attribute, which wayland.dtd requires (<!ATTLIST entry value CDATA #REQUIRED>)"
+          refused "double_sign" (form "--1")
+          refused "bare_sign" (form "-")
+          refused "spaced_sign" (form "- 1")
+          refused "neg_octal_digit" (octal "-08")
+          refused "neg_unsigned_int_hex" (unsignedNegation "-0x80000000" "0x80000000")
+          refused "neg_unsigned_long_hex" (unsignedNegation "-0x8000000000000000" "0x8000000000000000")
+          refused "neg_unsigned_octal" (unsignedNegation "-01000000000000000000000" "01000000000000000000000")
+          refused "neg_untyped_decimal" "value '-9223372036854775808', whose constant '9223372036854775808' has no standard C type (an unsuffixed decimal constant is int, long or long long, C11 6.4.4.1), so the value wayland-scanner's C gives it is not -9223372036854775808"
+          refused "neg_wide_hex" (outside "-0x10000000000000000")
+          refused "binary" (form "0b1") ]
+    match ProtocolParser.parseFileDiagnosed path with
+    | Ok _ -> failwith "a protocol with unreadable entry values was parsed"
+    | Error refusal ->
+        Assert.Equal<string list>(expected, refusal.Diagnostics |> List.map Diagnostics.render)
+        Assert.Equal(String.concat " " expected, refusal.Text)
+        for d in refusal.Diagnostics do
+            Assert.Equal(Diagnostics.inFile path "Fidelity.Data.XML keeps no line positions for protocol elements", d.Source)
+            Assert.Equal(None, d.Pilot)
+    // The same refusal ends a pilot run with real clang, before any binding is written.
+    TestHelpers.withPilotSections [protocolFixture "native.h"] [ $"xml_protocols = [\"{path}\"]" ] ["typed_protocol = true"] [] [] [] (fun result output ->
+        Assert.Equal(Error ("Failed to parse XML protocols: " + String.concat " " expected), result |> Result.map ignore)
+        Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+
+[<Fact>]
+let ``an entry of a protocol built outside the parser is refused the same way`` () =
+    let protocol : ProtocolParser.Protocol =
+        { Name = "fx_built"
+          Interfaces =
+            [ { Name = "fx_shape"; Version = 1; Requests = []; Events = []; Documentation = None
+                Enums = [ { Name = "kind"; IsBitfield = false; Documentation = None
+                            Entries = [ { Name = "bad"; Value = "seven"; Summary = None } ] } ] } ] }
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> ProtocolParser.toTypeDeclarations protocol |> ignore)
+    Assert.Equal("FS9130: protocol 'fx_built' enum 'fx_shape.kind' entry 'bad' has value 'seven', which is not a decimal, 0x hexadecimal or 0-prefixed octal integer, optionally negated, the forms the Wayland protocol definition gives an entry value in; an entry value is never read as 0.", error.Message)

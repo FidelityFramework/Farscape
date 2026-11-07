@@ -36,7 +36,7 @@ let ``an alias measurement contradicting its canonical type's profile row is ref
         { Name = "__size_t"; Function = "strlen"; Canonical = Ok ("unsigned long", { Bits = 32; IsSigned = false }) }
     Assert.Equal(
         Error "FS9118: clang measures the result of function 'strlen' in 'a.h' ('__size_t', canonically 'unsigned long') as unsigned 32-bit, but the LP64 profile row for 'unsigned long' is unsigned 64-bit; the profile and the target must agree. No bindings were written.",
-        BindingGenerator.requireCanonicalAliases Types.LP64 (Map.ofList ["a.h", [alias]]) ["a.h", [CppParser.Declaration.Function strlen]] [strlen])
+        (BindingGenerator.requireCanonicalAliases Types.LP64 (Map.ofList ["a.h", [alias]]) ["a.h", [CppParser.Declaration.Function strlen]] [strlen] |> refusalText))
     let agreeing = { alias with Canonical = Ok ("unsigned long", { Bits = 64; IsSigned = false }) }
     Assert.Equal(Ok (), BindingGenerator.requireCanonicalAliases Types.LP64 (Map.ofList ["a.h", [agreeing]]) ["a.h", [CppParser.Declaration.Function strlen]] [strlen])
 

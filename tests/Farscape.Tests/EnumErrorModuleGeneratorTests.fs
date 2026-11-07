@@ -41,7 +41,7 @@ let private hipValues = [
 [<Fact>]
 let ``generates describe function with integer literal patterns`` () =
     let config = makeHipConfig ()
-    let output = EnumErrorModuleGenerator.generate { Name = "hipError_t"; Values = hipValues; Documentation = None; UnderlyingType = None; Representation = CppParser.ClangUnmeasured } config "Fidelity.HIP.Errors" ["Fidelity.HIP.Types"]
+    let output = EnumErrorModuleGenerator.generate { Name = "hipError_t"; Values = hipValues; Documentation = None; UnderlyingType = None; Representation = CppParser.ClangUnmeasured; Location = TestHelpers.constructed } config "Fidelity.HIP.Errors" ["Fidelity.HIP.Types"]
     let text = output.Value
     Assert.Contains("let describe (code: int) : string =", text)
     Assert.Contains("| 0 ->", text)
@@ -53,7 +53,7 @@ let ``generates describe function with integer literal patterns`` () =
 [<Fact>]
 let ``describe falls back to variant name when no doc comment`` () =
     let config = makeHipConfig ()
-    let output = EnumErrorModuleGenerator.generate { Name = "hipError_t"; Values = hipValues; Documentation = None; UnderlyingType = None; Representation = CppParser.ClangUnmeasured } config "Fidelity.HIP.Errors" ["Fidelity.HIP.Types"]
+    let output = EnumErrorModuleGenerator.generate { Name = "hipError_t"; Values = hipValues; Documentation = None; UnderlyingType = None; Representation = CppParser.ClangUnmeasured; Location = TestHelpers.constructed } config "Fidelity.HIP.Errors" ["Fidelity.HIP.Types"]
     let text = output.Value
     // hipErrorUnknown has no doc comment, should use the variant name
     Assert.Contains("| 999 ->", text)
@@ -62,7 +62,7 @@ let ``describe falls back to variant name when no doc comment`` () =
 [<Fact>]
 let ``describe has default catch-all case`` () =
     let config = makeHipConfig ()
-    let output = EnumErrorModuleGenerator.generate { Name = "hipError_t"; Values = hipValues; Documentation = None; UnderlyingType = None; Representation = CppParser.ClangUnmeasured } config "Fidelity.HIP.Errors" ["Fidelity.HIP.Types"]
+    let output = EnumErrorModuleGenerator.generate { Name = "hipError_t"; Values = hipValues; Documentation = None; UnderlyingType = None; Representation = CppParser.ClangUnmeasured; Location = TestHelpers.constructed } config "Fidelity.HIP.Errors" ["Fidelity.HIP.Types"]
     let text = output.Value
     Assert.Contains("| other ->", text)
     Assert.Contains("\"Unknown hipError_t error\"", text)
@@ -70,20 +70,20 @@ let ``describe has default catch-all case`` () =
 [<Fact>]
 let ``generate returns None for empty enum`` () =
     let config = makeHipConfig ()
-    let output = EnumErrorModuleGenerator.generate { Name = "hipError_t"; Values = []; Documentation = None; UnderlyingType = None; Representation = CppParser.ClangUnmeasured } config "Fidelity.HIP.Errors" ["Fidelity.HIP.Types"]
+    let output = EnumErrorModuleGenerator.generate { Name = "hipError_t"; Values = []; Documentation = None; UnderlyingType = None; Representation = CppParser.ClangUnmeasured; Location = TestHelpers.constructed } config "Fidelity.HIP.Errors" ["Fidelity.HIP.Types"]
     Assert.True(output.IsNone)
 
 [<Fact>]
 let ``generate produces correct module namespace`` () =
     let config = makeHipConfig ()
-    let output = EnumErrorModuleGenerator.generate { Name = "hipError_t"; Values = hipValues; Documentation = None; UnderlyingType = None; Representation = CppParser.ClangUnmeasured } config "Fidelity.HIP.Errors" ["Fidelity.HIP.Types"]
+    let output = EnumErrorModuleGenerator.generate { Name = "hipError_t"; Values = hipValues; Documentation = None; UnderlyingType = None; Representation = CppParser.ClangUnmeasured; Location = TestHelpers.constructed } config "Fidelity.HIP.Errors" ["Fidelity.HIP.Types"]
     let text = output.Value
     Assert.Contains("module Fidelity.HIP.Errors", text)
 
 [<Fact>]
 let ``generate produces companion submodule`` () =
     let config = makeHipConfig ()
-    let output = EnumErrorModuleGenerator.generate { Name = "hipError_t"; Values = hipValues; Documentation = None; UnderlyingType = None; Representation = CppParser.ClangUnmeasured } config "Fidelity.HIP.Errors" ["Fidelity.HIP.Types"]
+    let output = EnumErrorModuleGenerator.generate { Name = "hipError_t"; Values = hipValues; Documentation = None; UnderlyingType = None; Representation = CppParser.ClangUnmeasured; Location = TestHelpers.constructed } config "Fidelity.HIP.Errors" ["Fidelity.HIP.Types"]
     let text = output.Value
     Assert.Contains("module HipError =", text)
 
@@ -99,14 +99,14 @@ let ``makeConfig derives struct name correctly`` () =
 [<Fact>]
 let ``generate emits open directive for types module`` () =
     let config = makeHipConfig ()
-    let output = EnumErrorModuleGenerator.generate { Name = "hipError_t"; Values = hipValues; Documentation = None; UnderlyingType = None; Representation = CppParser.ClangUnmeasured } config "Fidelity.HIP.Errors" ["Fidelity.HIP.Types"]
+    let output = EnumErrorModuleGenerator.generate { Name = "hipError_t"; Values = hipValues; Documentation = None; UnderlyingType = None; Representation = CppParser.ClangUnmeasured; Location = TestHelpers.constructed } config "Fidelity.HIP.Errors" ["Fidelity.HIP.Types"]
     let text = output.Value
     Assert.Contains("open Fidelity.HIP.Types", text)
 
 [<Fact>]
 let ``native reason metadata does not emit an undeclared text projection`` () =
     let config = EnumErrorModuleGenerator.makeConfig "hipError_t" "hipSuccess" (Some "hipGetErrorString") (Some "hipGetErrorName")
-    let output = EnumErrorModuleGenerator.generate { Name = "hipError_t"; Values = hipValues; Documentation = None; UnderlyingType = None; Representation = CppParser.ClangUnmeasured } config "Fidelity.HIP.Errors" []
+    let output = EnumErrorModuleGenerator.generate { Name = "hipError_t"; Values = hipValues; Documentation = None; UnderlyingType = None; Representation = CppParser.ClangUnmeasured; Location = TestHelpers.constructed } config "Fidelity.HIP.Errors" []
     let text = output.Value
     Assert.Contains("\"Successful completion\"", text)
     Assert.DoesNotContain("hipGetErrorString", text)
