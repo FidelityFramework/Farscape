@@ -14,6 +14,8 @@
     <Compile Include="CppParserEnumMeasurementTests.fs" />
     <Compile Include="CppParserAnonymousRecordTests.fs" />
     <Compile Include="CppParserResultAliasTests.fs" />
+    <Compile Include="CppParserInvocationTests.fs" />
+    <Compile Include="PkgConfigTests.fs" />
     <Compile Include="CppClassAnalysisTests.fs" />
     <Compile Include="DeclarationAlgebraTests.fs" />
     <Compile Include="CodeRendererTests.fs" />
@@ -25,6 +27,7 @@
     <Compile Include="ErrnoModuleGeneratorTests.fs" />
     <Compile Include="EnumErrorModuleGeneratorTests.fs" />
     <Compile Include="StructLayoutTests.fs" />
+    <Compile Include="AttributeContractsTests.fs" />
     <Compile Include="ProtocolParserTests.fs" />
     <Compile Include="DocumentationExtractionTests.fs" />
     <Compile Include="OpaqueHandleTests.fs" />

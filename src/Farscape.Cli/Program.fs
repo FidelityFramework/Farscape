@@ -140,30 +140,18 @@ let generateCommand =
         setAction action
     }
 
-/// Resolve include paths and defines from pkg-config.
-/// Returns (includePaths, defines) extracted from `pkg-config --cflags <name>`.
+/// Resolve include paths and defines from pkg-config (`PkgConfig.resolve`, #178): the module
+/// name is one argument, and output holding anything but -I and -D words is refused.
 let resolvePkgConfig (pkgName: string) (verbose: bool) : Result<string list * string list, string> =
-    try
-        let psi = System.Diagnostics.ProcessStartInfo("pkg-config", $"--cflags {pkgName}")
-        psi.RedirectStandardOutput <- true
-        psi.RedirectStandardError <- true
-        psi.UseShellExecute <- false
-        let proc = System.Diagnostics.Process.Start(psi)
-        let output = proc.StandardOutput.ReadToEnd().Trim()
-        let stderr = proc.StandardError.ReadToEnd().Trim()
-        proc.WaitForExit()
-        if proc.ExitCode <> 0 then
-            Error $"pkg-config failed for '{pkgName}': {stderr}"
-        else
-            if verbose then
-                printLine $"pkg-config --cflags {pkgName}:"
-                printLine $"  {output}"
-            let tokens = output.Split(' ', StringSplitOptions.RemoveEmptyEntries)
-            let includes = tokens |> Array.filter (fun t -> t.StartsWith("-I")) |> Array.map (fun t -> t.Substring(2)) |> Array.toList
-            let defines = tokens |> Array.filter (fun t -> t.StartsWith("-D")) |> Array.map (fun t -> t.Substring(2)) |> Array.toList
-            Ok (includes, defines)
-    with ex ->
-        Error $"Failed to run pkg-config: {ex.Message}"
+    let resolved = PkgConfig.resolve pkgName
+    if verbose then
+        match resolved with
+        | Ok (includes, defines) ->
+            printLine $"pkg-config --cflags {pkgName}:"
+            for path in includes do printLine $"  -I{path}"
+            for define in defines do printLine $"  -D{define}"
+        | Error _ -> ()
+    resolved
 
 let pilotAnalyzeCommand =
     let header =    Input.option<string[]> "--header"         |> desc "Path to C/C++ header file(s)" |> required

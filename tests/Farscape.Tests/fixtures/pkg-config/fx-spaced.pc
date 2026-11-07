@@ -1,0 +1,6 @@
+# A module whose include path contains spaces: pkg-config escapes each space with a backslash.
+prefix=/opt/fx lib
+Name: fx-spaced
+Description: Farscape fixture, include path with spaces
+Version: 1.0
+Cflags: -I"${prefix}/include dir" -DFX_PKG=1 -I/opt/plain

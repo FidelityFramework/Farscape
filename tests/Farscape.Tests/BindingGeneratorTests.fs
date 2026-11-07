@@ -391,20 +391,6 @@ let ``a signal enum payload whose enum its unit includes is measured in that uni
 // ═══════════════════════════════════════════════════════════════════
 
 /// Every emitted Types module (shared and per namespace), trimmed, as one text.
-let private allTypesOf (output: string) =
-    System.IO.Directory.GetFiles(output, "Types.clef", System.IO.SearchOption.AllDirectories)
-    |> Array.sort
-    |> Array.collect System.IO.File.ReadAllLines
-    |> Array.map (fun line -> line.Trim())
-    |> String.concat "\n"
-
-/// The text of one emitted layout module, from its headline to the next record's.
-let private recordModule (types: string) (name: string) =
-    let at = types.IndexOf($"module {name} =")
-    Assert.True(at >= 0, $"module {name} is not emitted:\n{types}")
-    let next = types.IndexOf("\nmodule ", at + 1)
-    if next < 0 then types.Substring(at) else types.Substring(at, next - at)
-
 [<Fact>]
 let ``an anonymous field record is emitted with its own clang-measured layout`` () =
     let header = fixturePath "anonymous-records/wide-counter.h"
@@ -470,6 +456,68 @@ let ``a generated record name colliding with a declared record is refused before
     withPilot [header] [] ["fx_clash_read"] (fun result output ->
         Assert.Equal(
             Error $"Failed to parse headers: FS9114: the generated record name 'fx_clash_inner' in '{header}' names more than one declaration: the unnamed record of field 'inner' of 'fx_clash' at {header}:10:3; a record. A generated name must name one record.",
+            result |> Result.map ignore)
+        Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+
+// ═══════════════════════════════════════════════════════════════════
+// C11 anonymous members (issue #173)
+// ═══════════════════════════════════════════════════════════════════
+
+[<Fact>]
+let ``anonymous members are emitted inside their record's measured layout, their members reachable`` () =
+    let header = fixturePath "anonymous-members/members.h"
+    withPilot [header] [] ["fx_am_read"] (fun result output ->
+        match result with
+        | Error error -> failwithf "The anonymous members were refused: %s" error
+        | Ok _ ->
+            let types = allTypesOf output
+            Assert.Contains("/// C struct `fx_am`: layout measured (clang record layout dump).", types)
+            let am = recordModule types "fx_am"
+            for literal in [ "Size = 24"; "Alignment = 8"; "tagOffset = 0"; "anonymous1Offset = 4"; "iOffset = 4"; "fOffset = 4"
+                             "anonymous2Offset = 8"; "loOffset = 8"; "hiOffset = 10"; "tailOffset = 16" ] do
+                Assert.Contains($"let {literal}\n", am)
+            Assert.Contains("/// Offset of `i` in bytes (measured), a member of `fx_am` reached through its anonymous member `anonymous1`.", am)
+            Assert.Contains("{ Name = \"anonymous1\"; Offset = 4; Repr = Repr.U8; Count = 4;", am)
+            Assert.Contains("see fx_am_anonymous1.Descriptor", am)
+            Assert.Contains("{ Name = \"tail\"; Offset = 16; Repr = Repr.I64; Count = 1;", am)
+            // Each anonymous member's record is emitted with its own measured layout.
+            Assert.Contains("/// C union `fx_am_anonymous1`: layout measured (clang record layout dump).", types)
+            Assert.Contains("let fOffset = 0\n", recordModule types "fx_am_anonymous1")
+            Assert.Contains("let hiOffset = 2\n", recordModule types "fx_am_anonymous2")
+            // Through two levels of anonymous members, under a record named only by a typedef.
+            let td = recordModule types "fx_am_td"
+            for literal in [ "Size = 8"; "Alignment = 4"; "headOffset = 0"; "anonymous1Offset = 4"; "wordOffset = 4"; "lowOffset = 4"; "highOffset = 6" ] do
+                Assert.Contains($"let {literal}\n", td)
+            Assert.Contains("let highOffset = 2\n", recordModule types "fx_am_td_anonymous1_anonymous1")
+            Assert.DoesNotContain("layout declared", types)
+            clangConfirms header [
+                "sizeof(struct fx_am) == 24"; "_Alignof(struct fx_am) == 8"; "offsetof(struct fx_am, i) == 4"
+                "offsetof(struct fx_am, f) == 4"; "offsetof(struct fx_am, lo) == 8"; "offsetof(struct fx_am, hi) == 10"
+                "offsetof(struct fx_am, tail) == 16"; "sizeof(fx_am_td) == 8"; "offsetof(fx_am_td, word) == 4"
+                "offsetof(fx_am_td, low) == 4"; "offsetof(fx_am_td, high) == 6" ])
+
+[<Fact>]
+let ``an anonymous member clang cannot attribute a layout to is refused before output`` () =
+    let header = fixturePath "anonymous-members/macro-pair.h"
+    withPilot [header] [] ["fx_mpair_read"] (fun result output ->
+        Assert.Equal(
+            Error ($"Binding generation failed: FS9113: anonymous record 'fx_mpair_anonymous1' (anonymous member 'anonymous1' of 'fx_mpair', declared at {header}:7:3) has no clang-measured layout in '{header}'; its layout is never computed from its declared fields."
+                   + $" FS9113: anonymous record 'fx_mpair_anonymous2' (anonymous member 'anonymous2' of 'fx_mpair', declared at {header}:7:3) has no clang-measured layout in '{header}'; its layout is never computed from its declared fields. No bindings were written."),
+            result |> Result.map ignore)
+        Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+
+[<Fact>]
+let ``an anonymous member Farscape cannot name or represent is refused before output`` () =
+    let clash = fixturePath "anonymous-members/name-clash.h"
+    withPilot [clash] [] ["fx_mclash_read"] (fun result output ->
+        Assert.Equal(
+            Error $"Failed to parse headers: FS9123: the generated member name 'anonymous1' of the anonymous member of 'fx_mclash' declared at {clash}:5:3 in '{clash}' names another member of that record. A generated name must name one member.",
+            result |> Result.map ignore)
+        Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+    let cpp = fixturePath "anonymous-members/class.hpp"
+    withPilot [cpp] [] ["fx_cpp_am_read"] (fun result output ->
+        Assert.Equal(
+            Error $"Failed to parse headers: FS9122: C++ record 'fx_cpp_am' in '{cpp}' has an anonymous member of clang type 'fx_cpp_am::(anonymous union at {cpp}:5:3)'; the C++ record path does not represent anonymous members, and none is dropped from its record.",
             result |> Result.map ignore)
         Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
 

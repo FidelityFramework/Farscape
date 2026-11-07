@@ -284,7 +284,7 @@ module BindingGenerator =
             headers |> List.collect (fun (header, decls) ->
                 decls |> List.choose (function
                     | CppParser.Declaration.Struct ({ Anonymous = Some origin; Measured = None } as s) ->
-                        Some $"{Diagnostics.AnonymousRecordUnmeasured}: anonymous record '{s.Name}' (field '{origin.Field}' of '{origin.Parent}', declared at {origin.Location}) has no clang-measured layout in '{header}'; its layout is never computed from its declared fields."
+                        Some $"{Diagnostics.AnonymousRecordUnmeasured}: anonymous record '{s.Name}' ({CppParser.describeOrigin origin}, declared at {origin.Location}) has no clang-measured layout in '{header}'; its layout is never computed from its declared fields."
                     | _ -> None))
         match refusals |> List.distinct with
         | [] -> Ok ()
@@ -969,6 +969,11 @@ module BindingGenerator =
         | Ok project when generateWrappers && (project.ErrorConventions |> Option.exists (fun spec -> match spec.Default with PilotTypes.NullWithReason _ -> true | _ -> false)) ->
             Error "null_with_reason wrappers require the declared reason return type and a native text extent/ownership projection. An assumed error-text handle is not an admitted contract. No bindings were written."
         | Ok project ->
+            // Each define reaches clang as one -D argument; a define that is not NAME or
+            // NAME=VALUE is refused before any header is parsed (#178).
+            match CppParser.requireWellFormedDefines project.Library.Defines with
+            | Error refusal -> Error (refusal + " No bindings were written.")
+            | Ok () ->
             let projectDir = Path.GetDirectoryName(Path.GetFullPath(projectPath))
             let outputDir =
                 if Path.IsPathRooted(project.Output.Directory) then project.Output.Directory

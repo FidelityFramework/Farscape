@@ -86,18 +86,38 @@ module CppParser =
     }
 
     /// Where a record C leaves unnamed comes from: an unnamed struct or union declared as the
-    /// type of a named field (glibc's `__atomic_wide_counter.__value32`). Farscape names it
-    /// `<Parent>_<Field>` (`anonymousRecordName`); it is never flattened into its parent.
+    /// type of a named field (glibc's `__atomic_wide_counter.__value32`), or a C11 anonymous
+    /// member, an unnamed struct or union with no field name whose members belong to the
+    /// enclosing record (#173). Farscape names it `<Parent>_<Field>` (`anonymousRecordName`);
+    /// an anonymous member's field is named `anonymous<n>` (`anonymousMemberName`). Neither is
+    /// flattened into its parent's fields: the parent holds the record as one field, and its
+    /// layout module also gives each member reached through an anonymous member its offset.
     type AnonymousRecordOrigin = {
         /// The enclosing record's name: its C name, or the generated name of an enclosing
         /// anonymous record.
         Parent: string
-        /// The named field whose type the unnamed record is.
+        /// The named field whose type the unnamed record is, or the generated field name of an
+        /// anonymous member.
         Field: string
         /// Clang's location of the unnamed record, `path:line:col`, as it spells the type
-        /// `struct (unnamed at path:line:col)`.
+        /// `struct (unnamed at path:line:col)`, or `struct P::(anonymous at path:line:col)` for
+        /// an anonymous member.
         Location: string
+        /// True for a C11 anonymous member: C gives the field no name, and its members are
+        /// reached as members of the parent.
+        Member: bool
     }
+
+    /// Clang's evidence of a record's layout without its layout-neutral attributes (#174): its
+    /// measurement of a copy of the record the parse synthesized in the same header context,
+    /// or the exact reason no faithful copy could be synthesized.
+    type UnattributedLayout =
+        /// Clang's record layout of the copy: the same fields in the same order, each declared
+        /// `__typeof__` the original member (so typedefs and their attributes are kept), with
+        /// only the layout-neutral attributes left out.
+        | UnattributedMeasured of StructLayoutInfo
+        /// Why no faithful copy exists or clang measured none.
+        | UnattributedUnsynthesized of reason: string
 
     /// Represents a C/C++ struct declaration
     type StructDecl = {
@@ -109,17 +129,34 @@ module CppParser =
         /// Set when C leaves the record unnamed and Farscape named it from its parent and field.
         Anonymous: AnonymousRecordOrigin option
         /// Clang's record layout of this record in its declaring unit, when the parse measured
-        /// it: every anonymous record and every record enclosing one is measured
-        /// (`measureAnonymousRecords`). None for records the parse did not measure.
+        /// it: every anonymous record, every record enclosing one, and every record carrying a
+        /// layout-neutral attribute is measured (`measureRecordLayouts`). None for records the
+        /// parse did not measure.
         Measured: StructLayoutInfo option
+        /// For a record carrying a layout-neutral attribute, clang's layout of its copy without
+        /// that attribute (`measureRecordLayouts`). None for every other record.
+        Unattributed: UnattributedLayout option
     }
 
     /// The name Farscape gives an unnamed record that is the type of a named field: the
     /// enclosing record's name and the field's name, joined by `_`.
     let anonymousRecordName (parent: string) (field: string) = parent + "_" + field
 
+    /// The field name Farscape gives the `ordinal`-th C11 anonymous member of a record,
+    /// counted from 1 in declaration order (#173).
+    let anonymousMemberName (ordinal: int) = $"anonymous{ordinal}"
+
+    /// How a refusal names an anonymous record's origin: its field, or its anonymous member.
+    let describeOrigin (origin: AnonymousRecordOrigin) =
+        if origin.Member then $"anonymous member '{origin.Field}' of '{origin.Parent}'"
+        else $"field '{origin.Field}' of '{origin.Parent}'"
+
     /// A unit whose generated anonymous record names collide (FS9114); carries the refusal.
     exception AnonymousNameCollision of string
+
+    /// A unit with an anonymous member Farscape cannot represent (FS9122) or whose generated
+    /// member name names another member (FS9123); carries the refusal.
+    exception AnonymousMemberRefused of string
 
     /// Represents a C/C++ enum value with signed support
     type EnumValue = {
@@ -573,9 +610,9 @@ module CppParser =
 
         match name, fields with
         | Some n, _ when not (String.IsNullOrEmpty(n)) ->
-            Some { Name = n; Fields = fields; Documentation = documentation; IsUnion = isUnion; Attributes = attributes; Anonymous = None; Measured = None }
+            Some { Name = n; Fields = fields; Documentation = documentation; IsUnion = isUnion; Attributes = attributes; Anonymous = None; Measured = None; Unattributed = None }
         | _, fs when not fs.IsEmpty ->
-            Some { Name = ""; Fields = fields; Documentation = documentation; IsUnion = isUnion; Attributes = attributes; Anonymous = None; Measured = None }
+            Some { Name = ""; Fields = fields; Documentation = documentation; IsUnion = isUnion; Attributes = attributes; Anonymous = None; Measured = None; Unattributed = None }
         | _ -> None
 
     /// Clang spells the type of a field declared with an unnamed record as
@@ -583,6 +620,12 @@ module CppParser =
     /// array extent; `loc` is the unnamed record's own location.
     let private unnamedRecordSpelling =
         System.Text.RegularExpressions.Regex(@"^(?<pre>.*?)\b(?<tag>struct|union) \(unnamed at (?<loc>[^()]+)\)(?<post>.*)$")
+
+    /// Clang spells the type of a C11 anonymous member, the implicit unnamed field it declares,
+    /// as `union P::(anonymous at path:line:col)`, scoped by every enclosing record (`P::(anonymous
+    /// union)::`), possibly cv-qualified; `loc` is the anonymous record's own location.
+    let private anonymousMemberSpelling =
+        System.Text.RegularExpressions.Regex(@"^(?<pre>(?:const |volatile )*)(?<tag>struct|union) (?:.+::)?\(anonymous at (?<loc>[^()]+)\)$")
 
     /// A clang `path:line:col` location with its path made absolute against the working
     /// directory: clang spells one file `x.h`, `./x.h` or `././x.h` depending on how the
@@ -606,46 +649,93 @@ module CppParser =
     /// and records nested in it are named the same way from its generated name. A field whose
     /// unnamed record cannot be paired this way keeps clang's spelling, which no resolver
     /// represents, so its use is refused rather than flattened or guessed.
-    let private nameAnonymousRecords (parent: string) (node: JsonValue) (record: StructDecl) : StructDecl * StructDecl list =
+    ///
+    /// A C11 anonymous member (#173), the implicit unnamed field clang declares for an unnamed
+    /// struct or union with no field name, is paired the same way with the record declared just
+    /// before it. It becomes the field `anonymousMemberName n` in its declaration position, typed
+    /// by the record named `anonymousRecordName parent field`, so the enclosing record's measured
+    /// layout has a field for every offset clang gives it. An anonymous member that cannot be
+    /// paired refuses the unit (FS9122), and so does a generated member name that names another
+    /// member of the record, direct or reached through an anonymous member (FS9123): an
+    /// anonymous member is never dropped.
+    let private nameAnonymousRecords (header: string) (parent: string) (node: JsonValue) (record: StructDecl) : StructDecl * StructDecl list =
         let position (declaration: JsonValue) (key: string) =
             getObject declaration "loc" |> Option.bind (fun loc ->
                 match getObject loc "expansionLoc" with
                 | Some expansion -> getInt64 expansion key
                 | None -> getInt64 loc key)
+        let pairs (declaration: JsonValue) (tag: string) (location: string) =
+            match clangLocation location with
+            | Some (_, line, col) ->
+                getStringOr declaration "tagUsed" "struct" = tag
+                && position declaration "col" = Some (int64 col)
+                && (position declaration "line" |> Option.forall ((=) (int64 line)))
+            | None -> false
         let rec name (parent: string) (node: JsonValue) (record: StructDecl) : StructDecl * StructDecl list =
             let nested = ResizeArray<StructDecl>()
-            let respelled = System.Collections.Generic.Dictionary<string, string>()
+            let fields = ResizeArray<FieldDecl>()
+            let declared = record.Fields |> List.map (fun f -> f.Name, f) |> Map.ofList
+            // Every member name of the record: its named fields and the members clang reaches
+            // through its anonymous members (IndirectFieldDecl).
+            let memberNames =
+                getArray node "inner"
+                |> Seq.filter (fun child -> let kind = getStringOr child "kind" "" in kind = "FieldDecl" || kind = "IndirectFieldDecl")
+                |> Seq.map (fun child -> getStringOr child "name" "")
+                |> Seq.filter ((<>) "")
+                |> Set.ofSeq
             let mutable unnamed : JsonValue option = None
+            let mutable members = 0
             for child in getArray node "inner" do
                 match getStringOr child "kind" "" with
                 | "RecordDecl" when getStringOr child "name" "" = "" && getBool child "completeDefinition" ->
                     unnamed <- Some child
                 | "FieldDecl" when not (getBool child "isImplicit") ->
                     let field = getStringOr child "name" ""
-                    let spelled = unnamedRecordSpelling.Match(getQualType child)
-                    if field <> "" && spelled.Success then
-                        match unnamed, clangLocation spelled.Groups.["loc"].Value with
-                        | Some declaration, Some (_, line, col)
-                            when getStringOr declaration "tagUsed" "struct" = spelled.Groups.["tag"].Value
-                                 && position declaration "col" = Some (int64 col)
-                                 && (position declaration "line" |> Option.forall ((=) (int64 line))) ->
-                            match processRecordDecl declaration with
-                            | Some declared ->
-                                let generated = anonymousRecordName parent field
-                                let origin = { Parent = parent; Field = field; Location = spelled.Groups.["loc"].Value }
-                                let named, deeper = name generated declaration { declared with Name = generated; Anonymous = Some origin }
-                                nested.Add named
-                                nested.AddRange deeper
-                                respelled.[field] <- spelled.Groups.["pre"].Value + spelled.Groups.["tag"].Value + " " + generated + spelled.Groups.["post"].Value
-                            | None -> ()
-                        | _ -> ()
+                    match Map.tryFind field declared with
+                    | None -> ()
+                    | Some f ->
+                        let spelled = unnamedRecordSpelling.Match(getQualType child)
+                        let paired =
+                            match unnamed with
+                            | Some declaration when spelled.Success && pairs declaration spelled.Groups.["tag"].Value spelled.Groups.["loc"].Value ->
+                                processRecordDecl declaration |> Option.map (fun record -> declaration, record)
+                            | _ -> None
+                        match paired with
+                        | Some (declaration, inner) ->
+                            let generated = anonymousRecordName parent field
+                            let origin = { Parent = parent; Field = field; Location = spelled.Groups.["loc"].Value; Member = false }
+                            let named, deeper = name generated declaration { inner with Name = generated; Anonymous = Some origin }
+                            nested.Add named
+                            nested.AddRange deeper
+                            let spelling = spelled.Groups.["pre"].Value + spelled.Groups.["tag"].Value + " " + generated + spelled.Groups.["post"].Value
+                            fields.Add { parseFieldType spelling with Name = f.Name; IsBitfield = f.IsBitfield; BitWidth = f.BitWidth; Attributes = f.Attributes }
+                        | None -> fields.Add f
+                | "FieldDecl" when getBool child "isImplicit" && getStringOr child "name" "" = "" ->
+                    members <- members + 1
+                    let field = anonymousMemberName members
+                    let clangType = getQualType child
+                    let spelled = anonymousMemberSpelling.Match clangType
+                    let location = if spelled.Success then spelled.Groups.["loc"].Value else ""
+                    if memberNames.Contains field then
+                        raise (AnonymousMemberRefused $"{Diagnostics.AnonymousMemberNameCollision}: the generated member name '{field}' of the anonymous member of '{parent}' declared at {location} in '{header}' names another member of that record. A generated name must name one member.")
+                    let paired =
+                        match unnamed with
+                        | Some declaration when spelled.Success && pairs declaration spelled.Groups.["tag"].Value location ->
+                            processRecordDecl declaration |> Option.map (fun record -> declaration, record)
+                        | _ -> None
+                    match paired with
+                    | Some (declaration, inner) ->
+                        let generated = anonymousRecordName parent field
+                        let origin = { Parent = parent; Field = field; Location = location; Member = true }
+                        let named, deeper = name generated declaration { inner with Name = generated; Anonymous = Some origin }
+                        nested.Add named
+                        nested.AddRange deeper
+                        let spelling = spelled.Groups.["pre"].Value + spelled.Groups.["tag"].Value + " " + generated
+                        fields.Add { parseFieldType spelling with Name = field; Attributes = extractAttributes child }
+                    | None ->
+                        raise (AnonymousMemberRefused $"{Diagnostics.AnonymousMemberUnrepresented}: an anonymous member of '{parent}' in '{header}', of clang type '{clangType}', cannot be paired with a record clang declares for it, so '{parent}' has no representation of it. An anonymous member is never dropped from its record.")
                 | _ -> ()
-            let fields =
-                record.Fields |> List.map (fun f ->
-                    match respelled.TryGetValue f.Name with
-                    | true, spelling -> { parseFieldType spelling with Name = f.Name; IsBitfield = f.IsBitfield; BitWidth = f.BitWidth; Attributes = f.Attributes }
-                    | _ -> f)
-            { record with Fields = fields }, List.ofSeq nested
+            { record with Fields = List.ofSeq fields }, List.ofSeq nested
         name parent node record
 
     /// Extract the explicit value from an EnumConstantDecl AST node, if present.
@@ -723,6 +813,7 @@ module CppParser =
     /// Library boundary is determined by includeRoot (from pkg-config) or filename matching (fallback).
     let private walkAst
         (root: JsonValue)
+        (header: string)
         (targetFile: string)
         (includeRoot: string option)
         (verbose: bool)
@@ -851,7 +942,7 @@ module CppParser =
                         if name = "" then results.Add(Struct structDecl)
                         else
                             // Unnamed records its fields are typed with become declarations of their own.
-                            let named, nested = nameAnonymousRecords name node { structDecl with Name = name }
+                            let named, nested = nameAnonymousRecords header name node { structDecl with Name = name }
                             results.Add(Struct named)
                             for record in nested do results.Add(Struct record)
                     | None -> ()
@@ -914,6 +1005,14 @@ module CppParser =
                             |> Seq.choose (processFunction childScope)
                             |> Seq.map Function
                             |> List.ofSeq
+
+                        // The C++ record path has no anonymous-member representation (#173): a
+                        // class with one is refused rather than given a field list without it.
+                        innerNodes
+                        |> Seq.tryFind (fun inner ->
+                            getStringOr inner "kind" "" = "FieldDecl" && getBool inner "isImplicit" && getStringOr inner "name" "" = "")
+                        |> Option.iter (fun inner ->
+                            raise (AnonymousMemberRefused $"{Diagnostics.AnonymousMemberUnrepresented}: C++ record '{name}' in '{header}' has an anonymous member of clang type '{getQualType inner}'; the C++ record path does not represent anonymous members, and none is dropped from its record."))
 
                         let fields =
                             innerNodes
@@ -1347,6 +1446,24 @@ module CppParser =
     // Clang Invocation
     // =========================================================================
 
+    /// A pilot define is `NAME` or `NAME=VALUE`, with `NAME` a C identifier and a one-line
+    /// `VALUE` (#178). It reaches clang as exactly one `-D` argument, so it can carry no other
+    /// option; anything else is refused before any parse (FS9124), quoting the define.
+    let defineRefusal (define: string) : string option =
+        if System.Text.RegularExpressions.Regex.IsMatch(define, @"\A[A-Za-z_][A-Za-z0-9_]*(=[^\r\n\x00]*)?\z") then None
+        else Some $"{Diagnostics.DefineMalformed}: define '{define}' is not NAME or NAME=VALUE with NAME a C identifier; a define reaches clang as one -D argument and carries no other option."
+
+    /// Every malformed define of a list, refused together, or Ok.
+    let requireWellFormedDefines (defines: string list) : Result<unit, string> =
+        match defines |> List.choose defineRefusal |> List.distinct with
+        | [] -> Ok ()
+        | refusals -> Error (String.concat " " refusals)
+
+    /// A clang process whose arguments are each exactly one argument (#178).
+    let private clangStartInfo (args: string seq) = ProcessLaunch.startInfo "clang" args
+
+    let private commandLine (args: string seq) = ProcessLaunch.commandLine args
+
     /// Build common clang arguments
     let private buildClangArgs (options: HeaderParserOptions) : ResizeArray<string> =
         let args = ResizeArray<string>()
@@ -1373,16 +1490,10 @@ module CppParser =
         for arg in extraArgs do
             args.Add(arg)
 
-        let startInfo = ProcessStartInfo()
-        startInfo.FileName <- "clang"
-        startInfo.Arguments <- String.Join(" ", args)
-        startInfo.RedirectStandardOutput <- true
-        startInfo.RedirectStandardError <- true
-        startInfo.UseShellExecute <- false
-        startInfo.CreateNoWindow <- true
+        let startInfo = clangStartInfo args
 
         if verbose then
-            printfn "[CppParser] Running: clang %s" startInfo.Arguments
+            printfn "[CppParser] Running: clang %s" (commandLine args)
 
         try
             use proc = Process.Start(startInfo)
@@ -1560,6 +1671,9 @@ module CppParser =
         (structNames: string list) (verbose: bool)
         : Result<Map<string, StructLayoutInfo>, string> =
 
+        match requireWellFormedDefines defines with
+        | Error refusal -> Error refusal
+        | Ok () ->
         if structNames.IsEmpty then Ok Map.empty
         else
 
@@ -1589,16 +1703,10 @@ module CppParser =
                 for arg in ["-Xclang"; "-fdump-record-layouts-simple"; "-fsyntax-only"; tempFile] do
                     args.Add(arg)
 
-                let startInfo = ProcessStartInfo()
-                startInfo.FileName <- "clang"
-                startInfo.Arguments <- String.Join(" ", args :> string seq)
-                startInfo.RedirectStandardOutput <- true
-                startInfo.RedirectStandardError <- true
-                startInfo.UseShellExecute <- false
-                startInfo.CreateNoWindow <- true
+                let startInfo = clangStartInfo args
 
                 if verbose then
-                    printfn "[CppParser] Layout extraction: clang %s" startInfo.Arguments
+                    printfn "[CppParser] Layout extraction: clang %s" (commandLine args)
 
                 use proc = Process.Start(startInfo)
                 let stdout = proc.StandardOutput.ReadToEnd()
@@ -1711,26 +1819,42 @@ module CppParser =
             | decl -> decl)
 
     // =========================================================================
-    // Anonymous Record Measurement (clang lays out each unnamed nested record)
+    // Record Measurement in the Declaring Unit (anonymous records; attribute contracts)
     // =========================================================================
 
-    /// Measure every anonymous record of a parsed unit, and every record enclosing one, with
-    /// clang in that same unit (issue #159). The probe includes the header under the parse's
-    /// own flags and takes `sizeof` of each outermost named enclosing record (by its typedef
+    /// Measure every anonymous record of a parsed unit, every record enclosing one, and every
+    /// record carrying a layout-neutral attribute, with clang in that same unit (issues #159,
+    /// #174). A layout-neutral attribute (`AttributeContracts.LayoutNeutral`, `may_alias`) is
+    /// admitted only when this measurement agrees with the record's layout without it, so the
+    /// record must be measured where it is declared, and so must its copy without the attribute:
+    /// the same probe declares `struct __farscape_unattributed_<n>` with one field per member,
+    /// in order, each declared `__typeof__(((R*)0)->member) member`, which keeps the member's
+    /// type with its typedefs and their attributes and leaves out only the record's own
+    /// attributes. Each name the copy spells is `#undef`ined first, because the AST names are
+    /// the members' real names. A record C leaves unnamed, a bit-field (which `__typeof__`
+    /// cannot read) and an anonymous member (which has no name to read it through) have no
+    /// faithful copy, and the record carries that reason instead. The probe includes the header under the
+    /// parse's own flags and takes `sizeof` of each outermost named enclosing record (by its typedef
     /// name when C names it only by a typedef), which makes clang lay out it and every record
     /// nested in it; `-fdump-record-layouts-simple` prints those layouts, the same dump measured
     /// ABI-critical layouts come from. An enclosing record is the dump block of its own name; an
     /// anonymous record is the block clang names `Parent::(unnamed at path:line:col)` at the
-    /// location its field's type spells. A record with no such block, or with two blocks of
-    /// different layouts (two unnamed records one macro expansion spells at one location), stays
+    /// location its field's type spells, and an anonymous member's record (#173) the block
+    /// `Parent::(anonymous at path:line:col)` at its own location. A record with no such block,
+    /// or with two blocks of different layouts (two unnamed records one macro expansion spells
+    /// at one location), stays
     /// unmeasured, and the generator refuses it (FS9113): an anonymous record's layout is never
     /// computed from its declared fields. A batch clang cannot compile is measured one record at
     /// a time.
-    let measureAnonymousRecords (options: HeaderParserOptions) (typedefNamed: Set<string>) (declarations: Declaration list)
+    let measureRecordLayouts (options: HeaderParserOptions) (typedefNamed: Set<string>) (declarations: Declaration list)
         : Declaration list =
         let records = declarations |> List.choose (function Struct s when s.Name <> "" -> Some s | _ -> None)
         let anonymous = records |> List.filter (fun s -> s.Anonymous.IsSome)
-        if anonymous.IsEmpty then declarations
+        let attributed =
+            records |> List.filter (fun s ->
+                not s.Fields.IsEmpty
+                && (s.Attributes @ (s.Fields |> List.collect _.Attributes)) |> List.exists (fun a -> (AttributeContracts.neutralFact a.Kind).IsSome))
+        if anonymous.IsEmpty && attributed.IsEmpty then declarations
         else
         let byName = records |> List.rev |> List.map (fun s -> s.Name, s) |> Map.ofList
         let rec outermost (visited: Set<string>) (s: StructDecl) =
@@ -1739,28 +1863,51 @@ module CppParser =
             | Some origin when not (visited.Contains origin.Parent) ->
                 byName.TryFind origin.Parent |> Option.bind (outermost (visited.Add s.Name))
             | Some _ -> None
-        let roots = anonymous |> List.choose (outermost Set.empty) |> List.distinctBy _.Name
+        let roots = (anonymous @ attributed) |> List.choose (outermost Set.empty) |> List.distinctBy _.Name
         let spelling (s: StructDecl) =
             if typedefNamed.Contains s.Name then s.Name
             elif s.IsUnion then "union " + s.Name
             else "struct " + s.Name
+        // The copy of each attributed record without its attributes (#174), or why none is faithful.
+        let copyName (ordinal: int) = $"__farscape_unattributed_{ordinal}"
+        let copies : (StructDecl * Result<int * string * string list, string>) list =
+            attributed |> List.mapi (fun ordinal s ->
+                let anonymousMember =
+                    s.Fields |> List.tryFind (fun f ->
+                        records |> List.exists (fun r ->
+                            r.Anonymous |> Option.exists (fun o -> o.Member && o.Parent = s.Name && o.Field = f.Name)))
+                match s.Anonymous, s.Fields |> List.tryFind _.IsBitfield, anonymousMember with
+                | Some _, _, _ -> s, Error "C leaves the record unnamed, so no copy can name it to read its members' types"
+                | None, Some f, _ -> s, Error $"field '{f.Name}' is a bit-field, whose type __typeof__ cannot read"
+                | None, None, Some f -> s, Error $"'{f.Name}' is an anonymous member, which has no C name a copy could read its type through"
+                | None, None, None ->
+                    let tag = if s.IsUnion then "union" else "struct"
+                    let members = s.Fields |> List.map (fun f -> $"__typeof__((({spelling s}*)0)->{f.Name}) {f.Name};") |> String.concat " "
+                    let names = s.Name :: (s.Fields |> List.map _.Name)
+                    s, Ok (ordinal, $"{tag} {copyName ordinal} {{ {members} }}; char _fs_copy_{ordinal}[sizeof({tag} {copyName ordinal})];", names))
+        let synthesized = copies |> List.choose (fun (_, copy) -> match copy with Ok c -> Some c | Error _ -> None)
         let tempDir = Path.Combine(Path.GetTempPath(), "farscape-layout")
         Directory.CreateDirectory(tempDir) |> ignore
-        let probe (batch: StructDecl list) : Result<StructLayoutInfo list, string> =
+        let probe (batch: StructDecl list) (copyBatch: (int * string * string list) list) : Result<StructLayoutInfo list, string> =
             let tempFile = Path.Combine(tempDir, "_farscape_record_probe_" + Guid.NewGuid().ToString("N") + ".c")
             try
                 let body = batch |> List.mapi (fun i s -> $"char _fs_record_{i}[sizeof({spelling s})];") |> String.concat "\n"
-                File.WriteAllText(tempFile, $"#include \"{Path.GetFullPath options.HeaderFile}\"\n{body}\n")
+                let undefs = copyBatch |> List.collect (fun (_, _, names) -> names) |> List.distinct |> List.map (fun n -> $"#undef {n}") |> String.concat "\n"
+                let copyText = copyBatch |> List.map (fun (_, text, _) -> text) |> String.concat "\n"
+                File.WriteAllText(tempFile, $"#include \"{Path.GetFullPath options.HeaderFile}\"\n{body}\n{undefs}\n{copyText}\n")
                 runClang (buildClangArgs options) ["-Xclang"; "-fdump-record-layouts-simple"; "-fsyntax-only"; tempFile] options.Verbose
                 |> Result.bind parseRecordLayoutBlocks
             finally
                 try File.Delete tempFile with _ -> ()
         let blocks =
-            match probe roots with
+            match probe roots synthesized with
             | Ok blocks -> blocks
-            | Error _ -> roots |> List.collect (fun root -> match probe [root] with Ok blocks -> blocks | Error _ -> [])
-        let unnamedAt (dumpName: string) =
-            let marker = "(unnamed at "
+            | Error _ ->
+                (roots |> List.collect (fun root -> match probe [root] [] with Ok blocks -> blocks | Error _ -> []))
+                @ (synthesized |> List.collect (fun copy -> match probe [] [copy] with Ok blocks -> blocks | Error _ -> []))
+        // A field's unnamed record is dumped `P::(unnamed at loc)`, an anonymous member's
+        // record `P::(anonymous at loc)`.
+        let unnamedAt (marker: string) (dumpName: string) =
             let at = dumpName.LastIndexOf marker
             if at < 0 || not (dumpName.EndsWith ")") then None
             else clangLocation (dumpName.Substring(at + marker.Length, dumpName.Length - at - marker.Length - 1))
@@ -1769,15 +1916,31 @@ module CppParser =
                 match s.Anonymous with
                 | Some origin ->
                     match clangLocation origin.Location with
-                    | Some location -> blocks |> List.filter (fun block -> unnamedAt block.Name = Some location)
+                    | Some location ->
+                        let marker = if origin.Member then "(anonymous at " else "(unnamed at "
+                        blocks |> List.filter (fun block -> unnamedAt marker block.Name = Some location)
                     | None -> []
                 | None -> blocks |> List.filter (fun block -> block.Name = s.Name)
             match candidates |> List.distinctBy (fun l -> l.SizeBits, l.DataSizeBits, l.AlignmentBits, l.FieldOffsetsBits) with
             | [ layout ] -> Some { layout with Name = s.Name }
             | _ -> None
-        let measured = Set.ofList ((roots |> List.map _.Name) @ (anonymous |> List.map _.Name))
+        let unattributedOf =
+            copies |> List.map (fun (s, copy) ->
+                let evidence =
+                    match copy with
+                    | Error reason -> UnattributedUnsynthesized reason
+                    | Ok (ordinal, _, _) ->
+                        match blocks |> List.filter (fun block -> block.Name = copyName ordinal)
+                                     |> List.distinctBy (fun l -> l.SizeBits, l.DataSizeBits, l.AlignmentBits, l.FieldOffsetsBits) with
+                        | [ layout ] -> UnattributedMeasured { layout with Name = s.Name }
+                        | [] -> UnattributedUnsynthesized "clang measured no copy of it in its declaring unit"
+                        | _ -> UnattributedUnsynthesized "clang dumped more than one layout under the copy's name"
+                s.Name, evidence)
+            |> Map.ofList
+        let measured = Set.ofList ((roots @ anonymous @ attributed) |> List.map _.Name)
         declarations |> List.map (function
-            | Struct s when s.Name <> "" && measured.Contains s.Name -> Struct { s with Measured = measuredOf s }
+            | Struct s when s.Name <> "" && measured.Contains s.Name ->
+                Struct { s with Measured = measuredOf s; Unattributed = Map.tryFind s.Name unattributedOf }
             | decl -> decl)
 
     /// The names Farscape gives anonymous records must name nothing else in their unit: no
@@ -1796,6 +1959,7 @@ module CppParser =
                 | _ -> None)
         let describe (s: StructDecl) =
             match s.Anonymous with
+            | Some o when o.Member -> $"the record of anonymous member '{o.Field}' of '{o.Parent}' at {o.Location}"
             | Some o -> $"the unnamed record of field '{o.Field}' of '{o.Parent}' at {o.Location}"
             | None -> s.Name
         generated
@@ -1987,13 +2151,7 @@ module CppParser =
         for arg in ["-H"; "-E"; "-o"; "/dev/null"; options.HeaderFile] do
             clangArgs.Add arg
 
-        let startInfo = ProcessStartInfo()
-        startInfo.FileName <- "clang"
-        startInfo.Arguments <- String.Join(" ", clangArgs :> string seq)
-        startInfo.RedirectStandardOutput <- true
-        startInfo.RedirectStandardError <- true
-        startInfo.UseShellExecute <- false
-        startInfo.CreateNoWindow <- true
+        let startInfo = clangStartInfo clangArgs
 
         try
             use proc = Process.Start(startInfo)
@@ -2042,6 +2200,9 @@ module CppParser =
 
     /// Parse a C/C++ header file and extract all declarations including macros
     let parseHeaderFull (options: HeaderParserOptions) : Result<ParseResult, string> =
+        match requireWellFormedDefines options.Defines with
+        | Error refusal -> Error refusal
+        | Ok () ->
         if not (File.Exists(options.HeaderFile)) then
             Error $"Header file not found: {options.HeaderFile}"
         else
@@ -2059,15 +2220,16 @@ module CppParser =
                     let root = JsonValue.Parse(jsonOutput)
                     let targetFile = Path.GetFileName(options.HeaderFile)
 
-                    let declarations, typedefNamedTags, included = walkAst root targetFile options.IncludeRoot options.Verbose (enrichNonNullAttributes options)
+                    let declarations, typedefNamedTags, included = walkAst root options.HeaderFile targetFile options.IncludeRoot options.Verbose (enrichNonNullAttributes options)
                     // Included enums are measured in this same unit, with its own enums.
                     let measured = measureEnums options typedefNamedTags (declarations @ included)
                     let declarations, included = List.splitAt declarations.Length measured
                     match anonymousNameCollisions options.HeaderFile (declarations @ included) with
                     | [] -> ()
                     | collisions -> raise (AnonymousNameCollision (String.concat " " collisions))
-                    // Anonymous records, and the records enclosing them, are measured in this same unit.
-                    let declarations = measureAnonymousRecords options typedefNamedTags declarations
+                    // Anonymous records, the records enclosing them, and records carrying a
+                    // layout-neutral attribute are measured in this same unit.
+                    let declarations = measureRecordLayouts options typedefNamedTags declarations
 
                     if options.Verbose then
                         printfn "[CppParser] Extracted %d AST declarations" (List.length declarations)
@@ -2110,7 +2272,25 @@ module CppParser =
                     }
                 with
                 | AnonymousNameCollision reason -> Error reason
+                | AnonymousMemberRefused reason -> Error reason
                 | ex -> Error $"Failed to parse clang output: {ex.Message}"
+
+    /// The declarations Farscape reads from one clang JSON AST of `header` (`clang -Xclang
+    /// -ast-dump=json`), named and refused as a parse names and refuses them (FS9114, FS9122,
+    /// FS9123). It is internal to Farscape.Core and visible only to its test assembly: it has
+    /// none of the parse's clang measurements or nonnull evidence, so its declarations must
+    /// never reach generation (#173). It admits an AST clang produced under options no pilot
+    /// can select (#178), such as `-fms-extensions`, whose tagged anonymous members a parse must
+    /// refuse rather than drop.
+    let internal declarationsOfAst (header: string) (astJson: string) : Result<Declaration list, string> =
+        try
+            let root = JsonValue.Parse astJson
+            let declarations, _, included = walkAst root header (Path.GetFileName header) None false (fun _ _ f -> f)
+            match anonymousNameCollisions header (declarations @ included) with
+            | [] -> Ok declarations
+            | collisions -> Error (String.concat " " collisions)
+        with
+        | AnonymousMemberRefused reason -> Error reason
 
     /// Parse a C/C++ header as one translation unit: its declarations (with macros), and the
     /// typedefs and enums its parse reaches through includes outside the library boundary.

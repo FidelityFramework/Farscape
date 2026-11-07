@@ -87,3 +87,138 @@ let ``a generated record name that names another declaration refuses the unit`` 
     Assert.Equal(
         Error $"FS9114: the generated record name 'fx_clash_inner' in '{header}' names more than one declaration: the unnamed record of field 'inner' of 'fx_clash' at {header}:10:3; a record. A generated name must name one record.",
         parse "anonymous-records/name-clash.h" |> Result.map ignore)
+
+// ═══════════════════════════════════════════════════════════════════
+// C11 anonymous members (issue #173): an unnamed struct or union with no field name is a field
+// of its record, typed by its own clang-measured record, with its members reachable; one that
+// cannot be represented refuses the unit. None is dropped.
+// ═══════════════════════════════════════════════════════════════════
+
+[<Fact>]
+let ``a C11 anonymous member is a field of its record, typed by its own measured record`` () =
+    let header = fixturePath "anonymous-members/members.h"
+    let found = records "anonymous-members/members.h"
+    let am = found.["fx_am"]
+    Assert.Equal<string list>(["tag"; "anonymous1"; "anonymous2"; "tail"], am.Fields |> List.map _.Name)
+    Assert.Equal("union fx_am_anonymous1", am.Fields.[1].Type)
+    Assert.Equal("struct fx_am_anonymous2", am.Fields.[2].Type)
+    let union = found.["fx_am_anonymous1"]
+    Assert.True(union.IsUnion)
+    Assert.Equal<string list>(["i"; "f"], union.Fields |> List.map _.Name)
+    let expected : CppParser.AnonymousRecordOrigin = { Parent = "fx_am"; Field = "anonymous1"; Location = $"{header}:6:3"; Member = true }
+    Assert.Equal(Some expected, union.Anonymous)
+    Assert.Equal<string list>(["lo"; "hi"], found.["fx_am_anonymous2"].Fields |> List.map _.Name)
+    // The enclosing record's measured layout has an offset for each anonymous member.
+    Assert.Equal((24, 8, [0; 4; 8; 16]), layoutOf am)
+    Assert.Equal((4, 4, [0; 0]), layoutOf union)
+    Assert.Equal((4, 2, [0; 2]), layoutOf found.["fx_am_anonymous2"])
+    // An anonymous member nested in another, under a record C names only by a typedef.
+    Assert.Equal<string list>(["head"; "anonymous1"], found.["fx_am_td"].Fields |> List.map _.Name)
+    Assert.Equal<string list>(["word"; "anonymous1"], found.["fx_am_td_anonymous1"].Fields |> List.map _.Name)
+    Assert.Equal<string list>(["low"; "high"], found.["fx_am_td_anonymous1_anonymous1"].Fields |> List.map _.Name)
+    Assert.Equal(Some "fx_am_td_anonymous1", found.["fx_am_td_anonymous1_anonymous1"].Anonymous |> Option.map _.Parent)
+    Assert.Equal((8, 4, [0; 4]), layoutOf found.["fx_am_td"])
+    Assert.Equal((4, 4, [0; 0]), layoutOf found.["fx_am_td_anonymous1"])
+    Assert.Equal((4, 2, [0; 2]), layoutOf found.["fx_am_td_anonymous1_anonymous1"])
+    clangConfirms header [
+        "sizeof(struct fx_am) == 24"; "_Alignof(struct fx_am) == 8"; "offsetof(struct fx_am, tag) == 0"
+        "offsetof(struct fx_am, i) == 4"; "offsetof(struct fx_am, f) == 4"; "offsetof(struct fx_am, lo) == 8"
+        "offsetof(struct fx_am, hi) == 10"; "offsetof(struct fx_am, tail) == 16"
+        "sizeof(fx_am_td) == 8"; "_Alignof(fx_am_td) == 4"; "offsetof(fx_am_td, word) == 4"
+        "offsetof(fx_am_td, low) == 4"; "offsetof(fx_am_td, high) == 6" ]
+
+[<Fact>]
+let ``anonymous members one macro expansion spells alike stay unmeasured`` () =
+    let found = records "anonymous-members/macro-pair.h"
+    Assert.Equal<string list>(["anonymous1"; "anonymous2"], found.["fx_mpair"].Fields |> List.map _.Name)
+    // Clang dumps two different layouts under one location, so neither is attributable.
+    Assert.Equal(None, found.["fx_mpair_anonymous1"].Measured)
+    Assert.Equal(None, found.["fx_mpair_anonymous2"].Measured)
+    Assert.Equal((16, 8, [0; 8]), layoutOf found.["fx_mpair"])
+
+[<Fact>]
+let ``a generated member name that names another member refuses the unit`` () =
+    let header = fixturePath "anonymous-members/name-clash.h"
+    Assert.Equal(
+        Error $"FS9123: the generated member name 'anonymous1' of the anonymous member of 'fx_mclash' declared at {header}:5:3 in '{header}' names another member of that record. A generated name must name one member.",
+        parse "anonymous-members/name-clash.h" |> Result.map ignore)
+
+[<Fact>]
+let ``an anonymous member of a C++ record refuses the unit`` () =
+    let header = fixturePath "anonymous-members/class.hpp"
+    let parsed =
+        CppParser.parseHeader {
+            HeaderFile = header; IncludePaths = []; Defines = []; IncludeRoot = None
+            MacroPrefixes = []; IncludeMacros = false; Verbose = false; CppMode = true }
+    Assert.Equal(
+        Error $"FS9122: C++ record 'fx_cpp_am' in '{header}' has an anonymous member of clang type 'fx_cpp_am::(anonymous union at {header}:5:3)'; the C++ record path does not represent anonymous members, and none is dropped from its record.",
+        parsed |> Result.map ignore)
+
+/// Clang's own JSON AST of `header` under `flags`, produced by the test harness: `-fms-extensions`
+/// is an option no pilot can select (#178), so only the harness can give the parser its AST.
+let private clangAst (header: string) (flags: string list) =
+    let info = System.Diagnostics.ProcessStartInfo("clang")
+    for arg in ["-x"; "c"] @ flags @ ["-Xclang"; "-ast-dump=json"; "-fsyntax-only"; header] do info.ArgumentList.Add arg
+    info.RedirectStandardOutput <- true
+    info.RedirectStandardError <- true
+    use proc = System.Diagnostics.Process.Start info
+    let json = proc.StandardOutput.ReadToEnd()
+    proc.StandardError.ReadToEnd() |> ignore
+    proc.WaitForExit()
+    Assert.Equal(0, proc.ExitCode)
+    json
+
+[<Fact>]
+let ``an anonymous member clang declares with no unnamed record is refused, never dropped`` () =
+    let header = fixturePath "anonymous-members/tagged-member.h"
+    // Under -fms-extensions clang declares the implicit unnamed field `struct fx_inner` in
+    // fx_tagged_outer; no unnamed record precedes it, so it cannot be paired.
+    let ast = clangAst header ["-fms-extensions"]
+    Assert.Contains("\"qualType\": \"struct fx_inner\"", ast)
+    Assert.Equal(
+        Error $"FS9122: an anonymous member of 'fx_tagged_outer' in '{header}', of clang type 'struct fx_inner', cannot be paired with a record clang declares for it, so 'fx_tagged_outer' has no representation of it. An anonymous member is never dropped from its record.",
+        CppParser.declarationsOfAst header ast |> Result.map ignore)
+    // Without the extension C declares no member, and the record holds only `y`.
+    match CppParser.declarationsOfAst header (clangAst header []) with
+    | Error error -> failwithf "The plain C AST was refused: %s" error
+    | Ok decls ->
+        let outer = decls |> List.pick (function CppParser.Declaration.Struct s when s.Name = "fx_tagged_outer" -> Some s | _ -> None)
+        Assert.Equal<string list>(["y"], outer.Fields |> List.map _.Name)
+
+[<Fact>]
+let ``no public entry point reads a name-clash header past its FS9114 refusal`` () =
+    // The AST reader that skips measurement is internal (#173 comment 5602): only the test
+    // assembly can call it, and it refuses the clash as well.
+    let header = fixturePath "anonymous-records/name-clash.h"
+    let refusal = $"FS9114: the generated record name 'fx_clash_inner' in '{header}' names more than one declaration: the unnamed record of field 'inner' of 'fx_clash' at {header}:10:3; a record. A generated name must name one record."
+    let parserType = typeof<CppParser.HeaderParserOptions>.DeclaringType
+    let flags = System.Reflection.BindingFlags.Static ||| System.Reflection.BindingFlags.Public
+    Assert.Null(parserType.GetMethod("declarationsOfAst", flags))
+    let internalReader = parserType.GetMethod("declarationsOfAst", System.Reflection.BindingFlags.Static ||| System.Reflection.BindingFlags.NonPublic)
+    Assert.NotNull(internalReader)
+    Assert.True(internalReader.IsAssembly, "declarationsOfAst must be internal to Farscape.Core")
+    Assert.Equal(Error refusal, CppParser.declarationsOfAst header (clangAst header []) |> Result.map ignore)
+    // Every public parse and generation entry point refuses the same header with FS9114.
+    let options : CppParser.HeaderParserOptions =
+        { HeaderFile = header; IncludePaths = []; Defines = []; IncludeRoot = None
+          MacroPrefixes = []; IncludeMacros = true; Verbose = false; CppMode = false }
+    Assert.Equal(Error refusal, CppParser.parseHeaderFull options |> Result.map ignore)
+    Assert.Equal(Error refusal, CppParser.parseHeaderUnit options |> Result.map ignore)
+    Assert.Equal(Error refusal, CppParser.parseHeader options |> Result.map ignore)
+    Assert.Equal(Error refusal, CppParser.parse header [] false |> Result.map ignore)
+    Assert.Equal(Error refusal, CppParser.parseWithDefines header [] [] false |> Result.map ignore)
+    Assert.Equal(Error refusal, CppParser.parseWithIncludeRoot header [] [] None [] false |> Result.map ignore)
+    Assert.Equal(Error refusal, CppParser.parseCMSIS header [] [] false |> Result.map ignore)
+    let output = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "farscape-clash-" + System.Guid.NewGuid().ToString("N"))
+    try
+        let generated =
+            BindingGenerator.generateBindings
+                { HeaderFile = System.IO.FileInfo header; LibraryName = "fixture"; OutputDirectory = output; Namespace = "Test.Fixture"
+                  IncludePaths = []; Defines = []; Verbose = false; GenerateWrappers = false; DataModel = Types.LP64 }
+        Assert.Equal(Error $"Failed to parse header: {refusal}", generated |> Result.map ignore)
+        Assert.False(System.IO.Directory.Exists output && System.IO.Directory.EnumerateFileSystemEntries(output) |> Seq.isEmpty |> not)
+    finally
+        if System.IO.Directory.Exists output then System.IO.Directory.Delete(output, true)
+    withPilot [header] [] ["fx_clash_read"] (fun result written ->
+        Assert.Equal(Error $"Failed to parse headers: {refusal}", result |> Result.map ignore)
+        Assert.Empty(System.IO.Directory.GetFiles(written, "*", System.IO.SearchOption.AllDirectories)))

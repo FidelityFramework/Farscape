@@ -26,6 +26,12 @@ namespace Farscape.Core
 /// | FS9118 | clang's measurement of an alias's canonical type contradicts its profile row  |
 /// | FS9119 | a descriptor cites a record the pilot declares no value type for              |
 /// | FS9120 | a result alias is unreadable: its function takes an incomplete type by value  |
+/// | FS9121 | a layout-neutral attribute is unconfirmed by clang's measured record layout   |
+/// | FS9122 | an anonymous struct or union member has no representation in its record       |
+/// | FS9123 | a generated anonymous member name names another member of its record          |
+/// | FS9124 | a pilot define is not NAME or NAME=VALUE, so it could carry a clang option    |
+/// | FS9125 | a pkg-config module name is not a module name, so it could carry an option    |
+/// | FS9126 | pkg-config --cflags output holds a word that is not an include path or define |
 ///
 /// Each refusal reason has exactly one code and each code one reason.
 module Diagnostics =
@@ -89,3 +95,21 @@ module Diagnostics =
 
     [<Literal>]
     let AliasIncompleteParameter = "FS9120" // result alias unreadable: function takes an incomplete type by value (#171)
+
+    [<Literal>]
+    let LayoutNeutralUnconfirmed = "FS9121" // layout-neutral attribute without clang's agreeing measurement (#174)
+
+    [<Literal>]
+    let AnonymousMemberUnrepresented = "FS9122" // C11 anonymous member with no representation in its record (#173)
+
+    [<Literal>]
+    let AnonymousMemberNameCollision = "FS9123" // generated anonymous member name names another member (#173)
+
+    [<Literal>]
+    let DefineMalformed = "FS9124"         // pilot define that is not NAME or NAME=VALUE (#178)
+
+    [<Literal>]
+    let PkgConfigModuleMalformed = "FS9125" // pkg-config module name that is not a module name (#178)
+
+    [<Literal>]
+    let PkgConfigFlagRefused = "FS9126"   // pkg-config --cflags word other than -I or -D (#178)

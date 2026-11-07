@@ -257,6 +257,7 @@ module ProtocolParser =
                 Attributes = []
                 Anonymous = None
                 Measured = None
+                Unattributed = None
             })
 
     /// The wire representation of a protocol enum, read from the protocol's own declarations.

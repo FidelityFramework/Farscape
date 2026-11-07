@@ -256,7 +256,7 @@ module GeneratorDispatch =
 
     [<Fact>]
     let ``an anonymous record without a clang measurement is refused, not laid out from its fields`` () =
-        let origin : CppParser.AnonymousRecordOrigin = { Parent = "P"; Field = "halves"; Location = "p.h:3:5" }
+        let origin : CppParser.AnonymousRecordOrigin = { Parent = "P"; Field = "halves"; Location = "p.h:3:5"; Member = false }
         let halves = { mkStruct "P_halves" [mkField "low" "int"; mkField "high" "int"] None with Anonymous = Some origin }
         let source = attributeLayoutSource [halves] Map.empty
         let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source halves |> ignore)

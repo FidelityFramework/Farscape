@@ -39,10 +39,10 @@ let mkEnumValWithDoc name value doc : CppParser.EnumValue =
     { Name = name; Value = value; Documentation = Some doc }
 
 let mkStruct name fields doc : CppParser.StructDecl =
-    { Name = name; Fields = fields; Documentation = doc; IsUnion = false; Attributes = []; Anonymous = None; Measured = None }
+    { Name = name; Fields = fields; Documentation = doc; IsUnion = false; Attributes = []; Anonymous = None; Measured = None; Unattributed = None }
 
 let mkStructSimple name : CppParser.StructDecl =
-    { Name = name; Fields = []; Documentation = None; IsUnion = false; Attributes = []; Anonymous = None; Measured = None }
+    { Name = name; Fields = []; Documentation = None; IsUnion = false; Attributes = []; Anonymous = None; Measured = None; Unattributed = None }
 
 let mkField name typ : CppParser.FieldDecl =
     { Name = name; Type = typ; IsConst = false; IsVolatile = false; IsArray = false; ArraySize = None
@@ -183,3 +183,18 @@ let clangConfirms (header: string) (assertions: string list) =
         if proc.ExitCode <> 0 then failwithf "clang does not confirm the layout of %s: %s" header errors
     finally
         try System.IO.File.Delete probe with _ -> ()
+
+/// Every emitted `Types.clef` of a generated package, its lines trimmed, in path order.
+let allTypesOf (output: string) =
+    System.IO.Directory.GetFiles(output, "Types.clef", System.IO.SearchOption.AllDirectories)
+    |> Array.sort
+    |> Array.collect System.IO.File.ReadAllLines
+    |> Array.map (fun line -> line.Trim())
+    |> String.concat "\n"
+
+/// The text of one emitted layout module, from its headline to the next record's.
+let recordModule (types: string) (name: string) =
+    let at = types.IndexOf($"module {name} =")
+    Xunit.Assert.True(at >= 0, $"module {name} is not emitted:\n{types}")
+    let next = types.IndexOf("\nmodule ", at + 1)
+    if next < 0 then types.Substring(at) else types.Substring(at, next - at)

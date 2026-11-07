@@ -8,10 +8,18 @@
     <PackageTags>fsharp;f#;bindings;codegen;native;fidelity;xparsec</PackageTags>
   </PropertyGroup>
 
+  <!-- CppParser.declarationsOfAst reads an AST without measurements; tests only (#173). -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Farscape.Tests" />
+  </ItemGroup>
+
   <ItemGroup>
     <Compile Include="Diagnostics.fs" />
+    <Compile Include="AttributeContracts.fs" />
+    <Compile Include="ProcessLaunch.fs" />
     <Compile Include="Types.fs" />
     <Compile Include="CppParser.fs" />
+    <Compile Include="PkgConfig.fs" />
     <Compile Include="TypeMapper.fs" />
     <Compile Include="CTypeParser.fs" />
     <Compile Include="ActivePatterns.fs" />

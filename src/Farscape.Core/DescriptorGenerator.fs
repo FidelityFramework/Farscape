@@ -149,6 +149,15 @@ module DescriptorGenerator =
         | UnknownField name ->
             invalidOp $"Struct '{structName}' field '{field.Name}' has no known representation for type '{name}'; a complete C representation contract is required."
 
+    /// The layout-neutral attributes (`AttributeContracts.LayoutNeutral`) a record or its fields
+    /// carry, each kind once, with the fact it records in the record's descriptor (#174).
+    let neutralAttributes (s: CppParser.StructDecl) : (string * string) list =
+        (s.Attributes @ (s.Fields |> List.collect _.Attributes))
+        |> List.choose (fun a -> AttributeContracts.neutralFact a.Kind |> Option.map (fun fact -> a.Kind, fact))
+        |> List.distinct
+
+    let private offsetsText (offsets: int list) = offsets |> List.map string |> String.concat ", "
+
     /// One struct's layout: per-field byte offsets, size, alignment, and the stratum of the offsets.
     let rec layoutOf (src: LayoutSource) (depth: int) (s: CppParser.StructDecl)
         : int list * int * int * Stratum =
@@ -171,10 +180,47 @@ module DescriptorGenerator =
                 invalidOp $"Struct '{s.Name}' has two clang measurements that disagree: the ABI-critical probe measured {requested.SizeBits / 8} bytes at alignment {requested.AlignmentBits / 8}, its declaring unit's parse {parsed.SizeBits / 8} bytes at alignment {parsed.AlignmentBits / 8}; one effective layout is required."
             | Some requested, _ -> Some requested
             | None, parsed -> parsed
+        // A layout-neutral attribute (`may_alias`) is admitted only when clang measures this
+        // record and its copy without the attribute (`CppParser.UnattributedLayout`), synthesized
+        // in the same unit, at the same size, alignment and field offsets (#174). An attribute
+        // the table does not classify keeps its exact reason; a layout attribute beside it, or a
+        // record with no faithful copy, leaves the contract unconfirmed. Farscape's own layout
+        // model is never the evidence.
+        let neutral = neutralAttributes s
+        let neutralKinds = neutral |> List.map fst |> String.concat "', '"
+        let kind = if s.IsUnion then "union" else "struct"
+        let unconfirmed detail =
+            invalidOp $"{Diagnostics.LayoutNeutralUnconfirmed}: {kind} '{s.Name}' carries layout-neutral attribute '{neutralKinds}', {detail}; the contract that '{neutralKinds}' moves no byte is unconfirmed."
+        let layoutText (sizeBits: int) (alignmentBits: int) (offsetsBits: int list) =
+            $"{sizeBits / 8} bytes, alignment {alignmentBits / 8}, offsets {offsetsText (offsetsBits |> List.map (fun bits -> bits / 8))}"
+        let confirmNeutral (measured: CppParser.StructLayoutInfo) =
+            if not neutral.IsEmpty then
+                let unclassified subject (attributes: CppParser.AttributeData list) =
+                    attributes |> List.iter (fun a ->
+                        if (AttributeContracts.contractOf a.Kind).IsNone then
+                            invalidOp $"{subject} carries attribute '{a.Kind}' with unclassified layout effect; a measured layout or a classified attribute contract is required.")
+                unclassified $"Struct '{s.Name}'" s.Attributes
+                s.Fields |> List.iter (fun f -> unclassified $"Struct '{s.Name}' field '{f.Name}'" f.Attributes)
+                let affecting =
+                    [ for a in s.Attributes do
+                        if AttributeContracts.contractOf a.Kind = Some AttributeContracts.LayoutAffecting then yield $"'{a.Kind}'"
+                      for f in s.Fields do
+                        for a in f.Attributes do
+                            if AttributeContracts.contractOf a.Kind = Some AttributeContracts.LayoutAffecting then yield $"'{a.Kind}' on field '{f.Name}'" ]
+                match affecting, s.Unattributed with
+                | first :: _, _ ->
+                    unconfirmed $"and layout attribute {first}, which a copy without '{neutralKinds}' would have to reproduce, so no copy is synthesized for clang to measure"
+                | [], None ->
+                    unconfirmed "but clang has no measurement of its copy without the attribute in its declaring unit"
+                | [], Some (CppParser.UnattributedUnsynthesized reason) ->
+                    unconfirmed $"but no faithful copy without the attribute can be synthesized for clang to measure: {reason}"
+                | [], Some (CppParser.UnattributedMeasured copy) ->
+                    if (copy.SizeBits, copy.AlignmentBits, copy.FieldOffsetsBits) <> (measured.SizeBits, measured.AlignmentBits, measured.FieldOffsetsBits) then
+                        unconfirmed $"but clang measures it at {layoutText measured.SizeBits measured.AlignmentBits measured.FieldOffsetsBits} and its copy without the attribute at {layoutText copy.SizeBits copy.AlignmentBits copy.FieldOffsetsBits}"
         match measuredLayout with
         | None when s.Anonymous.IsSome ->
             let origin = s.Anonymous.Value
-            invalidOp $"{Diagnostics.AnonymousRecordUnmeasured}: anonymous record '{s.Name}' (field '{origin.Field}' of '{origin.Parent}', declared at {origin.Location}) has no clang-measured layout in its declaring unit; its layout is never computed from its declared fields."
+            invalidOp $"{Diagnostics.AnonymousRecordUnmeasured}: anonymous record '{s.Name}' ({CppParser.describeOrigin origin}, declared at {origin.Location}) has no clang-measured layout in its declaring unit; its layout is never computed from its declared fields."
         | Some measured ->
             let size, alignment = validateMeasuredLayout s measured
             let offsets =
@@ -187,15 +233,20 @@ module DescriptorGenerator =
                         invalidOp $"Struct '{s.Name}' field '{field.Name}' has measured byte offset {offset} outside the measured storage 0..{size - 1}; a measured layout consistent with its record size is required."
                     offset)
                 |> List.ofSeq
+            confirmNeutral measured
             offsets, size, alignment, Measured
         | None ->
+            if not neutral.IsEmpty then
+                unconfirmed "but clang has no measurement of it in its declaring unit, which the contract is confirmed against together with clang's measurement of its copy without the attribute"
             let requireNaturalAttributes subject (attributes: CppParser.AttributeData list) =
                 attributes |> List.iter (fun attribute ->
-                    match attribute.Kind with
-                    | "PackedAttr" | "AlignedAttr" | "MaxFieldAlignmentAttr" ->
+                    match AttributeContracts.contractOf attribute.Kind with
+                    | Some AttributeContracts.LayoutAffecting ->
                         invalidOp $"{subject} carries layout attribute '{attribute.Kind}' that natural alignment cannot represent; a measured layout is required."
-                    | kind ->
-                        invalidOp $"{subject} carries attribute '{kind}' with unclassified layout effect; a measured layout or a classified attribute contract is required.")
+                    // Unreachable: a record carrying one is refused above unless clang measured it.
+                    | Some (AttributeContracts.LayoutNeutral _) -> ()
+                    | None ->
+                        invalidOp $"{subject} carries attribute '{attribute.Kind}' with unclassified layout effect; a measured layout or a classified attribute contract is required.")
             requireNaturalAttributes $"Struct '{s.Name}'" s.Attributes
             s.Fields |> List.iter (fun field -> requireNaturalAttributes $"Struct '{s.Name}' field '{field.Name}'" field.Attributes)
             let fieldExtent fieldName count shape : int * int =
@@ -257,11 +308,42 @@ module DescriptorGenerator =
             | Inferred -> "inferred (a field without a known representation; verify against a measurement)"
         let kind = if s.IsUnion then "union" else "struct"
         let fieldPairs = Seq.zip s.Fields offsets |> List.ofSeq
+        // The record of a C11 anonymous member of `parent` that field `f` holds (#173).
+        let memberRecordOf (parent: string) (f: CppParser.FieldDecl) =
+            match src.Shape (elementType parent f) with
+            | StructField name ->
+                Map.tryFind name src.Structs
+                |> Option.filter (fun r -> r.Anonymous |> Option.exists (fun o -> o.Member && o.Parent = parent && o.Field = f.Name))
+            | _ -> None
+        // C reaches the members of an anonymous member as members of the enclosing record:
+        // each, through any depth of anonymous members, at its offset in this record.
+        let rec reachable (record: CppParser.StructDecl) (at: int) : (string * int) list =
+            let nestedOffsets, _, _, _ = layoutOf src 1 record
+            Seq.zip record.Fields nestedOffsets |> List.ofSeq |> List.collect (fun (f, offset) ->
+                match memberRecordOf record.Name f with
+                | Some deeper -> reachable deeper (at + offset)
+                | None -> [ f.Name, at + offset ])
         let offsetLiterals =
             fieldPairs
             |> List.collect (fun (f, offset) ->
                 [ XmlDoc $"Offset of `{f.Name}` in bytes ({strat})."
-                  LiteralBinding($"{f.Name}Offset", string offset) ])
+                  LiteralBinding($"{f.Name}Offset", string offset) ]
+                @ (match memberRecordOf s.Name f with
+                   | Some record ->
+                       reachable record offset |> List.collect (fun (name, at) ->
+                           [ XmlDoc $"Offset of `{name}` in bytes ({strat}), a member of `{s.Name}` reached through its anonymous member `{f.Name}`."
+                             LiteralBinding($"{name}Offset", string at) ])
+                   | None -> []))
+        // Each confirmed layout-neutral attribute's fact (`may_alias`), first in the descriptor's
+        // Documentation, which is the record's contract with Layer 2 (#174).
+        let contracts =
+            neutralAttributes s
+            |> List.map (fun (attribute, fact) -> $"{attribute}: no layout effect, confirmed by clang measuring this record and its copy without the attribute, in the same unit, at the same size, alignment and field offsets; {fact}.")
+        let documentation =
+            match contracts, s.Documentation with
+            | [], doc -> doc
+            | facts, None -> Some (String.concat " " facts)
+            | facts, Some doc -> Some (String.concat " " facts + " " + doc)
         let descriptor =
             RecordBlock [
                 "Name", Literal (quote s.Name)
@@ -270,10 +352,12 @@ module DescriptorGenerator =
                     "Alignment", Literal (string align)
                     "Fields", ArrayBlock (fieldPairs |> List.map (fun (f, offset) -> fieldDescriptor src s.Name stratum size f offset))
                 ]
-                "Documentation", Literal (optionSource s.Documentation)
+                "Documentation", Literal (optionSource documentation)
             ]
         let headline = $"/// C {kind} `{s.Name}`: layout {how}."
-        let docLine = s.Documentation |> Option.map (fun d -> Comment $"/// {d}") |> Option.toList
+        let docLine =
+            (contracts |> List.map (fun fact -> Comment $"/// {fact}"))
+            @ (s.Documentation |> Option.map (fun d -> Comment $"/// {d}") |> Option.toList)
         [ Comment headline ] @ docLine @
         [ SubModule(s.Name,
             [ XmlDoc $"Size in bytes ({strat})."
