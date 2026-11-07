@@ -270,6 +270,12 @@ module WrapperCodeGenerator =
         : FsDecl list =
 
         let errorHandling = if passthroughFunctions.Contains func.Name then NoErrors else errorHandling
+        // A pilot-recorded declaring unit's facts (typedefs, opaque handles) stand for this
+        // function; without one (a single unit) the namespace's own declarations do.
+        let typedefMap, opaqueHandles =
+            match sourceContext |> Option.bind (fun c -> c.DeclarationUnits.TryFind ("function", func.Name)) with
+            | Some facts -> facts.Typedefs, facts.OpaqueHandles
+            | None -> typedefMap, opaqueHandles
         let mapType = FidelityCodeGenerator.mapCTypeToFidelityType typedefMap model opaqueHandles Map.empty
         let pattern = WrapperPatternAnalyzer.analyze func typedefMap
 

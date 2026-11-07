@@ -435,6 +435,8 @@ let ``TOML nonnull annotations override nullable default`` () =
     let nonnull : PilotTypes.NonnullAnnotations option = Some { Parameters = Map.ofList [("render", [0])]; Returns = Set.empty }
     let ctx : FidelityCodeGenerator.GenerationContext =
         { TypedefMap = FidelityCodeGenerator.buildTypedefMap decls
+          DeclarationUnits = Map.empty
+          TypeNameUnits = Map.empty
           OpaqueHandles = FidelityCodeGenerator.detectOpaqueHandles decls
           Delegates = Map.empty
           Enums = Map.empty
@@ -457,6 +459,8 @@ let ``TOML nonnull_returns prevents Option on return type`` () =
     let nonnull : PilotTypes.NonnullAnnotations option = Some { Parameters = Map.empty; Returns = Set.ofList ["create_thing"] }
     let ctx : FidelityCodeGenerator.GenerationContext =
         { TypedefMap = FidelityCodeGenerator.buildTypedefMap decls
+          DeclarationUnits = Map.empty
+          TypeNameUnits = Map.empty
           OpaqueHandles = FidelityCodeGenerator.detectOpaqueHandles decls
           Delegates = Map.empty
           Enums = Map.empty
@@ -1723,3 +1727,123 @@ let ``writable buffer project refusals preserve all existing output`` shape reas
     match writableProject shape with
     | Error error -> Assert.Contains("writable_buffers", error); Assert.Contains(reason, error)
     | Ok _ -> failwith "Unsupported writable buffer generated output"
+
+// ─── Unit typedef chains before the profile scalar table (issue #54) ────
+
+[<Fact>]
+let ``a profile scalar name the unit declares resolves through the unit's chain`` () =
+    let resolve typedefs cType =
+        FidelityCodeGenerator.resolveCType (Map.ofList typedefs) Types.LP64 Set.empty Map.empty Map.empty cType
+    // Agreement keeps the profile row, so output is unchanged for glibc's spelling.
+    match resolve ["dev_t", "unsigned long"] "dev_t" with
+    | FidelityCodeGenerator.Scalar r ->
+        Assert.Equal((TypeMapper.Unsigned, 64, "dev_t"), (r.Family, r.Bits, r.CType))
+    | other -> failwithf "Expected a scalar, got %A" other
+    // An undeclared profile name keeps its profile row.
+    match resolve [] "pid_t" with
+    | FidelityCodeGenerator.Scalar r -> Assert.Equal((TypeMapper.Signed, 32), (r.Family, r.Bits))
+    | other -> failwithf "Expected a scalar, got %A" other
+    let refusal = "FS9102: typedef 'dev_t' is declared by its translation unit as 'unsigned short' (unsigned 16-bit), but the LP64 profile row for 'dev_t' is unsigned 64-bit; the unit's declaration and the profile must agree."
+    let error = Assert.ThrowsAny<exn>(fun () -> resolve ["dev_t", "unsigned short"] "dev_t" |> ignore)
+    Assert.Equal(refusal, error.Message)
+    // The pointee of a data pointer is resolved through the same check.
+    let error = Assert.ThrowsAny<exn>(fun () -> resolve ["dev_t", "unsigned short"] "const dev_t *" |> ignore)
+    Assert.Equal(refusal, error.Message)
+    // Same width, opposite signedness: the family must agree too.
+    let error = Assert.ThrowsAny<exn>(fun () -> resolve ["dev_t", "long"] "dev_t" |> ignore)
+    Assert.Equal("FS9102: typedef 'dev_t' is declared by its translation unit as 'long' (signed 64-bit), but the LP64 profile row for 'dev_t' is unsigned 64-bit; the unit's declaration and the profile must agree.", error.Message)
+    let error = Assert.ThrowsAny<exn>(fun () -> resolve ["pid_t", "struct fx_pid"] "pid_t" |> ignore)
+    Assert.Equal("FS9102: typedef 'pid_t' is declared by its translation unit as 'struct fx_pid' (no scalar representation), but the LP64 profile row for 'pid_t' is signed 32-bit; the unit's declaration and the profile must agree.", error.Message)
+
+// ─── Enum representations by provenance, never inferred (issue #53) ────
+// These exercise enumRepr's agreement rules on given facts; the production measurement path
+// is covered by CppParserEnumMeasurementTests and the clang-parsed pilots in BindingGeneratorTests.
+
+let private enumReprOf e = FidelityCodeGenerator.enumRepr Types.LP64 (TypeMapper.tryScalar Types.LP64) e
+
+[<Fact>]
+let ``enum representations follow their provenance and must agree with the parsed facts`` () =
+    let packed = mkMeasuredEnum "fx_packed" [mkEnumVal "FX_PACKED_A" 0L; mkEnumVal "FX_PACKED_B" 200L] 8 false
+    let r = enumReprOf packed
+    Assert.Equal((TypeMapper.Unsigned, 8, TypeMapper.Measured, "enum fx_packed"), (r.Family, r.Bits, r.Stratum, r.CType))
+    // A fixed underlying type agreeing with the measurement is admitted.
+    Assert.Equal(8, (enumReprOf { packed with UnderlyingType = Some "unsigned char" }).Bits)
+    // A protocol enum stands on its protocol's declared wire type, at stratum Declared.
+    let wire = { mkEnum "wl_fmt" [mkEnumVal "A" 1L] None with Representation = CppParser.ProtocolWire ({ Bits = 32; IsSigned = false }, "protocol 'p'") }
+    let r = enumReprOf wire
+    Assert.Equal((TypeMapper.Unsigned, 32, TypeMapper.Declared, "enum wl_fmt : uint32_t"), (r.Family, r.Bits, r.Stratum, r.CType))
+
+[<Fact>]
+let ``an unmeasured C enum is refused even when it spells an underlying type`` () =
+    let error = Assert.ThrowsAny<exn>(fun () -> enumReprOf (mkEnum "fx_plain" [mkEnumVal "A" 0L] None) |> ignore)
+    Assert.Equal("FS9103: enum 'fx_plain' has no clang measurement of its representation in its declaring unit; its width cannot be inferred.", error.Message)
+    let error = Assert.ThrowsAny<exn>(fun () -> enumReprOf { mkEnum "fx_fixed" [mkEnumVal "A" 0L] None with UnderlyingType = Some "unsigned char" } |> ignore)
+    Assert.Equal("FS9103: enum 'fx_fixed' has no clang measurement of its representation in its declaring unit; its width cannot be inferred.", error.Message)
+
+[<Fact>]
+let ``a protocol enum without a declared wire type is refused`` () =
+    let undeclared = { mkEnum "wl_display_error" [mkEnumVal "A" 0L] None with Representation = CppParser.ProtocolUndeclared "no protocol argument references enum 'wl_display.error'" }
+    let error = Assert.ThrowsAny<exn>(fun () -> enumReprOf undeclared |> ignore)
+    Assert.Equal("FS9106: protocol enum 'wl_display_error' has no declared wire type: no protocol argument references enum 'wl_display.error'.", error.Message)
+
+[<Fact>]
+let ``a clang measurement contradicting the parsed facts is refused`` () =
+    let packed = mkMeasuredEnum "fx_packed" [mkEnumVal "FX_PACKED_A" 0L] 8 false
+    let error = Assert.ThrowsAny<exn>(fun () -> enumReprOf { packed with UnderlyingType = Some "int" } |> ignore)
+    Assert.Equal("FS9104: enum 'fx_packed' declares underlying type 'int' (signed 32-bit), but clang measured unsigned 8-bit.", error.Message)
+    let error = Assert.ThrowsAny<exn>(fun () -> enumReprOf (mkMeasuredEnum "fx_packed" [mkEnumVal "FX_BIG" 300L] 8 false) |> ignore)
+    Assert.Equal("FS9110: enumerator 'FX_BIG' of enum 'fx_packed' has value 300, which clang's measured unsigned 8-bit representation cannot hold.", error.Message)
+    let error = Assert.ThrowsAny<exn>(fun () -> enumReprOf (mkMeasuredEnum "fx_plain" [mkEnumVal "FX_NEG" -1L] 32 false) |> ignore)
+    Assert.Equal("FS9110: enumerator 'FX_NEG' of enum 'fx_plain' has value -1, which clang's measured unsigned 32-bit representation cannot hold.", error.Message)
+
+[<Fact>]
+let ``a clang-measured enum whose declared underlying type has no integer representation is refused`` () =
+    let fixedFloat = { mkMeasuredEnum "fx_odd" [mkEnumVal "A" 0L] 32 true with UnderlyingType = Some "float" }
+    let error = Assert.ThrowsAny<exn>(fun () -> enumReprOf fixedFloat |> ignore)
+    Assert.Equal("FS9111: enum 'fx_odd' declares underlying type 'float', which has no integer representation under LP64.", error.Message)
+
+[<Fact>]
+let ``a protocol enum value outside its declared wire type is refused with its own code`` () =
+    let wire = { mkEnum "wl_fmt" [mkEnumVal "BIG" 0x100000000L] None with Representation = CppParser.ProtocolWire ({ Bits = 32; IsSigned = false }, "protocol 'p'") }
+    let error = Assert.ThrowsAny<exn>(fun () -> enumReprOf wire |> ignore)
+    Assert.Equal("FS9107: enumerator 'BIG' of enum 'wl_fmt' has value 4294967296, which its protocol's declared unsigned 32-bit representation cannot hold.", error.Message)
+
+// ─── Owned resource release resolves in its own unit (issue #54) ────
+
+let private crossUnitRelease ownerPointer releasePointer =
+    let acquire = mkFunc "mallocFirst" "void *" ["size", "unsigned long"]
+    let release = mkFunc "freeFirst" "void" ["ptr", "fx_ptr_t"]
+    let declarations = [ CppParser.Declaration.Function acquire; CppParser.Declaration.Function release ]
+    let acquisition =
+        { rangeProjection with Name = "mallocFirst"; Symbol = "malloc"; ReturnHandle = Some "unit"; ResultRange = None; Resource = Some ownedResource }
+    let retirement = { rangeProjection with Name = "freeFirst"; Symbol = "free"; ParameterHandles = ["unit"]; ResultRange = None }
+    let spelling pointer = if pointer then "void *" else "unsigned long"
+    let context = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
+    let context =
+        { context with
+            // The merged map keeps the owner's unit's spelling; the release has its own unit.
+            TypedefMap = Map.ofList ["fx_ptr_t", spelling ownerPointer]
+            DeclarationUnits =
+                let facts pointer : FidelityCodeGenerator.UnitFacts = { Typedefs = Map.ofList ["fx_ptr_t", spelling pointer]; Enums = Map.empty; OpaqueHandles = Set.empty }
+                Map.ofList [ ("function", "mallocFirst"), facts ownerPointer; ("function", "freeFirst"), facts releasePointer ]
+            Bindings = Map.ofList ["mallocFirst", acquisition; "freeFirst", retirement]
+            NonnullAnnotations = Some { Parameters = Map.ofList ["freeFirst", [0]]; Returns = Set.empty } }
+    fun () -> FidelityCodeGenerator.generateModule context Set.empty declarations "Test.Storage" "c" "cross-unit release" []
+
+[<Fact>]
+let ``an owned resource's release parameter resolves in the release declaration's unit`` () =
+    // fx_ptr_t is a pointer only in the release's unit: the release is admitted.
+    let source = crossUnitRelease false true ()
+    Assert.Contains("OwnedNullableReturn", source)
+    Assert.Contains("Binding = \"Test.Storage.freeFirst\"", source)
+    // fx_ptr_t is a pointer only in the owner's unit: the release's own unit refuses its handle.
+    let error = Assert.ThrowsAny<exn>(fun () -> crossUnitRelease true false () |> ignore)
+    Assert.Equal("freeFirst parameter 0: handle projection requires a C data pointer", error.Message)
+
+[<Fact>]
+let ``a descriptor never carries an unknown width for a by-value enum`` () =
+    // No unit fact names fx_ghost: the descriptor is refused rather than emitted as width unknown.
+    let declarations = [ CppParser.Declaration.Function (mkFunc "fx_take_ghost" "int" ["value", "enum fx_ghost"]) ]
+    let context = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
+    let error = Assert.ThrowsAny<exn>(fun () -> FidelityCodeGenerator.generateModule context Set.empty declarations "Test.Ghost" "c" "ghost" [] |> ignore)
+    Assert.Equal("FS9103: by-value enum type 'enum fx_ghost' has no clang measurement in its declaring unit; a descriptor cannot carry an unknown width.", error.Message)

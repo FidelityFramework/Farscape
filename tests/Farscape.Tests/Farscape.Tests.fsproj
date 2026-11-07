@@ -11,6 +11,7 @@
     <Compile Include="CTypeParserTests.fs" />
     <Compile Include="ActivePatternsTests.fs" />
     <Compile Include="CppParserDetectionTests.fs" />
+    <Compile Include="CppParserEnumMeasurementTests.fs" />
     <Compile Include="CppClassAnalysisTests.fs" />
     <Compile Include="DeclarationAlgebraTests.fs" />
     <Compile Include="CodeRendererTests.fs" />
@@ -31,6 +32,7 @@
     <Compile Include="TypedProtocolTests.fs" />
     <Compile Include="MappedReturnTests.fs" />
     <Compile Include="IntrospectionTests.fs" />
+    <Compile Include="BindingGeneratorTests.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

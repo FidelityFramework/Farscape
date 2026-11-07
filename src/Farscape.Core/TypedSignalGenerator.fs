@@ -49,16 +49,22 @@ module TypedSignalGenerator =
                       (ctx: FidelityCodeGenerator.GenerationContext) : Set<string> =
         let signalTypes = signals |> List.collect (fun signal ->
             (signal.ClassCType + " *") :: signal.ReturnCType :: (signal.Parameters |> List.map (fun (_, cType, _) -> cType)))
+        let connect = declarations |> List.tryPick (function CppParser.Declaration.Function f when f.Name = "g_signal_connect_data" -> Some f | _ -> None)
+        // As in `render`: connect's own parameters resolve in the connect declaration's unit.
+        let ctx = connect |> Option.map (FidelityCodeGenerator.inFunctionUnit ctx) |> Option.defaultValue ctx
         let releaseTypes =
-            declarations |> List.tryPick (function CppParser.Declaration.Function f when f.Name = "g_signal_connect_data" -> Some f | _ -> None)
+            connect
             |> Option.bind (fun f -> f.Parameters |> List.tryItem 4)
             |> Option.bind (snd >> FidelityCodeGenerator.resolveCallbackNativeSignature ctx)
             |> Option.map (fun (_, parameters) -> parameters |> List.map snd)
             |> Option.defaultValue []
+        // GIR payload names resolve in the unit declaring each; release types in connect's unit.
+        let payloadNames = signalTypes |> List.map (fun cType -> resolve (FidelityCodeGenerator.declaringUnitOf ctx "GObject signal contract" cType) cType)
+        let releaseNames = releaseTypes |> List.map (resolve ctx)
         let names =
             if signals.IsEmpty then Set.empty
-            else signalTypes @ releaseTypes
-                 |> List.map (resolve ctx >> FidelityCodeGenerator.clefTypeOf >> carrierNames)
+            else payloadNames @ releaseNames
+                 |> List.map (FidelityCodeGenerator.clefTypeOf >> carrierNames)
                  |> List.fold Set.union Set.empty
         names |> Set.iter (requireNativeType ctx "GObject signal contract")
         names
@@ -127,6 +133,13 @@ module TypedSignalGenerator =
             |> Option.defaultWith (fun () -> failwith "GObject signals require `g_signal_connect_data`; list glib-object.h among the pilot headers")
         if connect.Parameters.Length <> 6 then
             failwith "g_signal_connect_data requires its complete six-parameter native declaration"
+        // The connect declaration's parameters, including the destroy notifier and its
+        // arguments, resolve in connect's declaring unit. GIR payload names resolve only in the
+        // unit that declares each (`payload`), never through another unit's typedefs.
+        let girCtx = ctx
+        let ctx = FidelityCodeGenerator.inFunctionUnit ctx connect
+        let payload where cType nullable nonnull =
+            carrierOf (FidelityCodeGenerator.declaringUnitOf girCtx where cType) where cType nullable nonnull
         let nativeTypes = connect.Parameters |> List.map snd
         requirePointer ctx "g_signal_connect_data instance" nativeTypes.[0]
         if not (isCharPointer ctx nativeTypes.[1]) then
@@ -162,12 +175,12 @@ module TypedSignalGenerator =
                 let names = s.Parameters |> List.map (fun (name, _, _) -> name)
                 if (names |> List.contains "") || (List.distinct names).Length <> names.Length then
                     failwith $"{where}: callback parameter names must be present and unique for nullability admission"
-                let instance = carrierOf ctx ($"{where}: instance") (s.ClassCType + " *") false false
+                let instance = payload ($"{where}: instance") (s.ClassCType + " *") false false
                 let instanceHandle =
                     match instance.Type with Generic("option", inner) -> CodeRenderer.renderType inner | typ -> CodeRenderer.renderType typ
                 let parameters = s.Parameters |> List.map (fun (name, cType, nullable) ->
-                    name, carrierOf ctx ($"{where}: parameter '{name}'") cType nullable (s.NonnullParameters.Contains name))
-                let result = carrierOf ctx ($"{where}: result") s.ReturnCType s.ReturnNullable s.ReturnNonnull
+                    name, payload ($"{where}: parameter '{name}'") cType nullable (s.NonnullParameters.Contains name))
+                let result = payload ($"{where}: result") s.ReturnCType s.ReturnNullable s.ReturnNonnull
                 let localName = pascal s.Class + pascal s.Name
                 let stem =
                     if signals |> List.exists (fun other -> other.Namespace <> s.Namespace && pascal other.Class + pascal other.Name = localName) then

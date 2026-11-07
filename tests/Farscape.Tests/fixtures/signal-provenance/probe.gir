@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<!-- Issue #54 fixture: signal payloads named only by their C spelling. -->
+<repository version="1.2" xmlns="http://www.gtk.org/introspection/core/1.0" xmlns:c="http://www.gtk.org/introspection/c/1.0" xmlns:glib="http://www.gtk.org/introspection/glib/1.0">
+  <namespace name="Fx" version="1.0" c:identifier-prefixes="Fx" c:symbol-prefixes="fx">
+    <class name="Probe" c:symbol-prefix="probe" c:type="FxProbe" parent="GObject.Object">
+      <glib:signal name="count-changed" when="last">
+        <return-value transfer-ownership="none"><type name="none" c:type="void"/></return-value>
+        <parameters>
+          <parameter name="count" transfer-ownership="none"><type name="guint16" c:type="fx_count_t"/></parameter>
+        </parameters>
+      </glib:signal>
+      <glib:signal name="missing-changed" when="last">
+        <return-value transfer-ownership="none"><type name="none" c:type="void"/></return-value>
+        <parameters>
+          <parameter name="missing" transfer-ownership="none"><type name="guint" c:type="fx_missing_t"/></parameter>
+        </parameters>
+      </glib:signal>
+    </class>
+  </namespace>
+</repository>

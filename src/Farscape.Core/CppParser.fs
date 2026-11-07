@@ -82,12 +82,38 @@ module CppParser =
         Documentation: string option
     }
 
+    /// The representation clang chose for an enum type in its declaring translation unit:
+    /// `sizeof` in bits and whether `(E)-1 < 0`, both evaluated by clang (C leaves an ordinary
+    /// enum's compatible integer type to the implementation; `packed` and wide enumerators
+    /// change it).
+    type EnumRepresentation = {
+        Bits: int
+        IsSigned: bool
+    }
+
+    /// Where an enum's representation comes from. C and C++ enums are measured by clang in
+    /// their declaring unit or have none; a protocol enum carries its protocol's declared wire
+    /// type. The two provenances never substitute for each other, and none is inferred.
+    type EnumRepresentationSource =
+        /// A C/C++ enum clang measured in its declaring unit.
+        | ClangMeasured of EnumRepresentation
+        /// A C/C++ enum clang did not measure (incomplete, or not nameable by the probe).
+        | ClangUnmeasured
+        /// A protocol enum whose referencing arguments all declare one wire type; `evidence`
+        /// names the protocol, the referencing arguments and their declared type.
+        | ProtocolWire of EnumRepresentation * evidence: string
+        /// A protocol enum no argument fixes to one declared wire type; `reason` says why.
+        | ProtocolUndeclared of reason: string
+
     /// Represents a C/C++ enum declaration
     type EnumDecl = {
         Name: string
         Values: EnumValue list
         Documentation: string option
         UnderlyingType: string option  // e.g., "int", "uint32_t"
+        /// The representation's provenance: clang's measurement in the declaring unit, or the
+        /// protocol's declared wire type.
+        Representation: EnumRepresentationSource
     }
 
     /// Represents a C/C++ typedef declaration
@@ -527,15 +553,24 @@ module CppParser =
 
     /// Extract the explicit value from an EnumConstantDecl AST node, if present.
     /// Returns None when the enum constant has no initializer (implicit sequential value).
+    /// A value clang reports that the signed 64-bit carrier cannot hold (an unsigned 64-bit
+    /// enumerator above 2^63-1) is refused rather than read as an implicit successor.
     let private extractEnumConstantValue (node: JsonValue) : int64 option =
+        let value (element: JsonValue) =
+            match getInt64 element "value", getString element "value" with
+            | Some v, _ -> Some v
+            | None, Some text when text <> "" ->
+                let name = getStringOr node "name" "<unnamed>"
+                failwith $"{Diagnostics.EnumValueRange}: enumerator '{name}' has value {text}, outside the signed 64-bit range the enum representation carries; a wider enumerator representation contract is required."
+            | None, _ -> None
         getArray node "inner"
         |> Seq.tryPick (fun inner ->
             match getStringOr inner "kind" "" with
             | "ConstantExpr" | "IntegerLiteral" ->
-                getInt64 inner "value"
+                value inner
             | _ ->
                 getArray inner "inner"
-                |> Seq.tryPick (fun nested -> getInt64 nested "value"))
+                |> Seq.tryPick value)
 
     /// Process EnumDecl AST node
     let private processEnumDecl (node: JsonValue) : EnumDecl option =
@@ -569,9 +604,9 @@ module CppParser =
 
         match name, values with
         | Some n, _ when not (String.IsNullOrEmpty(n)) ->
-            Some { Name = n; Values = values; Documentation = documentation; UnderlyingType = underlyingType }
+            Some { Name = n; Values = values; Documentation = documentation; UnderlyingType = underlyingType; Representation = ClangUnmeasured }
         | _, vs when not vs.IsEmpty ->
-            Some { Name = ""; Values = values; Documentation = documentation; UnderlyingType = underlyingType }
+            Some { Name = ""; Values = values; Documentation = documentation; UnderlyingType = underlyingType; Representation = ClangUnmeasured }
         | _ -> None
 
     /// Process TypedefDecl AST node
@@ -595,9 +630,15 @@ module CppParser =
         (includeRoot: string option)
         (verbose: bool)
         (enrichFunction: (string * string) list option -> JsonValue -> FunctionDecl -> FunctionDecl)
-        : Declaration list =
+        : Declaration list * Set<string> * Declaration list =
 
         let results = ResizeArray<Declaration>()
+        // Enums named only by a typedef (`typedef enum { ... } T;`): spelled `T`, not `enum T`.
+        let typedefNamedEnums = System.Collections.Generic.HashSet<string>()
+        // Typedefs and enums this unit's own parse sees through its includes but whose files
+        // lie outside the library boundary: facts of this same translation unit, kept for
+        // resolving its own declarations, never emitted as its declarations.
+        let included = ResizeArray<Declaration>()
         let mutable currentFile: string option = None
         let processFunction scope node =
             processFunctionDecl node |> Option.map (enrichFunction scope node)
@@ -707,7 +748,10 @@ module CppParser =
                     | Some enumDecl ->
                         let name =
                             if enumDecl.Name <> "" then enumDecl.Name
-                            else getString node "id" |> Option.bind (fun id -> Map.tryFind id anonymousRecordNames) |> Option.defaultValue ""
+                            else
+                                let named = getString node "id" |> Option.bind (fun id -> Map.tryFind id anonymousRecordNames) |> Option.defaultValue ""
+                                if named <> "" then typedefNamedEnums.Add named |> ignore
+                                named
                         results.Add(Enum { enumDecl with Name = name })
                     | None -> ()
 
@@ -842,6 +886,24 @@ module CppParser =
                     processNode childScope inner
 
             else
+                if not isImplicit then
+                    match kind with
+                    | "EnumDecl" ->
+                        match processEnumDecl node with
+                        | Some enumDecl ->
+                            let name =
+                                if enumDecl.Name <> "" then enumDecl.Name
+                                else
+                                    let named = getString node "id" |> Option.bind (fun id -> Map.tryFind id anonymousRecordNames) |> Option.defaultValue ""
+                                    if named <> "" then typedefNamedEnums.Add named |> ignore
+                                    named
+                            if name <> "" then included.Add(Enum { enumDecl with Name = name })
+                        | None -> ()
+                    | "TypedefDecl" ->
+                        match processTypedefDecl node with
+                        | Some typedef -> included.Add(Typedef typedef)
+                        | None -> ()
+                    | _ -> ()
                 // Outside the target file: still recurse to find target-file
                 // declarations that may appear deeper in the AST (e.g. in
                 // TranslationUnitDecl or LinkageSpecDecl wrappers).
@@ -851,7 +913,17 @@ module CppParser =
 
         // Start processing from root
         processNode (Some []) root
-        List.ofSeq results
+        let results = List.ofSeq results
+        let own = results |> List.choose (function Enum e -> Some ("enum", e.Name) | Typedef t -> Some ("typedef", t.Name) | _ -> None) |> Set.ofList
+        let included =
+            included
+            |> Seq.filter (function
+                | Enum e -> not (own.Contains ("enum", e.Name))
+                | Typedef t -> not (own.Contains ("typedef", t.Name))
+                | _ -> false)
+            |> Seq.distinctBy (function Enum e -> "enum " + e.Name | Typedef t -> "typedef " + t.Name | _ -> "")
+            |> List.ofSeq
+        results, Set.ofSeq typedefNamedEnums, included
 
     // =========================================================================
     // Macro Parsing
@@ -1434,6 +1506,90 @@ module CppParser =
         result
 
     // =========================================================================
+    // Enum Representation Measurement (clang evaluates sizeof and signedness)
+    // =========================================================================
+
+    /// Parse clang's filtered text AST of the probe variables: `_fs_enum_<kind>_<i> 'char[N]'`.
+    let private parseEnumProbe (output: string) : Map<string, int> =
+        output.Split([| '\n'; '\r' |], StringSplitOptions.RemoveEmptyEntries)
+        |> Array.choose (fun line ->
+            let at = line.IndexOf(" _fs_enum_")
+            if not (line.Contains("VarDecl")) || at < 0 then None
+            else
+                let rest = line.Substring(at + 1)
+                let space = rest.IndexOf(' ')
+                let typeStart = rest.IndexOf("'char[")
+                if space < 0 || typeStart < 0 then None
+                else
+                    let close = rest.IndexOf("]'", typeStart)
+                    match Int32.TryParse(rest.Substring(typeStart + 6, close - typeStart - 6)) with
+                    | true, n when close > typeStart -> Some (rest.Substring(0, space), n)
+                    | _ -> None)
+        |> Map.ofArray
+
+    /// Measure each named enum of a parsed unit with clang in that same unit: the probe includes
+    /// the header under the parse's own flags and declares, per enum, `char size[sizeof(E)]` and
+    /// a sign array whose extent clang evaluates: `((E)-1 < 0) ? 1 : 2` in C, and
+    /// `__is_signed(__underlying_type(E)) ? 1 : 2` in C++ (clang's builtins for
+    /// `std::is_signed_v<std::underlying_type_t<E>>`), which also covers scoped enums and enums
+    /// with a fixed underlying type. Clang's own evaluation is read back from its AST, so
+    /// ordinary, `packed`, wide, fixed and scoped enums carry the representation clang chose.
+    /// A batch clang cannot compile is measured one enum at a time; an enum clang still cannot
+    /// measure (an incomplete C enum, or one the probe cannot name at file scope) stays
+    /// `ClangUnmeasured`, and the generator refuses any use of it.
+    let measureEnums (options: HeaderParserOptions) (typedefNamedEnums: Set<string>) (declarations: Declaration list)
+        : Declaration list =
+        let spellings =
+            declarations
+            |> List.choose (function
+                | Enum e when e.Name <> "" ->
+                    Some (if typedefNamedEnums.Contains e.Name then e.Name else "enum " + e.Name)
+                | _ -> None)
+            |> List.distinct
+        if spellings.IsEmpty then declarations
+        else
+        let tempDir = Path.Combine(Path.GetTempPath(), "farscape-enum")
+        Directory.CreateDirectory(tempDir) |> ignore
+        let probe (batch: (int * string) list) : Result<Map<string, EnumRepresentation>, string> =
+            let tempFile = Path.Combine(tempDir, "_farscape_enum_probe_" + Guid.NewGuid().ToString("N") + ".c")
+            try
+                let body =
+                    batch |> List.map (fun (i, spelling) ->
+                        let signed =
+                            if options.CppMode then $"__is_signed(__underlying_type({spelling}))"
+                            else $"(({spelling})-1 < 0)"
+                        $"char _fs_enum_size_{i}[sizeof({spelling})]; char _fs_enum_sign_{i}[{signed} ? 1 : 2];")
+                    |> String.concat "\n"
+                File.WriteAllText(tempFile, $"#include \"{Path.GetFullPath options.HeaderFile}\"\n{body}\n")
+                match runClang (buildClangArgs options) ["-Xclang"; "-ast-dump"; "-Xclang"; "-ast-dump-filter=_fs_enum_"; "-fsyntax-only"; tempFile] options.Verbose with
+                | Error error -> Error error
+                | Ok output ->
+                    let facts = parseEnumProbe output
+                    batch |> List.fold (fun state (i, spelling) ->
+                        state |> Result.bind (fun (acc: Map<string, EnumRepresentation>) ->
+                            match facts.TryFind $"_fs_enum_size_{i}", facts.TryFind $"_fs_enum_sign_{i}" with
+                            | Some bytes, Some sign when sign = 1 || sign = 2 ->
+                                Ok (acc.Add(spelling, { Bits = bytes * 8; IsSigned = (sign = 1) }))
+                            | _ -> Error $"clang reported no representation for '{spelling}'")) (Ok Map.empty)
+            finally
+                try File.Delete tempFile with _ -> ()
+        let indexed = spellings |> List.mapi (fun i spelling -> i, spelling)
+        let measured =
+            match probe indexed with
+            | Ok facts -> facts
+            | Error _ ->
+                indexed |> List.fold (fun (acc: Map<string, EnumRepresentation>) item ->
+                    match probe [item] with
+                    | Ok facts -> Map.fold (fun m k v -> Map.add k v m) acc facts
+                    | Error _ -> acc) Map.empty
+        declarations
+        |> List.map (function
+            | Enum e when e.Name <> "" ->
+                let spelling = if typedefNamedEnums.Contains e.Name then e.Name else "enum " + e.Name
+                Enum { e with Representation = match measured.TryFind spelling with Some m -> ClangMeasured m | None -> ClangUnmeasured }
+            | decl -> decl)
+
+    // =========================================================================
     // Include Tree Discovery + Macro Documentation Enrichment
     // =========================================================================
 
@@ -1499,6 +1655,10 @@ module CppParser =
     type ParseResult = {
         Declarations: Declaration list
         Macros: MacroDecl list
+        /// Typedefs and enums (enums measured in this unit) the header's own parse reaches
+        /// through includes outside the library boundary; facts for resolving this unit's
+        /// declarations, never declarations of the unit.
+        Included: Declaration list
     }
 
     /// Parse a C/C++ header file and extract all declarations including macros
@@ -1520,7 +1680,10 @@ module CppParser =
                     let root = JsonValue.Parse(jsonOutput)
                     let targetFile = Path.GetFileName(options.HeaderFile)
 
-                    let declarations = walkAst root targetFile options.IncludeRoot options.Verbose (enrichNonNullAttributes options)
+                    let declarations, typedefNamedEnums, included = walkAst root targetFile options.IncludeRoot options.Verbose (enrichNonNullAttributes options)
+                    // Included enums are measured in this same unit, with its own enums.
+                    let measured = measureEnums options typedefNamedEnums (declarations @ included)
+                    let declarations, included = List.splitAt declarations.Length measured
 
                     if options.Verbose then
                         printfn "[CppParser] Extracted %d AST declarations" (List.length declarations)
@@ -1558,9 +1721,22 @@ module CppParser =
                     Ok {
                         Declarations = declarations
                         Macros = macros
+                        Included = included
                     }
                 with ex ->
                     Error $"Failed to parse clang output: {ex.Message}"
+
+    /// Parse a C/C++ header as one translation unit: its declarations (with macros), and the
+    /// typedefs and enums its parse reaches through includes outside the library boundary.
+    let parseHeaderUnit (options: HeaderParserOptions) : Result<Declaration list * Declaration list, string> =
+        match parseHeaderFull options with
+        | Error err -> Error err
+        | Ok result ->
+            let allDecls = result.Declarations @ (result.Macros |> List.map Macro)
+            if allDecls.IsEmpty then
+                Error $"Parse succeeded but no declarations found in {Path.GetFileName(options.HeaderFile)}."
+            else
+                Ok (allDecls, result.Included)
 
     /// Parse a C/C++ header file and extract declarations (backward compatible)
     let parseHeader (options: HeaderParserOptions) : Result<Declaration list, string> =

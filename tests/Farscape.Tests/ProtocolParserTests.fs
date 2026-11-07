@@ -235,7 +235,9 @@ let ``toTypeDeclarations produces enum with values`` () =
         Assert.Equal(0L, errorEnum.Values.[0].Value)
         Assert.Equal("implementation", errorEnum.Values.[3].Name)
         Assert.Equal(3L, errorEnum.Values.[3].Value)
-        Assert.Equal(Some "uint32_t", errorEnum.UnderlyingType)
+        // The XML declares no C underlying type, and no argument references this enum.
+        Assert.Equal(None, errorEnum.UnderlyingType)
+        Assert.Equal(CppParser.ProtocolUndeclared "no protocol argument references enum 'wl_display.error'", errorEnum.Representation)
     | Error e -> failwith e
 
 [<Fact>]
@@ -545,3 +547,73 @@ let ``retired aggregate projections preserve empty protocol metadata`` () =
     Assert.Empty(types)
     Assert.Empty(bodies)
     Assert.Empty(ProtocolParser.toDeclarations protocol)
+
+
+// =============================================================================
+// Protocol enum wire representation from the protocol's own declarations (issue #53)
+// =============================================================================
+
+let private wireProtocol (formatType: string) (otherType: string) = $"""<?xml version="1.0"?>
+<protocol name="wire_test">
+  <interface name="wl_shm" version="1">
+    <request name="create_pool"><arg name="size" type="int"/></request>
+    <enum name="format"><entry name="argb8888" value="0"/><entry name="c8" value="0x20203843"/></enum>
+    <enum name="error"><entry name="invalid_format" value="0"/></enum>
+    <event name="format"><arg name="format" type="{formatType}" enum="format"/></event>
+  </interface>
+  <interface name="wl_shm_pool" version="1">
+    <request name="create_buffer"><arg name="format" type="{otherType}" enum="wl_shm.format"/></request>
+  </interface>
+</protocol>"""
+
+let private protocolEnums xml =
+    match ProtocolParser.parseProtocolXml xml with
+    | Error e -> failwith e
+    | Ok proto ->
+        ProtocolParser.toTypeDeclarations proto
+        |> List.choose (function CppParser.Declaration.Enum e -> Some (e.Name, e) | _ -> None) |> Map.ofList
+
+[<Fact>]
+let ``a protocol enum's wire type is the type its referencing arguments declare`` () =
+    let enums = protocolEnums (wireProtocol "uint" "uint")
+    Assert.Equal(
+        CppParser.ProtocolWire ({ Bits = 32; IsSigned = false }, "2 protocol argument(s) reference enum 'wl_shm.format', first wl_shm.format arg 'format', each with type=\"uint\""),
+        enums.["wl_shm_format"].Representation)
+    Assert.Equal(None, enums.["wl_shm_format"].UnderlyingType)
+    let signed = protocolEnums (wireProtocol "int" "int")
+    Assert.Equal(CppParser.ProtocolWire ({ Bits = 32; IsSigned = true }, "2 protocol argument(s) reference enum 'wl_shm.format', first wl_shm.format arg 'format', each with type=\"int\""), signed.["wl_shm_format"].Representation)
+
+[<Fact>]
+let ``a protocol enum without one declared wire type has none`` () =
+    let enums = protocolEnums (wireProtocol "uint" "int")
+    Assert.Equal(
+        CppParser.ProtocolUndeclared "the protocol arguments referencing enum 'wl_shm.format' declare type=\"uint\", type=\"int\", not one of type=\"uint\" or type=\"int\"",
+        enums.["wl_shm_format"].Representation)
+    Assert.Equal(CppParser.ProtocolUndeclared "no protocol argument references enum 'wl_shm.error'", enums.["wl_shm_error"].Representation)
+
+[<Fact>]
+let ``protocol enums resolve to their declared wire type or are refused`` () =
+    let declarations =
+        match ProtocolParser.parseProtocolXml (wireProtocol "uint" "uint") with
+        | Ok proto -> ProtocolParser.toTypeDeclarations proto
+        | Error e -> failwith e
+    let ctx = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
+    let resolve = FidelityCodeGenerator.resolveCType ctx.TypedefMap ctx.DataModel ctx.OpaqueHandles ctx.Delegates ctx.Enums
+    match resolve "wl_shm_format" with
+    | FidelityCodeGenerator.CEnum (_, r) ->
+        Assert.Equal((TypeMapper.Unsigned, 32, TypeMapper.Declared, "enum wl_shm_format : uint32_t"), (r.Family, r.Bits, r.Stratum, r.CType))
+    | other -> failwithf "Expected a protocol enum, got %A" other
+    let error = Assert.ThrowsAny<exn>(fun () -> resolve "wl_shm_error" |> ignore)
+    Assert.Equal("FS9106: protocol enum 'wl_shm_error' has no declared wire type: no protocol argument references enum 'wl_shm.error'.", error.Message)
+
+[<Fact>]
+let ``a parsed protocol enum value beyond its wire type is refused with its own code`` () =
+    let xml = (wireProtocol "uint" "uint").Replace("<entry name=\"c8\" value=\"0x20203843\"/>", "<entry name=\"wide\" value=\"0x100000000\"/>")
+    let declarations =
+        match ProtocolParser.parseProtocolXml xml with
+        | Ok proto -> ProtocolParser.toTypeDeclarations proto
+        | Error e -> failwith e
+    let ctx = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
+    let error = Assert.ThrowsAny<exn>(fun () ->
+        FidelityCodeGenerator.resolveCType ctx.TypedefMap ctx.DataModel ctx.OpaqueHandles ctx.Delegates ctx.Enums "wl_shm_format" |> ignore)
+    Assert.Equal("FS9107: enumerator 'wide' of enum 'wl_shm_format' has value 4294967296, which its protocol's declared unsigned 32-bit representation cannot hold.", error.Message)

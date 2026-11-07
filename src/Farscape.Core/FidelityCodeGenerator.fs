@@ -81,6 +81,26 @@ module FidelityCodeGenerator =
         |> List.map fst
         |> Set.ofList
 
+    /// The type facts one translation unit itself declares: its typedef chains, its named enums
+    /// with the representation clang measured in that unit, and its opaque handle typedefs.
+    /// A declaration resolves through its own unit's facts; nothing is borrowed from another unit.
+    type UnitFacts = {
+        Typedefs: Map<string, string>
+        Enums: Map<string, CppParser.EnumDecl>
+        OpaqueHandles: Set<string>
+    }
+
+    /// The facts a unit's own declaration list declares (first declaration of an enum name wins,
+    /// as within one translation unit a tag has one definition).
+    let unitFactsOf (declarations: CppParser.Declaration list) : UnitFacts =
+        { Typedefs = buildTypedefMap declarations
+          Enums =
+            (Map.empty, declarations) ||> List.fold (fun acc decl ->
+                match decl with
+                | CppParser.Declaration.Enum e when e.Name <> "" && not (acc.ContainsKey e.Name) -> acc.Add(e.Name, e)
+                | _ -> acc)
+          OpaqueHandles = detectOpaqueHandles declarations }
+
     /// A C pointer typedef supplies a nominal marker, never a record exposing its address.
     /// Values of the typedef cross through CHandle<marker>; only the boundary constructs them.
     let generateOpaqueHandleDecls (handleNames: Set<string>) : FsDecl list =
@@ -175,23 +195,105 @@ module FidelityCodeGenerator =
     let private splitFunctionPointer cType =
         splitFunctionPointerPrototype cType |> Option.map (fun (ret, args, _) -> ret, args)
 
-    /// The ABI representation of an enum: its underlying type when clang reports one (declared),
-    /// else the profile's int, unsigned unless an enumerator is negative (inferred: C leaves the
-    /// choice to the implementation).
-    let private enumRepr (model: PlatformABI) (e: CppParser.EnumDecl) : TypeMapper.AbiRepr =
-        match e.UnderlyingType |> Option.bind (TypeMapper.tryScalar model) with
-        | Some r -> { r with CType = $"enum {e.Name} : {r.CType}" }
-        | None ->
-            let negative = e.Values |> List.exists (fun v -> v.Value < 0L)
-            { Family = (if negative then TypeMapper.Signed else TypeMapper.Unsigned)
-              Bits = TypeMapper.intWidth model
-              Stratum = TypeMapper.Inferred
-              CType = $"enum {e.Name} without a declared underlying type" }
+    /// The ABI representation of an enum, by provenance; no width is ever inferred.
+    /// - A C/C++ enum (`ClangMeasured`) has the width and signedness clang measured in its
+    ///   declaring unit (`CppParser.measureEnums`), which must agree with the facts the parser
+    ///   extracted: a fixed underlying type's family and width, and every enumerator's value.
+    /// - A C/C++ enum clang did not measure (`ClangUnmeasured`) is refused, whatever underlying
+    ///   type spelling it carries: a spelling is not a measurement.
+    /// - A protocol enum (`ProtocolWire`) has the wire type its protocol's referencing arguments
+    ///   declare, at stratum Declared; its values must fit it. One without such a declaration
+    ///   (`ProtocolUndeclared`) is refused.
+    /// `declaredScalar` resolves a fixed underlying spelling under the declaration's unit.
+    let enumRepr (model: PlatformABI) (declaredScalar: string -> TypeMapper.AbiRepr option) (e: CppParser.EnumDecl) : TypeMapper.AbiRepr =
+        let describe signed bits = $"""{(if signed then "signed" else "unsigned")} {bits}-bit"""
+        let requireValuesFit (m: CppParser.EnumRepresentation) code source =
+            let lower, upper =
+                if m.IsSigned then
+                    (if m.Bits >= 64 then System.Int64.MinValue else -(1L <<< (m.Bits - 1))),
+                    (if m.Bits >= 64 then System.Int64.MaxValue else (1L <<< (m.Bits - 1)) - 1L)
+                else 0L, (if m.Bits >= 64 then System.Int64.MaxValue else (1L <<< m.Bits) - 1L)
+            match e.Values |> List.tryFind (fun v -> v.Value < lower || v.Value > upper) with
+            | Some v ->
+                failwith $"{code}: enumerator '{v.Name}' of enum '{e.Name}' has value {v.Value}, which {source} {describe m.IsSigned m.Bits} representation cannot hold."
+            | None -> ()
+        let integer (m: CppParser.EnumRepresentation) = if m.IsSigned then TypeMapper.Signed else TypeMapper.Unsigned
+        match e.Representation with
+        | CppParser.ClangUnmeasured ->
+            failwith $"{Diagnostics.EnumUnmeasured}: enum '{e.Name}' has no clang measurement of its representation in its declaring unit; its width cannot be inferred."
+        | CppParser.ProtocolUndeclared reason ->
+            failwith $"{Diagnostics.ProtocolEnumUndeclared}: protocol enum '{e.Name}' has no declared wire type: {reason}."
+        | CppParser.ProtocolWire (m, _evidence) ->
+            requireValuesFit m Diagnostics.ProtocolEnumValueConflict "its protocol's declared"
+            { Family = integer m
+              Bits = m.Bits
+              Stratum = TypeMapper.Declared
+              // `evidence` stays on the declaration; the spelling names the wire type it fixed.
+              CType = $"""enum {e.Name} : {(if m.IsSigned then "int" else "uint")}{m.Bits}_t""" }
+        | CppParser.ClangMeasured m ->
+            match e.UnderlyingType with
+            | None -> ()
+            | Some underlying ->
+                match declaredScalar underlying with
+                | Some r when r.Family = TypeMapper.Signed || r.Family = TypeMapper.Unsigned || r.Family = TypeMapper.Bool ->
+                    if r.Bits <> m.Bits || (r.Family = TypeMapper.Signed) <> m.IsSigned then
+                        failwith $"{Diagnostics.EnumReprConflict}: enum '{e.Name}' declares underlying type '{underlying}' ({describe (r.Family = TypeMapper.Signed) r.Bits}), but clang measured {describe m.IsSigned m.Bits}."
+                | _ -> failwith $"{Diagnostics.EnumUnderlyingUnrepresented}: enum '{e.Name}' declares underlying type '{underlying}', which has no integer representation under {model}."
+            requireValuesFit m Diagnostics.EnumValueConflict "clang's measured"
+            { Family = integer m
+              Bits = m.Bits
+              Stratum = TypeMapper.Measured
+              CType = $"enum {e.Name}" }
+
+    let private describeRepr (r: TypeMapper.AbiRepr) =
+        let family =
+            match r.Family with
+            | TypeMapper.Signed -> "signed"
+            | TypeMapper.Unsigned -> "unsigned"
+            | TypeMapper.Float -> "floating"
+            | TypeMapper.Pointer -> "pointer"
+            | TypeMapper.Bool -> "boolean"
+            | TypeMapper.Void -> "void"
+        $"{family} {r.Bits}-bit"
+
+    /// The exact refusal when a unit's typedef chain and the profile row name different
+    /// representations; `unit` names the declaring header when the caller knows it.
+    let typedefProfileConflict (model: PlatformABI) (unit: string option) (name: string) (underlying: string)
+                               (declared: TypeMapper.AbiRepr option) (profile: TypeMapper.AbiRepr) =
+        let unitRepr = declared |> Option.map describeRepr |> Option.defaultValue "no scalar representation"
+        let by = match unit with Some header -> $"'{header}'" | None -> "its translation unit"
+        $"{Diagnostics.TypedefProfileConflict}: typedef '{name}' is declared by {by} as '{underlying}' ({unitRepr}), but the {model} profile row for '{name}' is {describeRepr profile}; the unit's declaration and the profile must agree."
+
+    /// The profile row of a scalar spelling, checked against the unit's own typedef chain for
+    /// that name: the row stands when the chain's family and bits agree with it (or the unit
+    /// does not declare the name); otherwise the name, its unit spelling, the unit's
+    /// representation and the profile row are returned for the refusal. `resolve` resolves a
+    /// spelling under the same unit typedef map.
+    let private checkProfileRow (model: PlatformABI) (typedefMap: Map<string, string>)
+                                (resolve: string -> ResolvedCType) (baseType: string)
+        : Result<TypeMapper.AbiRepr option, string * string * TypeMapper.AbiRepr option * TypeMapper.AbiRepr> =
+        match TypeMapper.tryScalar model baseType with
+        | None -> Ok None
+        | Some profile ->
+            let name = TypeMapper.cleanTypeName baseType
+            match Map.tryFind name typedefMap with
+            | Some underlying when TypeMapper.cleanTypeName underlying <> name ->
+                let declared =
+                    match resolve underlying with
+                    | Scalar r | CEnum (_, r) -> Some r
+                    | DataPointer _ | FunctionPointer _ | OpaqueHandle _ -> Some (TypeMapper.pointerRepr model underlying)
+                    | Unresolved _ -> None
+                match declared with
+                | Some r when r.Family = profile.Family && r.Bits = profile.Bits -> Ok (Some profile)
+                | declared -> Error (name, underlying, declared, profile)
+            | _ -> Ok (Some profile)
 
     /// Resolve a C type string once. Opaque handles keep their names; delegates and function
     /// pointers become FnPtr signatures with nullable-by-default native data values; data
-    /// pointers become CHandle of their pointee; scalars come from the one-kind table, through the
-    /// typedef map when the spelling is not in it; enums carry their underlying representation.
+    /// pointers become CHandle of their pointee; a scalar spelling the unit declares as a typedef
+    /// resolves through the unit's typedef chain first and must agree with the profile's one-kind
+    /// table row (refused otherwise); other scalars come from that table, and names the table
+    /// lacks through the typedef map; enums carry their underlying representation.
     let rec resolveCType
         (typedefMap: Map<string, string>) (model: PlatformABI)
         (opaqueHandles: Set<string>) (delegates: Map<string, CppParser.DelegateDecl>)
@@ -217,9 +319,16 @@ module FidelityCodeGenerator =
                     failwith $"Nested native function-pointer value '{typ}' requires explicit nonnull evidence; nullable callback values require a supported boundary adapter."
                 | _ -> clefTypeOf resolved
             FunctionPointer (parameters |> List.map nativeValueType, nativeValueType ret)
+        // A profile scalar name the unit itself declares as a typedef resolves through the unit's
+        // chain first; the profile row stands only when the chain agrees with it (family and bits).
+        let tableScalar (baseType: string) : TypeMapper.AbiRepr option =
+            match checkProfileRow model typedefMap recur baseType with
+            | Ok row -> row
+            | Error (name, underlying, declared, profile) ->
+                failwith (typedefProfileConflict model None name underlying declared profile)
         // A pointer's pointee: a scalar's spelling, a named type, or what a typedef stands for
         let pointee (baseType: string) : FsType =
-            match TypeMapper.tryScalar model baseType with
+            match tableScalar baseType with
             | Some r -> Named (TypeMapper.clefSpelling r.Family)
             | None ->
                 let name = TypeMapper.cleanTypeName baseType
@@ -235,12 +344,14 @@ module FidelityCodeGenerator =
                         | _ -> Named name
                     | _ -> Named name
         let scalarOrNamed (baseType: string) : ResolvedCType =
-            match TypeMapper.tryScalar model baseType with
+            match tableScalar baseType with
             | Some r -> Scalar r
             | None ->
                 let name = TypeMapper.cleanTypeName baseType
                 match Map.tryFind name enums with
-                | Some e -> CEnum (name, enumRepr model e)
+                | Some e ->
+                    let declaredScalar underlying = match recur underlying with Scalar r -> Some r | _ -> None
+                    CEnum (name, enumRepr model declaredScalar e)
                 | None ->
                     match Map.tryFind name typedefMap with
                     | Some underlying when TypeMapper.cleanTypeName underlying <> name ->
@@ -287,6 +398,17 @@ module FidelityCodeGenerator =
         | DataPointer _ | FunctionPointer _ | OpaqueHandle _ -> Some (TypeMapper.pointerRepr model cType)
         | Unresolved _ -> None
 
+    /// The profile conflicts of one translation unit: every profile scalar name the unit itself
+    /// declares as a typedef, resolved through the unit's typedef map, must agree with its
+    /// profile row. Returns the refusals, naming the unit, for names whose chain disagrees.
+    let unitProfileConflicts (model: PlatformABI) (unit: string) (typedefMap: Map<string, string>)
+                             (enums: Map<string, CppParser.EnumDecl>) (declaredNames: string list) : string list =
+        let resolve = resolveCType typedefMap model Set.empty Map.empty enums
+        declaredNames |> List.distinct |> List.choose (fun name ->
+            match checkProfileRow model typedefMap resolve name with
+            | Ok _ -> None
+            | Error (name, underlying, declared, profile) -> Some (typedefProfileConflict model (Some unit) name underlying declared profile))
+
     /// Map a C type string to its Clef spelling.
     /// Used by FidelityCodeGenerator (Layer 1) and WrapperCodeGenerator (Layer 2).
     let mapCTypeToFidelityType (typedefMap: Map<string, string>) (model: PlatformABI) (opaqueHandles: Set<string>) (delegates: Map<string, CppParser.DelegateDecl>) (cType: string) : FsType =
@@ -301,6 +423,16 @@ module FidelityCodeGenerator =
     /// even when it only contains a subset of declarations.
     type GenerationContext = {
         TypedefMap: Map<string, string>
+        /// The facts (typedefs, measured enums, opaque handles) of the translation unit that
+        /// declares each declaration, keyed by declaration kind ("struct", "function",
+        /// "typedef") and name. A declaration's type spellings are facts of its declaring unit,
+        /// which may declare a name differently from the first unit the merged maps keep.
+        /// Empty for a single unit, whose facts are the merged ones.
+        DeclarationUnits: Map<string * string, UnitFacts>
+        /// Every pilot unit declaring each C type name (typedef, record or enum), with that
+        /// unit's own facts, for names a non-C source (GIR) supplies without a declaring unit of
+        /// its own. Empty for a single unit, whose facts are the merged ones.
+        TypeNameUnits: Map<string, (string * UnitFacts) list>
         OpaqueHandles: Set<string>
         /// Delegate types (callback function pointers) by name: FnPtr of their signature in Clef.
         Delegates: Map<string, CppParser.DelegateDecl>
@@ -320,6 +452,54 @@ module FidelityCodeGenerator =
         ValueStructs: Set<string>
         PhantomMarkers: Set<string>
     }
+
+    /// A context holding one unit's facts in place of the merged ones.
+    let withUnitFacts (facts: UnitFacts) (ctx: GenerationContext) : GenerationContext =
+        { ctx with TypedefMap = facts.Typedefs; Enums = facts.Enums; OpaqueHandles = facts.OpaqueHandles }
+
+    /// The context of one declaration: its declaring unit's facts (typedefs, measured enums,
+    /// opaque handles) when the pilot recorded them, the merged facts otherwise (a single
+    /// unit, or a declaration no C unit declares). Every resolver call made for that
+    /// declaration (signature, parameters, return, callbacks, fields, descriptors) goes
+    /// through this.
+    let inUnitOf (kind: string) (name: string) (ctx: GenerationContext) : GenerationContext =
+        match ctx.DeclarationUnits.TryFind (kind, name) with
+        | Some facts -> withUnitFacts facts ctx
+        | None -> ctx
+
+    /// The context of a function declaration: its declaring unit's typedef map.
+    let inFunctionUnit (ctx: GenerationContext) (func: CppParser.FunctionDecl) : GenerationContext =
+        inUnitOf "function" func.Name ctx
+
+    /// The context in which a C type named by a non-C source (a GIR c:type) resolves: the unit
+    /// that declares its base name, with that unit's own facts (typedefs, measured enums, opaque
+    /// handles) and nothing borrowed from
+    /// another unit. A name several units declare must resolve identically in each; a name no
+    /// unit declares stands only as a profile scalar no unit redeclares; otherwise refused.
+    /// A single-unit pilot's merged map is its unit's map.
+    let declaringUnitOf (ctx: GenerationContext) (where: string) (cType: string) : GenerationContext =
+        if ctx.TypeNameUnits.IsEmpty then ctx
+        else
+        let name = TypeMapper.cleanTypeName (stripNullability cType)
+        let resolveUnder (facts: UnitFacts) = resolveCType facts.Typedefs ctx.DataModel facts.OpaqueHandles ctx.Delegates facts.Enums name
+        let describe resolved =
+            match resolved with
+            | Unresolved _ -> "no representation"
+            | resolved ->
+                match abiReprOf ctx.DataModel name resolved with
+                | Some r -> describeRepr r
+                | None -> "no representation"
+        match ctx.TypeNameUnits.TryFind name with
+        | Some ((_, first) :: _ as units) ->
+            let resolutions = units |> List.map (fun (header, facts) -> header, resolveUnder facts)
+            match resolutions |> List.map snd |> List.distinct with
+            | [ _ ] -> withUnitFacts first ctx
+            | _ ->
+                let described = resolutions |> List.map (fun (header, resolved) -> $"'{header}' ({describe resolved})") |> String.concat ", "
+                failwith $"{Diagnostics.GirTypeDivergent}: {where}: C type '{name}' is declared differently by {described}; one declaration per pilot is required."
+        | _ when (TypeMapper.tryScalar ctx.DataModel name).IsSome -> withUnitFacts { Typedefs = Map.empty; Enums = Map.empty; OpaqueHandles = Set.empty } ctx
+        | _ ->
+            failwith $"{Diagnostics.GirTypeUndeclared}: {where}: C type '{name}' is declared by no pilot unit; a GIR spelling cannot supply its representation."
 
     /// Resolve a C type under the context.
     let private resolveIn (ctx: GenerationContext) (cType: string) : ResolvedCType =
@@ -395,6 +575,11 @@ module FidelityCodeGenerator =
         | Some r -> DescriptorGenerator.typeRefSource r, DescriptorGenerator.widthProvenance ctx.DataModel r
         | None ->
             let name = match resolved with Unresolved n -> n | _ -> cType
+            // A by-value enum never crosses with an unknown width: measured or refused.
+            let isEnum (text: string) = text.Replace("const ", "").Replace("volatile ", "").Trim().StartsWith "enum "
+            let chain = ctx.TypedefMap |> Map.tryFind (TypeMapper.cleanTypeName cType) |> Option.defaultValue cType
+            if not (cType.Contains '*') && (isEnum cType || (isEnum chain && not (chain.Contains '*'))) then
+                failwith $"{Diagnostics.EnumUnmeasured}: by-value enum type '{cType}' has no clang measurement in its declaring unit; a descriptor cannot carry an unknown width."
             $"Named {quoteString name}", $"width unknown: no representation for {name}"
 
     /// The Layer 2 `Expr<FunctionDescriptor>` quotation beside an extern (platform-bindings.md,
@@ -403,6 +588,7 @@ module FidelityCodeGenerator =
     /// Each width fact carries its stratum as a trailing comment; the spec's record has no
     /// provenance field.
     let private generateDescriptorDecls (ctx: GenerationContext) (func: CppParser.FunctionDecl) : FsDecl list =
+        let ctx = inFunctionUnit ctx func
         let parameterInfos =
             func.Parameters
             |> List.mapi (fun index (name, cType) ->
@@ -454,6 +640,7 @@ module FidelityCodeGenerator =
 
     /// Anonymous entries belong to their parameter site.
     let private callbackEntries (ctx: GenerationContext) (namespace': string) (func: CppParser.FunctionDecl) =
+        let ctx = inFunctionUnit ctx func
         func.Parameters |> List.mapi (fun index (name, cType) ->
             resolveCallbackNativeSignature ctx cType |> Option.map (fun (ret, args) ->
                 let identity = if cType.Contains "(*)" then func.Name + "::" + name else cType
@@ -484,6 +671,7 @@ module FidelityCodeGenerator =
     /// Render a supplied result promise against the exact emitted declaration.
     /// ABI widths and placeholder bodies provide no behavioral contract.
     let private resultRangeDecls (ctx: GenerationContext) namespace' (func: CppParser.FunctionDecl) nativeName hasAdapter =
+        let ctx = inFunctionUnit ctx func
         match Map.tryFind func.Name ctx.Bindings |> Option.bind _.ResultRange with
         | None -> []
         | Some range ->
@@ -521,6 +709,7 @@ module FidelityCodeGenerator =
     /// Declare receiving-site activation separately from the listener record and its ABI.
     /// The existing native signature owner supplies every formal, including unused ones.
     let private callbackInvocationDecls (ctx: GenerationContext) namespace' (anchors: Map<string, string * CppParser.FunctionDecl * FsDecl list>) (func: CppParser.FunctionDecl) nativeName =
+        let ctx = inFunctionUnit ctx func
         let contracts = ctx.Bindings |> Map.tryFind func.Name |> Option.map _.CallbackInvocations |> Option.defaultValue []
         let refuse reason = failwith $"{func.Name} callback_invocations: {reason}"
         if (contracts |> List.map _.Parameter |> Set.ofList).Count <> contracts.Length then refuse "duplicate parameter indices"
@@ -631,6 +820,8 @@ module FidelityCodeGenerator =
     /// 1. Clang NonNullAttr — parameter indices explicitly marked non-null
     /// 2. Pilot TOML [annotations.nonnull] — developer-asserted non-null
     let generateFunctionDecls (ctx: GenerationContext) (libraryName: string) (func: CppParser.FunctionDecl) : FsDecl list =
+        // Every resolution for this declaration uses its declaring unit's typedefs.
+        let ctx = inFunctionUnit ctx func
         if ctx.NativePointerSurface then
             failwith "experimental_native_pointer_surface cannot emit Clef source: raw addresses and width-named carriers violate the FFI boundary contract."
         let mapType = resolveIn ctx >> clefTypeOf
@@ -791,6 +982,7 @@ module FidelityCodeGenerator =
     /// Only a real callback/argument adapter needs a separate native declaration.
     /// An unchanged optional entry carrier is already the public binding surface.
     let private nativeDeclarationName (ctx: GenerationContext) (func: CppParser.FunctionDecl) (entries: (int * string * FsDecl list) list) (raw: FsDecl list) =
+        let ctx = inFunctionUnit ctx func
         let name, parameters = raw |> List.pick (function LetBinding(name, parameters, _, _, attrs) when not attrs.IsEmpty -> Some(name, parameters) | _ -> None)
         let unchangedOptional =
             not entries.IsEmpty &&
@@ -803,6 +995,7 @@ module FidelityCodeGenerator =
     /// Consume the same selected declaration account as callback anchors. Native
     /// representation stays in its original descriptor; this quotation adds a promise.
     let private resourceDecls (ctx: GenerationContext) namespace' (anchors: Map<string, string * CppParser.FunctionDecl * FsDecl list>) (func: CppParser.FunctionDecl) nativeName raw =
+        let ctx = inFunctionUnit ctx func
         match ctx.Bindings |> Map.tryFind func.Name |> Option.bind _.Resource with
         | None -> []
         | Some resource ->
@@ -822,9 +1015,11 @@ module FidelityCodeGenerator =
                 anchors |> Map.tryFind resource.ReleaseBinding
                 |> Option.defaultWith (fun () -> refuse "release_binding must name an exact selected qualified generated declaration")
             let parameters, result = signature releaseRaw
-            match release.Parameters, parameters, result, resolveIn ctx release.ReturnType with
+            // The release declaration's return and parameter resolve in its own unit.
+            let releaseCtx = inFunctionUnit ctx release
+            match release.Parameters, parameters, result, resolveIn releaseCtx release.ReturnType with
             | [_, typ], [parameter], Named "unit", Scalar repr
-                when repr.Family = TypeMapper.Void && isDataPointerIn ctx typ
+                when repr.Family = TypeMapper.Void && isDataPointerIn releaseCtx typ
                      && parameter.Type = Generic("CHandle", Named marker) -> ()
             | _ -> refuse "release requires unary matching CHandle Value parameter 0 and a raw Void result"
             match ctx.Bindings |> Map.tryFind release.Name with
@@ -846,6 +1041,7 @@ module FidelityCodeGenerator =
 
     /// Add only the explicit call-bounded byte promise; source owns actual capacity and use.
     let private writableBufferDecls (ctx: GenerationContext) namespace' (func: CppParser.FunctionDecl) nativeName hasAdapter =
+        let ctx = inFunctionUnit ctx func
         let projection = ctx.Bindings |> Map.tryFind func.Name
         let contracts = projection |> Option.map _.WritableBuffers |> Option.defaultValue []
         let refuse reason = failwith $"{func.Name} writable_buffers: {reason}"
@@ -885,6 +1081,7 @@ module FidelityCodeGenerator =
                           "Source", Literal (quoteString contract.Source) ] ])) ])
 
     let private declaredFunctionDecls (ctx: GenerationContext) namespace' anchors (func: CppParser.FunctionDecl) (entries: (int * string * FsDecl list) list) (raw: FsDecl list) =
+        let ctx = inFunctionUnit ctx func
         if entries.IsEmpty then
             let nativeName = raw |> List.pick (function LetBinding(name, _, _, _, attrs) when not attrs.IsEmpty -> Some name | _ -> None)
             callbackInvocationDecls ctx namespace' anchors func nativeName |> ignore
@@ -922,6 +1119,7 @@ module FidelityCodeGenerator =
         declarations @ invocationDeclarations @ resourceDecls ctx namespace' anchors func emittedName raw @ adapter
 
     let generateDeclaredFunctionDecls (ctx: GenerationContext) libraryName namespace' (func: CppParser.FunctionDecl) =
+        let ctx = inFunctionUnit ctx func
         declaredFunctionDecls ctx namespace' Map.empty func (callbackEntries ctx namespace' func) (generateFunctionDecls ctx libraryName func)
 
     /// Generate FsDecl list for an enum type.
@@ -946,8 +1144,10 @@ module FidelityCodeGenerator =
                       IsArray = true; ArraySize = Some size; IsBitfield = false; BitWidth = None; Attributes = [] }
                 { s with Fields = [storage] }, ctx.StructLayouts.Add(s.Name, { layout with FieldOffsetsBits = [0] })
             | _ -> s, ctx.StructLayouts
+        // Field spellings resolve through the declaring unit's own typedef chain.
+        let unitCtx = inUnitOf "struct" s.Name ctx
         let shape (cType: string) : DescriptorGenerator.FieldShape =
-            match resolveIn ctx cType with
+            match resolveIn unitCtx cType with
             | Unresolved name when ctx.Structs.ContainsKey name -> DescriptorGenerator.StructField name
             | Unresolved name -> DescriptorGenerator.UnknownField name
             | resolved ->
@@ -959,9 +1159,9 @@ module FidelityCodeGenerator =
                 if s.IsUnion || s.Fields |> List.exists (fun field -> field.IsArray || field.IsBitfield) then
                     failwith $"Value struct '{s.Name}' requires a plain record with scalar or pointer fields"
                 let fieldType (field: CppParser.FieldDecl) =
-                    let resolved = resolveIn ctx field.Type
-                    let nonnull = outerNullabilityIn ctx "_Nonnull" field.Type
-                    if nonnull && outerNullabilityIn ctx "_Nullable" field.Type then
+                    let resolved = resolveIn unitCtx field.Type
+                    let nonnull = outerNullabilityIn unitCtx "_Nonnull" field.Type
+                    if nonnull && outerNullabilityIn unitCtx "_Nullable" field.Type then
                         failwith $"Value struct '{s.Name}' field '{field.Name}' has contradictory native nullability evidence."
                     match resolved with
                     | DataPointer _ | OpaqueHandle _ when not nonnull -> wrapOption (clefTypeOf resolved)
@@ -1030,7 +1230,7 @@ module FidelityCodeGenerator =
         OnTypedef = fun td ->
             if ctx.Bindings.IsEmpty then GNone
             else
-                match resolveIn ctx td.UnderlyingType with
+                match resolveIn (inUnitOf "typedef" td.Name ctx) td.UnderlyingType with
                 | Scalar r when r.Bits > 0 ->
                     let size = if r.Family = TypeMapper.Float && r.Bits = 80 then 16 else (r.Bits + 7) / 8
                     GStruct [
@@ -1067,6 +1267,8 @@ module FidelityCodeGenerator =
                 | _ -> None)
             |> Map.ofList
         { TypedefMap = buildTypedefMap declarations
+          DeclarationUnits = Map.empty
+          TypeNameUnits = Map.empty
           OpaqueHandles = detectOpaqueHandles declarations
           Delegates = delegates
           Enums = enums

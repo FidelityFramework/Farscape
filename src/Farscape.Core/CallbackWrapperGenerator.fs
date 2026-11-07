@@ -34,8 +34,10 @@ module CallbackWrapperGenerator =
                         | CppParser.Declaration.Function f when f.Name = reg.Function -> Some f
                         | _ -> None)
                     |> Option.defaultWith (fun () -> invalidOp $"Callback registration '{reg.Function}' is missing from the parsed declarations.")
+                // The registration's types resolve through its declaring unit's typedefs.
+                let unit = FidelityCodeGenerator.inFunctionUnit ctx f
                 let resolve typ =
-                    FidelityCodeGenerator.resolveCType ctx.TypedefMap ctx.DataModel ctx.OpaqueHandles ctx.Delegates ctx.Enums typ
+                    FidelityCodeGenerator.resolveCType unit.TypedefMap unit.DataModel unit.OpaqueHandles unit.Delegates unit.Enums typ
                 let callbackType =
                     f.Parameters |> List.tryFind (fun (name, _) -> name = reg.CallbackParam)
                     |> Option.map (snd >> resolve)

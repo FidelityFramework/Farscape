@@ -217,6 +217,279 @@ module BindingGenerator =
                     | None -> Ok (origins.Add(name, (header, layout))))))
         |> Result.map (Map.map (fun _ (_, layout) -> layout))
 
+    /// One unit's facts: its own declarations' typedefs, enums and opaque handles, plus the
+    /// typedefs and enums (measured in this unit) its own parse reaches through includes.
+    /// Opaque handles stay those its own declarations establish.
+    let unitFactsWith (included: Map<string, CppParser.Declaration list>) (header: string) (own: CppParser.Declaration list)
+        : FidelityCodeGenerator.UnitFacts =
+        let reached = included |> Map.tryFind header |> Option.defaultValue []
+        let facts = FidelityCodeGenerator.unitFactsOf (own @ reached)
+        { facts with OpaqueHandles = FidelityCodeGenerator.detectOpaqueHandles own }
+
+    /// No by-value enum without a clang measurement in the unit that uses it. Every type a
+    /// header's own declarations use by value (function parameters and returns, record fields,
+    /// typedef targets) that is, or through the unit's typedefs stands for, an enum must name
+    /// an enum this unit's parse measured, its own or reached through an include. Otherwise
+    /// the pilot is refused before any binding is written, naming the enum, the using
+    /// declaration and the unit; a width-unknown descriptor is never emitted for it.
+    let requireMeasuredEnumUses (included: Map<string, CppParser.Declaration list>)
+                                (headers: (string * CppParser.Declaration list) list) : Result<unit, string> =
+        let refusals =
+            headers |> List.collect (fun (header, decls) ->
+                let facts = unitFactsWith included header decls
+                let uses =
+                    decls |> List.collect (function
+                        | CppParser.Declaration.Function f -> (f.ReturnType :: (f.Parameters |> List.map snd)) |> List.map (fun t -> $"function '{f.Name}'", t)
+                        | CppParser.Declaration.Struct s -> s.Fields |> List.map (fun field -> $"record '{s.Name}' field '{field.Name}'", field.Type)
+                        | CppParser.Declaration.Typedef t -> [ $"typedef '{t.Name}'", t.UnderlyingType ]
+                        | _ -> [])
+                uses |> List.choose (fun (user, spelling) ->
+                    if spelling.Contains('*') || spelling.Contains('(') || spelling.Contains('&') then None
+                    else
+                        let element = match CppParser.classifyFieldDeclarator spelling with
+                                      | CppParser.TrailingArrayType (e, _) -> e
+                                      | _ -> spelling
+                        let named = TypeMapper.cleanTypeName element
+                        let final = facts.Typedefs |> Map.tryFind named |> Option.defaultValue element
+                        // An enum spelling, `enum X` under any cv-qualifiers.
+                        let isEnum (text: string) = text.Replace("const ", "").Replace("volatile ", "").Trim().StartsWith "enum "
+                        let enumName =
+                            if facts.Enums.ContainsKey named then Some named
+                            elif isEnum element then Some (TypeMapper.cleanTypeName element)
+                            elif isEnum final && not (final.Contains '*' || final.Contains '(') then Some (TypeMapper.cleanTypeName final)
+                            else None
+                        match enumName with
+                        | None -> None
+                        | Some name ->
+                            match facts.Enums.TryFind name |> Option.map _.Representation with
+                            | Some (CppParser.ClangMeasured _) -> None
+                            | _ ->
+                                Some $"{Diagnostics.EnumUnmeasured}: enum '{name}' is used by value by {user} in '{header}', but that unit's clang parse has no measurement of it; its width cannot be inferred."))
+        match refusals |> List.distinct with
+        | [] -> Ok ()
+        | refusals -> Error (String.concat " " refusals + " No bindings were written.")
+
+    /// The typedef map each merged declaration's types resolve through, keyed by kind
+    /// ("struct", "function", "typedef") and name: that of the first pilot header whose own
+    /// declaration list declares it as merged (a record with the merged shape, a function with
+    /// the merged signature, a typedef with the merged spelling), and that unit's own typedefs
+    /// only: a name the declaring unit does not declare is not borrowed from another unit's
+    /// typedefs (the merged map keeps the first typedef of a name across all units). A binding alias
+    /// (`symbol` renamed to `name`) resolves in the unit of the symbol it renames. A declaration
+    /// no header declares as merged has no entry and resolves through the merged map.
+    let unitTypedefMaps (included: Map<string, CppParser.Declaration list>)
+                        (merged: CppParser.Declaration list) (headers: (string * CppParser.Declaration list) list)
+                        (aliases: (string * string) list)
+        : Map<string * string, FidelityCodeGenerator.UnitFacts> =
+        let identity = function
+            | CppParser.Declaration.Struct s when s.Name <> "" && not s.Fields.IsEmpty -> Some (("struct", s.Name), declaredShape s)
+            | CppParser.Declaration.Function f -> Some (("function", f.Name), sprintf "%s(%A)" f.ReturnType f.Parameters)
+            | CppParser.Declaration.Typedef t -> Some (("typedef", t.Name), t.UnderlyingType)
+            | _ -> None
+        let declared (decls: CppParser.Declaration list) =
+            (Map.empty, decls) ||> List.fold (fun acc decl ->
+                match identity decl with
+                | Some (key, shape) when not (Map.containsKey key acc) -> Map.add key shape acc
+                | _ -> acc)
+        // A unit's facts are its own only: no other unit's declaration is borrowed.
+        let units =
+            headers |> List.map (fun (header, decls) -> declared decls, lazy (unitFactsWith included header decls))
+        let maps =
+            declared merged
+            |> Map.toList
+            |> List.choose (fun (key, shape) ->
+                units |> List.tryPick (fun (own, typedefs) ->
+                    match own.TryFind key with
+                    | Some ownShape when ownShape = shape -> Some (key, typedefs.Force())
+                    | _ -> None))
+            |> Map.ofList
+        (maps, aliases) ||> List.fold (fun acc (name, symbol) ->
+            match maps.TryFind ("function", symbol) with
+            | Some facts when name <> symbol -> Map.add ("function", name) facts acc
+            | _ -> acc)
+
+    /// Every unit declaring each C type name (typedef, defined record, named enum), with that
+    /// unit's own facts, for names a non-C source (GIR) supplies. Empty for one unit.
+    let typeNameUnits (included: Map<string, CppParser.Declaration list>) (headers: (string * CppParser.Declaration list) list)
+        : Map<string, (string * FidelityCodeGenerator.UnitFacts) list> =
+        if List.length headers < 2 then Map.empty
+        else
+        headers
+        |> List.collect (fun (header, decls) ->
+            let typedefs = lazy (unitFactsWith included header decls)
+            decls |> List.choose (function
+                | CppParser.Declaration.Typedef t -> Some t.Name
+                | CppParser.Declaration.Struct s when s.Name <> "" -> Some s.Name
+                | CppParser.Declaration.Enum e when e.Name <> "" -> Some e.Name
+                | _ -> None)
+            |> List.distinct
+            |> List.map (fun name -> name, (header, typedefs)))
+        |> List.groupBy fst
+        |> List.map (fun (name, entries) -> name, entries |> List.map (fun (_, (header, typedefs)) -> header, typedefs.Force()))
+        |> Map.ofList
+
+    /// Every pilot unit's profile scalar names must agree with the profile: each typedef a
+    /// header's own declaration list declares under a profile row name resolves through that
+    /// unit's own typedef map and is compared with the row.
+    /// This holds for every unit, whichever declarations a namespace later selects.
+    let agreeUnitProfileTypedefs (model: PlatformABI) (included: Map<string, CppParser.Declaration list>)
+                                 (headers: (string * CppParser.Declaration list) list) : Result<unit, string> =
+        let conflicts =
+            headers |> List.collect (fun (header, decls) ->
+                let own = decls |> List.choose (function CppParser.Declaration.Typedef t -> Some t.Name | _ -> None)
+                if own.IsEmpty then [] else
+                let facts = unitFactsWith included header decls
+                FidelityCodeGenerator.unitProfileConflicts model header facts.Typedefs facts.Enums own)
+        match conflicts with
+        | [] -> Ok ()
+        | conflicts -> Error (String.concat " " conflicts)
+
+    /// One definition per enum name per pilot. Each header's unit declares its enums with the
+    /// representation clang measured in that unit; two units declaring one name must agree on
+    /// that representation, the fixed underlying type and every enumerator (name and value), or
+    /// the pilot is refused naming each distinct definition and every header giving it. Checked
+    /// while the declaration lists are still paired with their headers, before the merge keeps
+    /// the first; past this check the merged enum facts agree with every declaring unit.
+    let agreeEnums (included: Map<string, CppParser.Declaration list>) (headers: (string * CppParser.Declaration list) list) : Result<unit, string> =
+        let describe (e: CppParser.EnumDecl) =
+            let repr =
+                match e.Representation with
+                | CppParser.ClangMeasured m -> $"""clang-measured {(if m.IsSigned then "signed" else "unsigned")} {m.Bits}-bit"""
+                | CppParser.ClangUnmeasured -> "unmeasured"
+                | CppParser.ProtocolWire (m, _) -> $"""protocol wire {(if m.IsSigned then "signed" else "unsigned")} {m.Bits}-bit"""
+                | CppParser.ProtocolUndeclared _ -> "protocol, no wire type"
+            let fixedType = match e.UnderlyingType with Some t -> $"; underlying type {t}" | None -> ""
+            let values = e.Values |> List.map (fun v -> $"{v.Name}={v.Value}") |> String.concat ", "
+            $"{repr}{fixedType}; enumerators {values}"
+        let identity (e: CppParser.EnumDecl) = e.Representation, e.UnderlyingType, e.Values |> List.map (fun v -> v.Name, v.Value)
+        let perHeader =
+            headers |> List.map (fun (header, decls) -> header, (unitFactsWith included header decls).Enums)
+        let names = perHeader |> List.collect (fun (_, enums) -> enums |> Map.toList |> List.map fst) |> List.distinct |> List.sort
+        let divergent =
+            names |> List.choose (fun name ->
+                let givers = perHeader |> List.choose (fun (header, enums) -> enums.TryFind name |> Option.map (fun e -> identity e, describe e, header))
+                let keys = givers |> List.map (fun (k, _, _) -> k) |> List.distinct
+                if keys.Length < 2 then None
+                else
+                    let described =
+                        keys |> List.map (fun key ->
+                            let same = givers |> List.filter (fun (k, _, _) -> k = key)
+                            let _, text, _ = List.head same
+                            let hs = same |> List.map (fun (_, _, h) -> $"'{h}'") |> String.concat ", "
+                            $"{hs} ({text})")
+                        |> String.concat "; "
+                    Some $"{Diagnostics.EnumDivergent}: enum '{name}' is declared differently by the pilot's headers: {described}. One declaration per pilot is required.")
+        if divergent.IsEmpty then Ok ()
+        else Error (String.concat " " divergent + " No bindings were written.")
+
+    /// The preprocessing tokens of a replacement list (C11 6.4, C++ [lex.pptoken]): identifiers,
+    /// pp-numbers, character and string literals with their encoding prefix (`L`, `u`, `U`,
+    /// `u8`) as part of the one literal token, and punctuators by longest match. The unit's
+    /// language decides the forms only one language has: in C++ (`cpp`), a pp-number continues
+    /// through a `'` digit separator followed by a digit or identifier character, a literal
+    /// takes an attached ud-suffix, and `R"d(...)d"` raw strings (with any encoding prefix) are
+    /// one token; in C, `'` always opens a character literal, a suffix is its own identifier
+    /// and `R` is an identifier. Whitespace between tokens carries no token; each token keeps
+    /// its exact spelling, so `0x10` and `16` stay distinct, `1 + 2` and `1+2` are one
+    /// sequence, `L"x"` differs from `L "x"`, and in C++ `1'2'3` (one number) differs from
+    /// `1 '2' 3` (number, character literal, number).
+    let macroTokens (cpp: bool) (text: string) : string list =
+        let punctuators =
+            [ "%:%:"; "..."; "<<="; ">>="; "->*"; "<=>"; "->"; "++"; "--"; "<<"; ">>"; "<="; ">="; "=="; "!="; "&&"; "||"
+              "*="; "/="; "%="; "+="; "-="; "&="; "^="; "|="; "##"; "::"; ".*"; "<:"; ":>"; "<%"; "%>"; "%:" ]
+        let isIdent c = System.Char.IsLetterOrDigit c || c = '_'
+        let isIdentStart c = System.Char.IsLetter c || c = '_'
+        let rec identEnd j = if j < text.Length && isIdent text.[j] then identEnd (j + 1) else j
+        // A quoted literal from its opening quote; returns the index after its closing quote.
+        let quotedEnd (j: int) =
+            let quote = text.[j]
+            let rec scan k =
+                if k >= text.Length then text.Length
+                elif text.[k] = '\\' then scan (k + 2)
+                elif text.[k] = quote then k + 1
+                else scan (k + 1)
+            min text.Length (scan (j + 1))
+        // A raw string from its opening quote: "delim( ... )delim".
+        let rawEnd (j: int) =
+            let openParen = text.IndexOf('(', j + 1)
+            if openParen < 0 then text.Length
+            else
+                let terminator = ")" + text.Substring(j + 1, openParen - j - 1) + "\""
+                match text.IndexOf(terminator, openParen + 1, System.StringComparison.Ordinal) with
+                | -1 -> text.Length
+                | close -> close + terminator.Length
+        let withSuffix j = if cpp && j < text.Length && isIdentStart text.[j] then identEnd j else j
+        let rec scan (i: int) (acc: string list) =
+            if i >= text.Length then List.rev acc
+            else
+                let c = text.[i]
+                let take j = scan j (text.Substring(i, j - i) :: acc)
+                if System.Char.IsWhiteSpace c then scan (i + 1) acc
+                elif System.Char.IsDigit c || (c = '.' && i + 1 < text.Length && System.Char.IsDigit text.[i + 1]) then
+                    // pp-number: digits, identifier characters, '.', a sign after e/E/p/P, and in
+                    // C++ a ' digit separator followed by a digit or identifier character.
+                    let rec number j =
+                        if j >= text.Length then j
+                        elif isIdent text.[j] || text.[j] = '.' then number (j + 1)
+                        elif (text.[j] = '+' || text.[j] = '-') && "eEpP".Contains(text.[j - 1]) then number (j + 1)
+                        elif cpp && text.[j] = '\'' && j + 1 < text.Length && isIdent text.[j + 1] then number (j + 2)
+                        else j
+                    take (number (i + 1))
+                elif isIdentStart c then
+                    let j = identEnd i
+                    let word = text.Substring(i, j - i)
+                    let quoteNext = j < text.Length && (text.[j] = '"' || text.[j] = '\'')
+                    match word with
+                    | "L" | "u" | "U" | "u8" when quoteNext -> take (withSuffix (quotedEnd j))
+                    | "R" | "LR" | "uR" | "UR" | "u8R" when cpp && j < text.Length && text.[j] = '"' -> take (withSuffix (rawEnd j))
+                    | _ -> take j
+                elif c = '"' || c = '\'' then take (withSuffix (quotedEnd i))
+                else
+                    let token =
+                        punctuators |> List.tryFind (fun p -> System.String.CompareOrdinal(text, i, p, 0, p.Length) = 0)
+                        |> Option.defaultValue (string c)
+                    scan (i + token.Length) (token :: acc)
+        scan 0 []
+
+    /// One macro definition per pilot. Each header's macros are collected from its whole
+    /// translation unit (`clang -E -dM`), so the same name can reach the pilot from several
+    /// units; `mergeDeclarations` keeps the first and discards which header supplied it. Two
+    /// definitions agree when they have the same parameter structure (object-like, or the same
+    /// parameter names in order) and the same preprocessing-token sequence; whitespace between
+    /// tokens is insignificant and token spellings are never assumed equivalent. A name with
+    /// disagreeing definitions is refused here, while the declaration lists are still paired
+    /// with their headers, naming the macro, each distinct definition (as first spelled) and
+    /// every header that gives it. Agreeing definitions merge silently.
+    let agreeMacros (headers: (string * bool * CppParser.Declaration list) list) : Result<unit, string> =
+        let definition cpp (m: CppParser.MacroDecl) =
+            match m.Kind with
+            | CppParser.FunctionLike (args, body) -> (Some args, macroTokens cpp body), "(" + String.concat ", " args + ") " + body
+            | _ -> (None, macroTokens cpp m.RawValue), m.RawValue
+        let perHeader =
+            headers |> List.map (fun (header, cpp, decls) ->
+                header,
+                ((Map.empty, decls) ||> List.fold (fun acc decl ->
+                    match decl with
+                    | CppParser.Declaration.Macro m when not (acc.ContainsKey m.Name) -> acc.Add(m.Name, definition cpp m)
+                    | _ -> acc)))
+        let names = perHeader |> List.collect (fun (_, macros) -> macros |> Map.toList |> List.map fst) |> List.distinct |> List.sort
+        let divergent =
+            names |> List.choose (fun name ->
+                let givers = perHeader |> List.choose (fun (header, macros) -> macros.TryFind name |> Option.map (fun (key, spelling) -> key, spelling, header))
+                let keys = givers |> List.map (fun (key, _, _) -> key) |> List.distinct
+                if keys.Length < 2 then None
+                else
+                    let described =
+                        keys |> List.map (fun key ->
+                            let same = givers |> List.filter (fun (k, _, _) -> k = key)
+                            let _, spelling, _ = List.head same
+                            let hs = same |> List.map (fun (_, _, h) -> $"'{h}'") |> String.concat ", "
+                            $"'{spelling}' in {hs}")
+                        |> String.concat "; "
+                    Some $"{Diagnostics.MacroDivergent}: macro '{name}' is defined differently by the pilot's headers: {described}. One definition per pilot is required.")
+        if divergent.IsEmpty then Ok ()
+        else Error (String.concat " " divergent + " No bindings were written.")
+
     type GenerationOptions = {
         HeaderFile: FileInfo
         LibraryName: string
@@ -513,13 +786,17 @@ module BindingGenerator =
                     if project.Options |> Option.exists (fun opts -> opts.NativePointerSurface || opts.CHeaderMode) then
                         // Native carrier pilots bind the C ABI. pthread.h also contains guarded
                         // C++ cleanup classes, which must not turn its public unions into C++ PODs.
-                        CppParser.parseHeader {
+                        CppParser.parseHeaderUnit {
                             HeaderFile = headerPath; IncludePaths = project.Library.IncludePaths
                             Defines = project.Library.Defines; IncludeRoot = includeRoot
                             MacroPrefixes = project.Library.MacroPrefixes; IncludeMacros = true
                             Verbose = verbose; CppMode = false }
                     else
-                        CppParser.parseWithIncludeRoot headerPath project.Library.IncludePaths project.Library.Defines includeRoot project.Library.MacroPrefixes verbose)
+                        CppParser.parseHeaderUnit {
+                            HeaderFile = headerPath; IncludePaths = project.Library.IncludePaths
+                            Defines = project.Library.Defines; IncludeRoot = includeRoot
+                            MacroPrefixes = project.Library.MacroPrefixes; IncludeMacros = true
+                            Verbose = verbose; CppMode = CppParser.detectCppMode headerPath })
 
             let headerErrors = headerResults |> List.choose (function Error e -> Some e | _ -> None)
             if not headerErrors.IsEmpty then
@@ -539,7 +816,19 @@ module BindingGenerator =
                 Error $"Failed to parse XML protocols: {msg}"
             else
 
-                let headerDeclLists = headerResults |> List.choose (function Ok d -> Some d | _ -> None)
+                let headerDeclLists = headerResults |> List.choose (function Ok (d, _) -> Some d | _ -> None)
+                // Typedefs and enums each header's own parse reaches through includes: facts of
+                // that unit for resolving its own declarations, never its declarations.
+                let included =
+                    List.zip project.Library.Headers (headerResults |> List.choose (function Ok (_, i) -> Some i | _ -> None))
+                    |> Map.ofList
+                // Before the merge discards provenance: one macro definition per pilot.
+                // Each header is tokenized in the language it was parsed in.
+                let cHeaders = project.Options |> Option.exists (fun opts -> opts.NativePointerSurface || opts.CHeaderMode)
+                let units = List.zip project.Library.Headers headerDeclLists
+                agreeMacros (units |> List.map (fun (header, decls) -> header, (not cHeaders && CppParser.detectCppMode header), decls)) |> Result.defaultWith failwith
+                agreeEnums included units |> Result.defaultWith failwith
+                requireMeasuredEnumUses included units |> Result.defaultWith failwith
                 let xmlProtocols = xmlResults |> List.choose (function Ok p -> Some p | _ -> None)
 
                 // GObject introspection data: the source of signal entry signatures (IntrospectionParser)
@@ -568,6 +857,11 @@ module BindingGenerator =
                         if binding.Name = binding.Symbol then None
                         else Some (CppParser.Declaration.Function { original with Name = binding.Name }))
                 let declarations = declarations @ aliases
+                // Each unit's own typedefs, kept per declaration through measurement and generation.
+                let unitTypedefMaps =
+                    unitTypedefMaps included declarations (List.zip project.Library.Headers headerDeclLists)
+                        (projections |> List.map (fun binding -> binding.Name, binding.Symbol))
+                agreeUnitProfileTypedefs dataModel included (List.zip project.Library.Headers headerDeclLists) |> Result.defaultWith failwith
                 if generateWrappers then
                     let callbacks = project.Callbacks |> Option.defaultWith (fun () -> PilotAnalyzer.discoverCallbacks declarations)
                     if not callbacks.ListenerStructs.IsEmpty then
@@ -630,7 +924,8 @@ module BindingGenerator =
                                     else
                                         failwithf "ABI-critical storage '%s' requires a measured layout; header probe did not provide it." name
                             else
-                                match FidelityCodeGenerator.resolveCType baseCtx.TypedefMap dataModel Set.empty baseCtx.Delegates baseCtx.Enums name with
+                                let unit = FidelityCodeGenerator.inUnitOf "typedef" name { baseCtx with DeclarationUnits = unitTypedefMaps }
+                                match FidelityCodeGenerator.resolveCType unit.TypedefMap dataModel Set.empty unit.Delegates unit.Enums name with
                                 | FidelityCodeGenerator.Scalar r when expectedUnion.IsNone && r.Bits > 0 -> ()
                                 | _ when nativeCarrier -> failwithf "Native carrier storage '%s' has no known scalar or measured record representation." name
                                 | _ -> failwithf "ABI-critical storage '%s' has no known scalar or measured record representation." name
@@ -659,11 +954,14 @@ module BindingGenerator =
                         declarations |> List.collect (function
                         | CppParser.Declaration.Function f when selectedNames.Contains f.Name ->
                             (f.ReturnType :: (f.Parameters |> List.map snd)) |> List.collect (fun ty ->
-                                FidelityCodeGenerator.resolveCType baseCtx.TypedefMap dataModel baseCtx.OpaqueHandles baseCtx.Delegates baseCtx.Enums ty
+                                let unit = FidelityCodeGenerator.inFunctionUnit { baseCtx with DeclarationUnits = unitTypedefMaps } f
+                                FidelityCodeGenerator.resolveCType unit.TypedefMap dataModel unit.OpaqueHandles unit.Delegates unit.Enums ty
                                 |> FidelityCodeGenerator.clefTypeOf |> markers)
                         | _ -> [])
                         |> Set.ofList
                     { baseCtx with
+                        DeclarationUnits = unitTypedefMaps
+                        TypeNameUnits = typeNameUnits included (List.zip project.Library.Headers headerDeclLists)
                         PhantomMarkers = if project.Options |> Option.exists (fun o -> o.CHeaderMode && not o.NativePointerSurface) then phantomMarkers else Set.empty
                         NonnullAnnotations = project.Nonnull
                         Bindings = projections |> List.map (fun binding -> binding.Name, binding) |> Map.ofList

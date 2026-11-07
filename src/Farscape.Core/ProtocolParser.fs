@@ -29,6 +29,9 @@ module ProtocolParser =
         Interface: string option
         /// Enum reference for constrained int/uint args
         Enum: string option
+        /// The `type` attribute exactly as the XML declares it (None when absent); `Type`
+        /// falls back to Uint for a missing or unknown attribute, so wire-type evidence reads this.
+        TypeAttribute: string option
         AllowNull: bool
         Summary: string option
     }
@@ -117,6 +120,7 @@ module ProtocolParser =
         Type = parseArgType (attr "type" "uint" el)
         Interface = attrOpt "interface" el
         Enum = attrOpt "enum" el
+        TypeAttribute = attrOpt "type" el
         AllowNull = (attr "allow-null" "false" el) = "true"
         Summary = attrOpt "summary" el
     }
@@ -253,8 +257,35 @@ module ProtocolParser =
                 Attributes = []
             })
 
-    /// Generate enum declarations for an interface.
-    let private interfaceEnums (iface: ProtocolInterface) : CppParser.Declaration list =
+    /// The wire representation of a protocol enum, read from the protocol's own declarations.
+    /// The Wayland wire format carries an enum only as the argument that references it
+    /// (`enum="name"` within its interface, `enum="iface.name"` elsewhere), and that argument's
+    /// declared `type` fixes the wire value: `uint` is 32-bit unsigned, `int` 32-bit signed.
+    /// Every referencing argument across `interfaces` must declare the same one of these;
+    /// otherwise, or with no referencing argument, the enum has no declared wire type.
+    let private protocolEnumRepresentation (interfaces: ProtocolInterface list)
+                                           (iface: ProtocolInterface) (enum: ProtocolEnum) : CppParser.EnumRepresentationSource =
+        let qualified = $"{iface.Name}.{enum.Name}"
+        let references =
+            interfaces |> List.collect (fun owner ->
+                (owner.Requests @ owner.Events) |> List.collect (fun message ->
+                    message.Args |> List.choose (fun arg ->
+                        match arg.Enum with
+                        | Some name when name = qualified || (owner.Name = iface.Name && name = enum.Name) ->
+                            Some ($"{owner.Name}.{message.Name} arg '{arg.Name}'", arg.TypeAttribute)
+                        | _ -> None)))
+        match references |> List.map snd |> List.distinct with
+        | [] -> CppParser.ProtocolUndeclared $"no protocol argument references enum '{qualified}'"
+        | [ Some ("uint" | "int" as wire) ] ->
+            let first, _ = List.head references
+            let evidence = $"{references.Length} protocol argument(s) reference enum '{qualified}', first {first}, each with type=\"{wire}\""
+            CppParser.ProtocolWire ({ Bits = 32; IsSigned = (wire = "int") }, evidence)
+        | declared ->
+            let spelled = declared |> List.map (function Some t -> $"type=\"{t}\"" | None -> "no type attribute") |> String.concat ", "
+            CppParser.ProtocolUndeclared $"the protocol arguments referencing enum '{qualified}' declare {spelled}, not one of type=\"uint\" or type=\"int\""
+
+    /// Generate enum declarations for an interface; wire-type evidence is read from `interfaces`.
+    let private interfaceEnums (interfaces: ProtocolInterface list) (iface: ProtocolInterface) : CppParser.Declaration list =
         iface.Enums |> List.map (fun enum ->
             let enumName = $"{iface.Name}_{enum.Name}"
             let values =
@@ -275,21 +306,28 @@ module ProtocolParser =
                 Name = enumName
                 Values = values
                 Documentation = enum.Documentation
-                UnderlyingType = Some "uint32_t"
+                // The protocol declares no C underlying type; its wire type is the representation.
+                UnderlyingType = None
+                Representation = protocolEnumRepresentation interfaces iface enum
             })
 
     /// Extract type declarations from an interface (typedefs, enums, delegates, listener structs).
     /// These are genuine type definitions — NOT request functions.
-    let interfaceTypeDeclarations (iface: ProtocolInterface) : CppParser.Declaration list =
+    let interfaceTypeDeclarationsIn (protocol: Protocol) (iface: ProtocolInterface) : CppParser.Declaration list =
         let handle = [ interfaceHandleTypedef iface ]
-        let enums = interfaceEnums iface
+        let enums = interfaceEnums protocol.Interfaces iface
         let delegates = eventDelegates iface
         let listener = listenerStruct iface |> Option.toList
         handle @ enums @ delegates @ listener
 
+    /// Type declarations of a lone interface: its enums' wire-type evidence is limited to that
+    /// interface's own arguments, which then stand as the whole protocol scope.
+    let interfaceTypeDeclarations (iface: ProtocolInterface) : CppParser.Declaration list =
+        interfaceTypeDeclarationsIn { Name = iface.Name; Interfaces = [ iface ] } iface
+
     /// Extract all type declarations from a protocol (no request functions).
     let toTypeDeclarations (protocol: Protocol) : CppParser.Declaration list =
-        protocol.Interfaces |> List.collect interfaceTypeDeclarations
+        protocol.Interfaces |> List.collect (interfaceTypeDeclarationsIn protocol)
 
     // =========================================================================
     // Retired Request Projection Entry Points

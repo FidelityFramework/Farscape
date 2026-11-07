@@ -51,14 +51,16 @@ module TypedProtocolGenerator =
         // Reject drift or missing parsing instead of silently emitting hand-assumed
         // native declarations. Only the record/array projection is profile-defined.
         let functions = declarations |> List.choose (function CppParser.Declaration.Function f -> Some(f.Name,f) | _ -> None) |> Map.ofList
-        let representation cType =
-            let resolved = FidelityCodeGenerator.resolveCType ctx.TypedefMap ctx.DataModel ctx.OpaqueHandles ctx.Delegates ctx.Enums cType
+        // Each C declaration's types resolve through its declaring unit's typedefs.
+        let representation (f: CppParser.FunctionDecl) cType =
+            let unit = FidelityCodeGenerator.inFunctionUnit ctx f
+            let resolved = FidelityCodeGenerator.resolveCType unit.TypedefMap unit.DataModel unit.OpaqueHandles unit.Delegates unit.Enums cType
             FidelityCodeGenerator.abiReprOf ctx.DataModel cType resolved
             |> Option.map (fun r -> r.Family, r.Bits)
         let verify symbol expectedParams expectedReturn =
             let f = functions |> Map.tryFind symbol |> Option.defaultWith(fun()->failwith $"Typed protocol requires parsed C declaration '{symbol}'")
-            let actual = f.Parameters |> List.map (snd >> representation)
-            if actual <> List.map Some expectedParams || representation f.ReturnType <> Some expectedReturn then
+            let actual = f.Parameters |> List.map (snd >> representation f)
+            if actual <> List.map Some expectedParams || representation f f.ReturnType <> Some expectedReturn then
                 failwith $"Typed protocol C signature '{symbol}' does not match the declared LP64 projection"
         let ptr = TypeMapper.Pointer, 64
         let u32 = TypeMapper.Unsigned, 32

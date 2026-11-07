@@ -103,7 +103,7 @@ let ``enum documentation flows to EnumType output`` () =
             { Name = "RED"; Value = 0L; Documentation = None }
             { Name = "GREEN"; Value = 1L; Documentation = None }
             { Name = "BLUE"; Value = 2L; Documentation = None }
-          ]; Documentation = Some "Color values for rendering."; UnderlyingType = None }
+          ]; Documentation = Some "Color values for rendering."; UnderlyingType = None; Representation = CppParser.ClangUnmeasured }
     let decls = [ CppParser.Declaration.Enum e ]
     let output = FidelityCodeGenerator.generate decls "Fidelity.test" "test" Types.LP64 Map.empty
     Assert.Contains("/// Color values for rendering.", output)

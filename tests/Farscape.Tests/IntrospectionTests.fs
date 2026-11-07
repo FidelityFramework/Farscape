@@ -68,8 +68,9 @@ let private headerDecls =
       CppParser.Declaration.Typedef (mkTypedef "GCallback" "void (*)(void)")
       CppParser.Declaration.Typedef (mkTypedef "GClosureNotify" "void (*)(gpointer, GClosure *)")
       CppParser.Declaration.Typedef (mkTypedef "WebKitLoadEvent" "enum WebKitLoadEvent")
-      CppParser.Declaration.Enum (mkEnum "WebKitLoadEvent" [ { Name = "WEBKIT_LOAD_STARTED"; Value = 0L; Documentation = None } ] None)
-      CppParser.Declaration.Enum (mkEnum "GConnectFlags" [ { Name = "G_CONNECT_DEFAULT"; Value = 0L; Documentation = None } ] None)
+      // clang measures these declarations unsigned 32-bit (the clang-parsed header below).
+      CppParser.Declaration.Enum (mkMeasuredEnum "WebKitLoadEvent" [ { Name = "WEBKIT_LOAD_STARTED"; Value = 0L; Documentation = None } ] 32 false)
+      CppParser.Declaration.Enum (mkMeasuredEnum "GConnectFlags" [ { Name = "G_CONNECT_DEFAULT"; Value = 0L; Documentation = None } ] 32 false)
       CppParser.Declaration.Typedef (mkTypedef "GConnectFlags" "enum GConnectFlags")
       CppParser.Declaration.Function
           (mkFunc "g_signal_connect_data" "gulong"

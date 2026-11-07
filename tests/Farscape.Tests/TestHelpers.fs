@@ -22,10 +22,15 @@ let mkTypedef name underlying : CppParser.TypedefInfo =
     { Name = name; UnderlyingType = underlying; Documentation = None }
 
 let mkEnum name values doc : CppParser.EnumDecl =
-    { Name = name; Values = values; Documentation = doc; UnderlyingType = None }
+    { Name = name; Values = values; Documentation = doc; UnderlyingType = None; Representation = CppParser.ClangUnmeasured }
+
+/// A synthetic C enum carrying a clang measurement, for tests that are not about measurement;
+/// it cannot evidence the production measurement path (`CppParser.measureEnums`).
+let mkMeasuredEnum name values bits isSigned : CppParser.EnumDecl =
+    { mkEnum name values None with Representation = CppParser.ClangMeasured { Bits = bits; IsSigned = isSigned } }
 
 let mkEnumSimple name : CppParser.EnumDecl =
-    { Name = name; Values = []; Documentation = None; UnderlyingType = None }
+    { Name = name; Values = []; Documentation = None; UnderlyingType = None; Representation = CppParser.ClangUnmeasured }
 
 let mkEnumVal name value : CppParser.EnumValue =
     { Name = name; Value = value; Documentation = None }
@@ -116,3 +121,38 @@ let mkDecl name retType parms attrs =
 
 let mkDeclWithDoc name retType parms doc =
     CppParser.Declaration.Function (mkFuncWithDoc name retType parms doc)
+
+// ─── Pilot project fixtures ───
+
+/// The header fixture tree: minimal headers, one directory per concern.
+let fixturePath (relative: string) =
+    System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "fixtures", relative))
+
+/// Generate a fidelity-mode pilot over `headers` in a fresh directory, apply `check` to the
+/// generation result and the output directory, then delete the directory. `options` are extra
+/// `[options]` lines; `functions` are the selected namespace functions.
+/// `withPilot` with extra `[library]` lines, extra `[[namespace]]` lines and trailing sections.
+let rec withPilotSections (headers: string list) (library: string list) (options: string list) (functions: string list)
+                          (ns: string list) (trailing: string list)
+                          (check: Result<BindingGenerator.GenerationResult, string> -> string -> unit) =
+    let dir = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "artifacts", "pilot-fixture-tests", System.Guid.NewGuid().ToString("N")))
+    let output = System.IO.Path.Combine(dir, "output")
+    System.IO.Directory.CreateDirectory(output) |> ignore
+    try
+        let quoted (items: string list) = items |> List.map (fun item -> "\"" + item + "\"") |> String.concat ", "
+        let pilot =
+            [ "[library]"; "name = \"fixture\""; "headers = [" + quoted headers + "]" ] @ library @
+            [ "[output]"; "mode = \"fidelity\""; "directory = \"" + output + "\""
+              "[options]" ] @ options @
+            [ "[[namespace]]"; "name = \"Test.Fixture\""; "description = \"fixture\""; "library = \"fixture\""
+              "functions = [" + quoted functions + "]" ] @ ns @ trailing
+        let project = System.IO.Path.Combine(dir, "fixture.pilot.toml")
+        System.IO.File.WriteAllText(project, String.concat "\n" pilot)
+        check (BindingGenerator.generateFromProject project false false Types.LP64) output
+    finally
+        System.IO.Directory.Delete(dir, true)
+
+/// Generate a fidelity-mode pilot over `headers` in a fresh directory (see `withPilotSections`).
+and withPilot (headers: string list) (options: string list) (functions: string list)
+              (check: Result<BindingGenerator.GenerationResult, string> -> string -> unit) =
+    withPilotSections headers [] options functions [] [] check

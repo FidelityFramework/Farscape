@@ -21,7 +21,7 @@ description = "test"
 xml_interfaces = ["wl_callback"]
 """
     let project = PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail toml) |> function Ok p -> p | Error e -> failwith e
-    let arg: ProtocolParser.ProtocolArg = { Name="callback_data"; Type=ProtocolParser.Uint; Interface=None; Enum=None; AllowNull=false; Summary=None }
+    let arg: ProtocolParser.ProtocolArg = { Name="callback_data"; Type=ProtocolParser.Uint; Interface=None; Enum=None; TypeAttribute=Some "uint"; AllowNull=false; Summary=None }
     let event: ProtocolParser.ProtocolMessage = { Name="done"; Args=[arg]; IsDestructor=false; Since=1; Documentation=None }
     let created = { arg with Name="id"; Type=ProtocolParser.NewId; Interface=Some "wl_callback" }
     let noop = { event with Name="noop"; Args=[] }
