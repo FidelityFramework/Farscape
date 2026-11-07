@@ -17,45 +17,45 @@ module DetectionTests =
     [<Fact>]
     let ``detects typedef to pointer of undefined struct as opaque handle`` () =
         let td : CppParser.TypedefInfo =
-            { Name = "hipStream_t"; UnderlyingType = "struct ihipStream_t *"; Documentation = None }
+            { Name = "hipStream_t"; UnderlyingType = "struct ihipStream_t *"; Documentation = None; Attributes = [] }
         Assert.True(ActivePatterns.isOpaqueHandleTypedef emptyStructs td)
 
     [<Fact>]
     let ``rejects typedef to value type`` () =
         let td : CppParser.TypedefInfo =
-            { Name = "pid_t"; UnderlyingType = "int"; Documentation = None }
+            { Name = "pid_t"; UnderlyingType = "int"; Documentation = None; Attributes = [] }
         Assert.False(ActivePatterns.isOpaqueHandleTypedef emptyStructs td)
 
     [<Fact>]
     let ``rejects typedef to void pointer`` () =
         let td : CppParser.TypedefInfo =
-            { Name = "generic_ptr"; UnderlyingType = "void *"; Documentation = None }
+            { Name = "generic_ptr"; UnderlyingType = "void *"; Documentation = None; Attributes = [] }
         Assert.False(ActivePatterns.isOpaqueHandleTypedef emptyStructs td)
 
     [<Fact>]
     let ``rejects typedef to defined struct pointer`` () =
         let knownStructs = Set.ofList ["Point"]
         let td : CppParser.TypedefInfo =
-            { Name = "Point_ptr"; UnderlyingType = "struct Point *"; Documentation = None }
+            { Name = "Point_ptr"; UnderlyingType = "struct Point *"; Documentation = None; Attributes = [] }
         Assert.False(ActivePatterns.isOpaqueHandleTypedef knownStructs td)
 
     [<Fact>]
     let ``detects when struct is not in known set`` () =
         let knownStructs = Set.ofList ["OtherStruct"]
         let td : CppParser.TypedefInfo =
-            { Name = "hipEvent_t"; UnderlyingType = "struct ihipEvent_t *"; Documentation = None }
+            { Name = "hipEvent_t"; UnderlyingType = "struct ihipEvent_t *"; Documentation = None; Attributes = [] }
         Assert.True(ActivePatterns.isOpaqueHandleTypedef knownStructs td)
 
     [<Fact>]
     let ``rejects non-pointer typedef`` () =
         let td : CppParser.TypedefInfo =
-            { Name = "myint"; UnderlyingType = "unsigned long"; Documentation = None }
+            { Name = "myint"; UnderlyingType = "unsigned long"; Documentation = None; Attributes = [] }
         Assert.False(ActivePatterns.isOpaqueHandleTypedef emptyStructs td)
 
     [<Fact>]
     let ``rejects char pointer typedef`` () =
         let td : CppParser.TypedefInfo =
-            { Name = "cstring"; UnderlyingType = "const char *"; Documentation = None }
+            { Name = "cstring"; UnderlyingType = "const char *"; Documentation = None; Attributes = [] }
         Assert.False(ActivePatterns.isOpaqueHandleTypedef emptyStructs td)
 
 // =============================================================================
@@ -66,7 +66,7 @@ module EndToEndDetectionTests =
 
     let private mkOpaqueTypedef name structName =
         CppParser.Declaration.Typedef
-            { Name = name; UnderlyingType = $"struct {structName} *"; Documentation = None }
+            { Name = name; UnderlyingType = $"struct {structName} *"; Documentation = None; Attributes = [] }
 
     [<Fact>]
     let ``detectOpaqueHandles finds opaque typedefs in declaration list`` () =
@@ -85,7 +85,7 @@ module EndToEndDetectionTests =
         let decls = [
             CppParser.Declaration.Struct (mkStruct "Point" [mkField "x" "int"; mkField "y" "int"] None)
             CppParser.Declaration.Typedef
-                { Name = "Point_ptr"; UnderlyingType = "struct Point *"; Documentation = None }
+                { Name = "Point_ptr"; UnderlyingType = "struct Point *"; Documentation = None; Attributes = [] }
         ]
         let handles = FidelityCodeGenerator.detectOpaqueHandles decls
         Assert.Empty(handles)
@@ -160,7 +160,7 @@ module IntegrationTests =
 
     let private mkOpaqueTypedef name structName =
         CppParser.Declaration.Typedef
-            { Name = name; UnderlyingType = $"struct {structName} *"; Documentation = None }
+            { Name = name; UnderlyingType = $"struct {structName} *"; Documentation = None; Attributes = [] }
 
     [<Fact>]
     let ``opaque typedef parameters use nullable CHandle with a nominal marker`` () =

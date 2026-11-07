@@ -216,6 +216,7 @@ module ProtocolParser =
             Name = iface.Name
             UnderlyingType = $"struct {iface.Name}_opaque *"
             Documentation = iface.Documentation
+            Attributes = []
         }
 
     /// Generate delegate declarations for each event in an interface.
@@ -258,6 +259,8 @@ module ProtocolParser =
                 Anonymous = None
                 Measured = None
                 Unattributed = None
+                UnnamedBitFields = []
+                TypedefAttributes = []
             })
 
     /// The wire representation of a protocol enum, read from the protocol's own declarations.

@@ -76,7 +76,7 @@ module FidelityCodeGenerator =
         |> List.choose id
         |> List.filter (fun (_, underlyingType) ->
             let td : CppParser.TypedefInfo =
-                { Name = ""; UnderlyingType = underlyingType; Documentation = None }
+                { Name = ""; UnderlyingType = underlyingType; Documentation = None; Attributes = [] }
             ActivePatterns.isOpaqueHandleTypedef knownStructNames td)
         |> List.map fst
         |> Set.ofList
@@ -1220,7 +1220,12 @@ module FidelityCodeGenerator =
                 let storage : CppParser.FieldDecl =
                     { Name = "Storage"; Type = "unsigned char"; IsConst = false; IsVolatile = false
                       IsArray = true; ArraySize = Some size; IsBitfield = false; BitWidth = None; Attributes = [] }
-                { s with Fields = [storage]; Measured = None }, ctx.StructLayouts.Add(s.Name, { layout with FieldOffsetsBits = [0] })
+                // The storage is the union's only member: its unnamed bit-fields (#176) and the
+                // typedef attributes its fields reach (#175) are inside the measured extent. A
+                // typedef naming it stays, since the record layout dump does not measure it.
+                { s with Fields = [storage]; Measured = None; UnnamedBitFields = []
+                         TypedefAttributes = s.TypedefAttributes |> List.filter (fun a -> a.Site = CppParser.RecordName) },
+                ctx.StructLayouts.Add(s.Name, { layout with FieldOffsetsBits = [0] })
             | _ -> s, ctx.StructLayouts
         // Field spellings resolve through the declaring unit's own typedef chain.
         let unitCtx = inUnitOf "struct" s.Name ctx
@@ -1236,6 +1241,16 @@ module FidelityCodeGenerator =
             if ctx.ValueStructs.Contains s.Name then
                 if s.IsUnion || s.Fields |> List.exists (fun field -> field.IsArray || field.IsBitfield) then
                     failwith $"Value struct '{s.Name}' requires a plain record with scalar or pointer fields"
+                // A value struct's Clef record is laid out from its field types, which hold
+                // neither an unnamed bit-field (#176) nor a typedef's attribute (#175).
+                match s.UnnamedBitFields with
+                | b :: _ ->
+                    failwith $"Value struct '{s.Name}' carries {CppParser.describeUnnamedBitField b}, which its Clef record of named fields cannot represent; a plain record with scalar or pointer fields is required."
+                | [] -> ()
+                match s.TypedefAttributes |> List.tryPick (fun a -> match a.Site with CppParser.FieldType field -> Some (field, a) | CppParser.RecordName -> None) with
+                | Some (field, a) ->
+                    failwith $"Value struct '{s.Name}' field '{field}' has a type reaching typedef '{a.Typedef}', which carries attribute '{a.Attribute.Kind}' that its Clef record's field type cannot represent; a plain record with scalar or pointer fields is required."
+                | None -> ()
                 let fieldType (field: CppParser.FieldDecl) =
                     let resolved = resolveIn unitCtx field.Type
                     let nonnull = outerNullabilityIn unitCtx "_Nonnull" field.Type

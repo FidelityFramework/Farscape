@@ -119,8 +119,12 @@ module DescriptorGenerator =
 
     /// Admit the measured storage extent before any consumer uses its byte quantities.
     let validateMeasuredLayout (s: CppParser.StructDecl) (measured: CppParser.StructLayoutInfo) : int * int =
-        if s.Fields.Length <> measured.FieldOffsetsBits.Length then
-            invalidOp $"Measured layout '{s.Name}' has {measured.FieldOffsetsBits.Length} field offsets for {s.Fields.Length} fields."
+        // Clang dumps an offset for each field and each unnamed bit-field (#176).
+        if s.Fields.Length + s.UnnamedBitFields.Length <> measured.FieldOffsetsBits.Length then
+            let members =
+                if s.UnnamedBitFields.IsEmpty then $"{s.Fields.Length} fields"
+                else $"{s.Fields.Length} fields and {s.UnnamedBitFields.Length} unnamed bit-fields"
+            invalidOp $"Measured layout '{s.Name}' has {measured.FieldOffsetsBits.Length} field offsets for {members}."
         if measured.SizeBits % 8 <> 0 then
             invalidOp $"Measured layout '{s.Name}' has size {measured.SizeBits} bits, which is not whole bytes; a supported bit-precise descriptor representation is required."
         let size = descriptorInt $"Measured layout '{s.Name}' size" (int64 measured.SizeBits / 8L)
@@ -189,6 +193,19 @@ module DescriptorGenerator =
         let neutral = neutralAttributes s
         let neutralKinds = neutral |> List.map fst |> String.concat "', '"
         let kind = if s.IsUnion then "union" else "struct"
+        // How a refusal names an attribute by its classification in `AttributeContracts`.
+        let classified (attribute: string) =
+            match AttributeContracts.contractOf attribute with
+            | Some AttributeContracts.LayoutAffecting -> $"layout attribute '{attribute}'"
+            | Some (AttributeContracts.LayoutNeutral _) -> $"layout-neutral attribute '{attribute}'"
+            | None -> $"attribute '{attribute}' with unclassified layout effect"
+        // A typedef naming the record (`typedef struct { ... } T __attribute__((aligned(16)))`)
+        // gives the type `T` its attributes, while clang's record layout dump measures the
+        // record without them; the descriptor of `T` would carry the record's layout (#175).
+        match s.TypedefAttributes |> List.tryFind (fun a -> a.Site = CppParser.RecordName) with
+        | Some a ->
+            invalidOp $"{Diagnostics.TypedefNamingAttribute}: {kind} '{s.Name}' is named by typedef '{a.Typedef}', which carries {classified a.Attribute.Kind}; clang's record layout dump measures the record, not the typedef that names it, so '{s.Name}' has no measured layout as the type its name spells."
+        | None -> ()
         let unconfirmed detail =
             invalidOp $"{Diagnostics.LayoutNeutralUnconfirmed}: {kind} '{s.Name}' carries layout-neutral attribute '{neutralKinds}', {detail}; the contract that '{neutralKinds}' moves no byte is unconfirmed."
         let layoutText (sizeBits: int) (alignmentBits: int) (offsetsBits: int list) =
@@ -224,7 +241,7 @@ module DescriptorGenerator =
         | Some measured ->
             let size, alignment = validateMeasuredLayout s measured
             let offsets =
-                Seq.zip s.Fields measured.FieldOffsetsBits
+                Seq.zip s.Fields (CppParser.fieldOffsetsBits s measured)
                 |> Seq.map (fun (field, bits) ->
                     if bits % 8 <> 0 then
                         invalidOp $"Struct '{s.Name}' field '{field.Name}' has measured bit offset {bits}, which is not byte-aligned; a supported bit-precise descriptor representation is required."
@@ -249,6 +266,18 @@ module DescriptorGenerator =
                         invalidOp $"{subject} carries attribute '{attribute.Kind}' with unclassified layout effect; a measured layout or a classified attribute contract is required.")
             requireNaturalAttributes $"Struct '{s.Name}'" s.Attributes
             s.Fields |> List.iter (fun field -> requireNaturalAttributes $"Struct '{s.Name}' field '{field.Name}'" field.Attributes)
+            // An unnamed bit-field pads the record, and a zero-width one moves the next member
+            // to its type's boundary (#176); only clang's layout places either.
+            match s.UnnamedBitFields with
+            | b :: _ ->
+                invalidOp $"{Diagnostics.UnnamedBitFieldUnmeasured}: {kind} '{s.Name}' carries {CppParser.describeUnnamedBitField b}, which moves bytes natural alignment of the declared field types cannot place, and clang has no measurement of '{s.Name}' in its declaring unit; an unnamed bit-field is never dropped from its record."
+            | [] -> ()
+            // A typedef attribute a field's type reaches (`aligned(8)` on the field's typedef)
+            // moves the field; only clang's layout places it (#175).
+            match s.TypedefAttributes |> List.tryPick (fun a -> match a.Site with CppParser.FieldType field -> Some (field, a) | CppParser.RecordName -> None) with
+            | Some (field, a) ->
+                invalidOp $"{Diagnostics.TypedefAttributeUnmeasured}: {kind} '{s.Name}' field '{field}' has a type reaching typedef '{a.Typedef}', which carries {classified a.Attribute.Kind}, and clang has no measurement of '{s.Name}' in its declaring unit; natural alignment of the declared field types never stands in for the typedef's attribute."
+            | None -> ()
             let fieldExtent fieldName count shape : int * int =
                 match shape with
                 | RepresentedScalar r ->
@@ -269,7 +298,7 @@ module DescriptorGenerator =
             offsets, descriptorInt $"Struct '{s.Name}' final size" (alignUp endOffset (int64 maxAlign)), maxAlign, Declared
 
     /// The BAREWire field descriptor of one field at its offset.
-    let private fieldDescriptor (src: LayoutSource) structName (offsetStratum: Stratum) (size: int) (f: CppParser.FieldDecl) (offset: int) : FsExpr =
+    let private fieldDescriptor (src: LayoutSource) structName (typedefAttributes: CppParser.TypedefAttribute list) (offsetStratum: Stratum) (size: int) (f: CppParser.FieldDecl) (offset: int) : FsExpr =
         let access = if f.IsConst then "AccessKind.ReadOnly" else "AccessKind.ReadWrite"
         let shape = representedFieldShape src structName f
         let count = elementCount structName f
@@ -285,7 +314,19 @@ module DescriptorGenerator =
         let endOffset = int64 offset + int64 extent
         if endOffset > int64 size then
             invalidOp $"Struct '{structName}' field '{f.Name}' has byte extent {extent} at {stratumName offsetStratum} offset {offset}, ending at byte {endOffset} beyond the record size {size}; a measured layout consistent with its field representation is required."
-        let doc = $"offset {stratumName offsetStratum}; {note}"
+        // The fact of each layout-neutral attribute of a typedef the field's type reaches (#175).
+        // Such a record is laid out only from clang's measurement, so the attribute's layout
+        // effect is clang's; its fact belongs to the field's type, and is recorded here.
+        let typedefFacts =
+            typedefAttributes
+            |> List.choose (fun (a: CppParser.TypedefAttribute) ->
+                match a.Site, AttributeContracts.neutralFact a.Attribute.Kind with
+                | CppParser.FieldType field, Some fact when field = f.Name ->
+                    Some $"; type reaches typedef '{a.Typedef}' carrying {a.Attribute.Kind} (laid out by clang's measurement of this record): {fact}"
+                | _ -> None)
+            |> List.distinct
+            |> String.concat ""
+        let doc = $"offset {stratumName offsetStratum}; {note}{typedefFacts}"
         RecordConstruction [
             "Name", Literal (quote f.Name)
             "Offset", Literal (string offset)
@@ -350,7 +391,7 @@ module DescriptorGenerator =
                 "Layout", RecordBlock [
                     "Size", Literal (string size)
                     "Alignment", Literal (string align)
-                    "Fields", ArrayBlock (fieldPairs |> List.map (fun (f, offset) -> fieldDescriptor src s.Name stratum size f offset))
+                    "Fields", ArrayBlock (fieldPairs |> List.map (fun (f, offset) -> fieldDescriptor src s.Name s.TypedefAttributes stratum size f offset))
                 ]
                 "Documentation", Literal (optionSource documentation)
             ]

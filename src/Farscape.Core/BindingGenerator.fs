@@ -24,7 +24,11 @@ module BindingGenerator =
             let width = if f.IsBitfield then sprintf ":%A" f.BitWidth else ""
             f.Name + ":" + f.Type + extent + width + attributes f.Attributes
         let kind = if s.IsUnion then "union" else "struct"
-        String.concat " " [ kind; s.Name; "{"; s.Fields |> List.map field |> String.concat "; "; "}"; attributes s.Attributes ]
+        // Unnamed bit-fields (#176) and the typedef attributes the record reaches in its unit
+        // (#175) are part of its declared shape: they move its bytes.
+        let padding = s.UnnamedBitFields |> List.map (fun b -> sprintf "@%d:%s:%A" b.Position b.Type b.Width) |> String.concat ","
+        let typedefs = s.TypedefAttributes |> List.map (fun a -> sprintf "%A>%s>%s" a.Site a.Typedef (attributes [a.Attribute])) |> String.concat ","
+        String.concat " " [ kind; s.Name; "{"; s.Fields |> List.map field |> String.concat "; "; "}"; attributes s.Attributes; padding; typedefs ]
 
     /// The records a record's fields hold by value, resolved through the same typedef
     /// chains the generator uses, so the agreement check sees the nesting the descriptor emits.
@@ -335,7 +339,7 @@ module BindingGenerator =
         aliases |> List.choose (fun alias ->
             match alias.Canonical with
             | Ok (canonical, _) ->
-                Some (CppParser.Declaration.Typedef { Name = alias.Name; UnderlyingType = canonical; Documentation = Some "clang canonical type of a built-in alias" })
+                Some (CppParser.Declaration.Typedef { Name = alias.Name; UnderlyingType = canonical; Documentation = Some "clang canonical type of a built-in alias"; Attributes = [] })
             | Error _ -> None)
 
     /// Every clang built-in alias an emitted function's result spells resolves through clang's
@@ -530,9 +534,18 @@ module BindingGenerator =
             let attrs = match attributes f.Attributes with [] -> "" | list -> " [" + String.concat ", " list + "]"
             $"{qualifiers}{f.Type} {f.Name}{extent}{width}{attrs}"
         let kindOf (s: CppParser.StructDecl) = if s.IsUnion then "union" else "struct"
+        // The record's unnamed bit-fields (#176) and the typedef attributes it reaches (#175).
+        let paddingText (s: CppParser.StructDecl) =
+            s.UnnamedBitFields |> List.map CppParser.describeUnnamedBitField
+        let typedefText (s: CppParser.StructDecl) =
+            s.TypedefAttributes |> List.map (fun a ->
+                let site = match a.Site with CppParser.FieldType field -> $"field '{field}'" | CppParser.RecordName -> "its name"
+                let attribute = attributes [a.Attribute] |> String.concat ""
+                $"{site} reaches typedef '{a.Typedef}' {attribute}")
         let describe (s: CppParser.StructDecl) =
             let attrs = match attributes s.Attributes with [] -> "" | list -> " [" + String.concat ", " list + "]"
-            $"""{kindOf s} {s.Name} {{ {s.Fields |> List.map fieldText |> String.concat "; "} }}{attrs}"""
+            let facts = match paddingText s @ typedefText s with [] -> "" | list -> " (" + String.concat "; " list + ")"
+            $"""{kindOf s} {s.Name} {{ {s.Fields |> List.map fieldText |> String.concat "; "} }}{attrs}{facts}"""
         // Where `other` first departs from `first`: a field, the record's kind or its attributes.
         let firstDifference (firstHeader: string, first: CppParser.StructDecl) (otherHeader: string, other: CppParser.StructDecl) =
             let rec fields index (a: CppParser.FieldDecl list) (b: CppParser.FieldDecl list) =
@@ -545,13 +558,22 @@ module BindingGenerator =
             match fields 1 first.Fields other.Fields with
             | Some field -> field
             | None when first.IsUnion <> other.IsUnion -> $"its kind: {kindOf first} in '{firstHeader}', {kindOf other} in '{otherHeader}'"
+            | None when paddingText first <> paddingText other ->
+                let a = paddingText first |> String.concat ", "
+                let b = paddingText other |> String.concat ", "
+                $"its unnamed bit-fields: [{a}] in '{firstHeader}', [{b}] in '{otherHeader}'"
+            | None when typedefText first <> typedefText other ->
+                let a = typedefText first |> String.concat ", "
+                let b = typedefText other |> String.concat ", "
+                $"its typedef attributes: [{a}] in '{firstHeader}', [{b}] in '{otherHeader}'"
             | None ->
                 let a = attributes first.Attributes |> String.concat ", "
                 let b = attributes other.Attributes |> String.concat ", "
                 $"its attributes: [{a}] in '{firstHeader}', [{b}] in '{otherHeader}'"
         // Where two clang measurements of one declared record first depart.
         let measuredDifference (firstHeader: string, first: CppParser.StructDecl, a: CppParser.StructLayoutInfo) (otherHeader: string, b: CppParser.StructLayoutInfo) =
-            let offsets = List.zip3 first.Fields (a.FieldOffsetsBits |> List.truncate first.Fields.Length) (b.FieldOffsetsBits |> List.truncate first.Fields.Length)
+            let fieldsOf layout = CppParser.fieldOffsetsBits first layout
+            let offsets = List.zip3 first.Fields (fieldsOf a |> List.truncate first.Fields.Length) (fieldsOf b |> List.truncate first.Fields.Length)
             match offsets |> List.tryFind (fun (_, x, y) -> x <> y) with
             | Some (f, x, y) when a.FieldOffsetsBits.Length = b.FieldOffsetsBits.Length ->
                 $"field '{f.Name}': clang-measured offset {x / 8} in '{firstHeader}', {y / 8} in '{otherHeader}'"
@@ -561,7 +583,7 @@ module BindingGenerator =
         let divergent =
             names |> List.choose (fun name ->
                 let givers = perHeader |> List.choose (fun (header, defs) -> defs.TryFind name |> Option.map (fun s -> header, s))
-                let identity (s: CppParser.StructDecl) = kindOf s, s.Fields |> List.map fieldText, attributes s.Attributes
+                let identity (s: CppParser.StructDecl) = kindOf s, s.Fields |> List.map fieldText, attributes s.Attributes, paddingText s, typedefText s
                 let shapes = givers |> List.groupBy (fun (_, s) -> identity s) |> List.map snd
                 match shapes with
                 | [ group ] ->

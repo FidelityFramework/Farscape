@@ -91,7 +91,7 @@ let ``struct documentation flows to RecordType output`` () =
         { Name = "Point"; Fields = [
             { Name = "x"; Type = "int"; IsConst = false; IsVolatile = false; IsArray = false; ArraySize = None; IsBitfield = false; BitWidth = None; Attributes = [] }
             { Name = "y"; Type = "int"; IsConst = false; IsVolatile = false; IsArray = false; ArraySize = None; IsBitfield = false; BitWidth = None; Attributes = [] }
-          ]; Documentation = Some "A point in 2D space."; IsUnion = false; Attributes = []; Anonymous = None; Measured = None; Unattributed = None }
+          ]; Documentation = Some "A point in 2D space."; IsUnion = false; Attributes = []; Anonymous = None; Measured = None; Unattributed = None; UnnamedBitFields = []; TypedefAttributes = [] }
     let decls = [ CppParser.Declaration.Struct s ]
     let output = FidelityCodeGenerator.generate decls "Fidelity.test" "test" Types.LP64 Map.empty
     Assert.Contains("/// A point in 2D space.", output)

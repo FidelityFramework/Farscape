@@ -182,7 +182,8 @@ module CallbackDiscovery =
             CppParser.Declaration.Typedef {
                 Name = "hipStreamCallback_t"
                 UnderlyingType = "void (*)(int, int, void *)"
-                Documentation = None }
+                Documentation = None
+                Attributes = [] }
             CppParser.Declaration.Function (
                 mkFunc "hipStreamAddCallback" "int"
                     [("stream", "void *"); ("callback", "hipStreamCallback_t");

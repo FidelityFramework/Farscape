@@ -19,7 +19,7 @@ let mkFuncWithDoc name retType parms doc : CppParser.FunctionDecl =
 // ─── Typedef / Enum / Struct helpers ───
 
 let mkTypedef name underlying : CppParser.TypedefInfo =
-    { Name = name; UnderlyingType = underlying; Documentation = None }
+    { Name = name; UnderlyingType = underlying; Documentation = None; Attributes = [] }
 
 let mkEnum name values doc : CppParser.EnumDecl =
     { Name = name; Values = values; Documentation = doc; UnderlyingType = None; Representation = CppParser.ClangUnmeasured }
@@ -39,10 +39,12 @@ let mkEnumValWithDoc name value doc : CppParser.EnumValue =
     { Name = name; Value = value; Documentation = Some doc }
 
 let mkStruct name fields doc : CppParser.StructDecl =
-    { Name = name; Fields = fields; Documentation = doc; IsUnion = false; Attributes = []; Anonymous = None; Measured = None; Unattributed = None }
+    { Name = name; Fields = fields; Documentation = doc; IsUnion = false; Attributes = []; Anonymous = None; Measured = None; Unattributed = None
+      UnnamedBitFields = []; TypedefAttributes = [] }
 
 let mkStructSimple name : CppParser.StructDecl =
-    { Name = name; Fields = []; Documentation = None; IsUnion = false; Attributes = []; Anonymous = None; Measured = None; Unattributed = None }
+    { Name = name; Fields = []; Documentation = None; IsUnion = false; Attributes = []; Anonymous = None; Measured = None; Unattributed = None
+      UnnamedBitFields = []; TypedefAttributes = [] }
 
 let mkField name typ : CppParser.FieldDecl =
     { Name = name; Type = typ; IsConst = false; IsVolatile = false; IsArray = false; ArraySize = None

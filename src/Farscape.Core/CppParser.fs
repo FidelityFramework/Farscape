@@ -81,7 +81,8 @@ module CppParser =
         DataSizeBits: int
         /// Required alignment in bits
         AlignmentBits: int
-        /// Per-field offsets in bits (order matches FieldDecl order)
+        /// Per-member offsets in bits, in clang's member order: one for each field and one for
+        /// each unnamed bit-field (`StructDecl.UnnamedBitFields`), which clang dumps in place.
         FieldOffsetsBits: int list
     }
 
@@ -119,6 +120,41 @@ module CppParser =
         /// Why no faithful copy exists or clang measured none.
         | UnattributedUnsynthesized of reason: string
 
+    /// An unnamed bit-field of a record (#176): `int : 3;` pads the record, and the zero-width
+    /// `int : 0;` moves the next member to the next boundary of its type. C names it with no
+    /// member, so it is no field of `StructDecl.Fields`, but it moves bytes of the layout and is
+    /// never dropped: clang dumps an offset for it among the record's member offsets, a record
+    /// carrying one is measured by clang in its declaring unit, and its layout is never computed
+    /// from the declared fields.
+    type UnnamedBitField = {
+        /// Its position among the record's members as clang declares them, counted from 0:
+        /// named fields, anonymous members and unnamed bit-fields alike, which is the index of its
+        /// offset in clang's dumped member offsets.
+        Position: int
+        /// Clang's type of it.
+        Type: string
+        /// Its declared width in bits, when clang gives it as a constant.
+        Width: int option
+    }
+
+    /// Where a typedef attribute reaches a record (#175).
+    type TypedefAttributeSite =
+        /// The type of field `field` is the typedef, or reaches it through typedefs, qualifiers
+        /// and array extents (not through a pointer, whose own layout the typedef cannot move).
+        | FieldType of field: string
+        /// The typedef names the record itself (`typedef struct { ... } T __attribute__((...))`),
+        /// so the type its name spells is the typedef, whose layout clang's record layout dump of
+        /// the record does not measure.
+        | RecordName
+
+    /// An attribute clang attaches to a typedef a record reaches, in the record's declaring unit.
+    type TypedefAttribute = {
+        Site: TypedefAttributeSite
+        /// The typedef carrying the attribute.
+        Typedef: string
+        Attribute: AttributeData
+    }
+
     /// Represents a C/C++ struct declaration
     type StructDecl = {
         Name: string
@@ -136,7 +172,28 @@ module CppParser =
         /// For a record carrying a layout-neutral attribute, clang's layout of its copy without
         /// that attribute (`measureRecordLayouts`). None for every other record.
         Unattributed: UnattributedLayout option
+        /// The record's unnamed bit-fields, in member order (#176).
+        UnnamedBitFields: UnnamedBitField list
+        /// The attributes of the typedefs its fields' types reach, and of a typedef naming it, in
+        /// its declaring unit (#175, `typedefAttributesOf`).
+        TypedefAttributes: TypedefAttribute list
     }
+
+    /// A measured layout's offsets of the record's fields: clang's member offsets without those
+    /// of its unnamed bit-fields. Offsets clang dumps for a different number of members are
+    /// returned as dumped, so the count check refuses them.
+    let fieldOffsetsBits (s: StructDecl) (layout: StructLayoutInfo) : int list =
+        if s.UnnamedBitFields.IsEmpty || layout.FieldOffsetsBits.Length <> s.Fields.Length + s.UnnamedBitFields.Length then
+            layout.FieldOffsetsBits
+        else
+            let padding = s.UnnamedBitFields |> List.map _.Position |> Set.ofList
+            layout.FieldOffsetsBits |> List.indexed |> List.filter (fun (position, _) -> not (padding.Contains position)) |> List.map snd
+
+    /// How a refusal names an unnamed bit-field: its member position, counted from 1, and its
+    /// declaration.
+    let describeUnnamedBitField (b: UnnamedBitField) =
+        let width = match b.Width with Some w -> string w | None -> "?"
+        $"member {b.Position + 1}, the unnamed bit-field '{b.Type} : {width}'"
 
     /// The name Farscape gives an unnamed record that is the type of a named field: the
     /// enclosing record's name and the field's name, joined by `_`.
@@ -204,6 +261,9 @@ module CppParser =
         Name: string
         UnderlyingType: string
         Documentation: string option
+        /// The attributes clang attaches to the typedef (`AlignedAttr`, `ModeAttr`, ...), each
+        /// classified through `AttributeContracts` where a record reaches it (#175).
+        Attributes: AttributeData list
     }
 
     /// Represents a C preprocessor macro
@@ -569,6 +629,20 @@ module CppParser =
                 MangledName = mangledName
             }
 
+    /// The constant width clang gives a bit-field FieldDecl.
+    let private bitWidthOf (node: JsonValue) : int option =
+        node.TryGetProperty("inner")
+        |> Option.bind (fun inner ->
+            inner.AsArray()
+            |> Array.tryPick (fun child ->
+                match getString child "kind" with
+                | Some "ConstantExpr" | Some "IntegerLiteral" ->
+                    getString child "value" |> Option.bind (fun v ->
+                        match System.Int32.TryParse(v) with
+                        | true, n -> Some n
+                        | _ -> None)
+                | _ -> None))
+
     /// Process FieldDecl AST node
     let private processFieldDecl (node: JsonValue) : FieldDecl option =
         match getString node "name" with
@@ -577,21 +651,21 @@ module CppParser =
             let typeStr = getQualType node
             let fieldInfo = parseFieldType typeStr
             let isBitfield = getBool node "isBitfield"
-            let bitWidth =
-                if isBitfield then
-                    node.TryGetProperty("inner")
-                    |> Option.bind (fun inner ->
-                        inner.AsArray()
-                        |> Array.tryPick (fun child ->
-                            match getString child "kind" with
-                            | Some "ConstantExpr" | Some "IntegerLiteral" ->
-                                getString child "value" |> Option.bind (fun v ->
-                                    match System.Int32.TryParse(v) with
-                                    | true, n -> Some n
-                                    | _ -> None)
-                            | _ -> None))
-                else None
+            let bitWidth = if isBitfield then bitWidthOf node else None
             Some { fieldInfo with Name = fieldName; IsBitfield = isBitfield; BitWidth = bitWidth; Attributes = extractAttributes node }
+
+    /// A record's unnamed bit-fields (#176): each FieldDecl clang declares with no name that is
+    /// not the implicit field of an anonymous member, at its position among all the record's
+    /// FieldDecls, which is the position of its offset in clang's record layout dump.
+    let private unnamedBitFieldsOf (node: JsonValue) : UnnamedBitField list =
+        getArray node "inner"
+        |> Seq.filter (fun inner -> getStringOr inner "kind" "" = "FieldDecl")
+        |> Seq.indexed
+        |> Seq.choose (fun (position, field) ->
+            if getStringOr field "name" "" = "" && not (getBool field "isImplicit") then
+                Some { Position = position; Type = getQualType field; Width = bitWidthOf field }
+            else None)
+        |> List.ofSeq
 
     /// Process RecordDecl (struct/union) AST node
     let private processRecordDecl (node: JsonValue) : StructDecl option =
@@ -607,12 +681,15 @@ module CppParser =
                 getStringOr inner "kind" "" = "FieldDecl")
             |> Seq.choose processFieldDecl
             |> List.ofSeq
+        let padding = unnamedBitFieldsOf node
 
         match name, fields with
         | Some n, _ when not (String.IsNullOrEmpty(n)) ->
-            Some { Name = n; Fields = fields; Documentation = documentation; IsUnion = isUnion; Attributes = attributes; Anonymous = None; Measured = None; Unattributed = None }
+            Some { Name = n; Fields = fields; Documentation = documentation; IsUnion = isUnion; Attributes = attributes; Anonymous = None; Measured = None; Unattributed = None
+                   UnnamedBitFields = padding; TypedefAttributes = [] }
         | _, fs when not fs.IsEmpty ->
-            Some { Name = ""; Fields = fields; Documentation = documentation; IsUnion = isUnion; Attributes = attributes; Anonymous = None; Measured = None; Unattributed = None }
+            Some { Name = ""; Fields = fields; Documentation = documentation; IsUnion = isUnion; Attributes = attributes; Anonymous = None; Measured = None; Unattributed = None
+                   UnnamedBitFields = padding; TypedefAttributes = [] }
         | _ -> None
 
     /// Clang spells the type of a field declared with an unnamed record as
@@ -806,6 +883,7 @@ module CppParser =
                 Name = name
                 UnderlyingType = underlyingType
                 Documentation = None
+                Attributes = extractAttributes node
             }
 
     /// Walk AST tree and extract declarations from the target file.
@@ -1819,21 +1897,78 @@ module CppParser =
             | decl -> decl)
 
     // =========================================================================
+    // Typedef Attributes a Record Reaches (#175)
+    // =========================================================================
+
+    let private identifierSpelling = System.Text.RegularExpressions.Regex(@"[A-Za-z_][A-Za-z0-9_]*")
+
+    /// The attributes of every typedef a type spelling reaches, with the typedef carrying each
+    /// (#175): the typedefs it names and, through each one's underlying type, the typedefs those
+    /// name, in order. A tag name (`struct T`, `union T`, `enum T`) names no typedef. A pointer
+    /// spelling reaches none: a pointer's layout is a pointer's, whatever typedef its pointee is.
+    let typedefAttributesOf (typedefs: Map<string, TypedefInfo>) (spelling: string) : (string * AttributeData) list =
+        let visited = System.Collections.Generic.HashSet<string>()
+        let rec reach (spelling: string) : (string * AttributeData) list =
+            if spelling.Contains '*' then []
+            else
+                let tokens = identifierSpelling.Matches spelling |> Seq.map _.Value |> List.ofSeq
+                let previous = None :: (tokens |> List.map Some) |> List.truncate tokens.Length
+                let typedefNames =
+                    List.zip previous tokens
+                    |> List.choose (fun (previous, token) ->
+                        match previous with
+                        | Some ("struct" | "union" | "enum") -> None
+                        | _ -> Some token)
+                typedefNames |> List.collect (fun name ->
+                    match typedefs.TryFind name with
+                    | Some t when visited.Add name -> (t.Attributes |> List.map (fun a -> name, a)) @ reach t.UnderlyingType
+                    | _ -> [])
+        reach spelling
+
+    /// Record on each named record of a unit the typedef attributes it reaches (#175), from the
+    /// typedefs of that same unit, its own and those reached through its includes: the
+    /// attributes of the typedefs each field's type reaches (`typedefAttributesOf`), and those of
+    /// the typedef that names a record C leaves untagged.
+    let annotateTypedefAttributes (typedefNamed: Set<string>) (unit: Declaration list) (declarations: Declaration list) : Declaration list =
+        let typedefs =
+            (Map.empty, unit) ||> List.fold (fun (acc: Map<string, TypedefInfo>) decl ->
+                match decl with
+                | Typedef t when not (acc.ContainsKey t.Name) -> acc.Add(t.Name, t)
+                | _ -> acc)
+        if typedefs |> Map.forall (fun _ t -> t.Attributes.IsEmpty) then declarations
+        else
+        declarations |> List.map (function
+            | Struct s when s.Name <> "" ->
+                let named =
+                    match s.Anonymous, typedefs.TryFind s.Name with
+                    | None, Some t when typedefNamed.Contains s.Name ->
+                        t.Attributes |> List.map (fun a -> { Site = RecordName; Typedef = t.Name; Attribute = a })
+                    | _ -> []
+                let fields =
+                    s.Fields |> List.collect (fun f ->
+                        typedefAttributesOf typedefs f.Type |> List.map (fun (typedef, a) -> { Site = FieldType f.Name; Typedef = typedef; Attribute = a }))
+                Struct { s with TypedefAttributes = named @ fields }
+            | decl -> decl)
+
+    // =========================================================================
     // Record Measurement in the Declaring Unit (anonymous records; attribute contracts)
     // =========================================================================
 
-    /// Measure every anonymous record of a parsed unit, every record enclosing one, and every
-    /// record carrying a layout-neutral attribute, with clang in that same unit (issues #159,
-    /// #174). A layout-neutral attribute (`AttributeContracts.LayoutNeutral`, `may_alias`) is
-    /// admitted only when this measurement agrees with the record's layout without it, so the
+    /// Measure every anonymous record of a parsed unit, every record enclosing one, every record
+    /// carrying a layout-neutral attribute, every record whose field type reaches an attributed
+    /// typedef (#175) and every record carrying an unnamed bit-field (#176), with clang in that
+    /// same unit (issues #159, #174). A typedef's attribute and an unnamed bit-field move bytes
+    /// that natural alignment of the declared field types cannot place, so such a record's
+    /// layout is clang's or none, and the generator refuses it without one. A layout-neutral
+    /// attribute (`AttributeContracts.LayoutNeutral`, `may_alias`) is admitted only when this measurement agrees with the record's layout without it, so the
     /// record must be measured where it is declared, and so must its copy without the attribute:
     /// the same probe declares `struct __farscape_unattributed_<n>` with one field per member,
     /// in order, each declared `__typeof__(((R*)0)->member) member`, which keeps the member's
     /// type with its typedefs and their attributes and leaves out only the record's own
     /// attributes. Each name the copy spells is `#undef`ined first, because the AST names are
     /// the members' real names. A record C leaves unnamed, a bit-field (which `__typeof__`
-    /// cannot read) and an anonymous member (which has no name to read it through) have no
-    /// faithful copy, and the record carries that reason instead. The probe includes the header under the
+    /// cannot read), an anonymous member and an unnamed bit-field (which have no name to read
+    /// them through) have no faithful copy, and the record carries that reason instead. The probe includes the header under the
     /// parse's own flags and takes `sizeof` of each outermost named enclosing record (by its typedef
     /// name when C names it only by a typedef), which makes clang lay out it and every record
     /// nested in it; `-fdump-record-layouts-simple` prints those layouts, the same dump measured
@@ -1854,7 +1989,11 @@ module CppParser =
             records |> List.filter (fun s ->
                 not s.Fields.IsEmpty
                 && (s.Attributes @ (s.Fields |> List.collect _.Attributes)) |> List.exists (fun a -> (AttributeContracts.neutralFact a.Kind).IsSome))
-        if anonymous.IsEmpty && attributed.IsEmpty then declarations
+        // A record whose field type reaches an attributed typedef (#175), or carrying an unnamed
+        // bit-field (#176): its layout is clang's, never computed from its declared fields.
+        let reaching = records |> List.filter (fun s -> s.TypedefAttributes |> List.exists (fun a -> a.Site <> RecordName))
+        let padded = records |> List.filter (fun s -> not s.UnnamedBitFields.IsEmpty)
+        if anonymous.IsEmpty && attributed.IsEmpty && reaching.IsEmpty && padded.IsEmpty then declarations
         else
         let byName = records |> List.rev |> List.map (fun s -> s.Name, s) |> Map.ofList
         let rec outermost (visited: Set<string>) (s: StructDecl) =
@@ -1863,7 +2002,7 @@ module CppParser =
             | Some origin when not (visited.Contains origin.Parent) ->
                 byName.TryFind origin.Parent |> Option.bind (outermost (visited.Add s.Name))
             | Some _ -> None
-        let roots = (anonymous @ attributed) |> List.choose (outermost Set.empty) |> List.distinctBy _.Name
+        let roots = (anonymous @ attributed @ reaching @ padded) |> List.choose (outermost Set.empty) |> List.distinctBy _.Name
         let spelling (s: StructDecl) =
             if typedefNamed.Contains s.Name then s.Name
             elif s.IsUnion then "union " + s.Name
@@ -1876,11 +2015,12 @@ module CppParser =
                     s.Fields |> List.tryFind (fun f ->
                         records |> List.exists (fun r ->
                             r.Anonymous |> Option.exists (fun o -> o.Member && o.Parent = s.Name && o.Field = f.Name)))
-                match s.Anonymous, s.Fields |> List.tryFind _.IsBitfield, anonymousMember with
-                | Some _, _, _ -> s, Error "C leaves the record unnamed, so no copy can name it to read its members' types"
-                | None, Some f, _ -> s, Error $"field '{f.Name}' is a bit-field, whose type __typeof__ cannot read"
-                | None, None, Some f -> s, Error $"'{f.Name}' is an anonymous member, which has no C name a copy could read its type through"
-                | None, None, None ->
+                match s.Anonymous, s.Fields |> List.tryFind _.IsBitfield, anonymousMember, s.UnnamedBitFields with
+                | Some _, _, _, _ -> s, Error "C leaves the record unnamed, so no copy can name it to read its members' types"
+                | None, Some f, _, _ -> s, Error $"field '{f.Name}' is a bit-field, whose type __typeof__ cannot read"
+                | None, None, Some f, _ -> s, Error $"'{f.Name}' is an anonymous member, which has no C name a copy could read its type through"
+                | None, None, None, b :: _ -> s, Error $"{describeUnnamedBitField b} has no member name a copy could read its type through"
+                | None, None, None, [] ->
                     let tag = if s.IsUnion then "union" else "struct"
                     let members = s.Fields |> List.map (fun f -> $"__typeof__((({spelling s}*)0)->{f.Name}) {f.Name};") |> String.concat " "
                     let names = s.Name :: (s.Fields |> List.map _.Name)
@@ -1937,7 +2077,7 @@ module CppParser =
                         | _ -> UnattributedUnsynthesized "clang dumped more than one layout under the copy's name"
                 s.Name, evidence)
             |> Map.ofList
-        let measured = Set.ofList ((roots @ anonymous @ attributed) |> List.map _.Name)
+        let measured = Set.ofList ((roots @ anonymous @ attributed @ reaching @ padded) |> List.map _.Name)
         declarations |> List.map (function
             | Struct s when s.Name <> "" && measured.Contains s.Name ->
                 Struct { s with Measured = measuredOf s; Unattributed = Map.tryFind s.Name unattributedOf }
@@ -2227,8 +2367,12 @@ module CppParser =
                     match anonymousNameCollisions options.HeaderFile (declarations @ included) with
                     | [] -> ()
                     | collisions -> raise (AnonymousNameCollision (String.concat " " collisions))
-                    // Anonymous records, the records enclosing them, and records carrying a
-                    // layout-neutral attribute are measured in this same unit.
+                    // Each record's typedef attributes, from this unit's typedefs (#175).
+                    let declarations = annotateTypedefAttributes typedefNamedTags (declarations @ included) declarations
+                    // Anonymous records, the records enclosing them, records carrying a
+                    // layout-neutral attribute, records whose field types reach an attributed
+                    // typedef and records carrying an unnamed bit-field are measured in this
+                    // same unit.
                     let declarations = measureRecordLayouts options typedefNamedTags declarations
 
                     if options.Verbose then
@@ -2285,9 +2429,9 @@ module CppParser =
     let internal declarationsOfAst (header: string) (astJson: string) : Result<Declaration list, string> =
         try
             let root = JsonValue.Parse astJson
-            let declarations, _, included = walkAst root header (Path.GetFileName header) None false (fun _ _ f -> f)
+            let declarations, typedefNamed, included = walkAst root header (Path.GetFileName header) None false (fun _ _ f -> f)
             match anonymousNameCollisions header (declarations @ included) with
-            | [] -> Ok declarations
+            | [] -> Ok (annotateTypedefAttributes typedefNamed (declarations @ included) declarations)
             | collisions -> Error (String.concat " " collisions)
         with
         | AnonymousMemberRefused reason -> Error reason

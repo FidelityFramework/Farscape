@@ -32,6 +32,9 @@ namespace Farscape.Core
 /// | FS9124 | a pilot define is not NAME or NAME=VALUE, so it could carry a clang option    |
 /// | FS9125 | a pkg-config module name is not a module name, so it could carry an option    |
 /// | FS9126 | pkg-config --cflags output holds a word that is not an include path or define |
+/// | FS9127 | a field's type reaches an attributed typedef, and clang has no layout of it   |
+/// | FS9128 | a typedef naming a record carries an attribute its record layout dump omits   |
+/// | FS9129 | a record carries an unnamed bit-field, and clang has no layout of it          |
 ///
 /// Each refusal reason has exactly one code and each code one reason.
 module Diagnostics =
@@ -113,3 +116,12 @@ module Diagnostics =
 
     [<Literal>]
     let PkgConfigFlagRefused = "FS9126"   // pkg-config --cflags word other than -I or -D (#178)
+
+    [<Literal>]
+    let TypedefAttributeUnmeasured = "FS9127" // field type reaches an attributed typedef, no clang layout (#175)
+
+    [<Literal>]
+    let TypedefNamingAttribute = "FS9128" // typedef naming a record carries an attribute its layout dump omits (#175)
+
+    [<Literal>]
+    let UnnamedBitFieldUnmeasured = "FS9129" // unnamed bit-field in a record without a clang layout (#176)

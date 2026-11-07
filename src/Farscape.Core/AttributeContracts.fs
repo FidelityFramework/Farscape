@@ -6,6 +6,14 @@ namespace Farscape.Core
 /// no attribute could move a byte. Each attribute clang attaches to a record or field is
 /// either classified here or refused with its exact reason ("unclassified layout effect"):
 /// an attribute is never ignored because it looks harmless.
+///
+/// The same table classifies the attributes clang attaches to typedefs (#175). A record whose
+/// field type reaches an attributed typedef is laid out only from clang's measurement of it in
+/// its declaring unit, which settles the layout effect of any such attribute; without that
+/// measurement it is refused (FS9127), naming the attribute by its classification here. A
+/// layout-neutral typedef attribute's fact is recorded on the field whose type reaches it. A
+/// typedef naming a record C leaves untagged gives the record's type an attribute clang's record
+/// layout dump omits, so such a record is refused (FS9128).
 module AttributeContracts =
 
     /// What an attribute does to the layout of the record that carries it.

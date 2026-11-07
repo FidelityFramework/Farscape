@@ -404,7 +404,7 @@ let ``wrapper preserves nominal CHandle when unwrapping an opaque nullable retur
     // Declaration with opaque handle typedef + function returning that type
     let decls = [
         CppParser.Declaration.Typedef
-            { Name = "hipStream_t"; UnderlyingType = "struct ihipStream_t *"; Documentation = None }
+            { Name = "hipStream_t"; UnderlyingType = "struct ihipStream_t *"; Documentation = None; Attributes = [] }
         CppParser.Declaration.Function
             { Name = "hipStreamCreate"
               ReturnType = "hipStream_t"
