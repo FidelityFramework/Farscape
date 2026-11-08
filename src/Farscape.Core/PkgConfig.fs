@@ -2,12 +2,13 @@ namespace Farscape.Core
 
 open System
 
-/// Include paths and defines from `pkg-config --cflags <module>` (#178). The module name is one
-/// process argument, the output is split into words as pkg-config quotes and escapes them for a
-/// shell, and every word must be an include path (`-I<path>`) or a define (`-D<define>`), the
-/// only two facts a pilot carries. Any other word (`-fms-extensions`, `-isystem`, `-pthread`)
-/// is refused: dropping it would hide a flag, and passing it would let pkg-config choose clang's
-/// language mode.
+/// Include paths, system include paths and defines from `pkg-config --cflags <module>` (#178,
+/// #179). The module name is one process argument, the output is split into words as pkg-config
+/// quotes and escapes them for a shell, and every word must be an include path (`-I<path>`), a
+/// system include path (`-isystem <path>` or `-isystem<path>`) or a define (`-D<define>`), the
+/// three facts a pilot carries. Any other word (`-fms-extensions`, `-pthread`) is refused:
+/// dropping it would hide a flag, and passing it would let pkg-config choose clang's language
+/// mode.
 module PkgConfig =
 
     /// A pkg-config module name: letters, digits and `_ . + -`, not starting with `-`
@@ -75,36 +76,55 @@ module PkgConfig =
             if inWord then result.Add(current.ToString())
             Some (List.ofSeq result)
 
-    /// The include paths and defines of one module's `--cflags` output, in order, or the refusal
-    /// of the first word that is neither (FS9126), of a malformed define (FS9124), or of output
-    /// that does not split into words (FS9126).
-    let parseCflagsDiagnosed (moduleName: string) (output: string) : Result<string list * string list, Diagnostics.Diagnostic> =
+    /// The pilot facts of one module's `--cflags` output, each list in the order pkg-config gives it.
+    type Cflags = {
+        /// `-I<path>` words: a pilot's `include_paths`.
+        IncludePaths: string list
+        /// `-isystem <path>` and `-isystem<path>` words: a pilot's `system_include_paths` (#179).
+        SystemIncludePaths: string list
+        /// `-D<define>` words: a pilot's `defines`.
+        Defines: string list
+    }
+
+    /// The pilot facts of one module's `--cflags` output, or the refusal of the first word that
+    /// is none of them (FS9126), of a malformed define (FS9124), or of output that does not
+    /// split into words (FS9126). pkgconf prints a system include path as two words,
+    /// `-isystem <path>`; one word `-isystem<path>` is read the same. A `-isystem` with no path
+    /// after it, or followed by a word that is itself an option, is refused rather than guessed.
+    let parseCflagsDiagnosed (moduleName: string) (output: string) : Result<Cflags, Diagnostics.Diagnostic> =
         let refuse (detail: string) =
             Error (Diagnostics.diagnostic Diagnostics.PkgConfigFlagRefused
-                     $"pkg-config --cflags for '{moduleName}' {detail}; a pilot carries only include paths and defines, so the output is refused rather than dropped or reinterpreted."
+                     $"pkg-config --cflags for '{moduleName}' {detail}; a pilot carries only include paths, system include paths and defines, so the output is refused rather than dropped or reinterpreted."
                      (Diagnostics.Located.Unknown $"pkg-config --cflags output for '{moduleName}' is tool output, not a header declaration"))
         match words output with
         | None -> refuse $"ends inside a quotation or an escape: '{output.Trim()}'"
         | Some tokens ->
-            let rec classify (includes: string list) (defines: string list) = function
-                | [] -> Ok (List.rev includes, List.rev defines)
+            let rec classify (includes: string list) (systems: string list) (defines: string list) = function
+                | [] -> Ok { IncludePaths = List.rev includes; SystemIncludePaths = List.rev systems; Defines = List.rev defines }
                 | (token: string) :: rest when token.StartsWith "-I" && token.Length > 2 ->
-                    classify (token.Substring 2 :: includes) defines rest
+                    classify (token.Substring 2 :: includes) systems defines rest
+                | "-isystem" :: (path: string) :: rest when path <> "" && not (path.StartsWith "-") ->
+                    classify includes (path :: systems) defines rest
+                | [ "-isystem" ] -> refuse "gives '-isystem' with no path after it"
+                | "-isystem" :: next :: _ -> refuse $"gives '-isystem' followed by '{next}', which is not a path"
+                | token :: rest when token.StartsWith "-isystem" && token.Length > 8 && not (token.Substring(8).StartsWith "-") ->
+                    classify includes (token.Substring 8 :: systems) defines rest
                 | token :: rest when token.StartsWith "-D" && token.Length > 2 ->
                     let define = token.Substring 2
                     match CppParser.defineRefusal define with
                     | Some refusal -> Error refusal
-                    | None -> classify includes (define :: defines) rest
-                | token :: _ -> refuse $"gives '{token}', which is not -I<path> or -D<define>"
-            classify [] [] tokens
+                    | None -> classify includes systems (define :: defines) rest
+                | token :: _ -> refuse $"gives '{token}', which is not -I<path>, -isystem <path> or -D<define>"
+            classify [] [] [] tokens
 
     /// `parseCflagsDiagnosed`, reporting a refusal as its text.
-    let parseCflags (moduleName: string) (output: string) : Result<string list * string list, string> =
+    let parseCflags (moduleName: string) (output: string) : Result<Cflags, string> =
         parseCflagsDiagnosed moduleName output |> Result.mapError Diagnostics.render
 
     /// Run `pkg-config --cflags <moduleName>` with `environment` added to its own, and read its
-    /// include paths and defines. A failure carries its diagnostic when it is an FS91xx refusal.
-    let runDiagnosed (environment: (string * string) list) (moduleName: string) : Result<string list * string list, Diagnostics.Refusal> =
+    /// include paths, system include paths and defines. A failure carries its diagnostic when it
+    /// is an FS91xx refusal.
+    let runDiagnosed (environment: (string * string) list) (moduleName: string) : Result<Cflags, Diagnostics.Refusal> =
         match moduleNameRefusal moduleName with
         | Some refusal -> Error (Diagnostics.refusalOf refusal)
         | None ->
@@ -121,7 +141,7 @@ module PkgConfig =
                 Error (Diagnostics.uncoded $"Failed to run pkg-config: {ex.Message}")
 
     /// `runDiagnosed`, reporting a failure as its text.
-    let run (environment: (string * string) list) (moduleName: string) : Result<string list * string list, string> =
+    let run (environment: (string * string) list) (moduleName: string) : Result<Cflags, string> =
         runDiagnosed environment moduleName |> Result.mapError _.Text
 
     /// `runDiagnosed` with pkg-config's own environment.

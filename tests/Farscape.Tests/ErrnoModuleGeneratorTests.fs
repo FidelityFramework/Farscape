@@ -109,6 +109,7 @@ let ``generate with live errno.h produces complete module`` () =
     let options : CppParser.HeaderParserOptions = {
         HeaderFile = "/usr/include/errno.h"
         IncludePaths = []
+        SystemIncludePaths = []
         Defines = []
         Verbose = false
         IncludeMacros = true

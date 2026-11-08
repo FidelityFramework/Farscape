@@ -418,7 +418,7 @@ let private signalProject (directory: string) (header: string) =
     File.WriteAllText(girPath, gir)
     let project : PilotTypes.PilotProject =
         { Library = { Name = "gobject-2.0"; Headers = [headerPath]; XmlProtocols = []; Introspection = [girPath]
-                      IncludePaths = [directory]; Defines = []; MacroPrefixes = []; PkgConfig = [] }
+                      IncludePaths = [directory]; SystemIncludePaths = []; Defines = []; MacroPrefixes = []; PkgConfig = [] }
           Output = { Mode = "fidelity"; Directory = output }
           Namespaces = [ { Name = "Fidelity.WebKit.Native.Core"; Description = "Signal-only generation"; Library = "gobject-2.0"
                            Prefixes = []; Functions = []; XmlInterfaces = []; Signals = ["UserContentManager::script-message-received"] } ]

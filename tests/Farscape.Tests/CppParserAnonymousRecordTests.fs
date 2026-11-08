@@ -11,7 +11,7 @@ open TestHelpers
 
 let private parse (relative: string) =
     CppParser.parseHeader {
-        HeaderFile = fixturePath relative; IncludePaths = []; Defines = []; IncludeRoot = None
+        HeaderFile = fixturePath relative; IncludePaths = []; SystemIncludePaths = []; Defines = []; IncludeRoot = None
         MacroPrefixes = []; IncludeMacros = false; Verbose = false; CppMode = false }
 
 let private records (relative: string) =
@@ -148,7 +148,7 @@ let ``an anonymous member of a C++ record refuses the unit`` () =
     let header = fixturePath "anonymous-members/class.hpp"
     let parsed =
         CppParser.parseHeader {
-            HeaderFile = header; IncludePaths = []; Defines = []; IncludeRoot = None
+            HeaderFile = header; IncludePaths = []; SystemIncludePaths = []; Defines = []; IncludeRoot = None
             MacroPrefixes = []; IncludeMacros = false; Verbose = false; CppMode = true }
     Assert.Equal(
         Error $"FS9122: C++ record 'fx_cpp_am' in '{header}' has an anonymous member of clang type 'fx_cpp_am::(anonymous union at {header}:5:3)'; the C++ record path does not represent anonymous members, and none is dropped from its record.",
@@ -200,7 +200,7 @@ let ``no public entry point reads a name-clash header past its FS9114 refusal`` 
     Assert.Equal(Error refusal, CppParser.declarationsOfAst header (clangAst header []) |> Result.map ignore)
     // Every public parse and generation entry point refuses the same header with FS9114.
     let options : CppParser.HeaderParserOptions =
-        { HeaderFile = header; IncludePaths = []; Defines = []; IncludeRoot = None
+        { HeaderFile = header; IncludePaths = []; SystemIncludePaths = []; Defines = []; IncludeRoot = None
           MacroPrefixes = []; IncludeMacros = true; Verbose = false; CppMode = false }
     Assert.Equal(Error refusal, CppParser.parseHeaderFull options |> Result.map ignore)
     Assert.Equal(Error refusal, CppParser.parseHeaderUnit options |> Result.map ignore)

@@ -39,7 +39,7 @@ let ``a define carrying a clang option is refused before any parse`` () =
     // The parser refuses it too, before running clang.
     Assert.Equal(
         Error "FS9124: define 'AUDIT -fms-extensions' is not NAME or NAME=VALUE with NAME a C identifier; a define reaches clang as one -D argument and carries no other option.",
-        CppParser.parseHeader { HeaderFile = header; IncludePaths = []; Defines = ["AUDIT -fms-extensions"]; IncludeRoot = None
+        CppParser.parseHeader { HeaderFile = header; IncludePaths = []; SystemIncludePaths = []; Defines = ["AUDIT -fms-extensions"]; IncludeRoot = None
                                 MacroPrefixes = []; IncludeMacros = false; Verbose = false; CppMode = false } |> Result.map ignore)
 
 [<Theory>]

@@ -70,7 +70,7 @@ module DetectCppModeTests =
         Assert.False(CppParser.detectCppMode header)
         let options =
             { CppParser.defaultOptions header with
-                Defines = ["_GNU_SOURCE"]; IncludePaths = ["/usr/include"]; IncludeRoot = Some "/usr/include"
+                Defines = ["_GNU_SOURCE"]; IncludePaths = ["/usr/include"]; SystemIncludePaths = []; IncludeRoot = Some "/usr/include"
                 IncludeMacros = false }
         let declarations =
             match CppParser.parseHeader options with
@@ -197,7 +197,7 @@ module AnonymousEnumNamingTests =
         File.WriteAllText(path, "typedef enum { WINDOW_TOPLEVEL, WINDOW_POPUP } WindowType;\nvoid make(WindowType kind);\n")
         try
             let options : CppParser.HeaderParserOptions = {
-                HeaderFile = path; IncludePaths = []; Defines = []; IncludeRoot = None
+                HeaderFile = path; IncludePaths = []; SystemIncludePaths = []; Defines = []; IncludeRoot = None
                 IncludeMacros = false; MacroPrefixes = []; Verbose = false; CppMode = false }
             let declarations = match CppParser.parseHeader options with Ok ds -> ds | Error e -> failwith e
             Assert.Contains(declarations, fun d -> match d with CppParser.Declaration.Enum e -> e.Name = "WindowType" | _ -> false)
@@ -218,7 +218,7 @@ module NonNullIdentityTests =
         try
             File.WriteAllText(path, content)
             let options : CppParser.HeaderParserOptions = {
-                HeaderFile = path; IncludePaths = []; Defines = []; IncludeRoot = None
+                HeaderFile = path; IncludePaths = []; SystemIncludePaths = []; Defines = []; IncludeRoot = None
                 IncludeMacros = false; MacroPrefixes = []; Verbose = false; CppMode = cppMode }
             match CppParser.parseHeader options with
             | Ok declarations -> declarations

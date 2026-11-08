@@ -337,6 +337,7 @@ module PilotAnalyzer =
         (libraryName: string)
         (headerFiles: string list)
         (includePaths: string list)
+        (systemIncludePaths: string list)
         (defines: string list)
         (pkgConfig: string list)
         (outputMode: string)
@@ -382,6 +383,7 @@ module PilotAnalyzer =
               Headers = headerFiles
               XmlProtocols = []; Introspection = []
               IncludePaths = includePaths
+              SystemIncludePaths = systemIncludePaths
               Defines = defines
               MacroPrefixes = []
               PkgConfig = pkgConfig }

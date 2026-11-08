@@ -3,6 +3,8 @@ module Farscape.Tests.AttributeContractsTests
 open Xunit
 open Farscape.Core
 open TestHelpers
+open System.IO
+open System.Text.RegularExpressions
 
 // ═══════════════════════════════════════════════════════════════════
 // Classified attribute contracts (issue #174): may_alias moves no byte, which clang confirms by
@@ -21,7 +23,7 @@ let private trimmed (source: string) =
 let private glibcSocket () =
     let header, includes = glibcSocketHeader ()
     let options : CppParser.HeaderParserOptions =
-        { HeaderFile = header; IncludePaths = includes; Defines = []; Verbose = false
+        { HeaderFile = header; IncludePaths = includes; SystemIncludePaths = []; Defines = []; Verbose = false
           IncludeMacros = false; MacroPrefixes = []; IncludeRoot = Some "/usr/include"; CppMode = false }
     match CppParser.parseHeader options with
     | Ok declarations -> declarations
@@ -46,23 +48,47 @@ let private unattributed (s: CppParser.StructDecl) =
     | other -> failwithf "%s carries no clang measurement of its unattributed copy: %A" s.Name other
 
 let private parseFixture (relative: string) =
-    match CppParser.parseHeader { HeaderFile = fixturePath relative; IncludePaths = []; Defines = []; Verbose = false
+    match CppParser.parseHeader { HeaderFile = fixturePath relative; IncludePaths = []; SystemIncludePaths = []; Defines = []; Verbose = false
                                   IncludeMacros = false; MacroPrefixes = []; IncludeRoot = None; CppMode = false } with
     | Ok declarations -> declarations
     | Error reason -> failwithf "%s did not parse: %s" relative reason
+
+/// Inspect each declaration, not the rest of the header: older glibc has no such attribute.
+let private socketHasMayAlias (header: string) (name: string) =
+    let pattern = @"\bstruct\b(?<before>[^;{}]*?)\b" + Regex.Escape name + @"\b(?<after>[^;{}]*)\{[^}]*\}(?<suffix>[^;]*);"
+    let declaration = Regex.Match(header, pattern, RegexOptions.Singleline)
+    if not declaration.Success then failwithf "struct %s was not found in bits/socket.h" name
+    let attributes = declaration.Groups.["before"].Value + declaration.Groups.["after"].Value + declaration.Groups.["suffix"].Value
+    Regex.IsMatch(attributes, @"\b(?:__attribute_(?:struct_)?may_alias__|__may_alias__)\b")
+
+[<Fact>]
+let ``socket header alias detection is per declaration and supports glibc spellings`` () =
+    let header = "struct __attribute_struct_may_alias__ sockaddr { int x; }; struct sockaddr_storage { int x; };"
+    Assert.True(socketHasMayAlias header "sockaddr")
+    Assert.False(socketHasMayAlias header "sockaddr_storage")
+    Assert.True(socketHasMayAlias "struct sockaddr { int x; } __attribute_may_alias__;" "sockaddr")
+    Assert.True(socketHasMayAlias "struct __attribute__ ((__may_alias__)) sockaddr { int x; };" "sockaddr")
 
 [<Fact>]
 let ``glibc's may_alias socket addresses are measured and emitted at clang's layout with their aliasing fact`` () =
     let declarations = glibcSocket ()
     let sockaddr = recordIn declarations "sockaddr"
     let storage = recordIn declarations "sockaddr_storage"
+    let socketHeader =
+        ["/usr/include/bits/socket.h"; "/usr/include/x86_64-linux-gnu/bits/socket.h"]
+        |> List.tryFind File.Exists
+        |> Option.defaultWith (fun () -> failwith "glibc bits/socket.h was not found")
+        |> File.ReadAllText
+    let addressAlias = socketHasMayAlias socketHeader "sockaddr"
+    let storageAlias = socketHasMayAlias socketHeader "sockaddr_storage"
     for record in [sockaddr; storage] do
-        Assert.Equal<string list>(["MayAliasAttr"], record.Attributes |> List.map _.Kind)
+        let expected = if socketHasMayAlias socketHeader record.Name then ["MayAliasAttr"] else []
+        Assert.Equal<string list>(expected, record.Attributes |> List.map _.Kind)
     // Clang's two measurements: the record, and its copy without the attribute.
     Assert.Equal((16, 2, [0; 2]), measured sockaddr)
-    Assert.Equal((16, 2, [0; 2]), unattributed sockaddr)
+    if addressAlias then Assert.Equal((16, 2, [0; 2]), unattributed sockaddr)
     Assert.Equal((128, 8, [0; 2; 120]), measured storage)
-    Assert.Equal((128, 8, [0; 2; 120]), unattributed storage)
+    if storageAlias then Assert.Equal((128, 8, [0; 2; 120]), unattributed storage)
     // The two records and the typedefs their fields resolve through, from the real parse.
     let selected =
         declarations |> List.filter (function
@@ -72,25 +98,26 @@ let ``glibc's may_alias socket addresses are measured and emitted at clang's lay
     let output = FidelityCodeGenerator.generate selected "Test" "test" Types.LP64 Map.empty |> trimmed
     let address = recordModule output "sockaddr"
     Assert.Contains("/// C struct `sockaddr`: layout measured (clang record layout dump).", output)
-    Assert.Contains($"/// {mayAliasContract}", output)
     Assert.Contains("let Size = 16\n", address)
     Assert.Contains("let Alignment = 2\n", address)
     Assert.Contains("let sa_familyOffset = 0\n", address)
     Assert.Contains("let sa_dataOffset = 2\n", address)
     Assert.Contains("{ Name = \"sa_data\"; Offset = 2; Repr = Repr.I8; Count = 14;", address)
-    Assert.Contains($"Documentation = Some \"{mayAliasContract}\"", address)
+    if addressAlias then Assert.Contains($"Documentation = Some \"{mayAliasContract}\"", address)
+    else Assert.DoesNotContain(mayAliasContract, address)
     // The aliasing fact is a typed field of the descriptor (BAREWire #12), not only prose.
-    Assert.Contains("MayAlias = true\n", address)
+    Assert.Contains((if addressAlias then "MayAlias = true\n" else "MayAlias = false\n"), address)
     Assert.Contains("FlexibleArray = None\n", address)
     let storageModule = recordModule output "sockaddr_storage"
-    Assert.Contains("MayAlias = true\n", storageModule)
+    Assert.Contains((if storageAlias then "MayAlias = true\n" else "MayAlias = false\n"), storageModule)
     Assert.Contains("/// C struct `sockaddr_storage`: layout measured (clang record layout dump).", output)
     Assert.Contains("let Size = 128\n", storageModule)
     Assert.Contains("let Alignment = 8\n", storageModule)
     Assert.Contains("let ss_familyOffset = 0\n", storageModule)
     Assert.Contains("let __ss_paddingOffset = 2\n", storageModule)
     Assert.Contains("let __ss_alignOffset = 120\n", storageModule)
-    Assert.Contains($"Documentation = Some \"{mayAliasContract}\"", storageModule)
+    if storageAlias then Assert.Contains($"Documentation = Some \"{mayAliasContract}\"", storageModule)
+    else Assert.DoesNotContain(mayAliasContract, storageModule)
     // Clang's own sizeof, _Alignof and offsetof: the emitted numbers, and the same layout for
     // glibc's members declared again without __attribute_struct_may_alias__.
     clangConfirms (fixturePath "attribute-contracts/socket-twins.h") [

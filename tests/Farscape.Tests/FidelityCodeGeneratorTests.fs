@@ -565,7 +565,7 @@ struct ValueFields {
 };
         """)
         let options : CppParser.HeaderParserOptions =
-            { HeaderFile = path; IncludePaths = []; Defines = []; Verbose = false; IncludeMacros = false
+            { HeaderFile = path; IncludePaths = []; SystemIncludePaths = []; Defines = []; Verbose = false; IncludeMacros = false
               MacroPrefixes = []; IncludeRoot = None; CppMode = false }
         let declarations = CppParser.parseHeader options |> function Ok declarations -> declarations | Error error -> failwith error
         let context = { FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty with ValueStructs = Set.singleton "ValueFields" }
@@ -1388,7 +1388,7 @@ let private writableProject shape =
 [<Fact>]
 let ``required ABI layout probe preserves success and refuses extraction error`` () =
     Assert.Equal(7, BindingGenerator.requireLayoutProbe (Ok 7))
-    let error = Assert.ThrowsAny<System.Exception>(fun () -> BindingGenerator.requireLayoutProbe (Error "probe failed") |> ignore)
+    let error = Assert.ThrowsAny<System.Exception>(fun () -> BindingGenerator.requireLayoutProbe (Error (Diagnostics.uncoded "probe failed")) |> ignore)
     Assert.Equal("ABI-critical struct layout extraction failed: probe failed", error.Message)
 
 [<Theory>]

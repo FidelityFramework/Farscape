@@ -59,14 +59,14 @@ let showConfiguration (options: GenerationOptions) =
 
     printLine ""
 
-let runGeneration (options: GenerationOptions) : Result<GenerationResult, string> =
+let runGeneration (options: GenerationOptions) : Result<GenerationResult, Diagnostics.Refusal> =
     // Show generating message
     printHeader "Generating Clef bindings..."
     printLine ""
 
-    match BindingGenerator.generateBindings options with
-    | Error errorMsg ->
-        Error errorMsg
+    match BindingGenerator.generateBindingsDiagnosed options with
+    | Error refusal ->
+        Error refusal
     | Ok result ->
         printLine ""
         printColorLine "Generation Complete" ConsoleColor.Green
@@ -127,8 +127,13 @@ let generateCommand =
         showConfiguration options
 
         match runGeneration options with
-        | Error errorMsg ->
-            showError errorMsg
+        | Error refusal ->
+            showError refusal.Text
+            // Each FS91xx refusal's clang location (#186), as project generation prints it.
+            for d in refusal.Diagnostics do
+                for line in Diagnostics.renderLocation d do
+                    printColorLine $"  {line}" ConsoleColor.Red
+            if not refusal.Diagnostics.IsEmpty then printLine ""
             1
         | Ok _ ->
             showNextSteps options
@@ -140,16 +145,18 @@ let generateCommand =
         setAction action
     }
 
-/// Resolve include paths and defines from pkg-config (`PkgConfig.resolve`, #178): the module
-/// name is one argument, and output holding anything but -I and -D words is refused.
-let resolvePkgConfig (pkgName: string) (verbose: bool) : Result<string list * string list, string> =
+/// Resolve include paths, system include paths and defines from pkg-config
+/// (`PkgConfig.resolve`, #178, #179): the module name is one argument, and output holding
+/// anything but -I, -isystem and -D words is refused.
+let resolvePkgConfig (pkgName: string) (verbose: bool) : Result<PkgConfig.Cflags, string> =
     let resolved = PkgConfig.resolve pkgName
     if verbose then
         match resolved with
-        | Ok (includes, defines) ->
+        | Ok cflags ->
             printLine $"pkg-config --cflags {pkgName}:"
-            for path in includes do printLine $"  -I{path}"
-            for define in defines do printLine $"  -D{define}"
+            for path in cflags.IncludePaths do printLine $"  -I{path}"
+            for path in cflags.SystemIncludePaths do printLine $"  -isystem {path}"
+            for define in cflags.Defines do printLine $"  -D{define}"
         | Error _ -> ()
     resolved
 
@@ -182,13 +189,15 @@ let pilotAnalyzeCommand =
 
         // Resolve pkg-config flags and merge with explicit CLI flags
         let mutable pkgIncludes = []
+        let mutable pkgSystemIncludes = []
         let mutable pkgDefines = []
         let mutable pkgError = None
         for pkg in pkgConfig do
             match resolvePkgConfig pkg verbose with
-            | Ok (incl, defs) ->
-                pkgIncludes <- pkgIncludes @ incl
-                pkgDefines <- pkgDefines @ defs
+            | Ok cflags ->
+                pkgIncludes <- pkgIncludes @ cflags.IncludePaths
+                pkgSystemIncludes <- pkgSystemIncludes @ cflags.SystemIncludePaths
+                pkgDefines <- pkgDefines @ cflags.Defines
             | Error e ->
                 pkgError <- Some e
 
@@ -199,12 +208,13 @@ let pilotAnalyzeCommand =
         | None ->
 
         let includePaths = (includes |> Array.toList) @ pkgIncludes |> List.distinct
+        let systemIncludePaths = pkgSystemIncludes |> List.distinct
         let definesList = (defines |> Array.toList) @ pkgDefines |> List.distinct
 
         // Derive include root from pkg-config paths for library boundary scoping
         let deriveIncludeRoot (headerPath: string) =
             let fullPath = Path.GetFullPath headerPath
-            includePaths
+            includePaths @ systemIncludePaths
             |> List.tryFind (fun ip ->
                 let fullIp = Path.GetFullPath ip
                 fullPath.StartsWith fullIp)
@@ -217,7 +227,11 @@ let pilotAnalyzeCommand =
             | Some _ -> ()
             | None ->
                 let includeRoot = deriveIncludeRoot headerPath
-                match CppParser.parseWithIncludeRoot headerPath includePaths definesList includeRoot [] verbose with
+                let options =
+                    { CppParser.defaultOptions headerPath with
+                        IncludePaths = includePaths; SystemIncludePaths = systemIncludePaths; Defines = definesList
+                        IncludeRoot = includeRoot; Verbose = verbose }
+                match CppParser.parseHeader options with
                 | Error e -> parseError <- Some (headerPath, e)
                 | Ok decls -> allDeclarations <- allDeclarations @ decls
 
@@ -249,7 +263,7 @@ let pilotAnalyzeCommand =
 
         let headerFiles = headers |> Array.toList
         let project =
-            PilotAnalyzer.toPilotProject library headerFiles includePaths definesList (pkgConfig |> Array.toList) "fidelity" outputDir result
+            PilotAnalyzer.toPilotProject library headerFiles includePaths systemIncludePaths definesList (pkgConfig |> Array.toList) "fidelity" outputDir result
 
         let tomlPath = Path.Combine(outputDir, $"{library}.pilot.toml")
 
@@ -289,6 +303,7 @@ let pilotInitCommand =
                 Headers = [if String.IsNullOrEmpty header then $"/usr/include/{library}.h" else header]
                 XmlProtocols = []; Introspection = []
                 IncludePaths = []
+                SystemIncludePaths = []
                 Defines = []
                 MacroPrefixes = []
                 PkgConfig = []

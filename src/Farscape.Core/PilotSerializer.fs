@@ -35,6 +35,9 @@ module PilotSerializer =
             if lib.IncludePaths.IsEmpty then table
             else TomlTable.add "include_paths" (TomlValue.Array (lib.IncludePaths |> List.map TomlValue.String)) table
         let table =
+            if lib.SystemIncludePaths.IsEmpty then table
+            else TomlTable.add "system_include_paths" (TomlValue.Array (lib.SystemIncludePaths |> List.map TomlValue.String)) table
+        let table =
             if lib.Defines.IsEmpty then table
             else TomlTable.add "defines" (TomlValue.Array (lib.Defines |> List.map TomlValue.String)) table
         let table =
@@ -399,6 +402,7 @@ module PilotSerializer =
                      XmlProtocols = optionalStringArray "xml_protocols" table
                      Introspection = optionalStringArray "introspection" table
                      IncludePaths = optionalStringArray "include_paths" table
+                     SystemIncludePaths = optionalStringArray "system_include_paths" table
                      Defines = optionalStringArray "defines" table
                      MacroPrefixes = optionalStringArray "macro_prefixes" table
                      PkgConfig = optionalStringArray "pkg_config" table }

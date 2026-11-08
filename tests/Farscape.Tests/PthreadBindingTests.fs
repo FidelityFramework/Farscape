@@ -125,7 +125,7 @@ let ``Linux x64 pthread storage comes from actual header unions and measured lay
        && System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture = System.Runtime.InteropServices.Architecture.X64
        && File.Exists "/usr/include/pthread.h" then
         let options : CppParser.HeaderParserOptions = {
-            HeaderFile = "/usr/include/pthread.h"; IncludePaths = ["/usr/include"]; Defines = ["_GNU_SOURCE"]
+            HeaderFile = "/usr/include/pthread.h"; IncludePaths = ["/usr/include"]; SystemIncludePaths = []; Defines = ["_GNU_SOURCE"]
             IncludeRoot = Some "/usr/include"; IncludeMacros = false; MacroPrefixes = []; Verbose = false; CppMode = false }
         let declarations =
             match CppParser.parseHeader options with Ok ds -> ds | Error e -> failwith e

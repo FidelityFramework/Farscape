@@ -188,7 +188,7 @@ let prepare work platform metadata =
     File.WriteAllText(pilotPath, pilot)
     let project = PilotSerializer.loadFromFile pilotPath |> need
     let options: CppParser.HeaderParserOptions =
-        { HeaderFile = header; IncludePaths = [work]; Defines = []; Verbose = false
+        { HeaderFile = header; IncludePaths = [work]; SystemIncludePaths = []; Defines = []; Verbose = false
           IncludeMacros = false; MacroPrefixes = []; IncludeRoot = Some work; CppMode = false }
     let declarations = CppParser.parseHeader options |> need
     require (declarations |> List.exists (function CppParser.Declaration.Function function' -> function'.Name = "abs" | _ -> false)) "clang did not parse the fixture scalar entry"

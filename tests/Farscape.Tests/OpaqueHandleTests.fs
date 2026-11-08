@@ -277,7 +277,7 @@ Token create_required(void) __attribute__((returns_nonnull));
 void qualifiers(Token _Nullable optional, Token _Nonnull required);
             """)
             let options : CppParser.HeaderParserOptions =
-                { HeaderFile = path; IncludePaths = []; Defines = []; Verbose = false; IncludeMacros = false
+                { HeaderFile = path; IncludePaths = []; SystemIncludePaths = []; Defines = []; Verbose = false; IncludeMacros = false
                   MacroPrefixes = []; IncludeRoot = None; CppMode = false }
             let declarations = CppParser.parseHeader options |> function Ok declarations -> declarations | Error error -> failwith error
             let attrs name =
@@ -310,7 +310,7 @@ void all_pointer_slots(Token token, int count, void *const destination, void (*n
 void scalar_only(int count) __attribute__((nonnull));
         """)
         let options : CppParser.HeaderParserOptions =
-          { HeaderFile = path; IncludePaths = []; Defines = []; Verbose = false; IncludeMacros = false
+          { HeaderFile = path; IncludePaths = []; SystemIncludePaths = []; Defines = []; Verbose = false; IncludeMacros = false
             MacroPrefixes = []; IncludeRoot = None; CppMode = false }
         let declarations = CppParser.parseHeader options |> function Ok d -> d | Error e -> failwith e
         let positions name =
@@ -347,7 +347,7 @@ void register_transform(Transform _Nonnull transform);
 void register_required(RequiredTransform _Nonnull transform);
             """)
             let options : CppParser.HeaderParserOptions =
-                { HeaderFile = path; IncludePaths = []; Defines = []; Verbose = false; IncludeMacros = false
+                { HeaderFile = path; IncludePaths = []; SystemIncludePaths = []; Defines = []; Verbose = false; IncludeMacros = false
                   MacroPrefixes = []; IncludeRoot = None; CppMode = false }
             let declarations = CppParser.parseHeader options |> function Ok declarations -> declarations | Error error -> failwith error
             let source = FidelityCodeGenerator.generate declarations "Test.Callback" "test" Types.LP64 Map.empty
@@ -425,6 +425,7 @@ module LiveHipTests =
             let options : CppParser.HeaderParserOptions = {
                 HeaderFile = "/opt/rocm/include/hip/hip_runtime_api.h"
                 IncludePaths = ["/opt/rocm/include"]
+                SystemIncludePaths = []
                 Defines = ["__HIP_PLATFORM_AMD__"]
                 Verbose = false
                 IncludeMacros = false

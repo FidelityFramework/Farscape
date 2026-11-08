@@ -1,0 +1,6 @@
+# A module whose cflags carry a system include path (#179). pkgconf prints it as two words,
+# `-isystem <dir>`, escaping the space in the directory name with a backslash.
+Name: fx-isystem
+Description: Farscape fixture, cflags carrying -isystem
+Version: 1.0
+Cflags: -isystem "${pcfiledir}/fx-isystem/sys dir" -I${pcfiledir}/fx-isystem/inc -DFX_SYS=1

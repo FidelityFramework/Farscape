@@ -41,6 +41,11 @@ module PilotTypes =
         Introspection: string list
         /// Additional include paths for clang
         IncludePaths: string list
+        /// System include paths (#179), each passed to clang as `-isystem` followed by the path
+        /// as its own argument: clang searches them after the include paths and treats the
+        /// headers it finds there as system headers, which changes its warnings and how some
+        /// headers parse, so a `pkg-config` `-isystem` is carried here, never rewritten as `-I`.
+        SystemIncludePaths: string list
         /// Preprocessor defines
         Defines: string list
         /// Macro name prefixes to include (e.g. ["WL_"; "WAYLAND_"]).

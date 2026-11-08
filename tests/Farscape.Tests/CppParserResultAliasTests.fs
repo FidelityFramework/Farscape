@@ -11,7 +11,7 @@ open TestHelpers
 
 let private aliasesOf (relative: string) =
     match CppParser.parseHeaderFull {
-            HeaderFile = fixturePath relative; IncludePaths = []; Defines = []; IncludeRoot = None
+            HeaderFile = fixturePath relative; IncludePaths = []; SystemIncludePaths = []; Defines = []; IncludeRoot = None
             MacroPrefixes = []; IncludeMacros = false; Verbose = false; CppMode = false } with
     | Ok result -> result.Aliases
     | Error error -> failwithf "Fixture %s did not parse: %s" relative error

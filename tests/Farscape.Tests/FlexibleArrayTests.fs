@@ -18,7 +18,7 @@ let private trimmed (source: string) =
 let private glibcSocket () =
     let header, includes = glibcSocketHeader ()
     let options : CppParser.HeaderParserOptions =
-        { HeaderFile = header; IncludePaths = includes; Defines = []; Verbose = false
+        { HeaderFile = header; IncludePaths = includes; SystemIncludePaths = []; Defines = []; Verbose = false
           IncludeMacros = false; MacroPrefixes = []; IncludeRoot = Some "/usr/include"; CppMode = false }
     match CppParser.parseHeader options with
     | Ok declarations -> declarations

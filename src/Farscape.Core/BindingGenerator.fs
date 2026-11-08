@@ -7,10 +7,13 @@ open PilotTypes
 
 module BindingGenerator =
 
-    /// A requested ABI layout probe cannot be replaced by declared layouts.
-    let requireLayoutProbe = function
+    /// A requested ABI layout probe cannot be replaced by declared layouts. Its failure is
+    /// raised as a refusal keeping the probe's structured diagnostics (#186), its text after
+    /// "ABI-critical struct layout extraction failed: ".
+    let requireLayoutProbe (probe: Result<'T, Diagnostics.Refusal>) : 'T =
+        match probe with
         | Ok layouts -> layouts
-        | Error error -> failwithf "ABI-critical struct layout extraction failed: %s" error
+        | Error refusal -> Diagnostics.raiseRefusal (Diagnostics.prefixed "ABI-critical struct layout extraction failed: " refusal)
 
     /// The declared shape of a record: its kind, each field's name, type, extent and bit
     /// width, and the attributes clang attached with their serialized arguments. Two headers
@@ -768,7 +771,7 @@ module BindingGenerator =
 
     /// Generate Clef bindings from a C/C++ header file.
     /// Returns Result to enforce proper error handling - fails fast on parse errors.
-    let private generateBindingsCore (options: GenerationOptions) : Result<GenerationResult, string> =
+    let private generateBindingsCore (options: GenerationOptions) : Result<GenerationResult, Diagnostics.Refusal> =
         logVerbose $"Starting binding generation for {options.HeaderFile}" options.Verbose
         logVerbose $"Target library: {options.LibraryName}" options.Verbose
         logVerbose $"Output directory: {options.OutputDirectory}" options.Verbose
@@ -776,9 +779,18 @@ module BindingGenerator =
 
         logVerbose "Parsing header file..." options.Verbose
 
-        match CppParser.parseWithDefines options.HeaderFile.FullName options.IncludePaths options.Defines options.Verbose with
-        | Error parseError ->
-            Error $"Failed to parse header: {parseError}"
+        let parseOptions =
+            { CppParser.defaultOptions options.HeaderFile.FullName with
+                IncludePaths = options.IncludePaths; Defines = options.Defines; Verbose = options.Verbose }
+        let parsed =
+            CppParser.parseHeaderFullDiagnosed parseOptions
+            |> Result.bind (fun result ->
+                match result.Declarations @ (result.Macros |> List.map CppParser.Declaration.Macro) with
+                | [] -> Error (Diagnostics.uncoded $"Parse succeeded but no declarations found in {options.HeaderFile.Name}.")
+                | declarations -> Ok declarations)
+        match parsed with
+        | Error refusal ->
+            Error (Diagnostics.prefixed "Failed to parse header: " refusal)
         | Ok declarations ->
             logVerbose $"Successfully parsed {declarations.Length} declarations" options.Verbose
 
@@ -810,9 +822,19 @@ module BindingGenerator =
                 Advisories = []
             }
 
-    let generateBindings options : Result<GenerationResult, string> =
+    /// Generate bindings from one header (`farscape generate`). A failure carries the structured
+    /// diagnostics of its FS91xx refusals (#186), whether the parse refuses (a malformed define,
+    /// FS9124) or generation raises it (an unmeasured enum, FS9103; a by-value type resolving
+    /// nowhere, FS9115), with the exact text `generateBindings` reports as its `Text`.
+    let generateBindingsDiagnosed (options: GenerationOptions) : Result<GenerationResult, Diagnostics.Refusal> =
         try generateBindingsCore options
-        with ex -> Error $"Binding generation failed: {ex.Message}"
+        with
+        | :? Diagnostics.RefusalException as refused -> Error (Diagnostics.prefixed "Binding generation failed: " refused.Refusal)
+        | ex -> Error (Diagnostics.uncoded $"Binding generation failed: {ex.Message}")
+
+    /// `generateBindingsDiagnosed`, reporting a failure as its text.
+    let generateBindings options : Result<GenerationResult, string> =
+        generateBindingsDiagnosed options |> Result.mapError _.Text
 
     /// Locate a platform dependency when a pilot lives in a nested experimental tree.
     let rec private findProjectAbove directory fileName =
@@ -1030,7 +1052,7 @@ module BindingGenerator =
                     logVerbose $"Parsing header: {headerPath}" verbose
                     let includeRoot =
                         let fullPath = Path.GetFullPath headerPath
-                        project.Library.IncludePaths
+                        project.Library.IncludePaths @ project.Library.SystemIncludePaths
                         |> List.tryFind (fun ip ->
                             let fullIp = Path.GetFullPath ip
                             fullPath.StartsWith fullIp)
@@ -1039,12 +1061,14 @@ module BindingGenerator =
                         // C++ cleanup classes, which must not turn its public unions into C++ PODs.
                         CppParser.parseHeaderUnitDiagnosed {
                             HeaderFile = headerPath; IncludePaths = project.Library.IncludePaths
+                            SystemIncludePaths = project.Library.SystemIncludePaths
                             Defines = project.Library.Defines; IncludeRoot = includeRoot
                             MacroPrefixes = project.Library.MacroPrefixes; IncludeMacros = true
                             Verbose = verbose; CppMode = false }
                     else
                         CppParser.parseHeaderUnitDiagnosed {
                             HeaderFile = headerPath; IncludePaths = project.Library.IncludePaths
+                            SystemIncludePaths = project.Library.SystemIncludePaths
                             Defines = project.Library.Defines; IncludeRoot = includeRoot
                             MacroPrefixes = project.Library.MacroPrefixes; IncludeMacros = true
                             Verbose = verbose; CppMode = CppParser.detectCppMode headerPath })
@@ -1176,7 +1200,7 @@ module BindingGenerator =
                         units
                         |> List.map (fun (headerFile, names) ->
                             let measured =
-                                CppParser.extractStructLayouts headerFile project.Library.IncludePaths project.Library.Defines names verbose
+                                CppParser.extractStructLayoutsDiagnosed headerFile project.Library.IncludePaths project.Library.SystemIncludePaths project.Library.Defines names verbose
                                 |> requireLayoutProbe
                             logVerbose $"Extracted layouts for {measured.Count} ABI-critical struct(s) in {headerFile}" verbose
                             headerFile, measured)
@@ -1449,6 +1473,7 @@ module BindingGenerator =
                                 let errnoOptions : CppParser.HeaderParserOptions = {
                                     HeaderFile = "/usr/include/errno.h"
                                     IncludePaths = project.Library.IncludePaths
+                                    SystemIncludePaths = project.Library.SystemIncludePaths
                                     Defines = project.Library.Defines
                                     Verbose = false
                                     IncludeMacros = true

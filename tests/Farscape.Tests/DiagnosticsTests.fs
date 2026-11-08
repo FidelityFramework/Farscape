@@ -139,7 +139,7 @@ let private diagnosedPilotWith (headers: string list) (options: string list) (fu
 
 let private parsedFunction (header: string) (name: string) : CppParser.FunctionDecl =
     let options : CppParser.HeaderParserOptions = {
-        HeaderFile = header; IncludePaths = []; Defines = []; IncludeRoot = None
+        HeaderFile = header; IncludePaths = []; SystemIncludePaths = []; Defines = []; IncludeRoot = None
         IncludeMacros = false; MacroPrefixes = []; Verbose = false; CppMode = false }
     match CppParser.parseHeader options with
     | Ok declarations -> declarations |> List.pick (function CppParser.Declaration.Function f when f.Name = name -> Some f | _ -> None)
@@ -177,7 +177,7 @@ let ``the generated binding and its descriptor name each unnamed parameter once,
 let ``a header name equal to an unnamed sibling's positional name is refused`` () =
     let header = fixturePath "diagnostics/parameter-clash.h"
     let options : CppParser.HeaderParserOptions = {
-        HeaderFile = header; IncludePaths = []; Defines = []; IncludeRoot = None
+        HeaderFile = header; IncludePaths = []; SystemIncludePaths = []; Defines = []; IncludeRoot = None
         IncludeMacros = false; MacroPrefixes = []; Verbose = false; CppMode = false }
     match CppParser.parseHeaderFullDiagnosed options with
     | Ok _ -> failwith "a colliding parameter name was admitted"
@@ -326,3 +326,134 @@ let ``a namespace listing signals without introspection files is refused at the 
     Assert.Equal("[[namespace]] signals require [library] introspection files", d.Message)
     Assert.Equal(Diagnostics.Located.Unknown "a namespace's signals and the library's introspection files are pilot input, not a header declaration", d.Source)
     Assert.Equal(Some { Diagnostics.PilotLocation.PilotFile = project; Diagnostics.PilotLocation.Key = "library.introspection"; Diagnostics.PilotLocation.Parameter = None }, d.Pilot)
+
+// ═══════════════════════════════════════════════════════════════════
+// GIR attribution end to end (#185): a GIR-named C type no pilot unit declares (FS9108), or two
+// units declare differently (FS9109), is caused by the pilot's `[library] introspection` files.
+// Real clang over the signal-provenance fixtures, through `generateFromProjectDiagnosed`.
+// ═══════════════════════════════════════════════════════════════════
+
+/// A signal pilot over the signal-provenance `headers` selecting `Probe::<signal>`, generated
+/// through `generateFromProjectDiagnosed`: the written pilot's path, the header paths, the
+/// structured refusal and whether the output directory stayed empty.
+let private diagnosedSignalPilot (headers: string list) (signal: string) =
+    let paths = headers |> List.map (fun h -> fixturePath ("signal-provenance/" + h))
+    let mutable captured = None
+    withPilotGenerating (fun project ->
+            let result = BindingGenerator.generateFromProjectDiagnosed project false false Types.LP64
+            captured <- Some (Path.GetFullPath project, result)
+            result |> refusalText)
+        paths
+        [ "introspection = [\"" + fixturePath "signal-provenance/probe.gir" + "\"]" ]
+        [ "c_header_mode = true"; "descriptor_only_dependencies = true" ] []
+        [ "signals = [\"Probe::" + signal + "\"]" ]
+        [ "[annotations.nonnull]"; "g_signal_connect_data = [2, 4]" ]
+        (fun _ output -> Assert.Empty(Directory.GetFiles(output, "*", SearchOption.AllDirectories)))
+    match captured with
+    | Some (project, Error refusal) -> project, paths, refusal
+    | Some (_, Ok _) -> failwith "the pilot generated; a refusal was expected"
+    | None -> failwith "the pilot was not generated"
+
+[<Fact>]
+let ``a GIR-named type no pilot unit declares is refused at the pilot's introspection key`` () =
+    // FS9108
+    let project, _, refusal = diagnosedSignalPilot ["gobject.h"; "count16.h"] "missing-changed"
+    let d = only refusal
+    let message = "GObject signal contract: C type 'fx_missing_t' is declared by no pilot unit; a GIR spelling cannot supply its representation."
+    Assert.Equal(Diagnostics.GirTypeUndeclared, d.Code)
+    Assert.Equal(message, d.Message)
+    Assert.Equal(Diagnostics.Located.Unknown "no pilot header declares C type 'fx_missing_t'; the pilot's introspection data names it", d.Source)
+    Assert.Equal<Diagnostics.SourceLocation list>([], d.Related)
+    Assert.Equal(Some { Diagnostics.PilotLocation.PilotFile = project; Diagnostics.PilotLocation.Key = "library.introspection"; Diagnostics.PilotLocation.Parameter = None }, d.Pilot)
+    Assert.Equal("Binding generation failed: FS9108: " + message, refusal.Text)
+    Assert.Equal<string list>(
+        [ "FS9108 source unknown: no pilot header declares C type 'fx_missing_t'; the pilot's introspection data names it"
+          $"FS9108 pilot key library.introspection in {project}" ],
+        Diagnostics.renderLocation d)
+
+[<Fact>]
+let ``a GIR-named type two pilot units declare differently is refused at the pilot's introspection key`` () =
+    // FS9109
+    let project, paths, refusal = diagnosedSignalPilot ["gobject.h"; "count16.h"; "count32.h"] "count-changed"
+    let d = only refusal
+    let unlocated = "Farscape's parse keeps no clang location for the declarations a GIR-named type resolves through"
+    let message = $"GObject signal contract: C type 'fx_count_t' is declared differently by '{paths.[1]}' (unsigned 16-bit), '{paths.[2]}' (unsigned 32-bit); one declaration per pilot is required."
+    Assert.Equal(Diagnostics.GirTypeDivergent, d.Code)
+    Assert.Equal(message, d.Message)
+    Assert.Equal(Diagnostics.inFile paths.[1] unlocated, d.Source)
+    Assert.Equal<Diagnostics.SourceLocation list>([ { Path = paths.[2]; Position = Diagnostics.Located.Unknown unlocated } ], d.Related)
+    Assert.Equal(Some { Diagnostics.PilotLocation.PilotFile = project; Diagnostics.PilotLocation.Key = "library.introspection"; Diagnostics.PilotLocation.Parameter = None }, d.Pilot)
+    Assert.Equal("Binding generation failed: FS9109: " + message, refusal.Text)
+    Assert.Equal<string list>(
+        [ $"FS9109 declared in {paths.[1]} ({unlocated})"
+          $"FS9109 pilot key library.introspection in {project}" ],
+        Diagnostics.renderLocation d)
+
+// ═══════════════════════════════════════════════════════════════════
+// Structured refusals below the pilot project (#186): single-header generation (`farscape
+// generate`) and the layout probe keep each FS91xx refusal's record, with the same text.
+// ═══════════════════════════════════════════════════════════════════
+
+let private singleHeader (header: string) (defines: string list) (output: string) : BindingGenerator.GenerationOptions =
+    { HeaderFile = FileInfo header; LibraryName = "fx"; OutputDirectory = output; Namespace = "Fx.Native"
+      IncludePaths = []; Defines = defines; Verbose = false; GenerateWrappers = false; DataModel = Types.LP64 }
+
+/// Generate one header through `generateBindingsDiagnosed` in a fresh output directory, return
+/// the structured refusal after checking `generateBindings` reports exactly its text and that
+/// nothing was written.
+let private singleHeaderRefusal (header: string) (defines: string list) =
+    let output = Path.Combine(Path.GetTempPath(), "farscape-single-header-" + System.Guid.NewGuid().ToString("N"))
+    try
+        let refusal =
+            match BindingGenerator.generateBindingsDiagnosed (singleHeader header defines output) with
+            | Ok _ -> failwith "the header generated; a refusal was expected"
+            | Error refusal -> refusal
+        Assert.Equal(Error refusal.Text, BindingGenerator.generateBindings (singleHeader header defines output) |> Result.map ignore)
+        if Directory.Exists output then Assert.Empty(Directory.EnumerateFileSystemEntries output)
+        refusal
+    finally
+        if Directory.Exists output then Directory.Delete(output, true)
+
+[<Fact>]
+let ``single-header generation keeps a generation refusal's record and clang location`` () =
+    // FS9103, real clang, raised inside generation: the enum's location is clang's.
+    let header = fixturePath "enum-representation/unmeasured.h"
+    let refusal = singleHeaderRefusal header []
+    let d = only refusal
+    let message = "enum 'fx_opaque' has no clang measurement of its representation in its declaring unit; its width cannot be inferred."
+    Assert.Equal(Diagnostics.EnumUnmeasured, d.Code)
+    Assert.Equal(message, d.Message)
+    Assert.Equal(
+        Diagnostics.Located.Known { Path = header; Position = Diagnostics.Located.Known (positionOf header "enum fx_opaque;" "fx_opaque") },
+        d.Source)
+    Assert.Equal(None, d.Pilot)
+    Assert.Equal("Binding generation failed: FS9103: " + message, refusal.Text)
+
+[<Fact>]
+let ``single-header generation keeps a parse refusal's record`` () =
+    // FS9124: a malformed command-line define, refused before clang runs.
+    let refusal = singleHeaderRefusal (fixturePath "by-value/record.h") ["FX X"]
+    let d = only refusal
+    let message = "define 'FX X' is not NAME or NAME=VALUE with NAME a C identifier; a define reaches clang as one -D argument and carries no other option."
+    Assert.Equal(Diagnostics.DefineMalformed, d.Code)
+    Assert.Equal(message, d.Message)
+    Assert.Equal(Diagnostics.Located.Unknown "a define is pilot, command-line or pkg-config input, not a header declaration", d.Source)
+    Assert.Equal("Failed to parse header: FS9124: " + message, refusal.Text)
+
+[<Fact>]
+let ``the layout probe keeps its refusal's record`` () =
+    // FS9124 from extractStructLayoutsDiagnosed; the text-only surface reports the same text.
+    let header = fixturePath "by-value/record.h"
+    let message = "define 'FX X' is not NAME or NAME=VALUE with NAME a C identifier; a define reaches clang as one -D argument and carries no other option."
+    match CppParser.extractStructLayoutsDiagnosed header [] [] ["FX X"] ["fx_vec_t"] false with
+    | Ok _ -> failwith "a malformed define was passed to the layout probe"
+    | Error refusal ->
+        let d = only refusal
+        Assert.Equal(Diagnostics.DefineMalformed, d.Code)
+        Assert.Equal(message, d.Message)
+        Assert.Equal("FS9124: " + message, refusal.Text)
+        Assert.Equal(Error refusal.Text, CppParser.extractStructLayouts header [] ["FX X"] ["fx_vec_t"] false |> Result.map ignore)
+        // A required probe raises the refusal with its record; its text is the probe's failure.
+        let raised = Assert.Throws<Diagnostics.RefusalException>(fun () -> BindingGenerator.requireLayoutProbe (Error refusal) |> ignore)
+        Assert.Equal<Diagnostics.Diagnostic list>([ d ], raised.Refusal.Diagnostics)
+        Assert.Equal("ABI-critical struct layout extraction failed: FS9124: " + message, raised.Message)

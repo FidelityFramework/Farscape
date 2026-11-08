@@ -97,7 +97,7 @@ let ``XML-only whole project validates complete protocol before changing output`
     File.WriteAllText(xml, "<protocol name=\"test\"><interface name=\"wl_callback\" version=\"1\"><request name=\"noop\"/><request name=\"spawn\"><arg name=\"id\" type=\"new_id\" interface=\"wl_callback\"/>"+extra+"</request><event name=\"done\"><arg name=\"callback_data\" type=\"uint\"/></event></interface></protocol>")
     let output = Path.Combine(directory, "out")
     let project: PilotTypes.PilotProject =
-      { Library = { Name="wayland-client"; Headers=[header]; XmlProtocols=[xml]; Introspection=[]; IncludePaths=[directory]; Defines=[]; MacroPrefixes=[]; PkgConfig=[] }
+      { Library = { Name="wayland-client"; Headers=[header]; XmlProtocols=[xml]; Introspection=[]; IncludePaths=[directory]; SystemIncludePaths=[]; Defines=[]; MacroPrefixes=[]; PkgConfig=[] }
         Output = {Mode="fidelity"; Directory=output}
         Namespaces = [{Name="Fidelity.Wayland.Protocol"; Description="Whole XML project"; Library="wayland-client"; Prefixes=[]; Functions=[]; XmlInterfaces=["wl_callback"]; Signals=[]}]
         ErrorConventions=(if shape = "constructor-string-errno" then Some {Default=PilotTypes.Errno; Overrides=Map.empty} else None)
@@ -152,7 +152,7 @@ let ``each typed protocol refusal carries its code, its location and the typed_p
     let output = Path.Combine(directory, "out")
     let critical = if shape = "unmeasured" then ["struct wl_message"; "struct wl_interface"] else ["union wl_argument"; "struct wl_message"; "struct wl_interface"]
     let project: PilotTypes.PilotProject =
-      { Library = { Name="wayland-client"; Headers=[header]; XmlProtocols=[xml]; Introspection=[]; IncludePaths=[directory]; Defines=[]; MacroPrefixes=[]; PkgConfig=[] }
+      { Library = { Name="wayland-client"; Headers=[header]; XmlProtocols=[xml]; Introspection=[]; IncludePaths=[directory]; SystemIncludePaths=[]; Defines=[]; MacroPrefixes=[]; PkgConfig=[] }
         Output = {Mode="fidelity"; Directory=output}
         Namespaces = [{Name="Fidelity.Wayland.Protocol"; Description="Whole XML project"; Library="wayland-client"; Prefixes=[]; Functions=[]; XmlInterfaces=["wl_callback"]; Signals=[]}]
         ErrorConventions=None; Callbacks=None; Nonnull=None; ProtocolConfig=None; Layer3=None; CppConfig=None
@@ -183,7 +183,7 @@ let ``the typed protocol projection under another profile than LP64 is refused a
   // FS9173: on an LP64 host a whole ILP32 project is refused earlier by measurement, so the
   // profile check is exercised at the generator itself.
   let project : PilotTypes.PilotProject =
-    { Library = { Name="wayland-client"; Headers=[]; XmlProtocols=[]; Introspection=[]; IncludePaths=[]; Defines=[]; MacroPrefixes=[]; PkgConfig=[] }
+    { Library = { Name="wayland-client"; Headers=[]; XmlProtocols=[]; Introspection=[]; IncludePaths=[]; SystemIncludePaths=[]; Defines=[]; MacroPrefixes=[]; PkgConfig=[] }
       Output = {Mode="fidelity"; Directory="out"}
       Namespaces = []; ErrorConventions=None; Callbacks=None; Nonnull=None; ProtocolConfig=None; Layer3=None; CppConfig=None; Options=None }
   let ctx = FidelityCodeGenerator.buildGenerationContext [] Types.ILP32 Map.empty

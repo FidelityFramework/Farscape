@@ -13,6 +13,7 @@ let private sampleProject : PilotTypes.PilotProject = {
         Headers = ["/usr/include/string.h"]
         XmlProtocols = []; Introspection = []
         IncludePaths = ["/usr/include"]
+        SystemIncludePaths = []
         Defines = ["_GNU_SOURCE"]
         MacroPrefixes = []
         PkgConfig = []
@@ -173,7 +174,7 @@ module ErrorConventionTomlTests =
     [<Fact>]
     let ``error conventions round-trip through TOML`` () =
         let project : PilotProject = {
-            Library = { Name = "libc"; Headers = ["/usr/include/stdio.h"]; XmlProtocols = []; Introspection = []; IncludePaths = []; Defines = []; MacroPrefixes = []; PkgConfig = [] }
+            Library = { Name = "libc"; Headers = ["/usr/include/stdio.h"]; XmlProtocols = []; Introspection = []; IncludePaths = []; SystemIncludePaths = []; Defines = []; MacroPrefixes = []; PkgConfig = [] }
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
             ErrorConventions = Some {
@@ -213,7 +214,7 @@ module ErrorConventionTomlTests =
     [<Fact>]
     let ``enum error code convention round-trips through TOML`` () =
         let project : PilotProject = {
-            Library = { Name = "hip"; Headers = ["/opt/rocm/include/hip/hip_runtime_api.h"]; XmlProtocols = []; Introspection = []; IncludePaths = []; Defines = []; MacroPrefixes = []; PkgConfig = [] }
+            Library = { Name = "hip"; Headers = ["/opt/rocm/include/hip/hip_runtime_api.h"]; XmlProtocols = []; Introspection = []; IncludePaths = []; SystemIncludePaths = []; Defines = []; MacroPrefixes = []; PkgConfig = [] }
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
             ErrorConventions = Some {
@@ -254,7 +255,7 @@ module ErrorConventionTomlTests =
     [<Fact>]
     let ``enum error code with only required fields round-trips`` () =
         let project : PilotProject = {
-            Library = { Name = "xrt"; Headers = ["xrt.h"]; XmlProtocols = []; Introspection = []; IncludePaths = []; Defines = []; MacroPrefixes = []; PkgConfig = [] }
+            Library = { Name = "xrt"; Headers = ["xrt.h"]; XmlProtocols = []; Introspection = []; IncludePaths = []; SystemIncludePaths = []; Defines = []; MacroPrefixes = []; PkgConfig = [] }
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
             ErrorConventions = Some {
@@ -289,7 +290,7 @@ module ErrorConventionTomlTests =
     [<Fact>]
     let ``error conventions with no overrides`` () =
         let project : PilotProject = {
-            Library = { Name = "libc"; Headers = ["/usr/include/stdio.h"]; XmlProtocols = []; Introspection = []; IncludePaths = []; Defines = []; MacroPrefixes = []; PkgConfig = [] }
+            Library = { Name = "libc"; Headers = ["/usr/include/stdio.h"]; XmlProtocols = []; Introspection = []; IncludePaths = []; SystemIncludePaths = []; Defines = []; MacroPrefixes = []; PkgConfig = [] }
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
             ErrorConventions = Some { Default = Errno; Overrides = Map.empty }
@@ -314,7 +315,7 @@ module ErrorConventionTomlTests =
     [<Fact>]
     let ``null_with_reason convention round-trips through TOML`` () =
         let project : PilotProject = {
-            Library = { Name = "stb_image"; Headers = ["/usr/include/stb/stb_image.h"]; XmlProtocols = []; Introspection = []; IncludePaths = []; Defines = []; MacroPrefixes = []; PkgConfig = [] }
+            Library = { Name = "stb_image"; Headers = ["/usr/include/stb/stb_image.h"]; XmlProtocols = []; Introspection = []; IncludePaths = []; SystemIncludePaths = []; Defines = []; MacroPrefixes = []; PkgConfig = [] }
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
             ErrorConventions = Some {

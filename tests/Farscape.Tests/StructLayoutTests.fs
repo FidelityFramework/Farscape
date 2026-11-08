@@ -235,7 +235,7 @@ module GeneratorDispatch =
             let header = System.IO.Path.Combine(directory, "arrays.h")
             System.IO.File.WriteAllText(header, text)
             let options : CppParser.HeaderParserOptions =
-                { HeaderFile = header; IncludePaths = []; Defines = []; Verbose = false
+                { HeaderFile = header; IncludePaths = []; SystemIncludePaths = []; Defines = []; Verbose = false
                   IncludeMacros = false; MacroPrefixes = []; IncludeRoot = None; CppMode = false }
             let declarations = match CppParser.parseHeader options with Ok value -> value | Error reason -> failwith reason
             let layouts = match CppParser.extractStructLayouts header [] [] (names |> List.map (fun name -> "struct " + name)) false with Ok value -> value | Error reason -> failwith reason
@@ -923,7 +923,7 @@ module GeneratorDispatch =
             let header = System.IO.Path.Combine(directory, "forward.h")
             System.IO.File.WriteAllText(header, "struct S; struct S { int a; }; struct H { struct S s; int tail; };\n")
             let options : CppParser.HeaderParserOptions =
-                { HeaderFile = header; IncludePaths = []; Defines = []; Verbose = false
+                { HeaderFile = header; IncludePaths = []; SystemIncludePaths = []; Defines = []; Verbose = false
                   IncludeMacros = false; MacroPrefixes = []; IncludeRoot = None; CppMode = false }
             let declarations = match CppParser.parseHeader options with Ok value -> value | Error reason -> failwith reason
             let layouts = match CppParser.extractStructLayouts header [] [] ["struct S"; "struct H"] false with Ok value -> value | Error reason -> failwith reason
@@ -1461,7 +1461,7 @@ generate_descriptors = true
     [<Fact>]
     let ``round-trip options with generate_descriptors`` () =
         let project : PilotProject = {
-            Library = { Name = "drm"; Headers = ["xf86drm.h"]; XmlProtocols = []; Introspection = []; IncludePaths = []; Defines = []; MacroPrefixes = []; PkgConfig = [] }
+            Library = { Name = "drm"; Headers = ["xf86drm.h"]; XmlProtocols = []; Introspection = []; IncludePaths = []; SystemIncludePaths = []; Defines = []; MacroPrefixes = []; PkgConfig = [] }
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
             ErrorConventions = None

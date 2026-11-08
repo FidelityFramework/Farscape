@@ -30,6 +30,7 @@ module RawHeaderCommentTests =
         let options : CppParser.HeaderParserOptions = {
             HeaderFile = "/usr/include/errno.h"
             IncludePaths = []
+            SystemIncludePaths = []
             Defines = []
             Verbose = false
             IncludeMacros = true
@@ -127,6 +128,7 @@ extern int close(int fd);
         let options : CppParser.HeaderParserOptions = {
             HeaderFile = tmpHeader
             IncludePaths = []
+            SystemIncludePaths = []
             Defines = []
             Verbose = false
             IncludeMacros = false
@@ -168,6 +170,7 @@ struct Point {
         let options : CppParser.HeaderParserOptions = {
             HeaderFile = tmpHeader
             IncludePaths = []
+            SystemIncludePaths = []
             Defines = []
             Verbose = false
             IncludeMacros = false
@@ -204,6 +207,7 @@ enum Color {
         let options : CppParser.HeaderParserOptions = {
             HeaderFile = tmpHeader
             IncludePaths = []
+            SystemIncludePaths = []
             Defines = []
             Verbose = false
             IncludeMacros = false
@@ -240,6 +244,7 @@ extern int multi_line_example(int x);
         let options : CppParser.HeaderParserOptions = {
             HeaderFile = tmpHeader
             IncludePaths = []
+            SystemIncludePaths = []
             Defines = []
             Verbose = false
             IncludeMacros = false

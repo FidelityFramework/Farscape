@@ -430,6 +430,7 @@ module PilotDiscovery =
             XmlProtocols = xmlProtocols
             Introspection = []
             IncludePaths = result.SuggestedIncludePaths
+            SystemIncludePaths = []
             Defines = []
             MacroPrefixes = []
             PkgConfig = []

@@ -12,7 +12,7 @@ open TestHelpers
 // ═══════════════════════════════════════════════════════════════════
 
 let private parseFixture (relative: string) =
-    match CppParser.parseHeader { HeaderFile = fixturePath relative; IncludePaths = []; Defines = []; Verbose = false
+    match CppParser.parseHeader { HeaderFile = fixturePath relative; IncludePaths = []; SystemIncludePaths = []; Defines = []; Verbose = false
                                   IncludeMacros = false; MacroPrefixes = []; IncludeRoot = None; CppMode = false } with
     | Ok declarations -> declarations
     | Error reason -> failwithf "%s did not parse: %s" relative reason

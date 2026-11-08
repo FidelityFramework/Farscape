@@ -348,6 +348,9 @@ module CppParser =
         HeaderFile: string
         /// Additional include paths for resolving #include directives
         IncludePaths: string list
+        /// System include paths (#179): searched after `IncludePaths`, and clang treats the
+        /// headers it finds there as system headers. Each is `-isystem` then the path.
+        SystemIncludePaths: string list
         /// Preprocessor definitions (e.g., ["DEBUG"; "STM32L552xx"])
         Defines: string list
         /// Enable verbose output
@@ -399,6 +402,7 @@ module CppParser =
     let defaultOptions headerFile = {
         HeaderFile = headerFile
         IncludePaths = []
+        SystemIncludePaths = []
         Defines = []
         Verbose = false
         IncludeMacros = true
@@ -1650,6 +1654,16 @@ module CppParser =
 
     let private commandLine (args: string seq) = ProcessLaunch.commandLine args
 
+    /// The include, system include and define arguments clang receives for a pilot's include
+    /// paths, system include paths and defines, in that order: each include path one `-I<path>`
+    /// argument, each system include path the two arguments `-isystem` and the path (#179), so
+    /// the path is always clang's next argument and never read as an option, and each define
+    /// one `-D<define>` argument (#178).
+    let internal searchArguments (includePaths: string list) (systemIncludePaths: string list) (defines: string list) : string list =
+        [ for includePath in includePaths -> $"-I{includePath}" ]
+        @ [ for systemPath in systemIncludePaths do yield "-isystem"; yield systemPath ]
+        @ [ for define in defines -> $"-D{define}" ]
+
     /// Build common clang arguments
     let private buildClangArgs (options: HeaderParserOptions) : ResizeArray<string> =
         let args = ResizeArray<string>()
@@ -1662,12 +1676,7 @@ module CppParser =
             args.Add("c++")
             args.Add("-std=c++17")
 
-        for includePath in options.IncludePaths do
-            args.Add($"-I{includePath}")
-
-        for define in options.Defines do
-            args.Add($"-D{define}")
-
+        args.AddRange(searchArguments options.IncludePaths options.SystemIncludePaths options.Defines)
         args
 
     /// Run clang with given arguments
@@ -1852,13 +1861,15 @@ module CppParser =
     /// Run clang with -fdump-record-layouts-simple to extract struct layout info.
     /// Generates a temporary C file that forces layout computation for the named structs
     /// by referencing sizeof() for each. Layout data appears on stderr.
-    let extractStructLayouts
-        (headerFile: string) (includePaths: string list) (defines: string list)
+    /// A refusal keeps its structured diagnostics (#186): a malformed define is FS9124, refused
+    /// before clang runs; a failure that is no FS91xx refusal carries its text only.
+    let extractStructLayoutsDiagnosed
+        (headerFile: string) (includePaths: string list) (systemIncludePaths: string list) (defines: string list)
         (structNames: string list) (verbose: bool)
-        : Result<Map<string, StructLayoutInfo>, string> =
+        : Result<Map<string, StructLayoutInfo>, Diagnostics.Refusal> =
 
         match requireWellFormedDefines defines with
-        | Error refusal -> Error refusal.Text
+        | Error refusal -> Error refusal
         | Ok () ->
         if structNames.IsEmpty then Ok Map.empty
         else
@@ -1883,9 +1894,7 @@ module CppParser =
                     |> String.concat "\n"
                 File.WriteAllText(tempFile, $"{includeDirective}\n{sizeofRefs}\n")
 
-                let args = ResizeArray<string>()
-                for ip in includePaths do args.Add($"-I{ip}")
-                for d in defines do args.Add($"-D{d}")
+                let args = ResizeArray<string>(searchArguments includePaths systemIncludePaths defines)
                 for arg in ["-Xclang"; "-fdump-record-layouts-simple"; "-fsyntax-only"; tempFile] do
                     args.Add(arg)
 
@@ -1904,7 +1913,7 @@ module CppParser =
 
                 // Parse layout data from stderr (clang may return non-zero due to unused variables)
                 match parseRecordLayouts (stdout + "\n" + stderr) with
-                | Error reason -> Error $"Record layout dump could not be parsed: {reason}"
+                | Error reason -> Error (Diagnostics.uncoded $"Record layout dump could not be parsed: {reason}")
                 | Ok layouts ->
                     // Filter to only the requested struct names
                     let filtered =
@@ -1916,9 +1925,16 @@ module CppParser =
 
                     Ok filtered
             with ex ->
-                Error $"Failed to extract struct layouts: {ex.Message}"
+                Error (Diagnostics.uncoded $"Failed to extract struct layouts: {ex.Message}")
         try File.Delete(tempFile) with _ -> ()
         result
+
+    /// `extractStructLayoutsDiagnosed` with no system include paths, reporting a failure as its text.
+    let extractStructLayouts
+        (headerFile: string) (includePaths: string list) (defines: string list)
+        (structNames: string list) (verbose: bool)
+        : Result<Map<string, StructLayoutInfo>, string> =
+        extractStructLayoutsDiagnosed headerFile includePaths [] defines structNames verbose |> Result.mapError _.Text
 
     // =========================================================================
     // Enum Representation Measurement (clang evaluates sizeof and signedness)
@@ -2593,6 +2609,7 @@ module CppParser =
         let options = {
             HeaderFile = headerFile
             IncludePaths = includePaths
+            SystemIncludePaths = []
             Defines = []
             Verbose = verbose
             IncludeMacros = true
@@ -2612,6 +2629,7 @@ module CppParser =
         let options = {
             HeaderFile = headerFile
             IncludePaths = includePaths
+            SystemIncludePaths = []
             Defines = defines
             Verbose = verbose
             IncludeMacros = true
@@ -2633,6 +2651,7 @@ module CppParser =
         let options = {
             HeaderFile = headerFile
             IncludePaths = includePaths
+            SystemIncludePaths = []
             Defines = defines
             Verbose = verbose
             IncludeMacros = true
@@ -2652,6 +2671,7 @@ module CppParser =
         let options = {
             HeaderFile = headerFile
             IncludePaths = includePaths
+            SystemIncludePaths = []
             Defines = defines
             Verbose = verbose
             IncludeMacros = true
