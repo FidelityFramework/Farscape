@@ -58,7 +58,7 @@ let ``a parameter fixed to a copying sentinel leaves the signature and is record
     Assert.Contains("let fx_bind_text (statement: option<CHandle<fx_stmt>>) (index: int) (text: option<string>) (bytes: int) : int =", text)
     let nonnull = generatedWith [ composedHeader ] "FX_" (sentinelBinding "fx_bind_text" 2 4 "FX_TRANSIENT") [ "fx_bind_text" ] [ "[annotations.nonnull]"; "fx_bind_text = [0, 2]" ]
     Assert.Contains("let fx_bind_text (statement: CHandle<fx_stmt>) (index: int) (text: string) (bytes: int) : int =", nonnull)
-    Assert.Contains("PassBy = Fixed (EntrySentinel (\"FX_TRANSIENT\", -1L)) } // ", text)
+    Assert.Contains("PassBy = Fixed (EntrySentinel (\"FX_TRANSIENT\", -1)) } // ", text)
     Assert.Contains("fixed by the pilot to sentinel FX_TRANSIENT = -1, which clang evaluates; no entry crosses", text)
     Assert.Contains("/// Parameter `destructor` is fixed by the pilot to the function-pointer sentinel FX_TRANSIENT (-1, as clang evaluates it)", text)
     // No entry record or callback descriptor exists for the fixed parameter.
@@ -106,7 +106,7 @@ let ``SQLite's text and blob routines bind with SQLITE_TRANSIENT and no destruct
     // NULL text binds SQL NULL (sqlite3.h:4948-4951), so without a nonnull claim it is optional.
     Assert.Contains("let sqlite3_bind_text (arg0: option<CHandle<sqlite3_stmt>>) (arg1: int) (arg2: option<string>) (arg3: int) : int =", text)
     Assert.Contains("let sqlite3_result_text (arg0: option<CHandle<sqlite3_context>>) (arg1: option<string>) (arg2: int) : unit =", text)
-    let fixedSentinel = "PassBy = Fixed (EntrySentinel (\"SQLITE_TRANSIENT\", -1L)) }"
+    let fixedSentinel = "PassBy = Fixed (EntrySentinel (\"SQLITE_TRANSIENT\", -1)) }"
     let descriptors = text.Split("Descriptor : Expr<FunctionDescriptor>") |> Array.skip 1
     Assert.Equal(4, descriptors.Length)
     for descriptor in descriptors do
@@ -138,7 +138,7 @@ let ``a sentinel with the same text that two units evaluate differently is refus
 let ``a function's sentinel is its declaring unit's macro, never another unit's`` () =
     // unit_bind is declared in the second unit; LOCAL_SECOND_ONLY is that unit's own sentinel.
     let text = generated [ unitFirst; unitSecond ] "LOCAL_" (sentinelBinding "unit_bind" 0 1 "LOCAL_SECOND_ONLY") [ "unit_bind" ]
-    Assert.Contains("PassBy = Fixed (EntrySentinel (\"LOCAL_SECOND_ONLY\", -1L)) } // ", text)
+    Assert.Contains("PassBy = Fixed (EntrySentinel (\"LOCAL_SECOND_ONLY\", -1)) } // ", text)
     // LOCAL_FIRST_ONLY is defined only by the first unit: the second unit's clang never saw it.
     let _, d, _ = refused [ unitFirst; unitSecond ] "LOCAL_" (sentinelBinding "unit_bind" 0 1 "LOCAL_FIRST_ONLY") [ "unit_bind" ]
     Assert.Equal(Diagnostics.SentinelProjectionInvalid, d.Code)

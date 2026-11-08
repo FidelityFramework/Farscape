@@ -4,6 +4,16 @@ open Xunit
 open Farscape.Core
 open TestHelpers
 
+[<Fact>]
+let ``uppercase parameter names and collisions are consistent in the signature and descriptor`` () =
+  let func = mkFunc "inspect" "int" ["N", "int"; "n", "int"; "Type", "int"]
+  let declarations = [CppParser.Declaration.Function func]
+  let source = FidelityCodeGenerator.generate declarations "Test.Native" "test" Types.LP64 Map.empty
+  Assert.Contains("(n: int) (n_1: int) (``type``: int)", source)
+  Assert.Contains("Name = \"n\"", source)
+  Assert.Contains("Name = \"n_1\"", source)
+  Assert.Contains("Name = \"type\"", source)
+
 [<Theory>]
 [<InlineData(false)>]
 [<InlineData(true)>]

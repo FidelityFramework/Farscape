@@ -29,6 +29,26 @@ open Types
 ///   Zero StringBuilder. Zero Regex. Zero mutable state.
 module FidelityCodeGenerator =
 
+    /// Give every native parameter a distinct Clef binding name. Uppercase identifiers
+    /// are constructor patterns in parameter position, so lower their first character.
+    let private parameterNames (parameters: (string * string) list) =
+        let fresh used (name: string) =
+            let stripped = if name.StartsWith "__" then name.TrimStart '_' else name
+            let lowered =
+                if stripped.Length > 0 then string (System.Char.ToLowerInvariant stripped[0]) + stripped.Substring 1
+                else "arg"
+            let rec choose suffix =
+                let candidate = cleanParamName (if suffix = 0 then lowered else lowered + "_" + string suffix)
+                if Set.contains candidate used then choose (suffix + 1) else candidate
+            choose 0
+        parameters
+        |> List.mapFold (fun used (name, _) ->
+            let name = fresh used name
+            name, Set.add name used) Set.empty
+        |> fst
+
+    let private parameterName parameters index = (parameterNames parameters)[index]
+
     // =========================================================================
     // Typedef Resolution (catamorphism + pure recursive chain resolution)
     // =========================================================================
@@ -890,13 +910,13 @@ module FidelityCodeGenerator =
                 let element = ctx.Bindings |> Map.tryFind func.Name |> Option.bind (fun b -> List.tryItem index b.ReferenceElements) |> Option.filter ((<>) "")
                 let represented = if reference then element |> Option.defaultWith (fun () -> cType.Substring(0, cType.LastIndexOf('*')).Trim()) else cType
                 let typeRef, provenance = abiClaim ctx represented
-                let clefName = (cleanParamName name).Replace("``", "")
+                let clefName = (parameterName func.Parameters index).Replace("``", "")
                 // A parameter fixed to a function-pointer sentinel crosses as that constant (#192):
                 // the Clef signature has no parameter for it.
                 let passBy, provenance =
                     match fixedSentinelOf ctx func index with
                     | Some (macro, value) ->
-                        $"Fixed (EntrySentinel ({quoteString macro}, {value}L))",
+                        $"Fixed (EntrySentinel ({quoteString macro}, {value}))",
                         provenance + $"; fixed by the pilot to sentinel {macro} = {value}, which clang evaluates; no entry crosses"
                     | None -> (if readOnly then "ReadOnlyReference" elif reference then "Reference" else "Value"), provenance
                 Commented(
@@ -1022,10 +1042,10 @@ module FidelityCodeGenerator =
             resolveCallbackNativeSignature ctx cType |> Option.map (fun (ret, args) ->
                 let identity = if cType.Contains "(*)" then func.Name + "::" + name else cType
                 let recordName = "Callback_" + callbackIdentifier (namespace' + "::" + identity) + "Entry"
-                let parameterInfos = args |> List.map (fun (name, cType) ->
+                let parameterInfos = args |> List.mapi (fun index (_, cType) ->
                     let typeRef, provenance = abiClaim ctx cType
                     Commented(RecordConstruction [
-                        "Name", Literal (quoteString ((cleanParamName name).Replace("``", "")))
+                        "Name", Literal (quoteString ((parameterName args index).Replace("``", "")))
                         "Type", Literal typeRef
                         "PassBy", Identifier "Value" ], provenance))
                 let returnRef, returnProvenance = abiClaim ctx ret
@@ -1294,7 +1314,7 @@ module FidelityCodeGenerator =
                     | _, Some array -> $"; read as a bounded read-only view of {describeCountedElement array.Element} counted by entry argument {array.CountArgument}"
                     | _ -> ""
                 Commented(RecordConstruction [
-                    "Name", Literal (quoteString ((cleanParamName name).Replace("``", "")))
+                    "Name", Literal (quoteString ((parameterName parameters index).Replace("``", "")))
                     "Type", Literal typeRef; "PassBy", Identifier "Value" ], provenance + role))
             let returnRef, returnProvenance = nativeType None ret
             let prefix = nativeName + "Callback" + string contract.Parameter
@@ -1309,7 +1329,7 @@ module FidelityCodeGenerator =
                 XmlDoc ("Declared foreign activation only: no argument values, invocation count, purity or functionhood are supplied." + scopeNote)
                 ValueBinding(scopeName, Generic("Expr", Named scopeType), Quoted(RecordBlock ([
                     "BAREWire.Descriptors." + scopeType + ".Binding", Literal (quoteString binding)
-                    "Parameter", Literal (quoteString ((cleanParamName name).Replace("``", ""))) ] @ scopeFields)))
+                    "Parameter", Literal (quoteString ((parameterName func.Parameters contract.Parameter).Replace("``", ""))) ] @ scopeFields)))
                 ValueBinding(contractName, Generic("Expr", Named "CallbackInvocationContract"), Quoted(RecordBlock [
                     "Binding", Literal (quoteString binding)
                     "Parameter", Literal (string contract.Parameter)
@@ -1492,7 +1512,7 @@ module FidelityCodeGenerator =
                         | _ -> mapType cType
                 let isNullable = nullableCallback || (not reference && isDataPointerIn ctx cType && not provenNonnull)
                 let finalType = if isNullable then wrapOption fsType else fsType
-                { FsParam.Name = cleanParamName name; Type = finalType })))
+                { FsParam.Name = parameterName func.Parameters idx; Type = finalType })))
         let parameters = slots |> List.choose snd
 
         // Return type: nullable unless proven nonnull
@@ -1636,7 +1656,7 @@ module FidelityCodeGenerator =
             (ctx.Bindings |> Map.tryFind func.Name |> Option.bind _.Resource |> Option.isNone) &&
             (entries |> List.forall (fun (ordinal, _, _) ->
                 // By name: a parameter fixed to a sentinel (#192) has no Clef parameter.
-                match parameters |> List.tryFind (fun p -> p.Name = cleanParamName (fst func.Parameters[ordinal])) |> Option.map _.Type with
+                match parameters |> List.tryFind (fun p -> p.Name = parameterName func.Parameters ordinal) |> Option.map _.Type with
                 | Some (Generic("option", Generic("FnPtr", _))) -> true
                 | _ -> false)) &&
             not (raw |> List.exists (function LetBinding(publicName, _, _, _, []) when publicName = func.Name -> true | _ -> false))
@@ -1832,9 +1852,9 @@ module FidelityCodeGenerator =
         let nativeName, nativeParameters, returnType =
             raw |> List.pick (function LetBinding(name, parameters, ret, _, attrs) when not attrs.IsEmpty -> Some (name, parameters, ret) | _ -> None)
         let callbackTypes = entries |> List.choose (fun (i, name, _) ->
-            match nativeParameters |> List.tryFind (fun p -> p.Name = cleanParamName (fst func.Parameters.[i])) |> Option.map _.Type with
+            match nativeParameters |> List.tryFind (fun p -> p.Name = parameterName func.Parameters i) |> Option.map _.Type with
             | Some (Generic("option", Generic("FnPtr", _))) -> None
-            | _ -> Some (cleanParamName (fst func.Parameters.[i]), name)) |> Map.ofList
+            | _ -> Some (parameterName func.Parameters i, name)) |> Map.ofList
         let emittedName = nativeDeclarationName ctx func entries raw
         let needsAdapter = emittedName <> func.Name
         let entryReferences, invocationDeclarations = callbackInvocationDecls ctx namespace' anchors func emittedName
