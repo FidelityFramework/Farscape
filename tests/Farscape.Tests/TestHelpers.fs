@@ -176,6 +176,14 @@ and withPilot (headers: string list) (options: string list) (functions: string l
               (check: Result<BindingGenerator.GenerationResult, string> -> string -> unit) =
     withPilotSections headers [] options functions [] [] check
 
+/// glibc's <sys/socket.h> and the include paths that parse it: /usr/include/sys on Arch,
+/// the Debian/Ubuntu multiarch directory /usr/include/x86_64-linux-gnu/sys otherwise.
+let glibcSocketHeader () =
+    if System.IO.File.Exists "/usr/include/sys/socket.h" then
+        "/usr/include/sys/socket.h", ["/usr/include"]
+    else
+        "/usr/include/x86_64-linux-gnu/sys/socket.h", ["/usr/include"; "/usr/include/x86_64-linux-gnu"]
+
 /// Clang's own answer, independent of its record layout dump: compile `header` with each
 /// `assertion` as a `_Static_assert` (`sizeof`, `_Alignof`, `offsetof`) and fail with clang's
 /// diagnostics unless every one holds.

@@ -16,8 +16,9 @@ let private trimmed (source: string) =
 
 /// glibc's own <sys/socket.h>, parsed as the libc pilot parses it: /usr/include is the boundary.
 let private glibcSocket () =
+    let header, includes = glibcSocketHeader ()
     let options : CppParser.HeaderParserOptions =
-        { HeaderFile = "/usr/include/sys/socket.h"; IncludePaths = ["/usr/include"]; Defines = []; Verbose = false
+        { HeaderFile = header; IncludePaths = includes; Defines = []; Verbose = false
           IncludeMacros = false; MacroPrefixes = []; IncludeRoot = Some "/usr/include"; CppMode = false }
     match CppParser.parseHeader options with
     | Ok declarations -> declarations
@@ -58,7 +59,7 @@ let ``glibc's cmsghdr is emitted at clang's layout with a trailing flexible arra
     Assert.Contains($"flexible array member, count from 'cmsg_len' (record bytes through the array's last element), declared by options.flexible_arrays: {cmsgCount.Source}\" }})", header)
     Assert.Contains("MayAlias = false\n", header)
     // Clang's own sizeof, _Alignof and offsetof, and the element size of the array.
-    clangConfirms "/usr/include/sys/socket.h" [
+    clangConfirms (fst (glibcSocketHeader ())) [
         "sizeof(struct cmsghdr) == 16"; "_Alignof(struct cmsghdr) == 8"
         "offsetof(struct cmsghdr, cmsg_len) == 0"; "offsetof(struct cmsghdr, cmsg_level) == 8"
         "offsetof(struct cmsghdr, cmsg_type) == 12"; "offsetof(struct cmsghdr, __cmsg_data) == 16"

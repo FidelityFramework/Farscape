@@ -11,7 +11,9 @@ open Farscape.Core
 module DetectCppModeTests =
 
     let private withTempHeader (ext: string) (content: string) (f: string -> 'a) : 'a =
-        let path = Path.Combine(Path.GetTempPath(), $"farscape_test_{System.Guid.NewGuid():N}{ext}")
+        let directory = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "../../test-results/scratch/detection"))
+        Directory.CreateDirectory directory |> ignore
+        let path = Path.Combine(directory, $"farscape_test_{System.Guid.NewGuid():N}{ext}")
         try
             File.WriteAllText(path, content)
             f path
@@ -38,6 +40,69 @@ module DetectCppModeTests =
         let content = "#include <stdio.h>\nint main(void) { return 0; }\n"
         withTempHeader ".h" content (fun path ->
             Assert.False(CppParser.detectCppMode path))
+
+    [<Fact>]
+    let ``C++ indicators in comments and literals do not select C++`` () =
+        let content = "/* namespace ids; class names; template<T>; std::vector; #include <vector> */\n// namespace ids\n#define TEXT \"class Widget and std::string\"\nstruct item { int value; };\n"
+        withTempHeader ".h" content (fun path ->
+            Assert.False(CppParser.detectCppMode path)
+            let declarations =
+                match CppParser.parseHeader (CppParser.defaultOptions path) with
+                | Ok declarations -> declarations
+                | Error error -> failwith error
+            Assert.Contains(declarations, fun d -> match d with CppParser.Struct s -> s.Name = "item" | _ -> false)
+            Assert.DoesNotContain(declarations, fun d -> match d with CppParser.Class c -> c.Name = "item" | _ -> false))
+
+    [<Fact>]
+    let ``C++ code following a comment still selects C++`` () =
+        withTempHeader ".h" "/* namespace ids */\nclass Widget {};\n" (fun path ->
+            Assert.True(CppParser.detectCppMode path)
+            let declarations =
+                match CppParser.parseHeader (CppParser.defaultOptions path) with
+                | Ok declarations -> declarations
+                | Error error -> failwith error
+            let error = Assert.Throws<System.Exception>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore)
+            Assert.Equal("C++ class 'Widget' requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source.", error.Message))
+
+    [<Fact>]
+    let ``glibc dl_find_object is a C record with clang's layout`` () =
+        let header = "/usr/include/dlfcn.h"
+        Assert.False(CppParser.detectCppMode header)
+        let options =
+            { CppParser.defaultOptions header with
+                Defines = ["_GNU_SOURCE"]; IncludePaths = ["/usr/include"]; IncludeRoot = Some "/usr/include"
+                IncludeMacros = false }
+        let declarations =
+            match CppParser.parseHeader options with
+            | Ok declarations -> declarations
+            | Error error -> failwith error
+        let record = declarations |> List.pick (function CppParser.Struct s when s.Name = "dl_find_object" -> Some s | _ -> None)
+        Assert.DoesNotContain(declarations, fun d -> match d with CppParser.Class c -> c.Name = "dl_find_object" | _ -> false)
+        let selected = declarations |> List.filter (function CppParser.Struct s -> s.Name = record.Name | CppParser.Typedef _ -> true | _ -> false)
+        let output = FidelityCodeGenerator.generate selected "Test" "test" Types.LP64 Map.empty
+        let value name =
+            let m = System.Text.RegularExpressions.Regex.Match(output, @"\blet " + name + @" = (\d+)")
+            Assert.True(m.Success, $"Missing {name} in generated record")
+            m.Groups.[1].Value
+        withTempHeader ".h" "#define _GNU_SOURCE\n#include <dlfcn.h>\n" (fun wrapper ->
+            let size = value "Size"
+            let alignment = value "Alignment"
+            let checks =
+                [ $"sizeof(struct dl_find_object) == {size}"
+                  $"_Alignof(struct dl_find_object) == {alignment}"
+                  for field in record.Fields do
+                      let offset = value (field.Name + "Offset")
+                      $"offsetof(struct dl_find_object, {field.Name}) == {offset}" ]
+            let assertions = checks |> List.map (fun check -> $"_Static_assert({check}, \"layout\");") |> String.concat "\n"
+            withTempHeader ".c" ($"#include <stddef.h>\n#include \"{wrapper}\"\n{assertions}\n") (fun probe ->
+                let info = System.Diagnostics.ProcessStartInfo("clang")
+                info.ArgumentList.Add "-fsyntax-only"
+                info.ArgumentList.Add probe
+                info.RedirectStandardError <- true
+                use proc = System.Diagnostics.Process.Start info
+                let errors = proc.StandardError.ReadToEnd()
+                proc.WaitForExit()
+                Assert.True(proc.ExitCode = 0, errors)))
 
     [<Fact>]
     let ``detectCppMode returns true for .h with namespace`` () =

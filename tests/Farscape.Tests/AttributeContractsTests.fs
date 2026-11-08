@@ -19,8 +19,9 @@ let private trimmed (source: string) =
 
 /// glibc's own <sys/socket.h>, parsed as the libc pilot parses it: /usr/include is the boundary.
 let private glibcSocket () =
+    let header, includes = glibcSocketHeader ()
     let options : CppParser.HeaderParserOptions =
-        { HeaderFile = "/usr/include/sys/socket.h"; IncludePaths = ["/usr/include"]; Defines = []; Verbose = false
+        { HeaderFile = header; IncludePaths = includes; Defines = []; Verbose = false
           IncludeMacros = false; MacroPrefixes = []; IncludeRoot = Some "/usr/include"; CppMode = false }
     match CppParser.parseHeader options with
     | Ok declarations -> declarations

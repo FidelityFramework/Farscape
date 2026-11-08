@@ -375,7 +375,13 @@ module CppParser =
         | ".hpp" | ".hxx" | ".hh" -> true
         | ".h" ->
             try
-                let content = File.ReadAllText(headerFile)
+                // Comments and literals can mention C++ without making a C header C++.
+                // Replace them with whitespace so tokens on either side do not join.
+                let content =
+                    System.Text.RegularExpressions.Regex.Replace(
+                        File.ReadAllText(headerFile),
+                        @"//[^\r\n]*|/\*[\s\S]*?\*/|""(?:\\.|[^""\\])*""|'(?:\\.|[^'\\])*'",
+                        " ")
                 content.Contains("namespace ") ||
                 content.Contains("class ") ||
                 content.Contains("template<") ||
