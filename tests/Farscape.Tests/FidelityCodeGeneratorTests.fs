@@ -45,7 +45,7 @@ let ``each explicit callback nonnull source preserves its hypothesis provenance`
   let declarations = [CppParser.Declaration.Typedef (mkTypedef "Notify" "void (*)(void)"); CppParser.Declaration.Function func]
   let projection : PilotTypes.BindingProjection =
     { Name = func.Name; Symbol = func.Name; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
-      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; WritableBuffers = []; CallbackInvocations = [] }
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; WritableBuffers = []; CallbackInvocations = []; BorrowedResult = None }
   let ctx = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
   let ctx =
     { ctx with
@@ -67,7 +67,7 @@ let ``pilot callback nonnull cannot override native nullable evidence`` () =
   let declarations = [CppParser.Declaration.Typedef (mkTypedef "Notify" "void (*)(void)"); CppParser.Declaration.Function func]
   let projection : PilotTypes.BindingProjection =
     { Name = func.Name; Symbol = func.Name; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
-      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; WritableBuffers = []; CallbackInvocations = [] }
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; WritableBuffers = []; CallbackInvocations = []; BorrowedResult = None }
   let ctx = { FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty with Bindings = Map.ofList [func.Name, projection] }
   let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generateFunctionDecls ctx "test" func |> ignore)
   Assert.Contains("register parameter 0: nullable native type conflicts with a nonnull contract", error.Message)
@@ -90,7 +90,7 @@ let ``explicit ownership hypotheses survive generation and withdrawal removes au
   let ctx = FidelityCodeGenerator.buildGenerationContext [CppParser.Declaration.Function func] Types.LP64 Map.empty
   let projection : PilotTypes.BindingProjection =
     { Name = func.Name; Symbol = "native_acquire"; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
-      ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; WritableBuffers = []; CallbackInvocations = [] }
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; WritableBuffers = []; CallbackInvocations = []; BorrowedResult = None }
   let emit ownership =
     let current = { ctx with Bindings = Map.ofList [func.Name, { projection with Ownership = ownership }] }
     FidelityCodeGenerator.generateFunctionDecls current "test" func |> List.map CodeRenderer.render |> String.concat "\n"
@@ -734,7 +734,7 @@ let ``rejects unsupported pimpl struct for xclbin-like inherited pimpl with no d
 
 let private rangeProjection : PilotTypes.BindingProjection =
     { Name = "read"; Symbol = "native_read"; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
-      ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None; Resource = None; WritableBuffers = []; CallbackInvocations = []
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None; Resource = None; WritableBuffers = []; CallbackInvocations = []; BorrowedResult = None
       ResultRange = Some { Identity = "posix.read"; Version = "2024"; Source = "/contracts/read.pilot.toml"
                            Lower = PilotTypes.ResultRangeBound.Constant -1; Upper = PilotTypes.ResultRangeBound.Argument 2 } }
 let private renderResultRange projection func =
@@ -787,7 +787,8 @@ let ``result range refuses ineligible native slots and unsupported translation``
 
 let private invocationContract : PilotTypes.BindingCallbackInvocation =
     { Parameter = 0; Identity = "fixture.call_twice.callback"; Version = "v1"
-      Source = "/contracts/call_twice.c"; Scope = "during_call"; ExitBinding = None; SuccessStatus = None; AbsenceHypothesis = None }
+      Source = "/contracts/call_twice.c"; Scope = "during_call"; ExitBinding = None; SuccessStatus = None; AbsenceHypothesis = None
+      Context = None; CountedArrays = []; Retention = None }
 let private invocationProjection =
     { rangeProjection with Name = "call_twice"; Symbol = "native_call_twice"
                            NonnullCallbacks = [0]; ResultRange = None; CallbackInvocations = [invocationContract] }
@@ -876,7 +877,7 @@ let ``explicit callback absence emits independent exact receiving promise`` () =
 [<InlineData("shared", "absence_hypothesis identity must differ from activation identity")>]
 [<InlineData("duplicate", "duplicate parameter indices")>]
 [<InlineData("ordinal", "requires explicit nonnull evidence")>]
-[<InlineData("retained", "nullable callback parameters require only during_call invocation contracts")>]
+[<InlineData("exit-scope", "nullable callback parameters require only during_call or retained invocation contracts")>]
 let ``explicit callback absence refuses incomplete shared and unmatched contracts`` shape reason =
     let hypothesis =
         match shape with
@@ -890,7 +891,7 @@ let ``explicit callback absence refuses incomplete shared and unmatched contract
         match shape with
         | "duplicate" -> [contract; contract]
         | "ordinal" -> [{contract with Parameter = 1}]
-        | "retained" -> [{contract with Scope = "process_exit"; SuccessStatus = Some 0}]
+        | "exit-scope" -> [{contract with Scope = "process_exit"; SuccessStatus = Some 0}]
         | _ -> [contract]
     let error = Assert.ThrowsAny<System.Exception>(fun () ->
         renderInvocation {invocationProjection with NonnullCallbacks = []; CallbackInvocations = contracts} "NativeCallback" "void (*)(void)" |> ignore)
@@ -969,9 +970,9 @@ let ``mixed optional and nonnull callbacks preserve the required adapter`` () =
 [<InlineData("missing", "requires explicit nonnull evidence")>]
 [<InlineData("wrong-ordinal", "requires explicit nonnull evidence")>]
 [<InlineData("duplicate", "duplicate parameter indices")>]
-[<InlineData("retained", "nullable callback parameters require only during_call invocation contracts")>]
-[<InlineData("process-exit", "nullable callback parameters require only during_call invocation contracts")>]
-[<InlineData("mixed", "nullable callback parameters require only during_call invocation contracts")>]
+[<InlineData("unknown-scope", "nullable callback parameters require only during_call or retained invocation contracts")>]
+[<InlineData("process-exit", "nullable callback parameters require only during_call or retained invocation contracts")>]
+[<InlineData("mixed", "nullable callback parameters require only during_call or retained invocation contracts")>]
 [<InlineData("profile", "unsupported native entry signature type 'void *'")>]
 [<InlineData("source", "requires nonempty source")>]
 [<InlineData("exit-fields", "during_call forbids exit_binding and success_status")>]
@@ -983,7 +984,7 @@ let ``optional callback invocation refuses missing ambiguous retained and unsupp
         | "missing" -> {projection with CallbackInvocations = []}, "int (*)(int)"
         | "wrong-ordinal" -> {projection with CallbackInvocations = [{invocationContract with Parameter = 1}]}, "int (*)(int)"
         | "duplicate" -> {projection with CallbackInvocations = [invocationContract; invocationContract]}, "int (*)(int)"
-        | "retained" -> {projection with CallbackInvocations = [{invocationContract with Scope = "retained"}]}, "int (*)(int)"
+        | "unknown-scope" -> {projection with CallbackInvocations = [{invocationContract with Scope = "forever"}]}, "int (*)(int)"
         | "process-exit" -> {projection with CallbackInvocations = [{invocationContract with Scope = "process_exit"; SuccessStatus = Some 0}]}, "void (*)(void)"
         | "mixed" -> {projection with CallbackInvocations = [invocationContract; {invocationContract with Parameter = 1; Scope = "process_exit"; SuccessStatus = Some 0}]}, "int (*)(int)"
         | "profile" -> projection, "int (*)(void *)"
@@ -1071,7 +1072,7 @@ let ``callback invocation rejects signatures outside admitted integer profile`` 
 [<Theory>]
 [<InlineData("index", "outside native arity 1")>]
 [<InlineData("duplicate", "duplicate parameter indices")>]
-[<InlineData("scope", "scope must be during_call or process_exit")>]
+[<InlineData("scope", "scope must be during_call, retained or process_exit")>]
 [<InlineData("source", "requires nonempty source")>]
 [<InlineData("kind", "not a native function pointer")>]
 [<InlineData("translated", "untranslated native parameter list")>]
@@ -1084,7 +1085,7 @@ let ``callback invocation contract refuses unsupported receiving correspondence 
         match shape with
         | "index" -> {invocationProjection with CallbackInvocations = [{invocationContract with Parameter = 1}]}, "NativeCallback", "int (*)(int)"
         | "duplicate" -> {invocationProjection with CallbackInvocations = [invocationContract; invocationContract]}, "NativeCallback", "int (*)(int)"
-        | "scope" -> {invocationProjection with CallbackInvocations = [{invocationContract with Scope = "retained"}]}, "NativeCallback", "int (*)(int)"
+        | "scope" -> {invocationProjection with CallbackInvocations = [{invocationContract with Scope = "forever"}]}, "NativeCallback", "int (*)(int)"
         | "source" -> {invocationProjection with CallbackInvocations = [{invocationContract with Source = " "}]}, "NativeCallback", "int (*)(int)"
         | "kind" -> {invocationProjection with NonnullCallbacks = []}, "int", "int (*)(int)"
         | "translated" -> {invocationProjection with ConstantParameters = [""; "4"]}, "NativeCallback", "int (*)(int)"
@@ -1910,9 +1911,9 @@ let private plainProjection name = { rangeProjection with Name = name; Symbol = 
 [<InlineData("hypothesis", "FS9134", "call_twice", "callback_invocations", 0, "requires nonempty source")>]
 [<InlineData("range-hypothesis", "FS9134", "read", "result_range", -1, "requires nonempty source")>]
 [<InlineData("untranslated", "FS9135", "call_twice", "callback_invocations", 0, "requires an untranslated native parameter list")>]
-[<InlineData("scope", "FS9136", "call_twice", "callback_invocations", 0, "scope must be during_call or process_exit")>]
+[<InlineData("scope", "FS9136", "call_twice", "callback_invocations", 0, "scope must be during_call, retained or process_exit")>]
 [<InlineData("scope-field", "FS9137", "call_twice", "callback_invocations", 0, "during_call forbids exit_binding and success_status")>]
-[<InlineData("nullable-scope", "FS9138", "call_twice", "callback_invocations", 0, "nullable callback parameters require only during_call invocation contracts.")>]
+[<InlineData("nullable-scope", "FS9138", "call_twice", "callback_invocations", 0, "nullable callback parameters require only during_call or retained invocation contracts.")>]
 [<InlineData("absence-identity", "FS9139", "call_twice", "callback_invocations", 0, "absence_hypothesis identity must differ from activation identity")>]
 [<InlineData("process-exit", "FS9140", "call_twice", "callback_invocations", 0, "process_exit requires a signed32 registration result")>]
 [<InlineData("release-unselected", "FS9141", "mallocFirst", "resource", -1, "release_binding must name an exact selected qualified generated declaration")>]
@@ -1951,7 +1952,7 @@ let ``each callback and projection refusal carries its code, its declaration's l
         | "hypothesis" -> invocation { invocationProjection with CallbackInvocations = [{ c with Source = " " }] } "int (*)(int)"
         | "range-hypothesis" -> range { rangeProjection with ResultRange = Some { range' with Source = " " } } readFunction
         | "untranslated" -> invocation { nullable with ConstantParameters = [""; "3"] } "int (*)(int)"
-        | "scope" -> invocation { invocationProjection with CallbackInvocations = [{ c with Scope = "retained" }] } "int (*)(int)"
+        | "scope" -> invocation { invocationProjection with CallbackInvocations = [{ c with Scope = "forever" }] } "int (*)(int)"
         | "scope-field" -> invocation { invocationProjection with CallbackInvocations = [{ c with ExitBinding = Some "Test.Native.exit" }] } "int (*)(int)"
         | "nullable-scope" -> invocation { nullable with CallbackInvocations = [{ c with Scope = "process_exit"; SuccessStatus = Some 0 }] } "void (*)(void)"
         | "absence-identity" -> invocation { nullable with CallbackInvocations = [{ c with AbsenceHypothesis = Some { absenceHypothesis with Identity = c.Identity } }] } "void (*)(void)"

@@ -81,7 +81,7 @@ let ``clang receives each system include path as -isystem and the path, after th
     // Real clang: under these arguments the header the system path reaches is a system header
     // (line-marker flag 3); the same directory given as -I would not be.
     let header = Path.Combine(includeDir, "fx_sys_api.h")
-    let info = ProcessLaunch.startInfo "clang" (CppParser.searchArguments [includeDir] [systemDir] [] @ ["-E"; header])
+    let info = ClangToolchain.startInfo (CppParser.searchArguments [includeDir] [systemDir] [] @ ["-E"; header])
     use proc = System.Diagnostics.Process.Start info
     let output = proc.StandardOutput.ReadToEnd()
     proc.StandardError.ReadToEnd() |> ignore

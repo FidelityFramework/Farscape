@@ -157,10 +157,7 @@ let ``an anonymous member of a C++ record refuses the unit`` () =
 /// Clang's own JSON AST of `header` under `flags`, produced by the test harness: `-fms-extensions`
 /// is an option no pilot can select (#178), so only the harness can give the parser its AST.
 let private clangAst (header: string) (flags: string list) =
-    let info = System.Diagnostics.ProcessStartInfo("clang")
-    for arg in ["-x"; "c"] @ flags @ ["-Xclang"; "-ast-dump=json"; "-fsyntax-only"; header] do info.ArgumentList.Add arg
-    info.RedirectStandardOutput <- true
-    info.RedirectStandardError <- true
+    let info = ClangToolchain.startInfo (["-x"; "c"] @ flags @ ["-Xclang"; "-ast-dump=json"; "-fsyntax-only"; header])
     use proc = System.Diagnostics.Process.Start info
     let json = proc.StandardOutput.ReadToEnd()
     proc.StandardError.ReadToEnd() |> ignore

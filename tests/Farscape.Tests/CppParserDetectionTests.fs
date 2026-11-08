@@ -95,10 +95,7 @@ module DetectCppModeTests =
                       $"offsetof(struct dl_find_object, {field.Name}) == {offset}" ]
             let assertions = checks |> List.map (fun check -> $"_Static_assert({check}, \"layout\");") |> String.concat "\n"
             withTempHeader ".c" ($"#include <stddef.h>\n#include \"{wrapper}\"\n{assertions}\n") (fun probe ->
-                let info = System.Diagnostics.ProcessStartInfo("clang")
-                info.ArgumentList.Add "-fsyntax-only"
-                info.ArgumentList.Add probe
-                info.RedirectStandardError <- true
+                let info = ClangToolchain.startInfo [ "-fsyntax-only"; probe ]
                 use proc = System.Diagnostics.Process.Start info
                 let errors = proc.StandardError.ReadToEnd()
                 proc.WaitForExit()

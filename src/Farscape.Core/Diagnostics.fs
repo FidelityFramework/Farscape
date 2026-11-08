@@ -41,9 +41,9 @@ namespace Farscape.Core
 /// | FS9133 | a pilot binding key names a parameter outside the native arity                |
 /// | FS9134 | a pilot hypothesis has an empty identity, version or source                   |
 /// | FS9135 | a pilot contract needs the untranslated parameter list its binding translates |
-/// | FS9136 | a callback invocation's scope is neither during_call nor process_exit         |
+/// | FS9136 | a callback invocation's scope is not during_call, retained or process_exit    |
 /// | FS9137 | a callback invocation carries a field its declared scope forbids or lacks     |
-/// | FS9138 | a callback that may be NULL has an invocation contract outside during_call    |
+/// | FS9138 | a callback that may be NULL has a contract outside during_call and retained   |
 /// | FS9139 | a callback's absence hypothesis reuses its activation identity                |
 /// | FS9140 | a process_exit callback is no zero-argument void entry with signed32 result   |
 /// | FS9141 | a contract names a binding that is no selected generated declaration          |
@@ -108,6 +108,14 @@ namespace Farscape.Core
 /// | FS9200 | a pilot table carries a key that table does not admit                           |
 /// | FS9201 | a pilot key's value is outside the values its key admits                        |
 /// | FS9202 | a pilot array declares one record's entry more than once                        |
+/// | FS9203 | a callback context is no untyped pointer entry argument and receiving parameter |
+/// | FS9204 | a counted entry array is no pointer array of its element and integer count      |
+/// | FS9205 | a pointer-to-pointer callback entry argument has no counted-array declaration   |
+/// | FS9206 | a retained callback's owner, redefinition key or release does not fit it        |
+/// | FS9207 | a retained callback is registered with a captured environment                   |
+/// | FS9208 | a borrowed result is no pointer to its content's bytes, or is a handle or resource |
+/// | FS9209 | a borrowed result's extent is no integer companion call on its own arguments     |
+/// | FS9210 | a borrowed result's owner or invalidation does not fit its declaration           |
 ///
 /// Allocation continues past FS9199 as FS92xx: the codes are sequential, four digits after FS.
 /// Each refusal reason has exactly one code and each code one reason.
@@ -226,13 +234,13 @@ module Diagnostics =
     let ContractRequiresUntranslated = "FS9135" // pilot contract on a binding whose projection translates its parameters (#195)
 
     [<Literal>]
-    let CallbackScopeUnknown = "FS9136" // callback invocation scope neither during_call nor process_exit (#195)
+    let CallbackScopeUnknown = "FS9136" // callback invocation scope not during_call, retained or process_exit (#195, #191)
 
     [<Literal>]
     let CallbackScopeFieldConflict = "FS9137" // callback invocation field its scope forbids or lacks (#195)
 
     [<Literal>]
-    let NullableCallbackScope = "FS9138" // callback that may be NULL with a contract outside during_call (#195)
+    let NullableCallbackScope = "FS9138" // callback that may be NULL with a contract outside during_call and retained (#195, #191)
 
     [<Literal>]
     let AbsenceIdentityReused = "FS9139" // absence hypothesis identity equal to the activation identity (#195)
@@ -425,6 +433,30 @@ module Diagnostics =
 
     [<Literal>]
     let PilotEntryRepeated = "FS9202" // pilot array declaring one record's entry more than once (#199)
+
+    [<Literal>]
+    let CallbackContextInvalid = "FS9203" // callback context naming no untyped pointer entry argument and receiving parameter (#189)
+
+    [<Literal>]
+    let CountedArrayInvalid = "FS9204" // counted entry array that is no pointer array of its element with an integer count (#190)
+
+    [<Literal>]
+    let PointerArrayUndeclared = "FS9205" // pointer-to-pointer callback entry argument without a counted-array declaration (#190)
+
+    [<Literal>]
+    let RetentionInvalid = "FS9206" // retained callback whose owner, redefinition key or release does not fit its registration (#191)
+
+    [<Literal>]
+    let RetainedCallbackCaptures = "FS9207" // retained callback registered with a captured environment (#191)
+
+    [<Literal>]
+    let BorrowedResultShape = "FS9208" // borrowed result that is no single-level pointer to its content's bytes, or also a handle or resource (#196)
+
+    [<Literal>]
+    let BorrowedExtentInvalid = "FS9209" // borrowed result extent that is no integer companion call on the borrowing call's arguments (#196)
+
+    [<Literal>]
+    let BorrowedInvalidationInvalid = "FS9210" // borrowed result whose owner is no opaque handle, or an invalidation that does not receive it (#196)
 
     // =========================================================================
     // Structured diagnostics (#184)

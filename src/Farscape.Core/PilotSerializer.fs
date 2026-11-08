@@ -135,7 +135,33 @@ module PilotSerializer =
                 "absence_hypothesis", TomlValue.InlineTable (Map.ofList [
                     "identity", TomlValue.String hypothesis.Identity
                     "version", TomlValue.String hypothesis.Version
-                    "source", TomlValue.String hypothesis.Source ])) |> Option.toList ])
+                    "source", TomlValue.String hypothesis.Source ])) |> Option.toList
+            yield! contract.Context |> Option.map (fun context ->
+                "context", TomlValue.InlineTable (Map.ofList [
+                    "argument", TomlValue.Integer (int64 context.Argument)
+                    "parameter", TomlValue.Integer (int64 context.Parameter) ])) |> Option.toList
+            if not contract.CountedArrays.IsEmpty then
+                "counted_arrays", TomlValue.Array (contract.CountedArrays |> List.map (fun array ->
+                    let element =
+                        match array.Element with
+                        | CountedArrayElement.Text -> "text"
+                        | CountedArrayElement.NullableText -> "nullable_text"
+                        | CountedArrayElement.Handle -> "handle"
+                        | CountedArrayElement.NullableHandle -> "nullable_handle"
+                    TomlValue.InlineTable (Map.ofList [
+                        "argument", TomlValue.Integer (int64 array.Argument)
+                        "count_argument", TomlValue.Integer (int64 array.CountArgument)
+                        "element", TomlValue.String element ])))
+            yield! contract.Retention |> Option.map (fun retention ->
+                "retention", TomlValue.InlineTable (Map.ofList [
+                    "owner_parameter", TomlValue.Integer (int64 retention.OwnerParameter)
+                    if not retention.RedefinedBy.IsEmpty then
+                        "redefined_by", TomlValue.Array (retention.RedefinedBy |> List.map (int64 >> TomlValue.Integer))
+                    if not retention.Releases.IsEmpty then
+                        "releases", TomlValue.Array (retention.Releases |> List.map (fun release ->
+                            TomlValue.InlineTable (Map.ofList [
+                                "binding", TomlValue.String release.Binding
+                                "parameter", TomlValue.Integer (int64 release.Parameter) ]))) ])) |> Option.toList ])
 
     let private serializeResource (resource: BindingResource) =
         TomlValue.InlineTable (Map.ofList [
@@ -146,6 +172,26 @@ module PilotSerializer =
                 "identity", TomlValue.String resource.Identity
                 "version", TomlValue.String resource.Version
                 "source", TomlValue.String resource.Source ]) ])
+
+    let private serializeBorrowedResult (borrowed: BindingBorrowedResult) =
+        TomlValue.InlineTable (Map.ofList [
+            "content", TomlValue.String (match borrowed.Content with BorrowedContent.Text -> "text" | BorrowedContent.Bytes -> "bytes")
+            "owner_parameter", TomlValue.Integer (int64 borrowed.OwnerParameter)
+            "extent",
+                (match borrowed.Extent with
+                 | BorrowedExtent.Companion (binding, arguments) ->
+                     TomlValue.InlineTable (Map.ofList [
+                         "binding", TomlValue.String binding
+                         "arguments", TomlValue.Array (arguments |> List.map (int64 >> TomlValue.Integer)) ])
+                 | BorrowedExtent.NulTerminated -> TomlValue.InlineTable (Map.ofList [ "nul_terminated", TomlValue.Boolean true ]))
+            "invalidated_by", TomlValue.Array (borrowed.InvalidatedBy |> List.map (function
+                | BorrowInvalidation.OwnerCall (binding, parameter) ->
+                    TomlValue.InlineTable (Map.ofList [ "binding", TomlValue.String binding; "parameter", TomlValue.Integer (int64 parameter) ])
+                | BorrowInvalidation.AnyOwnerCall -> TomlValue.InlineTable (Map.ofList [ "any_owner_call", TomlValue.Boolean true ])))
+            "hypothesis", TomlValue.InlineTable (Map.ofList [
+                "identity", TomlValue.String borrowed.Identity
+                "version", TomlValue.String borrowed.Version
+                "source", TomlValue.String borrowed.Source ]) ])
 
     let private serializeWritableBuffer (contract: BindingWritableBuffer) =
         TomlValue.InlineTable (Map.ofList [
@@ -193,6 +239,7 @@ module PilotSerializer =
             |> (fun t -> match binding.Resource with Some resource -> TomlTable.add "resource" (serializeResource resource) t | None -> t)
             |> (fun t -> if binding.WritableBuffers.IsEmpty then t else TomlTable.add "writable_buffers" (TomlValue.Array (binding.WritableBuffers |> List.map serializeWritableBuffer)) t)
             |> (fun t -> if binding.CallbackInvocations.IsEmpty then t else TomlTable.add "callback_invocations" (TomlValue.Array (binding.CallbackInvocations |> List.map serializeCallbackInvocation)) t)
+            |> (fun t -> match binding.BorrowedResult with Some borrowed -> TomlTable.add "borrowed_result" (serializeBorrowedResult borrowed) t | None -> t)
             |> TomlValue.Table)
         let table = if bindings.IsEmpty then table else TomlTable.add "bindings" (TomlValue.Array bindings) table
         let table = if opts.DescriptorOnlyDependencies then TomlTable.add "descriptor_only_dependencies" (TomlValue.Boolean true) table else table
@@ -611,6 +658,79 @@ module PilotSerializer =
             contracts
         | Some _ -> refuse Diagnostics.PilotValueType key "writable_buffers requires an array"
 
+    /// A pointer result read as a borrowed view (#196): its content, owner, extent, the events
+    /// that end its validity and the hypothesis stating them.
+    let private deserializeBorrowedResult (bindingKey: string) binding =
+        let key = bindingKey + ".borrowed_result"
+        match TomlTable.tryFind "borrowed_result" binding with
+        | None -> None
+        | Some value ->
+            let table = tableAt key "borrowed_result requires a table" value
+            onlyKeys key "borrowed_result has unknown fields" ["content"; "owner_parameter"; "extent"; "invalidated_by"; "hypothesis"] table
+            let content =
+                match nonemptyText key "borrowed_result requires nonempty content" "content" table with
+                | "text" -> BorrowedContent.Text
+                | "bytes" -> BorrowedContent.Bytes
+                | _ -> refuse Diagnostics.PilotValueUnadmitted $"{key}.content" "borrowed_result content must be text or bytes"
+            let owner = indexAt key "borrowed_result requires a nonnegative owner_parameter within int range" "owner_parameter" table
+            let extentKey = key + ".extent"
+            let extent =
+                let fields =
+                    TomlTable.tryFind "extent" table
+                    |> Option.map (tableAt extentKey "borrowed_result extent requires a table")
+                    |> Option.defaultWith (fun () -> refuse Diagnostics.PilotKeyMissing extentKey "borrowed_result requires extent")
+                match TomlTable.tryFind "nul_terminated" fields with
+                | Some value ->
+                    onlyKeys extentKey "borrowed_result extent is either { binding, arguments } or { nul_terminated = true }" ["nul_terminated"] fields
+                    match value with
+                    | TomlValue.Boolean true -> BorrowedExtent.NulTerminated
+                    | TomlValue.Boolean false -> refuse Diagnostics.PilotValueUnadmitted $"{extentKey}.nul_terminated" "borrowed_result extent nul_terminated admits only true"
+                    | _ -> refuse Diagnostics.PilotValueType $"{extentKey}.nul_terminated" "borrowed_result extent nul_terminated requires a boolean"
+                | None ->
+                    onlyKeys extentKey "borrowed_result extent is either { binding, arguments } or { nul_terminated = true }" ["binding"; "arguments"] fields
+                    let companion = nonemptyText extentKey "borrowed_result extent requires nonempty binding" "binding" fields
+                    let arguments =
+                        match TomlTable.tryFind "arguments" fields with
+                        | Some (TomlValue.Array values) ->
+                            values |> List.map (function
+                                | TomlValue.Integer value when value >= 0L && value <= int64 System.Int32.MaxValue -> int value
+                                | TomlValue.Integer _ -> refuse Diagnostics.PilotValueUnadmitted $"{extentKey}.arguments" "borrowed_result extent arguments requires nonnegative parameter indices within int range"
+                                | _ -> refuse Diagnostics.PilotValueType $"{extentKey}.arguments" "borrowed_result extent arguments requires parameter indices")
+                        | Some _ -> refuse Diagnostics.PilotValueType $"{extentKey}.arguments" "borrowed_result extent arguments requires an array"
+                        | None -> refuse Diagnostics.PilotKeyMissing $"{extentKey}.arguments" "borrowed_result extent requires arguments"
+                    BorrowedExtent.Companion (companion, arguments)
+            let invalidationKey = key + ".invalidated_by"
+            let invalidatedBy =
+                match TomlTable.tryFind "invalidated_by" table with
+                | Some (TomlValue.Array items) ->
+                    items |> List.map (fun item ->
+                        let entry = tableAt invalidationKey "borrowed_result invalidated_by requires tables" item
+                        match TomlTable.tryFind "any_owner_call" entry with
+                        | Some value ->
+                            onlyKeys invalidationKey "borrowed_result invalidated_by entry is either { binding, parameter } or { any_owner_call = true }" ["any_owner_call"] entry
+                            match value with
+                            | TomlValue.Boolean true -> BorrowInvalidation.AnyOwnerCall
+                            | TomlValue.Boolean false -> refuse Diagnostics.PilotValueUnadmitted $"{invalidationKey}.any_owner_call" "borrowed_result invalidated_by any_owner_call admits only true"
+                            | _ -> refuse Diagnostics.PilotValueType $"{invalidationKey}.any_owner_call" "borrowed_result invalidated_by any_owner_call requires a boolean"
+                        | None ->
+                            onlyKeys invalidationKey "borrowed_result invalidated_by entry is either { binding, parameter } or { any_owner_call = true }" ["binding"; "parameter"] entry
+                            BorrowInvalidation.OwnerCall (
+                                nonemptyText invalidationKey "borrowed_result invalidated_by requires nonempty binding" "binding" entry,
+                                indexAt invalidationKey "borrowed_result invalidated_by requires a nonnegative parameter within int range" "parameter" entry))
+                | Some _ -> refuse Diagnostics.PilotValueType invalidationKey "borrowed_result invalidated_by requires an array"
+                | None -> refuse Diagnostics.PilotKeyMissing invalidationKey "borrowed_result requires invalidated_by"
+            if (Set.ofList invalidatedBy).Count <> invalidatedBy.Length then
+                refuse Diagnostics.PilotEntryRepeated invalidationKey "borrowed_result invalidated_by declares one event more than once"
+            let hypothesisKey = key + ".hypothesis"
+            let hypothesis =
+                TomlTable.tryFind "hypothesis" table
+                |> Option.map (tableAt hypothesisKey "borrowed_result hypothesis requires a table")
+                |> Option.defaultWith (fun () -> refuse Diagnostics.PilotKeyMissing hypothesisKey "borrowed_result requires hypothesis")
+            onlyKeys hypothesisKey "borrowed_result hypothesis has unknown fields" ["identity"; "version"; "source"] hypothesis
+            let text name = hypothesisText hypothesisKey $"borrowed_result requires nonempty {name}" name hypothesis
+            Some { Content = content; OwnerParameter = owner; Extent = extent; InvalidatedBy = invalidatedBy
+                   Identity = text "identity"; Version = text "version"; Source = text "source" }
+
     let private deserializeCallbackInvocations (bindingKey: string) binding =
         let key = bindingKey + ".callback_invocations"
         match TomlTable.tryFind "callback_invocations" binding with
@@ -621,18 +741,19 @@ module PilotSerializer =
                 let text name = hypothesisText key $"callback_invocations requires nonempty {name}" name fields
                 let index = indexAt key "callback_invocations requires a nonnegative parameter index within int range" "parameter" fields
                 onlyKeys key "callback_invocations has unknown fields"
-                    ["parameter"; "identity"; "version"; "source"; "scope"; "exit_binding"; "success_status"; "absence_hypothesis"] fields
+                    ["parameter"; "identity"; "version"; "source"; "scope"; "exit_binding"; "success_status"; "absence_hypothesis"
+                     "context"; "counted_arrays"; "retention"] fields
                 let scope =
                     match TomlTable.tryFind "scope" fields with
                     | Some (TomlValue.String scope) -> scope
-                    | Some _ -> refuse Diagnostics.PilotValueType $"{key}.scope" "callback_invocations scope must be during_call or process_exit"
+                    | Some _ -> refuse Diagnostics.PilotValueType $"{key}.scope" "callback_invocations scope must be during_call, retained or process_exit"
                     | None -> refuse Diagnostics.PilotKeyMissing $"{key}.scope" "callback_invocations requires nonempty scope"
                 let exitBinding, successStatus =
                     match scope with
-                    | "during_call" ->
+                    | "during_call" | "retained" ->
                         if TomlTable.tryFind "exit_binding" fields |> Option.isSome
                            || TomlTable.tryFind "success_status" fields |> Option.isSome then
-                            refuse Diagnostics.CallbackScopeFieldConflict key "callback_invocations during_call forbids exit_binding and success_status"
+                            refuse Diagnostics.CallbackScopeFieldConflict key $"callback_invocations {scope} forbids exit_binding and success_status"
                         None, None
                     | "process_exit" ->
                         let exitBinding =
@@ -645,7 +766,7 @@ module PilotSerializer =
                             | Some _ -> refuse Diagnostics.PilotValueType $"{key}.success_status" "callback_invocations process_exit requires signed32 success_status"
                             | None -> refuse Diagnostics.CallbackScopeFieldConflict $"{key}.success_status" "callback_invocations process_exit requires signed32 success_status"
                         exitBinding, Some successStatus
-                    | _ -> refuse Diagnostics.CallbackScopeUnknown $"{key}.scope" "callback_invocations scope must be during_call or process_exit"
+                    | _ -> refuse Diagnostics.CallbackScopeUnknown $"{key}.scope" "callback_invocations scope must be during_call, retained or process_exit"
                 let absenceKey = key + ".absence_hypothesis"
                 let absenceHypothesis =
                     TomlTable.tryFind "absence_hypothesis" fields
@@ -654,8 +775,76 @@ module PilotSerializer =
                         onlyKeys absenceKey "callback_invocations absence_hypothesis has unknown fields" ["identity"; "version"; "source"] hypothesis
                         let required name = hypothesisText absenceKey $"callback_invocations absence_hypothesis requires nonempty {name}" name hypothesis
                         { Identity = required "identity"; Version = required "version"; Source = required "source" })
+                // The entry argument passing the caller's opaque context through (#189).
+                let context =
+                    let contextKey = key + ".context"
+                    TomlTable.tryFind "context" fields
+                    |> Option.map (fun value ->
+                        let context = tableAt contextKey "callback_invocations context requires a table" value
+                        onlyKeys contextKey "callback_invocations context has unknown fields" ["argument"; "parameter"] context
+                        let at name = indexAt contextKey $"callback_invocations context requires a nonnegative {name} within int range" name context
+                        { BindingCallbackContext.Argument = at "argument"; Parameter = at "parameter" })
+                // Counted pointer-array entry arguments (#190): one entry per argument.
+                let countedArrays =
+                    let arraysKey = key + ".counted_arrays"
+                    match TomlTable.tryFind "counted_arrays" fields with
+                    | None -> []
+                    | Some (TomlValue.Array items) ->
+                        let arrays = items |> List.map (fun item ->
+                            let entry = tableAt arraysKey "callback_invocations counted_arrays requires tables" item
+                            onlyKeys arraysKey "callback_invocations counted_arrays has unknown fields" ["argument"; "count_argument"; "element"] entry
+                            let at name = indexAt arraysKey $"callback_invocations counted_arrays requires a nonnegative {name} within int range" name entry
+                            let message = "callback_invocations counted_arrays element must be text, nullable_text, handle or nullable_handle"
+                            let element =
+                                match nonemptyText arraysKey message "element" entry with
+                                | "text" -> CountedArrayElement.Text
+                                | "nullable_text" -> CountedArrayElement.NullableText
+                                | "handle" -> CountedArrayElement.Handle
+                                | "nullable_handle" -> CountedArrayElement.NullableHandle
+                                | _ -> refuse Diagnostics.PilotValueUnadmitted $"{arraysKey}.element" message
+                            { BindingCountedArray.Argument = at "argument"; CountArgument = at "count_argument"; Element = element })
+                        if (arrays |> List.map _.Argument |> Set.ofList).Count <> arrays.Length then
+                            refuse Diagnostics.PilotEntryRepeated arraysKey "callback_invocations counted_arrays declares one argument more than once"
+                        arrays
+                    | Some _ -> refuse Diagnostics.PilotValueType arraysKey "callback_invocations counted_arrays requires an array"
+                // What keeps a retained callback and what retires it (#191).
+                let retention =
+                    let retentionKey = key + ".retention"
+                    match scope, TomlTable.tryFind "retention" fields with
+                    | "retained", None -> refuse Diagnostics.CallbackScopeFieldConflict retentionKey "callback_invocations retained requires retention"
+                    | "retained", Some value ->
+                        let table = tableAt retentionKey "callback_invocations retention requires a table" value
+                        onlyKeys retentionKey "callback_invocations retention has unknown fields" ["owner_parameter"; "redefined_by"; "releases"] table
+                        let owner = indexAt retentionKey "callback_invocations retention requires a nonnegative owner_parameter within int range" "owner_parameter" table
+                        let indices name =
+                            match TomlTable.tryFind name table with
+                            | None -> []
+                            | Some (TomlValue.Array values) ->
+                                values |> List.map (function
+                                    | TomlValue.Integer value when value >= 0L && value <= int64 System.Int32.MaxValue -> int value
+                                    | TomlValue.Integer _ -> refuse Diagnostics.PilotValueUnadmitted $"{retentionKey}.{name}" $"callback_invocations retention {name} requires nonnegative parameter indices within int range"
+                                    | _ -> refuse Diagnostics.PilotValueType $"{retentionKey}.{name}" $"callback_invocations retention {name} requires parameter indices")
+                            | Some _ -> refuse Diagnostics.PilotValueType $"{retentionKey}.{name}" $"callback_invocations retention {name} requires an array"
+                        let releasesKey = retentionKey + ".releases"
+                        let releases =
+                            match TomlTable.tryFind "releases" table with
+                            | None -> []
+                            | Some (TomlValue.Array items) ->
+                                items |> List.map (fun item ->
+                                    let release = tableAt releasesKey "callback_invocations retention releases requires tables" item
+                                    onlyKeys releasesKey "callback_invocations retention releases has unknown fields" ["binding"; "parameter"] release
+                                    { BindingRetentionRelease.Binding = nonemptyText releasesKey "callback_invocations retention releases requires nonempty binding" "binding" release
+                                      Parameter = indexAt releasesKey "callback_invocations retention releases requires a nonnegative parameter within int range" "parameter" release })
+                            | Some _ -> refuse Diagnostics.PilotValueType releasesKey "callback_invocations retention releases requires an array"
+                        let redefinedBy = indices "redefined_by"
+                        if (Set.ofList redefinedBy).Count <> redefinedBy.Length then
+                            refuse Diagnostics.PilotEntryRepeated $"{retentionKey}.redefined_by" "callback_invocations retention redefined_by names one parameter more than once"
+                        Some { OwnerParameter = owner; RedefinedBy = redefinedBy; Releases = releases }
+                    | _, Some _ -> refuse Diagnostics.CallbackScopeFieldConflict retentionKey $"callback_invocations {scope} forbids retention"
+                    | _, None -> None
                 { Parameter = index; Identity = text "identity"; Version = text "version"; Source = text "source"; Scope = scope
-                  ExitBinding = exitBinding; SuccessStatus = successStatus; AbsenceHypothesis = absenceHypothesis })
+                  ExitBinding = exitBinding; SuccessStatus = successStatus; AbsenceHypothesis = absenceHypothesis
+                  Context = context; CountedArrays = countedArrays; Retention = retention })
             if (contracts |> List.map _.Parameter |> Set.ofList).Count <> contracts.Length then
                 refuse Diagnostics.ContractDuplicateParameter key "callback_invocations has duplicate parameter indices"
             contracts
@@ -734,6 +923,7 @@ module PilotSerializer =
                           Resource = deserializeResource bindingKey binding
                           WritableBuffers = deserializeWritableBuffers bindingKey binding
                           CallbackInvocations = deserializeCallbackInvocations bindingKey binding
+                          BorrowedResult = deserializeBorrowedResult bindingKey binding
                           Ownership = optionalString "ownership" binding |> Option.map (function
                               | "caller_owns" -> CallerOwns | "callee_owns" -> CalleeOwns | "borrowed" -> Borrowed
                               | other -> refuse Diagnostics.PilotValueUnadmitted $"{bindingKey}.ownership" $"Unknown binding ownership '{other}'") }

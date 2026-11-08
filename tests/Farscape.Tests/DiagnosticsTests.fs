@@ -457,3 +457,26 @@ let ``the layout probe keeps its refusal's record`` () =
         let raised = Assert.Throws<Diagnostics.RefusalException>(fun () -> BindingGenerator.requireLayoutProbe (Error refusal) |> ignore)
         Assert.Equal<Diagnostics.Diagnostic list>([ d ], raised.Refusal.Diagnostics)
         Assert.Equal("ABI-critical struct layout extraction failed: FS9124: " + message, raised.Message)
+
+/// Every generator refusal code `Diagnostics` declares, with the name of the literal holding it.
+let private declaredCodes () =
+    let diagnostics = typeof<Diagnostics.Diagnostic>.DeclaringType
+    diagnostics.GetFields(System.Reflection.BindingFlags.Public ||| System.Reflection.BindingFlags.Static)
+    |> Array.filter (fun field -> field.IsLiteral && field.FieldType = typeof<string>)
+    |> Array.choose (fun field ->
+        match field.GetRawConstantValue() with
+        | :? string as code when System.Text.RegularExpressions.Regex.IsMatch(code, "^FS9[0-9]{3}$") -> Some (field.Name, code)
+        | _ -> None)
+    |> List.ofArray
+
+[<Fact>]
+let ``each refusal reason has its own code, allocated sequentially from FS9101 with no reuse`` () =
+    let codes = declaredCodes ()
+    // One code per reason: no two literals share a code (a renumbering into a taken slot fails here).
+    let shared = codes |> List.groupBy snd |> List.filter (fun (_, names) -> names.Length > 1)
+    Assert.True(shared.IsEmpty, sprintf "codes shared by more than one reason: %A" shared)
+    // Sequential: FS9101 onward with no gap, so the next reason takes the next code (FS91xx is
+    // full at FS9199, and allocation continues as FS92xx).
+    let numbers = codes |> List.map (snd >> fun code -> int (code.Substring 2)) |> List.sort
+    Assert.Equal<int list>([ 9101 .. 9101 + numbers.Length - 1 ], numbers)
+    Assert.Equal(9210, List.last numbers)

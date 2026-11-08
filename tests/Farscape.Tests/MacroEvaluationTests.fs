@@ -34,10 +34,7 @@ let private emitted (macros: CppParser.MacroDecl list) : Map<string, string> * s
 /// The `#define` names `clang -dM -E` lists for `header` that start with `prefix`, read
 /// independently of Farscape's macro reader.
 let private clangMacroNames (header: string) (prefix: string) : Set<string> =
-    let info = System.Diagnostics.ProcessStartInfo("clang")
-    for arg in [ "-dM"; "-E"; "-x"; "c"; header ] do info.ArgumentList.Add arg
-    info.RedirectStandardOutput <- true
-    info.RedirectStandardError <- true
+    let info = ClangToolchain.startInfo [ "-dM"; "-E"; "-x"; "c"; header ]
     use proc = System.Diagnostics.Process.Start info
     let output = proc.StandardOutput.ReadToEnd()
     proc.WaitForExit()

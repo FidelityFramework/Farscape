@@ -673,6 +673,18 @@ module FidelityCodeGenerator =
             TypeMapper.cleanTypeName (resolveType ctx.TypedefMap name) = "char"
         | _ -> false
 
+    /// What a single-level pointer result addresses, read as a borrowed view (#196): `Some true`
+    /// for an 8-bit character (`const unsigned char *`, `const char *`), which may be text or
+    /// bytes; `Some false` for void (`const void *`), which is bytes only; None for anything else.
+    let private borrowedPointeeIn (ctx: GenerationContext) (cType: string) : bool option =
+        match stripNullability cType with
+        | ParsedCType info when info.PointerDepth = 1 ->
+            match resolveIn ctx info.BaseType with
+            | Scalar r when r.Bits = 8 && (r.Family = TypeMapper.Signed || r.Family = TypeMapper.Unsigned) -> Some true
+            | Scalar r when r.Family = TypeMapper.Void -> Some false
+            | _ -> None
+        | _ -> None
+
     /// Const applies to the immediate referenced object, not a deeper pointee:
     /// const T** still exposes a writable pointer cell; T* const* does not.
     let private referencePassing (projection: BindingProjection option) index (cType: string) =
@@ -927,6 +939,77 @@ module FidelityCodeGenerator =
                 | None -> Map.tryFind name ctx.TypedefMap |> Option.bind (signature seen)
         signature Set.empty cType
 
+    /// The record marker of a callback entry argument that is a single-level pointer to a named
+    /// record (`sqlite3_context *`) or an opaque pointer typedef: the entry receives it as an
+    /// opaque handle it never dereferences (#189). None for any other type.
+    let private opaqueMarkerOf (ctx: GenerationContext) (cType: string) : string option =
+        let bare = stripNullability cType
+        match resolveIn ctx bare with
+        | OpaqueHandle name -> Some name
+        | DataPointer (Named name) when (bare |> Seq.filter ((=) '*') |> Seq.length) = 1 ->
+            match bare with
+            | ParsedCType info ->
+                match resolveIn ctx info.BaseType with
+                | Unresolved _ when not (ctx.Enums.ContainsKey (TypeMapper.cleanTypeName info.BaseType)) -> Some name
+                | _ -> None
+            | _ -> None
+        | _ -> None
+
+    /// An untyped data pointer (`void *`, or a typedef standing for one): a context the caller
+    /// passes and gets back unchanged (#189).
+    let private isUntypedPointerIn (ctx: GenerationContext) (cType: string) : bool =
+        resolveIn ctx cType = DataPointer (Named "unit")
+
+    /// How a counted array's elements read, in a refusal.
+    let private describeCountedElement (element: CountedArrayElement) =
+        match element with
+        | CountedArrayElement.Text -> "text (char *)"
+        | CountedArrayElement.NullableText -> "nullable text (char *)"
+        | CountedArrayElement.Handle -> "opaque handles"
+        | CountedArrayElement.NullableHandle -> "nullable opaque handles"
+
+    /// A pointer-to-pointer entry argument's element as its declared counted-array element reads
+    /// it (#190): the element's Clef carrier and its BAREWire `CountedElement`. None when the
+    /// argument is no pointer array of that element (text needs `char **`, a handle `T **` with T
+    /// a record).
+    let private countedElementOf (ctx: GenerationContext) (element: CountedArrayElement) (argumentType: string) : (FsType * string) option =
+        let bare = stripNullability argumentType
+        if (bare |> Seq.filter ((=) '*') |> Seq.length) <> 2 then None else
+        let pointee = bare.Substring(0, bare.LastIndexOf('*')).Trim()
+        match element with
+        | CountedArrayElement.Text when isCharPointerIn ctx pointee -> Some (Named "string", "Text")
+        | CountedArrayElement.NullableText when isCharPointerIn ctx pointee -> Some (wrapOption (Named "string"), "NullableText")
+        | CountedArrayElement.Handle ->
+            opaqueMarkerOf ctx pointee |> Option.map (fun marker -> Generic("CHandle", Named marker), $"Handle {quoteString marker}")
+        | CountedArrayElement.NullableHandle ->
+            opaqueMarkerOf ctx pointee |> Option.map (fun marker -> wrapOption (Generic("CHandle", Named marker)), $"NullableHandle {quoteString marker}")
+        | _ -> None
+
+    /// The invocation contract a binding declares for its native parameter `index`.
+    let private invocationAt (ctx: GenerationContext) (func: CppParser.FunctionDecl) (index: int) =
+        ctx.Bindings |> Map.tryFind func.Name
+        |> Option.bind (fun binding -> binding.CallbackInvocations |> List.tryFind (fun contract -> contract.Parameter = index))
+
+    /// The Clef type of callback parameter `index`: its FnPtr, each counted pointer-array argument
+    /// its invocation contract declares read as a `ReadOnlyView` of its elements rather than a
+    /// nested CHandle (#190). An argument the contract declares wrongly keeps its type here; the
+    /// contract's validation refuses it.
+    let private callbackParameterType (ctx: GenerationContext) (func: CppParser.FunctionDecl) (index: int) (cType: string) : FsType =
+        let resolved = resolveIn ctx cType
+        match resolved, invocationAt ctx func index with
+        | FunctionPointer (parameters, ret), Some contract when not contract.CountedArrays.IsEmpty ->
+            let arguments = resolveCallbackNativeSignature ctx cType |> Option.map snd |> Option.defaultValue []
+            let viewed =
+                parameters |> List.mapi (fun argument clefType ->
+                    match contract.CountedArrays |> List.tryFind (fun array -> array.Argument = argument), List.tryItem argument arguments with
+                    | Some array, Some (_, argumentType) ->
+                        countedElementOf ctx array.Element argumentType
+                        |> Option.map (fun (element, _) -> Generic("ReadOnlyView", element))
+                        |> Option.defaultValue clefType
+                    | _ -> clefType)
+            Generic("FnPtr", FunctionType(viewed, ret))
+        | _ -> clefTypeOf resolved
+
     /// Anonymous entries belong to their parameter site.
     let private callbackEntries (ctx: GenerationContext) (namespace': string) (func: CppParser.FunctionDecl) =
         let ctx = inFunctionUnit ctx func
@@ -945,7 +1028,7 @@ module FidelityCodeGenerator =
                         "Type", Literal typeRef
                         "PassBy", Identifier "Value" ], provenance))
                 let returnRef, returnProvenance = abiClaim ctx ret
-                let entryType = resolveIn ctx cType |> clefTypeOf
+                let entryType = callbackParameterType ctx func index cType
                 let declarations = [
                     RecordType(recordName, ["Invoke", entryType],
                         Some "Layer 2 native entry contract. Construct its field with FnPtr.ofFunction on a closed module function.", [])
@@ -965,7 +1048,8 @@ module FidelityCodeGenerator =
     /// (the pointee a reference projection passes) and the result of its `FunctionDescriptor`,
     /// and each argument and result of the `CallbackDescriptor` of every callback parameter.
     /// These are all the `abiClaim` sites a claim can fail at: a callback invocation entry
-    /// admits only ordered integers and void before it claims.
+    /// admits only ordered integers, opaque handles, a declared context, declared counted arrays
+    /// and void before it claims.
     let descriptorTypeSites (ctx: GenerationContext) (func: CppParser.FunctionDecl) : (string * string) list =
         let ctx = inFunctionUnit ctx func
         let parameters =
@@ -1025,7 +1109,10 @@ module FidelityCodeGenerator =
 
     /// Declare receiving-site activation separately from the listener record and its ABI.
     /// The existing native signature owner supplies every formal, including unused ones.
-    let private callbackInvocationDecls (ctx: GenerationContext) namespace' (anchors: Map<string, string * CppParser.FunctionDecl * FsDecl list>) (func: CppParser.FunctionDecl) nativeName =
+    /// `anchors` resolves exit and release bindings to selected generated declarations; None
+    /// validates a contract whose declarations this call does not emit (the nullable-callback
+    /// check before raw emission, and wrappers that keep only the public binding).
+    let private callbackInvocationDecls (ctx: GenerationContext) namespace' (anchors: Map<string, string * CppParser.FunctionDecl * FsDecl list> option) (func: CppParser.FunctionDecl) nativeName =
         let ctx = inFunctionUnit ctx func
         let contracts = ctx.Bindings |> Map.tryFind func.Name |> Option.map _.CallbackInvocations |> Option.defaultValue []
         let key = bindingKey func.Name "callback_invocations"
@@ -1043,32 +1130,74 @@ module FidelityCodeGenerator =
                     if System.String.IsNullOrWhiteSpace value then refuse Diagnostics.HypothesisFieldEmpty $"absence_hypothesis requires nonempty {key}"
                 if hypothesis.Identity = contract.Identity then
                     refuse Diagnostics.AbsenceIdentityReused "absence_hypothesis identity must differ from activation identity"
-                if contract.Scope <> "during_call" then
-                    refuse Diagnostics.CallbackScopeFieldConflict "absence_hypothesis requires during_call"
+                if contract.Scope <> "during_call" && contract.Scope <> "retained" then
+                    refuse Diagnostics.CallbackScopeFieldConflict "absence_hypothesis requires during_call or retained"
             | None -> ()
+            if contract.Retention.IsSome && contract.Scope <> "retained" then
+                refuse Diagnostics.CallbackScopeFieldConflict $"{contract.Scope} forbids retention"
+            let arity = func.Parameters.Length
             let scopeType, scopeFields =
                 match contract.Scope, contract.ExitBinding, contract.SuccessStatus with
                 | "during_call", None, None -> "ScopedCallbackDescriptor", []
-                | "during_call", _, _ -> refuse Diagnostics.CallbackScopeFieldConflict "during_call forbids exit_binding and success_status"
+                | "retained", None, None ->
+                    // A registration the library keeps until a declared release retires it (#191).
+                    let retention = contract.Retention |> Option.defaultWith (fun () -> refuse Diagnostics.CallbackScopeFieldConflict "retained requires retention")
+                    let refuseRetention reason = refuse Diagnostics.RetentionInvalid $"retention {reason}"
+                    let owner = retention.OwnerParameter
+                    if owner < 0 || owner >= arity then refuseRetention $"owner_parameter {owner} is outside native arity {arity}"
+                    if owner = contract.Parameter then refuseRetention $"owner_parameter {owner} is the callback parameter itself"
+                    let ownerType = snd func.Parameters[owner]
+                    if (opaqueMarkerOf ctx ownerType).IsNone then
+                        refuseRetention $"owner_parameter {owner} ('{ownerType}') is no opaque handle that could hold the registration"
+                    for index in retention.RedefinedBy do
+                        if index < 0 || index >= arity then refuseRetention $"redefined_by {index} is outside native arity {arity}"
+                        if index = contract.Parameter then refuseRetention $"redefined_by {index} is the callback parameter itself"
+                    if not retention.RedefinedBy.IsEmpty && not (List.contains owner retention.RedefinedBy) then
+                        refuseRetention $"redefined_by must include owner_parameter {owner}: a later call replaces a registration only on its own owner"
+                    if retention.RedefinedBy.IsEmpty && retention.Releases.IsEmpty then
+                        refuseRetention "names neither redefined_by nor a release; a registration nothing retires is no retained scope"
+                    let releases =
+                        retention.Releases |> List.map (fun release ->
+                            let call binding = FunctionCall("", "OwnerRelease", [RecordConstruction [ "Binding", Literal (quoteString binding); "Parameter", Literal (string release.Parameter) ]])
+                            match anchors with
+                            | None -> call release.Binding
+                            | Some anchors ->
+                                match Map.tryFind release.Binding anchors with
+                                | None -> refuse Diagnostics.ContractBindingUnselected $"retention release '{release.Binding}' must name a selected qualified generated declaration"
+                                | Some (actual, releaseFunc, _) ->
+                                    if release.Parameter < 0 || release.Parameter >= releaseFunc.Parameters.Length then
+                                        refuseRetention $"release '{release.Binding}' parameter {release.Parameter} is outside its native arity {releaseFunc.Parameters.Length}"
+                                    let received = resolveIn (inFunctionUnit ctx releaseFunc) (snd releaseFunc.Parameters[release.Parameter]) |> clefTypeOf
+                                    let owned = resolveIn ctx ownerType |> clefTypeOf
+                                    if received <> owned then
+                                        refuseRetention $"release '{release.Binding}' parameter {release.Parameter} receives {CodeRenderer.renderType received}, not the owner's {CodeRenderer.renderType owned}"
+                                    call actual)
+                    let redefinition =
+                        if retention.RedefinedBy.IsEmpty then []
+                        else [ Literal ("Redefinition [|" + (retention.RedefinedBy |> List.map string |> String.concat "; ") + "|]") ]
+                    "RetainedCallbackDescriptor", ["Owner", Literal (string owner); "Releases", ArrayBlock (redefinition @ releases)]
+                | ("during_call" | "retained"), _, _ -> refuse Diagnostics.CallbackScopeFieldConflict $"{contract.Scope} forbids exit_binding and success_status"
                 | "process_exit", anchor, Some status ->
                     match resolveIn ctx func.ReturnType with
                     | Scalar r when r.Family = TypeMapper.Signed && r.Bits = 32 -> ()
                     | _ -> refuse Diagnostics.ProcessExitSignature "process_exit requires a signed32 registration result"
                     let anchorValue =
-                        match anchor with
-                        | None -> Identifier "None"
-                        | Some selected ->
+                        match anchor, anchors with
+                        | None, _ -> Identifier "None"
+                        | Some selected, None -> Literal ("Some " + quoteString selected)
+                        | Some selected, Some anchors ->
                             match Map.tryFind selected anchors with
                             | Some (actual, _, _) -> Literal ("Some " + quoteString actual)
                             | None -> refuse Diagnostics.ContractBindingUnselected "exit_binding must name a selected qualified generated declaration"
                     "ProcessExitCallbackDescriptor", ["ExitBinding", anchorValue; "SuccessStatus", Literal (string status)]
                 | "process_exit", _, None -> refuse Diagnostics.CallbackScopeFieldConflict "process_exit requires signed32 success_status"
-                | _ -> refuse Diagnostics.CallbackScopeUnknown "scope must be during_call or process_exit"
-            if contract.Parameter < 0 || contract.Parameter >= func.Parameters.Length then
-                refuse Diagnostics.ContractParameterOutOfRange $"parameter {contract.Parameter} is outside native arity {func.Parameters.Length}"
+                | _ -> refuse Diagnostics.CallbackScopeUnknown "scope must be during_call, retained or process_exit"
+            if contract.Parameter < 0 || contract.Parameter >= arity then
+                refuse Diagnostics.ContractParameterOutOfRange $"parameter {contract.Parameter} is outside native arity {arity}"
             let projection = ctx.Bindings[func.Name]
-            if not projection.ReferenceParameters.IsEmpty || not projection.ReadOnlyReferenceParameters.IsEmpty
-               || not projection.StringParameters.IsEmpty || (projection.ConstantParameters |> List.exists (System.String.IsNullOrWhiteSpace >> not)) then
+            // Native ordinals survive string and reference projections (#189); a constant removes
+            // the parameter from the Clef signature, so it still needs the untranslated list.
+            if projection.ConstantParameters |> List.exists (System.String.IsNullOrWhiteSpace >> not) then
                 refuse Diagnostics.ContractRequiresUntranslated "requires an untranslated native parameter list"
             let name, cType = func.Parameters[contract.Parameter]
             match resolveIn ctx cType with
@@ -1089,26 +1218,94 @@ module FidelityCodeGenerator =
                 match parameters, resolveIn ctx ret with
                 | [], Scalar r when r.Family = TypeMapper.Void -> ()
                 | _ -> refuse Diagnostics.ProcessExitSignature "process_exit requires a zero-argument void callback"
-            let nativeType isReturn (cType: string) =
+            let entryArity = parameters.Length
+            // Counted pointer-array arguments (#190): each a pointer array of its declared element,
+            // counted by a scalar integer argument of the same entry.
+            let counted = contract.CountedArrays
+            match counted |> List.countBy _.Argument |> List.tryFind (fun (_, count) -> count > 1) with
+            | Some (argument, _) -> refuse Diagnostics.CountedArrayInvalid $"counted_arrays declares entry argument {argument} more than once"
+            | None -> ()
+            let contextArgument = contract.Context |> Option.map _.Argument
+            for array in counted do
+                let refuseArray reason = refuse Diagnostics.CountedArrayInvalid $"counted_arrays argument {array.Argument}: {reason}"
+                for ordinal in [array.Argument; array.CountArgument] do
+                    if ordinal < 0 || ordinal >= entryArity then refuseArray $"entry argument {ordinal} is outside the entry's arity {entryArity}"
+                if array.Argument = array.CountArgument then refuseArray "an array cannot count itself"
+                if counted |> List.exists (fun other -> other.Argument = array.CountArgument) then
+                    refuseArray $"count_argument {array.CountArgument} is itself a counted array"
+                if contextArgument = Some array.Argument || contextArgument = Some array.CountArgument then
+                    refuseArray $"entry argument {contextArgument.Value} is the declared context"
+                let argumentType = snd parameters[array.Argument]
+                if (countedElementOf ctx array.Element argumentType).IsNone then
+                    refuseArray $"entry argument '{fst parameters[array.Argument]}' ('{argumentType}') is no pointer array of {describeCountedElement array.Element}"
+                let countType = snd parameters[array.CountArgument]
+                match resolveIn ctx countType with
+                | Scalar r when (r.Family = TypeMapper.Signed || r.Family = TypeMapper.Unsigned) && not (countType.Contains '*') -> ()
+                | _ -> refuseArray $"count_argument {array.CountArgument} ('{countType}') is no scalar integer entry argument"
+            // The caller's opaque context passed through to the entry (#189).
+            match contract.Context with
+            | None -> ()
+            | Some context ->
+                let refuseContext reason = refuse Diagnostics.CallbackContextInvalid $"context: {reason}"
+                if context.Argument < 0 || context.Argument >= entryArity then
+                    refuseContext $"entry argument {context.Argument} is outside the entry's arity {entryArity}"
+                if context.Parameter < 0 || context.Parameter >= arity then
+                    refuseContext $"parameter {context.Parameter} is outside native arity {arity}"
+                if context.Parameter = contract.Parameter then
+                    refuseContext $"parameter {context.Parameter} is the callback parameter itself"
+                let argumentType = snd parameters[context.Argument]
+                if not (isUntypedPointerIn ctx argumentType) then
+                    refuseContext $"entry argument {context.Argument} ('{argumentType}') is no untyped data pointer (void *)"
+                let parameterType = snd func.Parameters[context.Parameter]
+                if not (isUntypedPointerIn ctx parameterType) then
+                    refuseContext $"parameter {context.Parameter} ('{parameterType}') is no untyped data pointer (void *)"
+                let projected =
+                    List.contains context.Parameter projection.StringParameters
+                    || List.contains context.Parameter projection.ReferenceParameters
+                    || List.contains context.Parameter projection.ReadOnlyReferenceParameters
+                    || (List.tryItem context.Parameter projection.ParameterHandles |> Option.exists ((<>) ""))
+                if projected then
+                    refuseContext $"parameter {context.Parameter} is projected; the context passes through untranslated as CHandle<unit>"
+            // Each entry argument's admitted representation: a declared counted array or context,
+            // an ordered 32- or 64-bit integer, or an opaque handle to a record (#189). The result:
+            // such an integer or void.
+            let nativeType (argument: int option) (cType: string) =
                 if cType.Contains('&') then refuse Diagnostics.CallbackEntryTypeUnadmitted $"unsupported native entry reference signature type '{cType}'"
-                match resolveIn ctx cType with
-                | Scalar r when (r.Family = TypeMapper.Signed || r.Family = TypeMapper.Unsigned) && (r.Bits = 32 || r.Bits = 64) -> ()
-                | Scalar r when r.Family = TypeMapper.Bool ->
-                    refuse Diagnostics.CallbackEntryTypeUnadmitted "Boolean native entry signatures are outside the admitted ordered integer callback profile"
-                | Scalar r when isReturn && r.Family = TypeMapper.Void -> ()
-                | _ -> refuse Diagnostics.CallbackEntryTypeUnadmitted $"unsupported native entry signature type '{cType}'"
+                let declared =
+                    argument |> Option.exists (fun a -> contextArgument = Some a || counted |> List.exists (fun array -> array.Argument = a))
+                if not declared then
+                    match resolveIn ctx cType with
+                    | Scalar r when (r.Family = TypeMapper.Signed || r.Family = TypeMapper.Unsigned) && (r.Bits = 32 || r.Bits = 64) -> ()
+                    | Scalar r when r.Family = TypeMapper.Bool ->
+                        refuse Diagnostics.CallbackEntryTypeUnadmitted "Boolean native entry signatures are outside the admitted ordered integer callback profile"
+                    | Scalar r when argument.IsNone && r.Family = TypeMapper.Void -> ()
+                    | DataPointer (Generic ("CHandle", _)) when argument.IsSome ->
+                        refuse Diagnostics.PointerArrayUndeclared
+                            $"pointer-to-pointer entry argument {argument.Value} ('{cType}') has no counted_arrays declaration; an undeclared pointer array has no admitted representation"
+                    | (DataPointer _ | OpaqueHandle _) when argument.IsSome && (opaqueMarkerOf ctx cType).IsSome -> ()
+                    | _ -> refuse Diagnostics.CallbackEntryTypeUnadmitted $"unsupported native entry signature type '{cType}'"
                 abiClaim ctx cType
-            let infos = parameters |> List.map (fun (name, typ) ->
-                let typeRef, provenance = nativeType false typ
+            let infos = parameters |> List.mapi (fun index (name, typ) ->
+                let typeRef, provenance = nativeType (Some index) typ
+                let role =
+                    match contextArgument, counted |> List.tryFind (fun array -> array.Argument = index) with
+                    | Some a, _ when a = index -> $"; the caller's opaque context, passed through from parameter {contract.Context.Value.Parameter}"
+                    | _, Some array -> $"; read as a bounded read-only view of {describeCountedElement array.Element} counted by entry argument {array.CountArgument}"
+                    | _ -> ""
                 Commented(RecordConstruction [
                     "Name", Literal (quoteString ((cleanParamName name).Replace("``", "")))
-                    "Type", Literal typeRef; "PassBy", Identifier "Value" ], provenance))
-            let returnRef, returnProvenance = nativeType true ret
-            let contractName = nativeName + "Callback" + string contract.Parameter + "InvocationContract"
-            let scopeName = nativeName + "Callback" + string contract.Parameter + "Scope"
+                    "Type", Literal typeRef; "PassBy", Identifier "Value" ], provenance + role))
+            let returnRef, returnProvenance = nativeType None ret
+            let prefix = nativeName + "Callback" + string contract.Parameter
+            let contractName = prefix + "InvocationContract"
+            let scopeName = prefix + "Scope"
             let binding = namespace' + "." + nativeName
+            let scopeNote =
+                if contract.Scope = "retained" then
+                    " The entry is retained until a declared release: construct it with FnPtr.ofFunction on a closed module function; no environment is captured or retained."
+                else ""
             contract.Parameter, namespace' + "." + contractName, [
-                XmlDoc "Declared foreign activation only: no argument values, invocation count, purity or functionhood are supplied."
+                XmlDoc ("Declared foreign activation only: no argument values, invocation count, purity or functionhood are supplied." + scopeNote)
                 ValueBinding(scopeName, Generic("Expr", Named scopeType), Quoted(RecordBlock ([
                     "BAREWire.Descriptors." + scopeType + ".Binding", Literal (quoteString binding)
                     "Parameter", Literal (quoteString ((cleanParamName name).Replace("``", ""))) ] @ scopeFields)))
@@ -1125,14 +1322,28 @@ module FidelityCodeGenerator =
                         "Source", Literal (quoteString contract.Source) ]
                     "Scope", Literal (quoteString (namespace' + "." + scopeName)) ]))
                 yield! contract.AbsenceHypothesis |> Option.map (fun hypothesis ->
-                    ValueBinding(nativeName + "Callback" + string contract.Parameter + "AbsenceContract",
+                    ValueBinding(prefix + "AbsenceContract",
                         Generic("Expr", Named "CallbackAbsenceContract"), Quoted(RecordBlock [
                             "BAREWire.Descriptors.CallbackAbsenceContract.Binding", Literal (quoteString binding)
                             "Parameter", Literal (string contract.Parameter)
                             "Hypothesis", RecordBlock [
                                 "Identity", Literal (quoteString hypothesis.Identity)
                                 "Version", Literal (quoteString hypothesis.Version)
-                                "Source", Literal (quoteString hypothesis.Source) ] ]))) |> Option.toList ])
+                                "Source", Literal (quoteString hypothesis.Source) ] ]))) |> Option.toList
+                yield! contract.Context |> Option.map (fun context ->
+                    ValueBinding(prefix + "Context", Generic("Expr", Named "CallbackContextDescriptor"), Quoted(RecordBlock [
+                        "BAREWire.Descriptors.CallbackContextDescriptor.Binding", Literal (quoteString binding)
+                        "Parameter", Literal (string contract.Parameter)
+                        "Argument", Literal (string context.Argument)
+                        "ContextParameter", Literal (string context.Parameter) ]))) |> Option.toList
+                yield! counted |> List.map (fun array ->
+                    let _, element = (countedElementOf ctx array.Element (snd parameters[array.Argument])).Value
+                    ValueBinding(prefix + "Argument" + string array.Argument + "CountedArray", Generic("Expr", Named "CountedEntryArrayDescriptor"), Quoted(RecordBlock [
+                        "BAREWire.Descriptors.CountedEntryArrayDescriptor.Binding", Literal (quoteString binding)
+                        "Parameter", Literal (string contract.Parameter)
+                        "Argument", Literal (string array.Argument)
+                        "CountArgument", Literal (string array.CountArgument)
+                        "Element", Literal element ]))) ])
         entries |> List.map (fun (index, binding, _) -> index, binding) |> Map.ofList,
         entries |> List.collect (fun (_, _, declarations) -> declarations)
 
@@ -1239,11 +1450,11 @@ module FidelityCodeGenerator =
                         let contracts = projection |> Option.map _.CallbackInvocations |> Option.defaultValue []
                         if not (contracts |> List.exists (fun contract -> contract.Parameter = idx)) then
                             refuse Diagnostics.NullableCallbackUnadmitted (Some (bindingKey func.Name "")) "a native function-pointer parameter requires explicit nonnull evidence; nullable callback parameters require a supported boundary adapter."
-                        if contracts |> List.exists (fun contract -> contract.Scope <> "during_call") then
-                            refuse Diagnostics.NullableCallbackScope (Some (bindingKey func.Name "callback_invocations")) "nullable callback parameters require only during_call invocation contracts."
-                        // Reuse the complete receiving-contract validator before raw emission.
-                        // This profile has no process-exit anchors to resolve.
-                        callbackInvocationDecls ctx "" Map.empty func func.Name |> ignore
+                        if contracts |> List.exists (fun contract -> contract.Scope <> "during_call" && contract.Scope <> "retained") then
+                            refuse Diagnostics.NullableCallbackScope (Some (bindingKey func.Name "callback_invocations")) "nullable callback parameters require only during_call or retained invocation contracts."
+                        // Reuse the complete receiving-contract validator before raw emission. Its
+                        // declarations are emitted later, where release bindings are resolved.
+                        callbackInvocationDecls ctx "" None func func.Name |> ignore
                         true
                     | _ -> false
                 let referenceKey =
@@ -1271,10 +1482,13 @@ module FidelityCodeGenerator =
                         if not (isDataPointerIn ctx cType) then refuse Diagnostics.HandleProjectionNotDataPointer (Some (bindingKey func.Name "parameter_handles")) "handle projection requires a C data pointer"
                         Generic("CHandle", Named handle.Value)
                     elif callbackNonnull then
-                        match mapType cType with
+                        match callbackParameterType ctx func idx cType with
                         | Generic("FnPtr", _) as ty -> ty
                         | _ -> refuse Diagnostics.CallbackNotFunctionPointer (Some (bindingKey func.Name "nonnull_callbacks")) "nonnull_callbacks requires a C function pointer"
-                    else mapType cType
+                    else
+                        match resolveIn ctx cType with
+                        | FunctionPointer _ -> callbackParameterType ctx func idx cType
+                        | _ -> mapType cType
                 let isNullable = nullableCallback || (not reference && isDataPointerIn ctx cType && not provenNonnull)
                 let finalType = if isNullable then wrapOption fsType else fsType
                 { FsParam.Name = cleanParamName name; Type = finalType })))
@@ -1297,12 +1511,26 @@ module FidelityCodeGenerator =
             | FunctionPointer _ when not provenReturnNonnull ->
                 refuseResult Diagnostics.NullableCallbackUnadmitted returnsKey "a native function-pointer result requires explicit nonnull evidence; nullable callback results require a supported boundary adapter."
             | _ -> ())
+        let borrowed = projection |> Option.bind _.BorrowedResult
         let returnType =
-            match projection |> Option.bind (fun b -> b.ReturnHandle) with
-            | Some name ->
+            match projection |> Option.bind (fun b -> b.ReturnHandle), borrowed with
+            | Some _, Some _ ->
+                refuseResult Diagnostics.BorrowedResultShape (Some (bindingKey func.Name "borrowed_result")) "borrowed_result conflicts with return_handle: a borrowed view is no handle"
+            | Some name, None ->
                 if not (isDataPointerIn ctx func.ReturnType) then refuseResult Diagnostics.HandleProjectionNotDataPointer (Some (bindingKey func.Name "return_handle")) "return_handle requires a C data pointer"
                 Generic("CHandle", Named name)
-            | None -> mapType func.ReturnType
+            | None, Some borrowedResult ->
+                // A borrowed view of the library's bytes (#196): its descriptor states extent and validity.
+                let key = Some (bindingKey func.Name "borrowed_result")
+                if projection |> Option.exists (fun b -> b.Resource.IsSome) then
+                    refuseResult Diagnostics.BorrowedResultShape key "borrowed_result conflicts with resource: a borrowed view is never owned or released"
+                match borrowedPointeeIn ctx func.ReturnType, borrowedResult.Content with
+                | Some true, _ | Some false, BorrowedContent.Bytes -> Generic("ReadOnlyView", Named "byte")
+                | Some false, BorrowedContent.Text ->
+                    refuseResult Diagnostics.BorrowedResultShape key $"borrowed_result text requires a pointer to an 8-bit character, not '{func.ReturnType}'"
+                | None, _ ->
+                    refuseResult Diagnostics.BorrowedResultShape key $"borrowed_result requires a single-level pointer to an 8-bit character or void, not '{func.ReturnType}'"
+            | None, None -> mapType func.ReturnType
         let finalReturnType =
             if returnIsPointer && not provenReturnNonnull
             then wrapOption returnType
@@ -1348,11 +1576,38 @@ module FidelityCodeGenerator =
                           if outerNullabilityIn ctx "_Nonnull" cType then "native _Nonnull type"
                           if projection |> Option.exists (fun b -> List.contains idx b.NonnullCallbacks) then "pilot nonnull_callbacks" ]
                         |> String.concat ", "
-                    Some (XmlDoc (if evidence = "" then
-                                      $"Callback parameter `{name}` is optional; None supplies no callable entry. Activation relies on the declared during_call external hypothesis, not a proof of foreign behavior."
-                                  else $"Callback parameter `{name}` nonnull is an external execution hypothesis from {evidence}; it is not a proof of foreign behavior."))
+                    let contract = invocationAt ctx func idx
+                    let scope = contract |> Option.map _.Scope |> Option.defaultValue "during_call"
+                    // Each counted array the entry reads, and the context it passes through (#189, #190).
+                    let arguments = resolveCallbackNativeSignature ctx cType |> Option.map snd |> Option.defaultValue []
+                    let roles =
+                        contract |> Option.map (fun contract ->
+                            [ for array in contract.CountedArrays do
+                                let argument = arguments |> List.tryItem array.Argument |> Option.map fst |> Option.defaultValue $"arg{array.Argument}"
+                                let count = arguments |> List.tryItem array.CountArgument |> Option.map fst |> Option.defaultValue $"arg{array.CountArgument}"
+                                $" Entry argument `{argument}` is a read-only view of `{count}` elements borrowed until the entry returns."
+                              match contract.Context with
+                              | Some context ->
+                                  let argument = arguments |> List.tryItem context.Argument |> Option.map fst |> Option.defaultValue $"arg{context.Argument}"
+                                  let parameter = func.Parameters |> List.tryItem context.Parameter |> Option.map fst |> Option.defaultValue $"arg{context.Parameter}"
+                                  $" Entry argument `{argument}` is the opaque `{parameter}` passed through unchanged."
+                              | None -> () ] |> String.concat "")
+                        |> Option.defaultValue ""
+                    let activation =
+                        if scope = "retained" then "the declared retained external hypothesis: the library may invoke it until a declared release retires the registration"
+                        else $"the declared {scope} external hypothesis"
+                    Some (XmlDoc ((if evidence = "" then
+                                      $"Callback parameter `{name}` is optional; None supplies no callable entry. Activation relies on {activation}, not a proof of foreign behavior."
+                                   else $"Callback parameter `{name}` nonnull is an external execution hypothesis from {evidence}; it is not a proof of foreign behavior.") + roles))
                 | _ -> None) |> List.choose id
-        formatDocDecls { func with Name = symbol } @ callbackNotes @
+        // A character-pointer result nothing declares stays opaque, and says why (#196).
+        let resultNote =
+            match projection, borrowedPointeeIn ctx func.ReturnType with
+            | Some p, _ when p.BorrowedResult.IsSome || p.ReturnHandle.IsSome || p.Resource.IsSome -> []
+            | _, Some true ->
+                [ XmlDoc $"Result `{func.ReturnType}` is kept opaque: no borrowed_result declares its owner, extent and validity, so it is not read as text or bytes." ]
+            | _ -> []
+        formatDocDecls { func with Name = symbol } @ callbackNotes @ resultNote @
         [ LetBinding(nativeName, parameters, finalReturnType, NativeZeroed,
                      [$"FidelityExtern(\"{libraryName}\", \"{symbol}\")"]) ] @
         generateDescriptorDecls descriptorContext nativeFunction @ wrapper
@@ -1433,6 +1688,83 @@ module FidelityCodeGenerator =
                           "Version", Literal (quoteString resource.Version)
                           "Source", Literal (quoteString resource.Source) ] ])) ]
 
+    /// The borrowed view a binding declares for its pointer result (#196): the owner parameter
+    /// whose argument owns the bytes, the extent (an integer companion call on the borrowing
+    /// call's own arguments, or the terminating NUL of text) and the selected calls that end its
+    /// validity. The result type itself is projected in `generateFunctionDecls`.
+    let private borrowedResultDecls (ctx: GenerationContext) (anchors: Map<string, string * CppParser.FunctionDecl * FsDecl list>) (func: CppParser.FunctionDecl) (qualifiedName: string) =
+        let ctx = inFunctionUnit ctx func
+        match ctx.Bindings |> Map.tryFind func.Name |> Option.bind _.BorrowedResult with
+        | None -> []
+        | Some borrowed ->
+            let key = bindingKey func.Name "borrowed_result"
+            let refuseAt code field parameter reason = refuseContract func code (Some (key + field, parameter)) $"{func.Name} borrowed_result: {reason}"
+            for name, value in ["identity", borrowed.Identity; "version", borrowed.Version; "source", borrowed.Source] do
+                if System.String.IsNullOrWhiteSpace value then refuseAt Diagnostics.HypothesisFieldEmpty ".hypothesis" None $"requires nonempty {name}"
+            let arity = func.Parameters.Length
+            let owner = borrowed.OwnerParameter
+            let refuseOwner reason = refuseAt Diagnostics.BorrowedInvalidationInvalid "" (Some owner) reason
+            if owner < 0 || owner >= arity then refuseAt Diagnostics.ContractParameterOutOfRange "" (Some owner) $"owner_parameter {owner} is outside native arity {arity}"
+            let ownerType = snd func.Parameters[owner]
+            if (opaqueMarkerOf ctx ownerType).IsNone then
+                refuseOwner $"owner_parameter {owner} ('{ownerType}') is no opaque handle that could own the result"
+            let owned = resolveIn ctx ownerType |> clefTypeOf
+            let selected field (binding: string) =
+                anchors |> Map.tryFind binding
+                |> Option.defaultWith (fun () -> refuseAt Diagnostics.ContractBindingUnselected field None $"'{binding}' must name a selected qualified generated declaration")
+            let extent =
+                match borrowed.Extent with
+                | BorrowedExtent.NulTerminated ->
+                    if borrowed.Content = BorrowedContent.Bytes then
+                        refuseAt Diagnostics.BorrowedExtentInvalid ".extent" None "nul_terminated requires text content: bytes may hold a NUL before their end"
+                    Identifier "NulTerminated"
+                | BorrowedExtent.Companion (binding, arguments) ->
+                    let refuseExtent reason = refuseAt Diagnostics.BorrowedExtentInvalid ".extent" None $"extent '{binding}' {reason}"
+                    let actual, companion, _ = selected ".extent" binding
+                    let companionCtx = inFunctionUnit ctx companion
+                    match resolveIn companionCtx companion.ReturnType with
+                    | Scalar r when r.Family = TypeMapper.Signed || r.Family = TypeMapper.Unsigned -> ()
+                    | _ -> refuseExtent $"returns '{companion.ReturnType}', not an integer byte count"
+                    if arguments.Length <> companion.Parameters.Length then
+                        refuseExtent $"takes {companion.Parameters.Length} arguments, not the {arguments.Length} arguments declared"
+                    if not (List.contains owner arguments) then
+                        refuseExtent $"arguments must include owner_parameter {owner}: the extent is measured on the same owner"
+                    arguments |> List.iteri (fun index argument ->
+                        if argument >= arity then refuseExtent $"argument {argument} is outside native arity {arity}"
+                        let passed = resolveIn ctx (snd func.Parameters[argument]) |> clefTypeOf
+                        let received = resolveIn companionCtx (snd companion.Parameters[index]) |> clefTypeOf
+                        if passed <> received then
+                            refuseExtent $"parameter {index} receives {CodeRenderer.renderType received}, not argument {argument}'s {CodeRenderer.renderType passed}")
+                    Literal ($"CompanionCall ({quoteString actual}, [|" + (arguments |> List.map string |> String.concat "; ") + "|])")
+            if borrowed.InvalidatedBy.IsEmpty then
+                refuseOwner "invalidated_by is empty: a result nothing invalidates is no borrow"
+            let invalidations =
+                borrowed.InvalidatedBy |> List.map (function
+                    | BorrowInvalidation.AnyOwnerCall -> Identifier "AnyOwnerCall"
+                    | BorrowInvalidation.OwnerCall (binding, parameter) ->
+                        let actual, call, _ = selected ".invalidated_by" binding
+                        if parameter >= call.Parameters.Length then
+                            refuseOwner $"invalidation '{binding}' parameter {parameter} is outside its native arity {call.Parameters.Length}"
+                        let received = resolveIn (inFunctionUnit ctx call) (snd call.Parameters[parameter]) |> clefTypeOf
+                        if received <> owned then
+                            refuseOwner $"invalidation '{binding}' parameter {parameter} receives {CodeRenderer.renderType received}, not the owner's {CodeRenderer.renderType owned}"
+                        FunctionCall("", "OwnerCall", [RecordConstruction [ "Binding", Literal (quoteString actual); "Parameter", Literal (string parameter) ]]))
+            let content = match borrowed.Content with BorrowedContent.Text -> "Utf8Text" | BorrowedContent.Bytes -> "RawBytes"
+            let ownerName = fst func.Parameters[owner]
+            [ XmlDoc $"Borrowed result: the library's bytes, owned through `{ownerName}`, read-only and valid only until a declared invalidation; an external execution hypothesis, not a proof of foreign behavior."
+              ValueBinding(func.Name + "BorrowedResult", Generic("Expr", Named "BorrowedResultViewDescriptor"),
+                  Quoted(RecordBlock [
+                      // Qualified: Binding and Owner are also RetainedCallbackDescriptor fields.
+                      "BAREWire.Descriptors.BorrowedResultViewDescriptor.Binding", Literal (quoteString qualifiedName)
+                      "Content", Identifier content
+                      "Extent", extent
+                      "Owner", Literal (string owner)
+                      "InvalidatedBy", ArrayBlock invalidations
+                      "Hypothesis", RecordBlock [
+                          "Identity", Literal (quoteString borrowed.Identity)
+                          "Version", Literal (quoteString borrowed.Version)
+                          "Source", Literal (quoteString borrowed.Source) ] ])) ]
+
     /// Add only the explicit call-bounded byte promise; source owns actual capacity and use.
     let private writableBufferDecls (ctx: GenerationContext) namespace' (func: CppParser.FunctionDecl) nativeName hasAdapter =
         let ctx = inFunctionUnit ctx func
@@ -1478,12 +1810,21 @@ module FidelityCodeGenerator =
                           "Version", Literal (quoteString contract.Version)
                           "Source", Literal (quoteString contract.Source) ] ])) ])
 
-    let private declaredFunctionDecls (ctx: GenerationContext) namespace' anchors (func: CppParser.FunctionDecl) (entries: (int * string * FsDecl list) list) (raw: FsDecl list) =
+    /// `anchors` is None where only the public binding is kept (wrappers): no contract
+    /// declaration is emitted there, so no exit or release binding is resolved.
+    let private declaredFunctionDecls (ctx: GenerationContext) namespace' (anchors: Map<string, string * CppParser.FunctionDecl * FsDecl list> option) (func: CppParser.FunctionDecl) (entries: (int * string * FsDecl list) list) (raw: FsDecl list) =
         let ctx = inFunctionUnit ctx func
+        let resourceAnchors = anchors |> Option.defaultValue Map.empty
+        // A borrowed result's descriptor names selected declarations: emitted only where they are (#196).
+        let borrowedDecls nativeName =
+            match anchors with
+            | Some anchors -> borrowedResultDecls ctx anchors func (namespace' + "." + nativeName)
+            | None -> []
         if entries.IsEmpty then
             let nativeName = raw |> List.pick (function LetBinding(name, _, _, _, attrs) when not attrs.IsEmpty -> Some name | _ -> None)
             callbackInvocationDecls ctx namespace' anchors func nativeName |> ignore
-            raw @ resultRangeDecls ctx namespace' func nativeName false @ resourceDecls ctx namespace' anchors func nativeName raw @ writableBufferDecls ctx namespace' func nativeName false
+            raw @ resultRangeDecls ctx namespace' func nativeName false @ resourceDecls ctx namespace' resourceAnchors func nativeName raw @ writableBufferDecls ctx namespace' func nativeName false
+            @ borrowedDecls nativeName
         else
         resultRangeDecls ctx namespace' func func.Name true |> ignore
         writableBufferDecls ctx namespace' func func.Name true |> ignore
@@ -1514,11 +1855,11 @@ module FidelityCodeGenerator =
             | LetBinding(name, _, _, _, []) when name = func.Name -> None
             | declaration -> Some declaration)
         let adapter = if needsAdapter then [LetBinding(func.Name, publicParameters, returnType, FunctionCall("", emittedName, callArguments), [])] else []
-        declarations @ invocationDeclarations @ resourceDecls ctx namespace' anchors func emittedName raw @ adapter
+        declarations @ invocationDeclarations @ resourceDecls ctx namespace' resourceAnchors func emittedName raw @ borrowedDecls emittedName @ adapter
 
     let generateDeclaredFunctionDecls (ctx: GenerationContext) libraryName namespace' (func: CppParser.FunctionDecl) =
         let ctx = inFunctionUnit ctx func
-        declaredFunctionDecls ctx namespace' Map.empty func (callbackEntries ctx namespace' func) (generateFunctionDecls ctx libraryName func)
+        declaredFunctionDecls ctx namespace' None func (callbackEntries ctx namespace' func) (generateFunctionDecls ctx libraryName func)
 
     /// Generate FsDecl list for an enum type.
     /// Automatically detects bitmask (flags) enums via value pattern analysis.
@@ -1758,7 +2099,7 @@ module FidelityCodeGenerator =
             func, callbackEntries ctx namespace' func, generateFunctionDecls ctx libraryName func)
         let anchors = prepared |> List.map (fun (func, entries, raw) ->
             namespace' + "." + func.Name, (namespace' + "." + nativeDeclarationName ctx func entries raw, func, raw)) |> Map.ofList
-        let functions = prepared |> List.collect (fun (func, entries, raw) -> declaredFunctionDecls ctx namespace' anchors func entries raw)
+        let functions = prepared |> List.collect (fun (func, entries, raw) -> declaredFunctionDecls ctx namespace' (Some anchors) func entries raw)
         let macros = groups |> List.collect (function GMacro d -> d | _ -> [])
 
         let macroSection =

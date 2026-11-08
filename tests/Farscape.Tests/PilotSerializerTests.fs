@@ -480,9 +480,45 @@ let ``callback invocation profile roundtrips explicit provenance and missing sta
     let binding = value.Options.Value.Bindings.Head
     Assert.Equal<int list>([0], binding.NonnullCallbacks)
     if absent then Assert.Empty(binding.CallbackInvocations) else
-        let expected: PilotTypes.BindingCallbackInvocation = {Parameter = 0; Identity = "fixture.callback"; Version = "v1"; Source = "/contracts/call_twice.c"; Scope = "during_call"; ExitBinding = None; SuccessStatus = None; AbsenceHypothesis = None}
+        let expected: PilotTypes.BindingCallbackInvocation = {Parameter = 0; Identity = "fixture.callback"; Version = "v1"; Source = "/contracts/call_twice.c"; Scope = "during_call"; ExitBinding = None; SuccessStatus = None; AbsenceHypothesis = None; Context = None; CountedArrays = []; Retention = None}
         Assert.Equal<PilotTypes.BindingCallbackInvocation list>([expected], binding.CallbackInvocations)
     Assert.Equal(value, read (PilotSerializer.toTomlString value))
+
+[<Fact>]
+let ``callback context, counted arrays and retention roundtrip`` () =
+    let read text = PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail text) |> function Ok value -> value | Error error -> failwith error
+    let contract =
+        invocationProfile.Replace("during_call", "retained").Replace(" }",
+            ", context = { argument = 0, parameter = 3 }, counted_arrays = [ { argument = 2, count_argument = 1, element = \"nullable_text\" }, { argument = 3, count_argument = 1, element = \"handle\" } ]"
+            + ", retention = { owner_parameter = 0, redefined_by = [0, 1], releases = [ { binding = \"Test.close\", parameter = 0 } ] } }")
+    let project = read (invocationPilot ("[" + contract + "]"))
+    let actual = project.Options.Value.Bindings.Head.CallbackInvocations.Head
+    let context : PilotTypes.BindingCallbackContext = { Argument = 0; Parameter = 3 }
+    Assert.Equal(Some context, actual.Context)
+    let arrays : PilotTypes.BindingCountedArray list =
+        [ { Argument = 2; CountArgument = 1; Element = PilotTypes.CountedArrayElement.NullableText }
+          { Argument = 3; CountArgument = 1; Element = PilotTypes.CountedArrayElement.Handle } ]
+    Assert.Equal<PilotTypes.BindingCountedArray list>(arrays, actual.CountedArrays)
+    let release : PilotTypes.BindingRetentionRelease = { Binding = "Test.close"; Parameter = 0 }
+    let retention : PilotTypes.BindingCallbackRetention = { OwnerParameter = 0; RedefinedBy = [ 0; 1 ]; Releases = [ release ] }
+    Assert.Equal(Some retention, actual.Retention)
+    Assert.Equal(project, read (PilotSerializer.toTomlString project))
+
+[<Theory>]
+[<InlineData("retention = { owner_parameter = 0, releases = [] }", "during_call", "FS9137", "callback_invocations.retention", "callback_invocations during_call forbids retention")>]
+[<InlineData("counted_arrays = [ { argument = 2, count_argument = 1, element = \"strings\" } ]", "during_call", "FS9201", "callback_invocations.counted_arrays.element", "callback_invocations counted_arrays element must be text, nullable_text, handle or nullable_handle")>]
+[<InlineData("counted_arrays = [ { argument = 2, count_argument = 1, element = \"text\" }, { argument = 2, count_argument = 1, element = \"text\" } ]", "during_call", "FS9202", "callback_invocations.counted_arrays", "callback_invocations counted_arrays declares one argument more than once")>]
+[<InlineData("context = { argument = 0 }", "during_call", "FS9198", "callback_invocations.context.parameter", "callback_invocations context requires a nonnegative parameter within int range")>]
+[<InlineData("retention = { owner_parameter = 0, redefined_by = [0, 0] }", "retained", "FS9202", "callback_invocations.retention.redefined_by", "callback_invocations retention redefined_by names one parameter more than once")>]
+let ``callback context, counted arrays and retention refuse malformed pilot input`` (field: string) (scope: string) (code: string) (key: string) (message: string) =
+    let contract = invocationProfile.Replace("during_call", scope).Replace(" }", ", " + field + " }")
+    match PilotSerializer.deserializeDiagnosed (Fidelity.Data.TOML.Toml.parseOrFail (invocationPilot ("[" + contract + "]"))) with
+    | Error refusal ->
+        let d = refusal.Diagnostics |> List.exactlyOne
+        Assert.Equal(code, d.Code)
+        Assert.Equal(message, d.Message)
+        Assert.Equal(Some ("options.bindings[call_twice]." + key), d.Pilot |> Option.map _.Key)
+    | Ok _ -> failwith "malformed callback contract input was accepted"
 
 [<Fact>]
 let ``callback absence hypothesis roundtrips separately from activation`` () =
@@ -513,7 +549,7 @@ let ``callback absence hypothesis refuses malformed explicit provenance`` hypoth
 [<InlineData("version", "requires nonempty version")>]
 [<InlineData("source", "requires nonempty source")>]
 [<InlineData("scope", "requires nonempty scope")>]
-[<InlineData("retained", "scope must be during_call")>]
+[<InlineData("unknown-scope", "scope must be during_call, retained or process_exit")>]
 [<InlineData("negative", "nonnegative parameter index")>]
 [<InlineData("overflow", "nonnegative parameter index")>]
 [<InlineData("duplicate", "duplicate parameter indices")>]
@@ -526,7 +562,7 @@ let ``callback invocation profile refuses incomplete and unsupported contracts``
         | "version" -> invocationProfile.Replace("version = \"v1\"", "version = \" \"")
         | "source" -> invocationProfile.Replace("source = \"/contracts/call_twice.c\", ", "")
         | "scope" -> invocationProfile.Replace(", scope = \"during_call\"", "")
-        | "retained" -> invocationProfile.Replace("during_call", "retained")
+        | "unknown-scope" -> invocationProfile.Replace("during_call", "forever")
         | "negative" -> invocationProfile.Replace("parameter = 0", "parameter = -1")
         | "overflow" -> invocationProfile.Replace("parameter = 0", "parameter = 2147483648")
         | "boolean" -> invocationProfile.Replace(" }", ", accepts_absence = true }")

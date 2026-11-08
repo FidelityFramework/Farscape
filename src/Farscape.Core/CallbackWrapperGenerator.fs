@@ -60,6 +60,14 @@ module CallbackWrapperGenerator =
                     match resolve (snd f.Parameters[dataIndex]) with
                     | FidelityCodeGenerator.DataPointer _ | FidelityCodeGenerator.OpaqueHandle _ -> ()
                     | _ -> refuse Diagnostics.CallbackEnvironmentNotDataPointer "data_param" (Some dataIndex) $"Callback registration '{reg.Function}' requires data-pointer environment parameter '{name}'."
+                    // A retained entry outlives the call (#191): it must be capture-free, and an
+                    // environment paired with it would be retained with no declared retirement.
+                    let retained =
+                        ctx.Bindings |> Map.tryFind f.Name
+                        |> Option.exists (fun binding -> binding.CallbackInvocations |> List.exists (fun c -> c.Parameter = callbackIndex && c.Scope = "retained"))
+                    if retained then
+                        refuse Diagnostics.RetainedCallbackCaptures "data_param" (Some dataIndex)
+                            $"Callback registration '{reg.Function}' pairs retained callback '{reg.CallbackParam}' with environment parameter '{name}': a retained entry must be capture-free (FnPtr.ofFunction on a closed module function), and a captured environment would be retained with no declared retirement."
                 FidelityCodeGenerator.generateDeclaredFunctionDecls ctx "" (resolveModule f.Name) f
                 |> List.choose (function
                     | LetBinding(name, parameters, returnType, _, _) when name = f.Name ->

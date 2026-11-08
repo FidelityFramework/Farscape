@@ -122,6 +122,52 @@ module PilotTypes =
         Source: string
     }
 
+    /// An entry argument that is the opaque `void*` the caller passed to the receiving function
+    /// (#189): `context = { argument = 0, parameter = 3 }` for sqlite3_exec's row callback.
+    type BindingCallbackContext = {
+        /// The entry's zero-based argument ordinal.
+        Argument: int
+        /// The receiving function's zero-based native parameter ordinal.
+        Parameter: int
+    }
+
+    /// How a counted entry array's elements are read (#190), the pilot's `element` spelling.
+    [<RequireQualifiedAccess>]
+    type CountedArrayElement =
+        /// `text`: NUL-terminated strings, never NULL.
+        | Text
+        /// `nullable_text`: NUL-terminated strings, any of them NULL.
+        | NullableText
+        /// `handle`: opaque handles to the pointee record, never NULL.
+        | Handle
+        /// `nullable_handle`: opaque handles to the pointee record, any of them NULL.
+        | NullableHandle
+
+    /// A pointer-to-pointer entry argument read as a bounded read-only array whose length is
+    /// another entry argument (#190): `{ argument = 2, count_argument = 1, element = "nullable_text" }`.
+    type BindingCountedArray = {
+        Argument: int
+        CountArgument: int
+        Element: CountedArrayElement
+    }
+
+    /// A release binding retiring a retained registration through the registration's owner.
+    type BindingRetentionRelease = {
+        /// The selected qualified generated declaration (`Fidelity.SQLite.sqlite3_close_v2`).
+        Binding: string
+        /// Its zero-based native parameter receiving the owner.
+        Parameter: int
+    }
+
+    /// What keeps a `retained` callback and what retires it (#191): the receiving function's
+    /// owner parameter (the connection), the parameters whose equal values make a later call a
+    /// redefinition, and the release bindings.
+    type BindingCallbackRetention = {
+        OwnerParameter: int
+        RedefinedBy: int list
+        Releases: BindingRetentionRelease list
+    }
+
     /// Explicit external callback activation provenance; ABI stays header-owned.
     type BindingCallbackInvocation = {
         Parameter: int
@@ -132,6 +178,12 @@ module PilotTypes =
         ExitBinding: string option
         SuccessStatus: int option
         AbsenceHypothesis: BindingCallbackAbsenceHypothesis option
+        /// The entry argument passing through the caller's opaque context (#189).
+        Context: BindingCallbackContext option
+        /// The entry's counted pointer-array arguments (#190).
+        CountedArrays: BindingCountedArray list
+        /// For `retained` scope only: its owner, redefinition key and releases (#191).
+        Retention: BindingCallbackRetention option
     }
 
     /// Explicit owned-nullable protocol; no resource authority is inferred from transfer.
@@ -147,6 +199,45 @@ module PilotTypes =
     type BindingWritableBuffer = {
         Parameter: int
         CountParameter: int
+        Identity: string
+        Version: string
+        Source: string
+    }
+
+    /// What a borrowed result's bytes are (#196), the pilot's `content` spelling.
+    [<RequireQualifiedAccess>]
+    type BorrowedContent =
+        /// `text`: UTF-8 text, the result a single-level pointer to an 8-bit character.
+        | Text
+        /// `bytes`: uninterpreted bytes, the result a single-level pointer to an 8-bit character or void.
+        | Bytes
+
+    /// How a borrowed result's byte extent is found (#196).
+    [<RequireQualifiedAccess>]
+    type BorrowedExtent =
+        /// `{ binding, arguments }`: the integer result of the selected declaration `binding`
+        /// called with the borrowing call's arguments at these native ordinals, in order.
+        | Companion of binding: string * arguments: int list
+        /// `{ nul_terminated = true }`: the bytes before the first NUL.
+        | NulTerminated
+
+    /// What ends a borrowed result's validity (#196).
+    [<RequireQualifiedAccess>]
+    type BorrowInvalidation =
+        /// `{ binding, parameter }`: a call of the selected declaration whose `parameter` receives the owner.
+        | OwnerCall of binding: string * parameter: int
+        /// `{ any_owner_call = true }`: any later call that receives the owner.
+        | AnyOwnerCall
+
+    /// A pointer result read as a borrowed read-only view (#196): `sqlite3_column_text`'s text,
+    /// measured by `sqlite3_column_bytes` on the same statement and column, valid until the
+    /// statement's next step, reset or finalize.
+    type BindingBorrowedResult = {
+        Content: BorrowedContent
+        /// The native parameter whose argument owns the memory (the statement).
+        OwnerParameter: int
+        Extent: BorrowedExtent
+        InvalidatedBy: BorrowInvalidation list
         Identity: string
         Version: string
         Source: string
@@ -170,6 +261,8 @@ module PilotTypes =
         Resource: BindingResource option
         WritableBuffers: BindingWritableBuffer list
         CallbackInvocations: BindingCallbackInvocation list
+        /// The result read as a borrowed view with its extent and validity (#196).
+        BorrowedResult: BindingBorrowedResult option
     }
 
     /// A scoped projection of an actual native mapped-pointer result. Parameter

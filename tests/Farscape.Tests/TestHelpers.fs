@@ -192,10 +192,8 @@ let private clangConfirmsIn (language: string) (header: string) (assertions: str
         let check = if language = "c++" then "static_assert" else "_Static_assert"
         let body = assertions |> List.map (fun a -> $"{check}({a}, \"{a.Replace('\"', '\'')}\");") |> String.concat "\n"
         System.IO.File.WriteAllText(probe, $"#include <stddef.h>\n#include \"{header}\"\n{body}\n")
-        let standard = if language = "c++" then " -std=c++17" else ""
-        let info = System.Diagnostics.ProcessStartInfo("clang", $"-x {language}{standard} -fsyntax-only {probe}")
-        info.RedirectStandardError <- true
-        info.RedirectStandardOutput <- true
+        let standard = if language = "c++" then [ "-std=c++17" ] else []
+        let info = ClangToolchain.startInfo ([ "-x"; language ] @ standard @ [ "-fsyntax-only"; probe ])
         use proc = System.Diagnostics.Process.Start info
         let errors = proc.StandardError.ReadToEnd()
         proc.StandardOutput.ReadToEnd() |> ignore
@@ -229,3 +227,45 @@ let recordModule (types: string) (name: string) =
     Xunit.Assert.True(at >= 0, $"module {name} is not emitted:\n{types}")
     let next = types.IndexOf("\nmodule ", at + 1)
     if next < 0 then types.Substring(at) else types.Substring(at, next - at)
+
+// ─── Generation over a pilot with binding contracts (#189 #190 #191 #196) ───
+
+/// Generate over `headers` with `bindings` and `trailing` sections; every .clef file's text.
+let generatedClefWith (headers: string list) (bindings: string list) (functions: string list) (trailing: string list) =
+    let mutable text = None
+    withPilotSections headers [] ("c_header_mode = true" :: bindings) functions [] trailing (fun result output ->
+        match result with
+        | Error error -> failwithf "generation was refused: %s" error
+        | Ok _ ->
+            text <-
+                System.IO.Directory.GetFiles(output, "*.clef", System.IO.SearchOption.AllDirectories)
+                |> Array.sort |> Array.map System.IO.File.ReadAllText |> String.concat "\n" |> Some)
+    text.Value
+
+/// Generate over `headers` and return the pilot path, the one structured refusal and its text.
+let refusedOnce (headers: string list) (bindings: string list) (functions: string list) =
+    let mutable captured = None
+    withPilotGenerating (fun project ->
+            let result = BindingGenerator.generateFromProjectDiagnosed project false false Types.LP64
+            captured <- Some (System.IO.Path.GetFullPath project, result)
+            result |> Result.mapError _.Text)
+        headers [] ("c_header_mode = true" :: bindings) functions [] [] (fun _ output ->
+            Xunit.Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+    match captured with
+    | Some (project, Error refusal) ->
+        match refusal.Diagnostics with
+        | [ d ] -> project, d, refusal.Text
+        | ds -> failwithf "one diagnostic expected, got %d: %s" ds.Length refusal.Text
+    | Some (_, Ok _) -> failwith "the pilot generated; a refusal was expected"
+    | None -> failwith "the pilot was not generated"
+
+/// One `[[options.bindings]]` entry.
+let pilotBinding (name: string) (lines: string list) = [ "[[options.bindings]]"; $"name = \"{name}\"" ] @ lines
+
+/// The text of the declaration `name` (from its `let` line to the next blank line).
+let declarationText (text: string) (name: string) =
+    let start = text.IndexOf($"let {name} ")
+    if start < 0 then failwithf "no declaration %s was generated" name
+    let finish = text.IndexOf("\n\n", start)
+    text.Substring(start, (if finish < 0 then text.Length else finish) - start)
+

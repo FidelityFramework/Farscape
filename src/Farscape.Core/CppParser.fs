@@ -1752,7 +1752,9 @@ module CppParser =
         | refusals -> Error (Diagnostics.refusalsOf refusals "")
 
     /// A clang process whose arguments are each exactly one argument (#178).
-    let private clangStartInfo (args: string seq) = ProcessLaunch.startInfo "clang" args
+    /// It launches the pinned toolchain clang with its own resource directory (#200), never a host
+    /// clang or a host resource directory.
+    let clangStartInfo (args: string seq) = ClangToolchain.startInfo args
 
     let private commandLine (args: string seq) = ProcessLaunch.commandLine args
 

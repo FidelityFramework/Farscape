@@ -26,7 +26,7 @@ let ``legacy native pointer profile cannot emit Clef source`` () =
 let ``pthread handle storage is derived from its scalar typedef`` () =
     let binding : PilotTypes.BindingProjection =
         { Name = createDecl.Name; Symbol = createDecl.Name; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
-          ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; WritableBuffers = []; CallbackInvocations = [] }
+          ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; WritableBuffers = []; CallbackInvocations = []; BorrowedResult = None }
     let ctx = { FidelityCodeGenerator.buildGenerationContext decls Types.LP64 Map.empty with Bindings = Map.ofList [createDecl.Name, binding] }
     let source = FidelityCodeGenerator.generateModule ctx Set.empty [List.head decls] "Test.Types" "pthread" "test" []
     Assert.Contains("module pthread_t =", source)
@@ -153,7 +153,7 @@ let ``Linux x64 pthread storage comes from actual header unions and measured lay
 
 let private projection name symbol : PilotTypes.BindingProjection =
     { Name = name; Symbol = symbol; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []; ConstantParameters = []; StringParameters = []; NonnullCallbacks = []
-      ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; WritableBuffers = []; CallbackInvocations = [] }
+      ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; WritableBuffers = []; CallbackInvocations = []; BorrowedResult = None }
 
 [<Fact>]
 let ``pthread output array declares scalar reference ABI and nonnull typed callback`` () =

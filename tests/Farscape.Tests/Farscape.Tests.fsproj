@@ -15,6 +15,7 @@
     <Compile Include="CppParserAnonymousRecordTests.fs" />
     <Compile Include="CppParserResultAliasTests.fs" />
     <Compile Include="CppParserInvocationTests.fs" />
+    <Compile Include="ClangToolchainTests.fs" />
     <Compile Include="PkgConfigTests.fs" />
     <Compile Include="CppClassAnalysisTests.fs" />
     <Compile Include="DeclarationAlgebraTests.fs" />
@@ -47,6 +48,8 @@
     <Compile Include="MacroEvaluationTests.fs" />
     <Compile Include="DestructorSentinelTests.fs" />
     <Compile Include="CodedRefusalTests.fs" />
+    <Compile Include="CallbackEntryArgumentTests.fs" />
+    <Compile Include="BorrowedResultTests.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
