@@ -85,7 +85,31 @@ namespace Farscape.Core
 /// | FS9177 | a typed protocol constructor carries string arguments with no ownership profile |
 /// | FS9178 | a by-value type reaches an attributed typedef clang measures unlike its claim |
 /// | FS9179 | a record of only unnamed bit-fields measures zero bytes, which no descriptor has |
+/// | FS9180 | a null function-pointer sentinel is fixed with no declared borrow lifetime      |
+/// | FS9181 | a constant on a function-pointer parameter names no sentinel macro of its type  |
+/// | FS9182 | a pilot selects the retired experimental native-pointer surface                 |
+/// | FS9183 | a value struct is no plain record of named scalar or pointer fields             |
+/// | FS9184 | a C++ class has no admitted object storage, ownership and method ABI contract   |
+/// | FS9185 | an abi_critical_structs entry names no declared record or scalar typedef        |
+/// | FS9186 | an abi_critical_structs entry names another record kind than it declares        |
+/// | FS9187 | an abi_critical_structs record has no clang-measured layout                     |
+/// | FS9188 | an abi_critical_structs record's measuring unit disagrees with the pilot's      |
+/// | FS9189 | an abi_critical_structs record measures differently in two of a pilot's units   |
+/// | FS9190 | a pilot introspection file does not exist                                       |
+/// | FS9191 | a pilot introspection file is no GIR repository document with a namespace       |
+/// | FS9192 | a GIR signal declares no name, or a signal parameter or result no type          |
+/// | FS9193 | a pilot signal selection is not spelled [Namespace.]Class::signal-name          |
+/// | FS9194 | a pilot signal selection names no signal the introspection files declare        |
+/// | FS9195 | a pilot signal selection names a signal several namespaces declare              |
+/// | FS9196 | a selected signal's parameter or result type has no C spelling the files give   |
+/// | FS9197 | a pilot file cannot be read as a TOML document                                  |
+/// | FS9198 | a pilot key its table requires is absent                                        |
+/// | FS9199 | a pilot key's value has another TOML type than its key requires                 |
+/// | FS9200 | a pilot table carries a key that table does not admit                           |
+/// | FS9201 | a pilot key's value is outside the values its key admits                        |
+/// | FS9202 | a pilot array declares one record's entry more than once                        |
 ///
+/// Allocation continues past FS9199 as FS92xx: the codes are sequential, four digits after FS.
 /// Each refusal reason has exactly one code and each code one reason.
 ///
 /// Every refusal is built as a `Diagnostic` (#184): its code, its message, its severity, where
@@ -333,6 +357,75 @@ module Diagnostics =
     [<Literal>]
     let PaddingOnlyRecordEmpty = "FS9179" // record of only unnamed bit-fields clang measures at zero bytes (#183)
 
+    [<Literal>]
+    let SentinelBorrowUndeclared = "FS9180" // null function-pointer sentinel fixed with no declared borrow lifetime (#192)
+
+    [<Literal>]
+    let SentinelProjectionInvalid = "FS9181" // constant on a function-pointer parameter naming no sentinel macro of its type (#192)
+
+    [<Literal>]
+    let NativePointerSurfaceRetired = "FS9182" // pilot selecting the retired experimental native-pointer surface (#199)
+
+    [<Literal>]
+    let ValueStructUnrepresentable = "FS9183" // value struct that is no plain record of named scalar or pointer fields (#199)
+
+    [<Literal>]
+    let CppClassAbiUnadmitted = "FS9184" // C++ class without an admitted storage, ownership and method ABI contract (#199)
+
+    [<Literal>]
+    let AbiStorageUndeclared = "FS9185" // abi_critical_structs entry naming no declared record or scalar typedef (#199)
+
+    [<Literal>]
+    let AbiStorageKindMismatch = "FS9186" // abi_critical_structs entry naming another record kind than declared (#199)
+
+    [<Literal>]
+    let AbiStorageUnmeasured = "FS9187" // abi_critical_structs record without a clang-measured layout (#199)
+
+    [<Literal>]
+    let AbiStorageUnitDisagrees = "FS9188" // abi_critical_structs record whose measuring unit disagrees with the pilot's declarations (#199)
+
+    [<Literal>]
+    let AbiStorageMeasurementDivergent = "FS9189" // abi_critical_structs record measuring differently in two units (#199)
+
+    [<Literal>]
+    let IntrospectionFileMissing = "FS9190" // pilot introspection file that does not exist (#199)
+
+    [<Literal>]
+    let IntrospectionNotGir = "FS9191" // pilot introspection file that is no GIR repository document with a namespace (#199)
+
+    [<Literal>]
+    let SignalDeclarationIncomplete = "FS9192" // GIR signal without a name, or a signal parameter or result without a type (#199)
+
+    [<Literal>]
+    let SignalSelectionMalformed = "FS9193" // pilot signal selection not spelled [Namespace.]Class::signal-name (#199)
+
+    [<Literal>]
+    let SignalUndeclared = "FS9194" // pilot signal selection naming no declared signal (#199)
+
+    [<Literal>]
+    let SignalAmbiguous = "FS9195" // pilot signal selection naming a signal several namespaces declare (#199)
+
+    [<Literal>]
+    let SignalTypeUnspelled = "FS9196" // selected signal parameter or result type without a C spelling the files give (#199)
+
+    [<Literal>]
+    let PilotDocumentUnreadable = "FS9197" // pilot file that cannot be read as a TOML document (#199)
+
+    [<Literal>]
+    let PilotKeyMissing = "FS9198" // pilot key its table requires, absent (#199)
+
+    [<Literal>]
+    let PilotValueType = "FS9199" // pilot key value of another TOML type than its key requires (#199)
+
+    [<Literal>]
+    let PilotKeyUnknown = "FS9200" // pilot table key that table does not admit (#199)
+
+    [<Literal>]
+    let PilotValueUnadmitted = "FS9201" // pilot key value outside the values its key admits (#199)
+
+    [<Literal>]
+    let PilotEntryRepeated = "FS9202" // pilot array declaring one record's entry more than once (#199)
+
     // =========================================================================
     // Structured diagnostics (#184)
     // =========================================================================
@@ -398,7 +491,9 @@ module Diagnostics =
             d.Pilot |> Option.map (fun p ->
                 let parameter = p.Parameter |> Option.map (fun i -> $", parameter {i}") |> Option.defaultValue ""
                 let file = if p.PilotFile = "" then "" else $" in {p.PilotFile}"
-                $"{d.Code} pilot key {p.Key}{parameter}{file}")
+                // A refusal of the whole pilot file (FS9197) names the file and no key.
+                if p.Key = "" then $"{d.Code} pilot file {p.PilotFile}"
+                else $"{d.Code} pilot key {p.Key}{parameter}{file}")
         source :: Option.toList pilot
 
     /// An FS91xx refusal with the given source and no pilot location.

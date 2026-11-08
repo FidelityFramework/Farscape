@@ -754,7 +754,7 @@ module GeneratorDispatch =
         let decls = [CppParser.Declaration.Struct (mkStruct "Flags" [mkBitField "ready" "unsigned int" 1] None)]
         let context = {FidelityCodeGenerator.buildGenerationContext decls Types.LP64 Map.empty with ValueStructs = Set.singleton "Flags"}
         let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generateModule context Set.empty decls "Test" "test" "test" [] |> ignore)
-        Assert.Equal("Value struct 'Flags' requires a plain record with scalar or pointer fields", error.Message)
+        Assert.Equal("FS9183: Value struct 'Flags' field 'ready' is a bit-field; a plain record with scalar or pointer fields is required.", error.Message)
 
     [<Theory>]
     [<InlineData(false, "Mystery", "Mystery")>]

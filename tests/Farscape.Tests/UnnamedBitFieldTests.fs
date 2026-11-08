@@ -105,7 +105,7 @@ let ``a value struct carrying an unnamed bit-field is refused before output`` ()
     let header = fixturePath "unnamed-bitfields/value.h"
     withPilot [header] ["value_structs = [\"fx_pad_value\"]"] ["fx_pad_value_use"] (fun result output ->
         Assert.Equal(
-            Error "Binding generation failed: Value struct 'fx_pad_value' carries member 2, the unnamed bit-field 'int : 3', which its Clef record of named fields cannot represent; a plain record with scalar or pointer fields is required.",
+            Error "Binding generation failed: FS9183: Value struct 'fx_pad_value' carries member 2, the unnamed bit-field 'int : 3', which its Clef record of named fields cannot represent; a plain record with scalar or pointer fields is required.",
             result |> Result.map ignore)
         noOutput output)
     clangConfirms header [ "sizeof(struct fx_pad_value) == 3"; "offsetof(struct fx_pad_value, b) == 2" ]

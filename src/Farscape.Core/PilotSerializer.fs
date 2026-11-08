@@ -360,15 +360,60 @@ module PilotSerializer =
         project |> serialize |> Toml.serialize
 
     // =========================================================================
-    // Deserialization: TomlDocument → Result<PilotProject, string>
+    // Deserialization: TomlDocument → Result<PilotProject, Diagnostics.Refusal>
     // =========================================================================
 
+    /// Raise a pilot TOML-shape refusal (#199): its code, the pilot key whose value causes it,
+    /// and its message. A pilot's shape is no header declaration, so its source is unknown;
+    /// `loadFromFileDiagnosed` binds the pilot file.
+    let private refuse (code: string) (key: string) (message: string) : 'T =
+        Diagnostics.diagnostic code message (Diagnostics.Located.Unknown "the refusal is in pilot TOML input, not a header declaration")
+        |> Diagnostics.withPilotKey key None
+        |> Diagnostics.refuse
+
+    /// The table of a TOML value, or a refusal that the key needs a table.
+    let private tableAt (key: string) (message: string) (value: TomlValue) : TomlTable =
+        match value with
+        | TomlValue.Table t | TomlValue.InlineTable t -> t
+        | _ -> refuse Diagnostics.PilotValueType key message
+
+    /// Refuse a key of `table` outside `allowed`.
+    let private onlyKeys (key: string) (message: string) (allowed: string list) (table: TomlTable) =
+        match table |> Map.toList |> List.tryFind (fun (name, _) -> not (List.contains name allowed)) with
+        | Some (name, _) -> refuse Diagnostics.PilotKeyUnknown $"{key}.{name}" message
+        | None -> ()
+
+    /// A required nonempty string: absent is FS9198, another TOML type FS9199, empty FS9201.
+    let private nonemptyText (key: string) (message: string) (name: string) (table: TomlTable) : string =
+        match TomlTable.tryFind name table with
+        | Some (TomlValue.String value) when not (System.String.IsNullOrWhiteSpace value) -> value
+        | Some (TomlValue.String _) -> refuse Diagnostics.PilotValueUnadmitted $"{key}.{name}" message
+        | Some _ -> refuse Diagnostics.PilotValueType $"{key}.{name}" message
+        | None -> refuse Diagnostics.PilotKeyMissing $"{key}.{name}" message
+
+    /// A hypothesis field (identity, version, source): an empty one is FS9134, the code the
+    /// generator gives the same reason.
+    let private hypothesisText (key: string) (message: string) (name: string) (table: TomlTable) : string =
+        match TomlTable.tryFind name table with
+        | Some (TomlValue.String value) when not (System.String.IsNullOrWhiteSpace value) -> value
+        | Some (TomlValue.String _) -> refuse Diagnostics.HypothesisFieldEmpty $"{key}.{name}" message
+        | Some _ -> refuse Diagnostics.PilotValueType $"{key}.{name}" message
+        | None -> refuse Diagnostics.PilotKeyMissing $"{key}.{name}" message
+
+    /// A nonnegative int index: absent FS9198, no integer FS9199, outside 0..Int32.MaxValue FS9201.
+    let private indexAt (key: string) (message: string) (name: string) (table: TomlTable) : int =
+        match TomlTable.tryFind name table with
+        | Some (TomlValue.Integer value) when value >= 0L && value <= int64 System.Int32.MaxValue -> int value
+        | Some (TomlValue.Integer _) -> refuse Diagnostics.PilotValueUnadmitted $"{key}.{name}" message
+        | Some _ -> refuse Diagnostics.PilotValueType $"{key}.{name}" message
+        | None -> refuse Diagnostics.PilotKeyMissing $"{key}.{name}" message
+
     /// Helper: require a string field from a TomlTable.
-    let private requireString (fieldName: string) (sectionName: string) (table: TomlTable) : Result<string, string> =
+    let private requireString (fieldName: string) (sectionName: string) (table: TomlTable) : string =
         match TomlTable.tryFind fieldName table with
-        | Some (TomlValue.String s) -> Ok s
-        | Some _ -> Error $"[{sectionName}].{fieldName} must be a string"
-        | None -> Error $"[{sectionName}].{fieldName} is required"
+        | Some (TomlValue.String s) -> s
+        | Some _ -> refuse Diagnostics.PilotValueType $"{sectionName}.{fieldName}" $"[{sectionName}].{fieldName} must be a string"
+        | None -> refuse Diagnostics.PilotKeyMissing $"{sectionName}.{fieldName}" $"[{sectionName}].{fieldName} is required"
 
     /// Helper: get an optional string list from a TomlTable.
     let private optionalStringArray (fieldName: string) (table: TomlTable) : string list =
@@ -379,77 +424,69 @@ module PilotSerializer =
 
     /// Parse a LibrarySpec from the [library] table.
     /// Accepts either `headers = [...]` (new) or `header = "..."` (backward compat).
-    let private deserializeLibrary (doc: TomlDocument) : Result<LibrarySpec, string> =
+    let private deserializeLibrary (doc: TomlDocument) : LibrarySpec =
         match Toml.getTable "library" doc with
-        | None -> Error "Missing [library] section"
+        | None -> refuse Diagnostics.PilotKeyMissing "library" "Missing [library] section"
         | Some table ->
-            let nameResult = requireString "name" "library" table
-            let headersResult =
+            let name = requireString "name" "library" table
+            let headers =
                 match TomlTable.tryFind "headers" table with
                 | Some (TomlValue.Array arr) ->
                     let headers = arr |> List.choose (function TomlValue.String s -> Some s | _ -> None)
-                    if headers.IsEmpty then Error "[library].headers must not be empty"
-                    else Ok headers
-                | Some _ -> Error "[library].headers must be an array of strings"
+                    if headers.IsEmpty then refuse Diagnostics.PilotValueUnadmitted "library.headers" "[library].headers must not be empty"
+                    else headers
+                | Some _ -> refuse Diagnostics.PilotValueType "library.headers" "[library].headers must be an array of strings"
                 | None ->
-                    match requireString "header" "library" table with
-                    | Ok h -> Ok [h]
-                    | Error _ -> Error "[library] requires either 'header' or 'headers'"
-            match nameResult, headersResult with
-            | Ok name, Ok headers ->
-                Ok { Name = name
-                     Headers = headers
-                     XmlProtocols = optionalStringArray "xml_protocols" table
-                     Introspection = optionalStringArray "introspection" table
-                     IncludePaths = optionalStringArray "include_paths" table
-                     SystemIncludePaths = optionalStringArray "system_include_paths" table
-                     Defines = optionalStringArray "defines" table
-                     MacroPrefixes = optionalStringArray "macro_prefixes" table
-                     PkgConfig = optionalStringArray "pkg_config" table }
-            | Error e, _ | _, Error e -> Error e
+                    match TomlTable.tryFind "header" table with
+                    | Some (TomlValue.String h) -> [h]
+                    | Some _ -> refuse Diagnostics.PilotValueType "library.header" "[library].header must be a string"
+                    | None -> refuse Diagnostics.PilotKeyMissing "library.headers" "[library] requires either 'header' or 'headers'"
+            { Name = name
+              Headers = headers
+              XmlProtocols = optionalStringArray "xml_protocols" table
+              Introspection = optionalStringArray "introspection" table
+              IncludePaths = optionalStringArray "include_paths" table
+              SystemIncludePaths = optionalStringArray "system_include_paths" table
+              Defines = optionalStringArray "defines" table
+              MacroPrefixes = optionalStringArray "macro_prefixes" table
+              PkgConfig = optionalStringArray "pkg_config" table }
 
     /// Parse an OutputSpec from the [output] table.
-    let private deserializeOutput (doc: TomlDocument) : Result<OutputSpec, string> =
+    let private deserializeOutput (doc: TomlDocument) : OutputSpec =
         match Toml.getTable "output" doc with
-        | None -> Error "Missing [output] section"
+        | None -> refuse Diagnostics.PilotKeyMissing "output" "Missing [output] section"
         | Some table ->
-            match requireString "mode" "output" table, requireString "directory" "output" table with
-            | Ok mode, Ok directory ->
-                Ok { Mode = mode; Directory = directory }
-            | Error e, _ | _, Error e -> Error e
+            let mode = requireString "mode" "output" table
+            { Mode = mode; Directory = requireString "directory" "output" table }
 
     /// Parse a NamespaceSpec from a TomlTable (one entry in [[namespace]] array).
-    let private deserializeNamespace (table: TomlTable) : Result<NamespaceSpec, string> =
-        match requireString "name" "namespace" table,
-              requireString "description" "namespace" table,
-              requireString "library" "namespace" table with
-        | Ok name, Ok description, Ok library ->
-            Ok { Name = name
-                 Description = description
-                 Library = library
-                 Prefixes = optionalStringArray "prefixes" table
-                 Functions = optionalStringArray "functions" table
-                 XmlInterfaces = optionalStringArray "xml_interfaces" table
-                 Signals = optionalStringArray "signals" table }
-        | Error e, _, _ | _, Error e, _ | _, _, Error e -> Error e
+    let private deserializeNamespace (table: TomlTable) : NamespaceSpec =
+        let name = requireString "name" "namespace" table
+        let description = requireString "description" "namespace" table
+        { Name = name
+          Description = description
+          Library = requireString "library" "namespace" table
+          Prefixes = optionalStringArray "prefixes" table
+          Functions = optionalStringArray "functions" table
+          XmlInterfaces = optionalStringArray "xml_interfaces" table
+          Signals = optionalStringArray "signals" table }
 
-    /// Parse the [[namespace]] array from a document.
-    let private deserializeNamespaces (doc: TomlDocument) : Result<NamespaceSpec list, string> =
+    /// Parse the [[namespace]] array from a document. Every malformed entry is reported.
+    let private deserializeNamespaces (doc: TomlDocument) : NamespaceSpec list =
         match Toml.getValue "namespace" doc with
-        | None -> Ok []
+        | None -> []
         | Some (TomlValue.Array items) ->
             let results =
                 items |> List.map (fun item ->
-                    match item with
-                    | TomlValue.Table t -> deserializeNamespace t
-                    | _ -> Error "Each [[namespace]] entry must be a table")
-            // Collect all errors or all successes
-            let errors = results |> List.choose (function Error e -> Some e | _ -> None)
-            if errors.IsEmpty then
-                Ok (results |> List.choose (function Ok ns -> Some ns | _ -> None))
-            else
-                Error (String.concat "; " errors)
-        | _ -> Error "'namespace' must be an array of tables"
+                    try
+                        match item with
+                        | TomlValue.Table t -> Ok (deserializeNamespace t)
+                        | _ -> refuse Diagnostics.PilotValueType "namespace" "Each [[namespace]] entry must be a table"
+                    with :? Diagnostics.RefusalException as refused -> Error refused.Refusal)
+            match results |> List.choose (function Error e -> Some e | Ok _ -> None) with
+            | [] -> results |> List.choose (function Ok ns -> Some ns | Error _ -> None)
+            | errors -> Diagnostics.raiseRefusal (Diagnostics.joined "; " errors)
+        | _ -> refuse Diagnostics.PilotValueType "namespace" "'namespace' must be an array of tables"
 
     /// Helper: get an optional string field from a TomlTable.
     let private optionalString (fieldName: string) (table: TomlTable) : string option =
@@ -497,146 +534,132 @@ module PilotSerializer =
             Some { Default = defaultConv; Overrides = overrides }
         | _ -> None
 
-    let private deserializeResultRange (binding: TomlTable) =
-        let table label = function
-            | TomlValue.Table value | TomlValue.InlineTable value -> value
-            | _ -> failwith $"result_range {label} requires a table"
+    let private deserializeResultRange (bindingKey: string) (binding: TomlTable) =
+        let key = bindingKey + ".result_range"
         match TomlTable.tryFind "result_range" binding with
         | None -> None
         | Some value ->
-            let range = table "contract" value
-            let text key =
-                match TomlTable.tryFind key range with
-                | Some (TomlValue.String value) when not (System.String.IsNullOrWhiteSpace value) -> value
-                | _ -> failwith $"result_range requires nonempty {key}"
-            let endpoint key =
-                let fields = TomlTable.tryFind key range |> Option.map (table key) |> Option.defaultWith (fun () -> failwith $"result_range requires {key}")
+            let range = tableAt key "result_range contract requires a table" value
+            let text name = hypothesisText key $"result_range requires nonempty {name}" name range
+            let endpoint name =
+                let at = $"{key}.{name}"
+                let fields =
+                    TomlTable.tryFind name range
+                    |> Option.map (tableAt at $"result_range {name} requires a table")
+                    |> Option.defaultWith (fun () -> refuse Diagnostics.PilotKeyMissing at $"result_range requires {name}")
                 match Map.toList fields with
                 | [arm, TomlValue.Integer value] when value >= int64 System.Int32.MinValue && value <= int64 System.Int32.MaxValue ->
                     match arm with
                     | "constant" -> ResultRangeBound.Constant (int value)
                     | "argument" when value >= 0L -> ResultRangeBound.Argument (int value)
-                    | "argument" -> failwith $"result_range {key} argument requires a nonnegative index"
-                    | _ -> failwith $"result_range {key} requires exactly one constant or argument integer"
-                | _ -> failwith $"result_range {key} requires exactly one constant or argument integer within int range"
+                    | "argument" -> refuse Diagnostics.PilotValueUnadmitted $"{at}.argument" $"result_range {name} argument requires a nonnegative index"
+                    | _ -> refuse Diagnostics.PilotKeyUnknown $"{at}.{arm}" $"result_range {name} requires exactly one constant or argument integer"
+                | [arm, TomlValue.Integer _] -> refuse Diagnostics.PilotValueUnadmitted $"{at}.{arm}" $"result_range {name} requires exactly one constant or argument integer within int range"
+                | [arm, _] -> refuse Diagnostics.PilotValueType $"{at}.{arm}" $"result_range {name} requires exactly one constant or argument integer within int range"
+                | _ -> refuse Diagnostics.PilotValueUnadmitted at $"result_range {name} requires exactly one constant or argument integer within int range"
             Some { Identity = text "identity"; Version = text "version"; Source = text "source"; Lower = endpoint "lower"; Upper = endpoint "upper" }
 
-    let private deserializeResource binding =
-        let table label = function
-            | TomlValue.Table value | TomlValue.InlineTable value -> value
-            | _ -> failwith $"resource {label} requires a table"
-        let text name fields =
-            match TomlTable.tryFind name fields with
-            | Some (TomlValue.String value) when not (System.String.IsNullOrWhiteSpace value) -> value
-            | _ -> failwith $"resource requires nonempty {name}"
-        let fields label allowed values =
-            if values |> Map.exists (fun key _ -> not (Set.contains key allowed)) then
-                failwith $"resource {label} has unknown fields"
+    let private deserializeResource (bindingKey: string) binding =
+        let key = bindingKey + ".resource"
         match TomlTable.tryFind "resource" binding with
         | None -> None
         | Some value ->
-            let resource = table "contract" value
-            fields "contract" (Set.ofList ["kind"; "release_binding"; "release_parameter"; "hypothesis"]) resource
-            if text "kind" resource <> "owned_nullable_return" then failwith "resource kind must be owned_nullable_return"
-            let release = text "release_binding" resource
-            if not (release.Contains '.') || release.Trim() <> release then failwith "resource requires a qualified release_binding"
+            let resource = tableAt key "resource contract requires a table" value
+            onlyKeys key "resource contract has unknown fields" ["kind"; "release_binding"; "release_parameter"; "hypothesis"] resource
+            if nonemptyText key "resource requires nonempty kind" "kind" resource <> "owned_nullable_return" then
+                refuse Diagnostics.PilotValueUnadmitted $"{key}.kind" "resource kind must be owned_nullable_return"
+            let release = nonemptyText key "resource requires nonempty release_binding" "release_binding" resource
+            if not (release.Contains '.') || release.Trim() <> release then
+                refuse Diagnostics.PilotValueUnadmitted $"{key}.release_binding" "resource requires a qualified release_binding"
             let parameter =
                 match TomlTable.tryFind "release_parameter" resource with
                 | Some (TomlValue.Integer 0L) -> 0
-                | _ -> failwith "resource owned_nullable_return requires release_parameter 0"
+                | _ -> refuse Diagnostics.ResourceReturnShape $"{key}.release_parameter" "resource owned_nullable_return requires release_parameter 0"
+            let hypothesisKey = key + ".hypothesis"
             let hypothesis =
-                TomlTable.tryFind "hypothesis" resource |> Option.map (table "hypothesis")
-                |> Option.defaultWith (fun () -> failwith "resource requires hypothesis")
-            fields "hypothesis" (Set.ofList ["identity"; "version"; "source"]) hypothesis
+                TomlTable.tryFind "hypothesis" resource
+                |> Option.map (tableAt hypothesisKey "resource hypothesis requires a table")
+                |> Option.defaultWith (fun () -> refuse Diagnostics.PilotKeyMissing hypothesisKey "resource requires hypothesis")
+            onlyKeys hypothesisKey "resource hypothesis has unknown fields" ["identity"; "version"; "source"] hypothesis
+            let text name = hypothesisText hypothesisKey $"resource requires nonempty {name}" name hypothesis
             Some { ReleaseBinding = release; ReleaseParameter = parameter
-                   Identity = text "identity" hypothesis; Version = text "version" hypothesis; Source = text "source" hypothesis }
+                   Identity = text "identity"; Version = text "version"; Source = text "source" }
 
-    let private deserializeWritableBuffers binding =
-        let table label = function
-            | TomlValue.Table value | TomlValue.InlineTable value -> value
-            | _ -> failwith $"writable_buffers {label} requires a table"
-        let fields label allowed values =
-            if values |> Map.exists (fun key _ -> not (Set.contains key allowed)) then
-                failwith $"writable_buffers {label} has unknown fields"
-        let text name values =
-            match TomlTable.tryFind name values with
-            | Some (TomlValue.String value) when not (System.String.IsNullOrWhiteSpace value) -> value
-            | _ -> failwith $"writable_buffers requires nonempty {name}"
+    let private deserializeWritableBuffers (bindingKey: string) binding =
+        let key = bindingKey + ".writable_buffers"
         match TomlTable.tryFind "writable_buffers" binding with
         | None -> []
         | Some (TomlValue.Array values) ->
             let contracts = values |> List.map (fun value ->
-                let contract = table "contract" value
-                fields "contract" (Set.ofList ["parameter"; "count_parameter"; "hypothesis"]) contract
-                let index name =
-                    match TomlTable.tryFind name contract with
-                    | Some (TomlValue.Integer value) when value >= 0L && value <= int64 System.Int32.MaxValue -> int value
-                    | _ -> failwith $"writable_buffers requires nonnegative {name} within int range"
+                let contract = tableAt key "writable_buffers contract requires a table" value
+                onlyKeys key "writable_buffers contract has unknown fields" ["parameter"; "count_parameter"; "hypothesis"] contract
+                let index name = indexAt key $"writable_buffers requires nonnegative {name} within int range" name contract
                 let parameter, count = index "parameter", index "count_parameter"
-                if parameter = count then failwith "writable_buffers requires distinct buffer and count parameters"
+                if parameter = count then
+                    refuse Diagnostics.WritableBufferSameParameter $"{key}.count_parameter" "writable_buffers requires distinct buffer and count parameters"
+                let hypothesisKey = key + ".hypothesis"
                 let hypothesis =
-                    TomlTable.tryFind "hypothesis" contract |> Option.map (table "hypothesis")
-                    |> Option.defaultWith (fun () -> failwith "writable_buffers requires hypothesis")
-                fields "hypothesis" (Set.ofList ["identity"; "version"; "source"]) hypothesis
+                    TomlTable.tryFind "hypothesis" contract
+                    |> Option.map (tableAt hypothesisKey "writable_buffers hypothesis requires a table")
+                    |> Option.defaultWith (fun () -> refuse Diagnostics.PilotKeyMissing hypothesisKey "writable_buffers requires hypothesis")
+                onlyKeys hypothesisKey "writable_buffers hypothesis has unknown fields" ["identity"; "version"; "source"] hypothesis
+                let text name = hypothesisText hypothesisKey $"writable_buffers requires nonempty {name}" name hypothesis
                 { Parameter = parameter; CountParameter = count
-                  Identity = text "identity" hypothesis; Version = text "version" hypothesis; Source = text "source" hypothesis })
+                  Identity = text "identity"; Version = text "version"; Source = text "source" })
             if (contracts |> List.map _.Parameter |> Set.ofList).Count <> contracts.Length then
-                failwith "writable_buffers has duplicate parameter indices"
+                refuse Diagnostics.ContractDuplicateParameter key "writable_buffers has duplicate parameter indices"
             contracts
-        | Some _ -> failwith "writable_buffers requires an array"
+        | Some _ -> refuse Diagnostics.PilotValueType key "writable_buffers requires an array"
 
-    let private deserializeCallbackInvocations binding =
+    let private deserializeCallbackInvocations (bindingKey: string) binding =
+        let key = bindingKey + ".callback_invocations"
         match TomlTable.tryFind "callback_invocations" binding with
         | None -> []
         | Some (TomlValue.Array values) ->
-            let contracts = values |> List.map (function
-                | TomlValue.Table fields | TomlValue.InlineTable fields ->
-                    let text name =
-                        match TomlTable.tryFind name fields with
-                        | Some (TomlValue.String value) when not (System.String.IsNullOrWhiteSpace value) -> value
-                        | _ -> failwith $"callback_invocations requires nonempty {name}"
-                    let index =
-                        match TomlTable.tryFind "parameter" fields with
-                        | Some (TomlValue.Integer value) when value >= 0L && value <= int64 System.Int32.MaxValue -> int value
-                        | _ -> failwith "callback_invocations requires a nonnegative parameter index within int range"
-                    let scope = text "scope"
-                    let allowed = Set.ofList ["parameter"; "identity"; "version"; "source"; "scope"; "exit_binding"; "success_status"; "absence_hypothesis"]
-                    if fields |> Map.exists (fun key _ -> not (Set.contains key allowed)) then
-                        failwith "callback_invocations has unknown fields"
-                    let exitBinding, successStatus =
-                        match scope with
-                        | "during_call" ->
-                            if TomlTable.tryFind "exit_binding" fields |> Option.isSome
-                               || TomlTable.tryFind "success_status" fields |> Option.isSome then
-                                failwith "callback_invocations during_call forbids exit_binding and success_status"
-                            None, None
-                        | "process_exit" ->
-                            let exitBinding = TomlTable.tryFind "exit_binding" fields |> Option.map (fun _ -> text "exit_binding")
-                            let successStatus =
-                                match TomlTable.tryFind "success_status" fields with
-                                | Some (TomlValue.Integer value) when value >= int64 System.Int32.MinValue && value <= int64 System.Int32.MaxValue -> int value
-                                | _ -> failwith "callback_invocations process_exit requires signed32 success_status"
-                            exitBinding, Some successStatus
-                        | _ -> failwith "callback_invocations scope must be during_call or process_exit"
-                    let absenceHypothesis =
-                        match TomlTable.tryFind "absence_hypothesis" fields with
-                        | None -> None
-                        | Some (TomlValue.Table hypothesis) | Some (TomlValue.InlineTable hypothesis) ->
-                            if hypothesis |> Map.exists (fun key _ -> not (Set.contains key (Set.ofList ["identity"; "version"; "source"]))) then
-                                failwith "callback_invocations absence_hypothesis has unknown fields"
-                            let required name =
-                                match TomlTable.tryFind name hypothesis with
-                                | Some (TomlValue.String value) when not (System.String.IsNullOrWhiteSpace value) -> value
-                                | _ -> failwith $"callback_invocations absence_hypothesis requires nonempty {name}"
-                            Some { Identity = required "identity"; Version = required "version"; Source = required "source" }
-                        | Some _ -> failwith "callback_invocations absence_hypothesis requires a table"
-                    { Parameter = index; Identity = text "identity"; Version = text "version"; Source = text "source"; Scope = scope
-                      ExitBinding = exitBinding; SuccessStatus = successStatus; AbsenceHypothesis = absenceHypothesis }
-                | _ -> failwith "callback_invocations requires tables")
+            let contracts = values |> List.map (fun value ->
+                let fields = tableAt key "callback_invocations requires tables" value
+                let text name = hypothesisText key $"callback_invocations requires nonempty {name}" name fields
+                let index = indexAt key "callback_invocations requires a nonnegative parameter index within int range" "parameter" fields
+                onlyKeys key "callback_invocations has unknown fields"
+                    ["parameter"; "identity"; "version"; "source"; "scope"; "exit_binding"; "success_status"; "absence_hypothesis"] fields
+                let scope =
+                    match TomlTable.tryFind "scope" fields with
+                    | Some (TomlValue.String scope) -> scope
+                    | Some _ -> refuse Diagnostics.PilotValueType $"{key}.scope" "callback_invocations scope must be during_call or process_exit"
+                    | None -> refuse Diagnostics.PilotKeyMissing $"{key}.scope" "callback_invocations requires nonempty scope"
+                let exitBinding, successStatus =
+                    match scope with
+                    | "during_call" ->
+                        if TomlTable.tryFind "exit_binding" fields |> Option.isSome
+                           || TomlTable.tryFind "success_status" fields |> Option.isSome then
+                            refuse Diagnostics.CallbackScopeFieldConflict key "callback_invocations during_call forbids exit_binding and success_status"
+                        None, None
+                    | "process_exit" ->
+                        let exitBinding =
+                            TomlTable.tryFind "exit_binding" fields
+                            |> Option.map (fun _ -> nonemptyText key "callback_invocations requires nonempty exit_binding" "exit_binding" fields)
+                        let successStatus =
+                            match TomlTable.tryFind "success_status" fields with
+                            | Some (TomlValue.Integer value) when value >= int64 System.Int32.MinValue && value <= int64 System.Int32.MaxValue -> int value
+                            | Some (TomlValue.Integer _) -> refuse Diagnostics.PilotValueUnadmitted $"{key}.success_status" "callback_invocations process_exit requires signed32 success_status"
+                            | Some _ -> refuse Diagnostics.PilotValueType $"{key}.success_status" "callback_invocations process_exit requires signed32 success_status"
+                            | None -> refuse Diagnostics.CallbackScopeFieldConflict $"{key}.success_status" "callback_invocations process_exit requires signed32 success_status"
+                        exitBinding, Some successStatus
+                    | _ -> refuse Diagnostics.CallbackScopeUnknown $"{key}.scope" "callback_invocations scope must be during_call or process_exit"
+                let absenceKey = key + ".absence_hypothesis"
+                let absenceHypothesis =
+                    TomlTable.tryFind "absence_hypothesis" fields
+                    |> Option.map (fun value ->
+                        let hypothesis = tableAt absenceKey "callback_invocations absence_hypothesis requires a table" value
+                        onlyKeys absenceKey "callback_invocations absence_hypothesis has unknown fields" ["identity"; "version"; "source"] hypothesis
+                        let required name = hypothesisText absenceKey $"callback_invocations absence_hypothesis requires nonempty {name}" name hypothesis
+                        { Identity = required "identity"; Version = required "version"; Source = required "source" })
+                { Parameter = index; Identity = text "identity"; Version = text "version"; Source = text "source"; Scope = scope
+                  ExitBinding = exitBinding; SuccessStatus = successStatus; AbsenceHypothesis = absenceHypothesis })
             if (contracts |> List.map _.Parameter |> Set.ofList).Count <> contracts.Length then
-                failwith "callback_invocations has duplicate parameter indices"
+                refuse Diagnostics.ContractDuplicateParameter key "callback_invocations has duplicate parameter indices"
             contracts
-        | Some _ -> failwith "callback_invocations requires an array"
+        | Some _ -> refuse Diagnostics.PilotValueType key "callback_invocations requires an array"
 
     let private deserializeOptions (doc: TomlDocument) : ProjectOptions option =
         match Toml.getValue "options" doc with
@@ -645,30 +668,26 @@ module PilotSerializer =
             // Each flexible array member's declared count source (BAREWire #11): every key
             // required and nonempty, no unknown key, one entry per record.
             let flexibleArrays =
+                let key = "options.flexible_arrays"
                 match TomlTable.tryFind "flexible_arrays" table with
                 | None -> []
                 | Some (TomlValue.Array items) ->
-                    let entries = items |> List.map (function
-                        | TomlValue.Table entry | TomlValue.InlineTable entry ->
-                            let allowed = Set.ofList ["record"; "field"; "count_field"; "count_rule"; "source"]
-                            match entry |> Map.toList |> List.tryFind (fun (key, _) -> not (Set.contains key allowed)) with
-                            | Some (key, _) -> failwith $"options.flexible_arrays has unknown field '{key}'"
-                            | None -> ()
-                            let text key =
-                                match TomlTable.tryFind key entry with
-                                | Some (TomlValue.String value) when not (System.String.IsNullOrWhiteSpace value) -> value
-                                | _ -> failwith $"options.flexible_arrays requires nonempty {key}"
-                            let rule =
-                                match text "count_rule" with
-                                | "element_count" -> ElementCount
-                                | "record_bytes" -> RecordBytes
-                                | other -> failwith $"options.flexible_arrays count_rule '{other}' is neither element_count nor record_bytes"
-                            { Record = text "record"; Field = text "field"; CountField = text "count_field"; Rule = rule; Source = text "source" }
-                        | _ -> failwith "options.flexible_arrays requires tables")
+                    let entries = items |> List.map (fun item ->
+                        let entry = tableAt key "options.flexible_arrays requires tables" item
+                        match entry |> Map.toList |> List.tryFind (fun (name, _) -> not (List.contains name ["record"; "field"; "count_field"; "count_rule"; "source"])) with
+                        | Some (name, _) -> refuse Diagnostics.PilotKeyUnknown $"{key}.{name}" $"options.flexible_arrays has unknown field '{name}'"
+                        | None -> ()
+                        let text name = nonemptyText key $"options.flexible_arrays requires nonempty {name}" name entry
+                        let rule =
+                            match text "count_rule" with
+                            | "element_count" -> ElementCount
+                            | "record_bytes" -> RecordBytes
+                            | other -> refuse Diagnostics.PilotValueUnadmitted $"{key}.count_rule" $"options.flexible_arrays count_rule '{other}' is neither element_count nor record_bytes"
+                        { Record = text "record"; Field = text "field"; CountField = text "count_field"; Rule = rule; Source = text "source" })
                     match entries |> List.countBy _.Record |> List.tryFind (fun (_, n) -> n > 1) with
-                    | Some (record, _) -> failwith $"options.flexible_arrays declares record '{record}' more than once; a struct has at most one flexible array member"
+                    | Some (record, _) -> refuse Diagnostics.PilotEntryRepeated $"{key}.record" $"options.flexible_arrays declares record '{record}' more than once; a struct has at most one flexible array member"
                     | None -> entries
-                | Some _ -> failwith "options.flexible_arrays requires an array of tables"
+                | Some _ -> refuse Diagnostics.PilotValueType key "options.flexible_arrays requires an array of tables"
             let abiStructs =
                 match TomlTable.tryFind "abi_critical_structs" table with
                 | Some (TomlValue.Array items) ->
@@ -690,42 +709,58 @@ module PilotSerializer =
                 match TomlTable.tryFind "bindings" table with
                 | Some (TomlValue.Array items) -> items |> List.map (function
                     | TomlValue.Table binding ->
-                        let name = optionalString "name" binding |> Option.defaultWith (fun () -> failwith "options.bindings requires name")
+                        let name =
+                            match TomlTable.tryFind "name" binding with
+                            | Some (TomlValue.String name) -> name
+                            | Some _ -> refuse Diagnostics.PilotValueType "options.bindings.name" "options.bindings requires name"
+                            | None -> refuse Diagnostics.PilotKeyMissing "options.bindings.name" "options.bindings requires name"
+                        let bindingKey = $"options.bindings[{name}]"
                         let indices key = match TomlTable.tryFind key binding with
-                                          | Some (TomlValue.Array values) -> values |> List.map (function TomlValue.Integer i -> int i | _ -> failwith $"{key} requires integer indices")
+                                          | Some (TomlValue.Array values) -> values |> List.map (function TomlValue.Integer i -> int i | _ -> refuse Diagnostics.PilotValueType $"{bindingKey}.{key}" $"{key} requires integer indices")
                                           | _ -> []
-                        let handles = match TomlTable.tryFind "parameter_handles" binding with
-                                      | Some (TomlValue.Array values) -> values |> List.map (function TomlValue.String name -> name | _ -> failwith "parameter_handles requires type names")
-                                      | _ -> []
+                        let strings key message =
+                            match TomlTable.tryFind key binding with
+                            | Some (TomlValue.Array values) -> values |> List.map (function TomlValue.String text -> text | _ -> refuse Diagnostics.PilotValueType $"{bindingKey}.{key}" message)
+                            | _ -> []
                         { Name = name; Symbol = optionalString "symbol" binding |> Option.defaultValue name
                           ReferenceParameters = indices "reference_parameters"
                           ReadOnlyReferenceParameters = indices "read_only_reference_parameters"
-                          ConstantParameters = match TomlTable.tryFind "constant_parameters" binding with Some (TomlValue.Array xs) -> xs |> List.map (function TomlValue.String x -> x | _ -> failwith "constant_parameters requires integer constants") | _ -> []
-                          ReferenceElements = match TomlTable.tryFind "reference_elements" binding with Some (TomlValue.Array xs) -> xs |> List.map (function TomlValue.String x -> x | _ -> failwith "reference_elements requires C element type names") | _ -> []
+                          ConstantParameters = strings "constant_parameters" "constant_parameters requires strings: an integer literal or a function-pointer sentinel macro name, or \"\" for an unfixed parameter"
+                          ReferenceElements = strings "reference_elements" "reference_elements requires C element type names"
                           StringParameters = indices "string_parameters"; NonnullCallbacks = indices "nonnull_callbacks"
-                          ParameterHandles = handles; ReturnHandle = optionalString "return_handle" binding
-                          ResultRange = deserializeResultRange binding
-                          Resource = deserializeResource binding
-                          WritableBuffers = deserializeWritableBuffers binding
-                          CallbackInvocations = deserializeCallbackInvocations binding
+                          ParameterHandles = strings "parameter_handles" "parameter_handles requires type names"
+                          ReturnHandle = optionalString "return_handle" binding
+                          ResultRange = deserializeResultRange bindingKey binding
+                          Resource = deserializeResource bindingKey binding
+                          WritableBuffers = deserializeWritableBuffers bindingKey binding
+                          CallbackInvocations = deserializeCallbackInvocations bindingKey binding
                           Ownership = optionalString "ownership" binding |> Option.map (function
                               | "caller_owns" -> CallerOwns | "callee_owns" -> CalleeOwns | "borrowed" -> Borrowed
-                              | other -> failwith $"Unknown binding ownership '{other}'") }
-                    | _ -> failwith "options.bindings requires tables")
+                              | other -> refuse Diagnostics.PilotValueUnadmitted $"{bindingKey}.ownership" $"Unknown binding ownership '{other}'") }
+                    | _ -> refuse Diagnostics.PilotValueType "options.bindings" "options.bindings requires tables")
                 | _ -> []
             let descriptorOnly = TomlTable.tryFind "descriptor_only_dependencies" table = Some (TomlValue.Boolean true)
             let mappedReturns =
                 match TomlTable.tryFind "mapped_returns" table with
                 | Some (TomlValue.Array items) -> items |> List.map (function
                     | TomlValue.Table mapping ->
-                        let text key = optionalString key mapping |> Option.defaultWith (fun () -> failwith $"options.mapped_returns requires {key}")
-                        let number key = match TomlTable.tryFind key mapping with Some (TomlValue.Integer value) -> int value | _ -> failwith $"options.mapped_returns requires integer {key}"
+                        let key = "options.mapped_returns"
+                        let text name =
+                            match TomlTable.tryFind name mapping with
+                            | Some (TomlValue.String value) -> value
+                            | Some _ -> refuse Diagnostics.PilotValueType $"{key}.{name}" $"options.mapped_returns requires {name}"
+                            | None -> refuse Diagnostics.PilotKeyMissing $"{key}.{name}" $"options.mapped_returns requires {name}"
+                        let number name =
+                            match TomlTable.tryFind name mapping with
+                            | Some (TomlValue.Integer value) -> int value
+                            | Some _ -> refuse Diagnostics.PilotValueType $"{key}.{name}" $"options.mapped_returns requires integer {name}"
+                            | None -> refuse Diagnostics.PilotKeyMissing $"{key}.{name}" $"options.mapped_returns requires integer {name}"
                         { Name = text "name"; Acquire = text "acquire"; Release = text "release"
                           Schema = text "schema"; Element = text "element"; Alignment = number "alignment"; Access = text "access"
                           OwnerParameter = text "owner_parameter"; StrideParameter = text "stride_parameter"
                           RowsParameter = text "rows_parameter"; WidthParameter = text "width_parameter"
                           CookieParameter = text "cookie_parameter"; FailureStatus = number "failure_status" }
-                    | _ -> failwith "options.mapped_returns requires tables")
+                    | _ -> refuse Diagnostics.PilotValueType "options.mapped_returns" "options.mapped_returns requires tables")
                 | _ -> []
             Some { AbiCriticalStructs = abiStructs; GenerateDescriptors = generateDescriptors
                    NativePointerSurface = nativePointerSurface; CHeaderMode = cHeaderMode
@@ -734,7 +769,10 @@ module PilotSerializer =
                    TypedProtocol = TomlTable.tryFind "typed_protocol" table = Some (TomlValue.Boolean true)
                    MappedReturns = mappedReturns
                    FlexibleArrays = flexibleArrays
-                   ValueStructs = match TomlTable.tryFind "value_structs" table with Some (TomlValue.Array values) -> values |> List.map (function TomlValue.String name -> name | _ -> failwith "value_structs requires type names") | _ -> [] }
+                   ValueStructs =
+                       match TomlTable.tryFind "value_structs" table with
+                       | Some (TomlValue.Array values) -> values |> List.map (function TomlValue.String name -> name | _ -> refuse Diagnostics.PilotValueType "options.value_structs" "value_structs requires type names")
+                       | _ -> [] }
         | _ -> None
 
     /// Deserialize the optional [callbacks] section, including the documented inline tables.
@@ -902,39 +940,62 @@ module PilotSerializer =
                    Classes = classes }
 
     /// Deserialize a TomlDocument to a PilotProject.
-    let private deserializeCore (doc: TomlDocument) : Result<PilotProject, string> =
-        match deserializeLibrary doc, deserializeOutput doc, deserializeNamespaces doc with
-        | Ok lib, Ok output, Ok namespaces ->
-            Ok { Library = lib
-                 Output = output
-                 Namespaces = namespaces
-                 ErrorConventions = deserializeErrorConventions doc
-                 Options = deserializeOptions doc
-                 Callbacks = deserializeCallbacks doc
-                 Nonnull = deserializeNonnull doc
-                 ProtocolConfig = deserializeProtocolConfig doc
-                 Layer3 = None
-                 CppConfig = deserializeCppConfig doc }
-        | Error e, _, _ | _, Error e, _ | _, _, Error e -> Error e
+    let private deserializeCore (doc: TomlDocument) : PilotProject =
+        let lib = deserializeLibrary doc
+        let output = deserializeOutput doc
+        { Library = lib
+          Output = output
+          Namespaces = deserializeNamespaces doc
+          ErrorConventions = deserializeErrorConventions doc
+          Options = deserializeOptions doc
+          Callbacks = deserializeCallbacks doc
+          Nonnull = deserializeNonnull doc
+          ProtocolConfig = deserializeProtocolConfig doc
+          Layer3 = None
+          CppConfig = deserializeCppConfig doc }
+
+    /// A pilot document's project, or its TOML-shape refusal (#199): each carries its FS code
+    /// and the pilot key whose value causes it.
+    let deserializeDiagnosed (doc: TomlDocument) : Result<PilotProject, Diagnostics.Refusal> =
+        try Ok (deserializeCore doc)
+        with
+        | :? Diagnostics.RefusalException as refused -> Error refused.Refusal
+        | ex -> Error (Diagnostics.uncoded ex.Message)
 
     /// Invalid explicit projection annotations are reported as project errors.
     let deserialize (doc: TomlDocument) : Result<PilotProject, string> =
-        try deserializeCore doc
-        with ex -> Error ex.Message
+        deserializeDiagnosed doc |> Result.mapError _.Text
 
     // =========================================================================
     // File I/O
     // =========================================================================
 
-    /// Load a PilotProject from a TOML file path.
-    let loadFromFile (path: string) : Result<PilotProject, string> =
-        try
-            let content = System.IO.File.ReadAllText(path)
+    /// Load a PilotProject from a TOML file path. A file that cannot be read or is no TOML
+    /// document is FS9197; each refusal carries the pilot file (#199).
+    let loadFromFileDiagnosed (path: string) : Result<PilotProject, Diagnostics.Refusal> =
+        let pilotFile = try System.IO.Path.GetFullPath path with _ -> path
+        let unreadable message =
+            Diagnostics.diagnostic Diagnostics.PilotDocumentUnreadable message
+                (Diagnostics.Located.Unknown "the refusal is in pilot TOML input, not a header declaration")
+            |> Diagnostics.withPilot ({ PilotFile = pilotFile; Key = ""; Parameter = None } : Diagnostics.PilotLocation)
+            |> Diagnostics.refusalOf
+        let content =
+            try Ok (System.IO.File.ReadAllText path)
+            with ex -> Error (unreadable $"Failed to read file: {ex.Message}")
+        content
+        |> Result.bind (fun content ->
             match Toml.parse content with
-            | Ok doc -> deserialize doc
-            | Error err -> Error $"TOML parse error: {err}"
-        with ex ->
-            Error $"Failed to read file: {ex.Message}"
+            | Error err -> Error (unreadable $"TOML parse error: {err}")
+            | Ok doc ->
+                deserializeDiagnosed doc
+                |> Result.mapError (Diagnostics.mapDiagnostics (fun d ->
+                    match d.Pilot with
+                    | Some pilot when pilot.PilotFile = "" -> Diagnostics.withPilot { pilot with PilotFile = pilotFile } d
+                    | _ -> d)))
+
+    /// `loadFromFileDiagnosed`, reporting a failure as its text.
+    let loadFromFile (path: string) : Result<PilotProject, string> =
+        loadFromFileDiagnosed path |> Result.mapError _.Text
 
     /// Save a PilotProject to a TOML file.
     let saveToFile (path: string) (project: PilotProject) : Result<unit, string> =

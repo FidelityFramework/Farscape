@@ -254,7 +254,9 @@ let ``generate filters compiler builtin macros`` () =
         CppParser.Declaration.Macro { Name = "FOO"; Kind = CppParser.SimpleValue "42"; RawValue = "42"; Documentation = None }
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
-    Assert.DoesNotContain("__STDC__", result)
+    // A builtin is emitted as no constant, and reported as such rather than dropped (#193).
+    Assert.DoesNotContain("let __STDC__", result)
+    Assert.Contains("//   __STDC__: predefined or reserved name", result)
     Assert.Contains("let FOO = 42", result)
 
 [<Fact>]
@@ -446,7 +448,7 @@ let ``TOML nonnull annotations override nullable default`` () =
           NonnullAnnotations = nonnull
           KnownClasses = Map.empty
           NativePointerSurface = false; Bindings = Map.empty; ValueStructs = Set.empty; FlexibleArrays = Map.empty; PhantomMarkers = Set.empty
-          TypedefInfos = Map.empty; ByValueTypedefs = [] }
+          TypedefInfos = Map.empty; ByValueTypedefs = []; Macros = Map.empty }
     let result = FidelityCodeGenerator.generateModule ctx Set.empty decls "Test" "lib" "test" []
     // ctx (idx 0) is nonnull via TOML
     Assert.Contains("(ctx: CHandle<unit>)", result)
@@ -471,7 +473,7 @@ let ``TOML nonnull_returns prevents Option on return type`` () =
           NonnullAnnotations = nonnull
           KnownClasses = Map.empty
           NativePointerSurface = false; Bindings = Map.empty; ValueStructs = Set.empty; FlexibleArrays = Map.empty; PhantomMarkers = Set.empty
-          TypedefInfos = Map.empty; ByValueTypedefs = [] }
+          TypedefInfos = Map.empty; ByValueTypedefs = []; Macros = Map.empty }
     let result = FidelityCodeGenerator.generateModule ctx Set.empty decls "Test" "lib" "test" []
     // Return is nonnull via TOML
     Assert.Contains(": CHandle<unit> =", result)
@@ -1436,9 +1438,9 @@ let ``ABI critical layout probe must succeed before generation`` shape =
         | Error error ->
             let expected =
                 match shape with
-                | "wrong-kind" -> "Binding generation failed: ABI-critical storage 'Present' does not match the requested record kind."
-                | "missing-typedef" -> "Binding generation failed: ABI-critical typedef 'Present' is not declared."
-                | _ -> "Binding generation failed: ABI-critical storage 'Missing' has no known scalar or measured record representation."
+                | "wrong-kind" -> "Binding generation failed: FS9186: ABI-critical storage 'Present' does not match the requested record kind."
+                | "missing-typedef" -> "Binding generation failed: FS9185: ABI-critical typedef 'Present' is not declared."
+                | _ -> "Binding generation failed: FS9185: ABI-critical storage 'Missing' has no known scalar or measured record representation."
             Assert.Equal(expected, error)
             Assert.Equal("held-original", System.IO.File.ReadAllText sentinel)
             Assert.Equal<string array>([|sentinel|], System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories))
@@ -1555,18 +1557,18 @@ let ``ABI critical layouts are measured in the declaring header's translation un
             | "nested-conflict" ->
                 Some (sprintf "Binding generation failed: FS9116: record 'Inner' is defined differently by the pilot's headers: '%s' (struct Inner { int a; int b }); '%s' (struct Inner { long a; long b }); first difference at field 1 'a': 'int a' in '%s', 'long a' in '%s'. One definition per pilot is required. No bindings were written." a b a b)
             | "pack-conflict" ->
-                Some (sprintf "Binding generation failed: ABI-critical storage 'X' measures differently in '%s' (5 bytes, alignment 1) and '%s' (6 bytes, alignment 2); one effective layout per pilot is required." a b)
+                Some (sprintf "Binding generation failed: FS9189: ABI-critical storage 'X' measures differently in '%s' (5 bytes, alignment 1) and '%s' (6 bytes, alignment 2); one effective layout per pilot is required." a b)
             | "field-typedef-conflict" ->
-                Some (sprintf "Binding generation failed: ABI-critical storage 'X' is measured in '%s', but its field typedef 'T' is declared differently by '%s' and that header; one declaration per pilot is required." b a)
+                Some (sprintf "Binding generation failed: FS9188: ABI-critical storage 'X' is measured in '%s', but its field typedef 'T' is declared differently by '%s' and that header; one declaration per pilot is required." b a)
             | "chain-typedef-conflict" ->
                 // `T` agrees (both say `Base`); the second hop `Base` is `int` in the merge and `long` in the measuring unit.
-                Some (sprintf "Binding generation failed: ABI-critical storage 'X' is measured in '%s', but its field typedef 'Base' is declared differently by '%s' and that header; one declaration per pilot is required." b a)
+                Some (sprintf "Binding generation failed: FS9188: ABI-critical storage 'X' is measured in '%s', but its field typedef 'Base' is declared differently by '%s' and that header; one declaration per pilot is required." b a)
             | "entry-chain-conflict" ->
                 // The requested typedef `X` agrees at its first hop (`Base`) in both headers, but `Base` names `struct Y` in B.
-                Some (sprintf "Binding generation failed: ABI-critical typedef 'X' is declared by '%s', but its typedef 'Base' is declared differently by '%s' and that header; one declaration per pilot is required." b a)
+                Some (sprintf "Binding generation failed: FS9188: ABI-critical typedef 'X' is declared by '%s', but its typedef 'Base' is declared differently by '%s' and that header; one declaration per pilot is required." b a)
             | "entry-typedef-conflict" ->
                 // B declares the requested typedef differently although B defines no record for it.
-                Some (sprintf "Binding generation failed: ABI-critical typedef 'X' is declared differently by '%s' and '%s'; one declaration per pilot is required." a b)
+                Some (sprintf "Binding generation failed: FS9188: ABI-critical typedef 'X' is declared differently by '%s' and '%s'; one declaration per pilot is required." a b)
             | _ -> None
         match BindingGenerator.generateFromProject project false false Types.LP64, expectedRefusal with
         | Error error, Some expected ->
@@ -1828,7 +1830,7 @@ let private crossUnitRelease ownerPointer releasePointer =
             // The merged map keeps the owner's unit's spelling; the release has its own unit.
             TypedefMap = Map.ofList ["fx_ptr_t", spelling ownerPointer]
             DeclarationUnits =
-                let facts pointer : FidelityCodeGenerator.UnitFacts = { Typedefs = Map.ofList ["fx_ptr_t", spelling pointer]; Enums = Map.empty; OpaqueHandles = Set.empty; TypedefInfos = Map.empty }
+                let facts pointer : FidelityCodeGenerator.UnitFacts = { Typedefs = Map.ofList ["fx_ptr_t", spelling pointer]; Enums = Map.empty; OpaqueHandles = Set.empty; TypedefInfos = Map.empty; Macros = Map.empty }
                 Map.ofList [ ("function", "mallocFirst"), facts ownerPointer; ("function", "freeFirst"), facts releasePointer ]
             Bindings = Map.ofList ["mallocFirst", acquisition; "freeFirst", retirement]
             NonnullAnnotations = Some { Parameters = Map.ofList ["freeFirst", [0]]; Returns = Set.empty } }

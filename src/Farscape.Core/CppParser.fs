@@ -316,11 +316,28 @@ module CppParser =
     }
 
     /// Represents a C preprocessor macro
+    /// What a macro's definition is. The first four come from the definition's text; the last
+    /// four from clang's evaluation of an object macro in its own unit (`evaluateObjectMacros`,
+    /// #193), so a composed constant carries the value clang computes and every other kind
+    /// says what clang found instead of an integer.
     type MacroKind =
         | SimpleValue of string           // #define FOO 42
         | Expression of string            // #define FOO (BAR + 1)
         | FunctionLike of string list * string  // #define FOO(x,y) (x+y)
         | TypeCast of string * string     // #define GPIOA ((GPIO_TypeDef*)0x...)
+        /// An integer constant expression and the value clang evaluates for it
+        /// (`(SQLITE_IOERR | (1<<8))` is 266; an alias of another macro is that macro's value).
+        | IntegerConstant of expression: string * value: int64
+        /// A cast of an integer to a function-pointer type: no entry, but a sentinel the library
+        /// gives a meaning (#192). `pointerType` is the type clang gives the expression (its
+        /// typedef name when it has one), `canonical` clang's canonical spelling of it, and
+        /// `value` the integer clang evaluates for its address (SQLITE_TRANSIENT is -1).
+        | FunctionPointerSentinel of expression: string * pointerType: string * canonical: string * value: int64
+        /// A string literal, with the array type clang gives it.
+        | StringConstant of expression: string * clangType: string
+        /// An object macro clang evaluates to no integer, sentinel or string: `reason` is clang's
+        /// diagnostic for it, or why clang gave none.
+        | Unevaluated of expression: string * reason: string
 
     type MacroDecl = {
         Name: string
@@ -2106,6 +2123,207 @@ module CppParser =
             | decl -> decl)
 
     // =========================================================================
+    // Object Macro Evaluation (clang evaluates each definition in its unit, #193)
+    // =========================================================================
+
+    /// A definition that is one integer literal (`42`, `0x1F`, `(-1)`, `8u`): the generator
+    /// reads it as written, so clang is not asked.
+    let private plainIntegerLiteral =
+        System.Text.RegularExpressions.Regex(@"^\(*\s*[-+]?\s*(0[xX][0-9a-fA-F]+|0[bB][01]+|[0-9]+)[uUlL]*\s*\)*$")
+
+    /// A plain integer literal whose magnitude fits the signed 64-bit carrier: the generator
+    /// reads it as written. A wider one is left to clang, which reports its value.
+    let private plainLiteralFits (definition: string) =
+        let m = plainIntegerLiteral.Match definition
+        m.Success &&
+            (let digits = m.Groups.[1].Value
+             let magnitude =
+                 if digits.StartsWith "0x" || digits.StartsWith "0X" then
+                     bigint.Parse("0" + digits.Substring 2, Globalization.NumberStyles.HexNumber)
+                 elif digits.StartsWith "0b" || digits.StartsWith "0B" then
+                     digits.Substring 2 |> Seq.fold (fun acc c -> acc * 2I + (if c = '1' then 1I else 0I)) 0I
+                 else bigint.Parse digits
+             magnitude <= bigint Int64.MaxValue)
+
+    /// A definition holding tokens no expression has (a brace, a semicolon) or unbalanced
+    /// parentheses: placed in a probe it would swallow the declarations after it.
+    let private notAnExpression (definition: string) =
+        definition.IndexOfAny([| '{'; '}'; ';' |]) >= 0
+        || (definition |> Seq.sumBy (function '(' -> 1 | ')' -> -1 | _ -> 0)) <> 0
+
+    /// What clang reports for each evaluated object macro of one probe.
+    type private MacroFacts = {
+        /// The integer clang evaluates for `(NAME)` as an enumerator.
+        Values: Map<int, bigint>
+        /// The type clang gives `(NAME)`: its spelling and its canonical spelling.
+        Types: Map<int, string * string>
+        /// The integer clang evaluates for `(__INTPTR_TYPE__)(NAME)`, a pointer's address.
+        Addresses: Map<int, bigint>
+        /// Clang's first error on the line evaluating `(NAME)` as an enumerator.
+        Errors: Map<int, string>
+    }
+
+    /// Evaluate the object macros at `indexed` with clang in the unit the header's parse ran in
+    /// (its own flags), one probe for all: per macro an enumerator `(NAME)` whose value clang
+    /// evaluates, an `extern __typeof__((NAME))` whose type clang names, and an enumerator
+    /// `(__INTPTR_TYPE__)(NAME)` whose value is a constant pointer's address. Each declaration is
+    /// on its own line, so clang's errors (with `-ferror-limit=0`) are read back by line.
+    let private probeObjectMacros (options: HeaderParserOptions) (indexed: (int * string) list) : Result<MacroFacts, string> =
+        let tempDir = Path.Combine(Path.GetTempPath(), "farscape-macro")
+        Directory.CreateDirectory(tempDir) |> ignore
+        let tempFile = Path.Combine(tempDir, "_farscape_macro_probe_" + Guid.NewGuid().ToString("N") + (if options.CppMode then ".cpp" else ".c"))
+        try
+            // Line 1 includes the header; macro i's three declarations follow on lines
+            // 2 + 3k, 3 + 3k and 4 + 3k, where k is its position in the probe.
+            let lines =
+                indexed |> List.collect (fun (i, name) ->
+                    [ $"enum {{ _fs_macro_value_{i} = ({name}) }};"
+                      $"extern __typeof__(({name})) _fs_macro_type_{i};"
+                      $"enum {{ _fs_macro_address_{i} = (__INTPTR_TYPE__)({name}) }};" ])
+            File.WriteAllText(tempFile, $"#include \"{Path.GetFullPath options.HeaderFile}\"\n" + String.concat "\n" lines + "\n")
+            let valueLine = indexed |> List.mapi (fun k (i, _) -> 2 + 3 * k, i) |> Map.ofList
+            let args = ResizeArray<string>(buildClangArgs options)
+            for arg in [ "-ferror-limit=0"; "-fno-caret-diagnostics"; "-fno-color-diagnostics"; "-w"
+                         "-Xclang"; "-ast-dump"; "-Xclang"; "-ast-dump-filter=_fs_macro_"; "-fsyntax-only"; tempFile ] do
+                args.Add arg
+            if options.Verbose then
+                printfn "[CppParser] Macro evaluation: clang %s" (commandLine args)
+            use proc = Process.Start(clangStartInfo args)
+            // Errors are expected (a string is no enumerator): read both streams to their end.
+            let stderrTask = proc.StandardError.ReadToEndAsync()
+            let stdout = proc.StandardOutput.ReadToEnd()
+            let stderr = stderrTask.Result
+            proc.WaitForExit()
+            let number (prefix: string) =
+                let pattern = System.Text.RegularExpressions.Regex(@"^Dumping " + prefix + @"(\d+):")
+                let value = System.Text.RegularExpressions.Regex(@"value: Int (-?\d+)")
+                let blocks = stdout.Split([| '\n' |])
+                let mutable current = None
+                let mutable found = Map.empty
+                for line in blocks do
+                    let m = pattern.Match line
+                    if m.Success then current <- Some (int m.Groups.[1].Value)
+                    elif line.StartsWith "Dumping " then current <- None
+                    else
+                        match current with
+                        | Some i when not (found.ContainsKey i) ->
+                            let v = value.Match line
+                            if v.Success then found <- found.Add(i, bigint.Parse v.Groups.[1].Value)
+                        | _ -> ()
+                found
+            // `__typeof__` keeps its operand as sugar (`typeof ((X))`): the type's own spelling is
+            // read from the first sugared function-pointer type in the address probe's block,
+            // which is the type the macro casts to (`sqlite3_destructor_type`).
+            let castSpellings =
+                let pattern = System.Text.RegularExpressions.Regex(@"^Dumping _fs_macro_address_(\d+):")
+                let sugared = System.Text.RegularExpressions.Regex(@"'([^']*)':'([^']*\(\s*\*\s*\)\s*\([^']*)'")
+                let mutable current = None
+                let mutable found = Map.empty
+                for line in stdout.Split([| '\n' |]) do
+                    let m = pattern.Match line
+                    if m.Success then current <- Some (int m.Groups.[1].Value)
+                    elif line.StartsWith "Dumping " then current <- None
+                    else
+                        match current with
+                        | Some i when not (found.ContainsKey i) ->
+                            let t = sugared.Match line
+                            if t.Success && not (t.Groups.[1].Value.StartsWith "typeof") then found <- found.Add(i, t.Groups.[1].Value)
+                        | _ -> ()
+                found
+            let types =
+                let pattern = System.Text.RegularExpressions.Regex(@"VarDecl .* _fs_macro_type_(\d+) '([^']*)'(?::'([^']*)')?")
+                stdout.Split([| '\n' |])
+                |> Array.choose (fun line ->
+                    let m = pattern.Match line
+                    if not m.Success then None
+                    else
+                        let i = int m.Groups.[1].Value
+                        let canonical = if m.Groups.[3].Success then m.Groups.[3].Value else m.Groups.[2].Value
+                        let spelled = castSpellings |> Map.tryFind i |> Option.defaultValue canonical
+                        Some (i, (spelled, canonical)))
+                |> Map.ofArray
+            // An error clang places in the probe is on its macro's line; one it places inside a
+            // header's macro body is followed by notes, the probe line among them.
+            let errors =
+                let located = System.Text.RegularExpressions.Regex(@"^(.*?):(\d+):\d+: (error|note): (.*)$")
+                let full = Path.GetFullPath tempFile
+                let mutable pending = None
+                let mutable found = Map.empty
+                for line in stderr.Split([| '\n'; '\r' |], StringSplitOptions.RemoveEmptyEntries) do
+                    let m = located.Match line
+                    if m.Success then
+                        let inProbe = (try Path.GetFullPath m.Groups.[1].Value = full with _ -> false)
+                        let lineNumber = int m.Groups.[2].Value
+                        let attribute message =
+                            match valueLine.TryFind lineNumber with
+                            | Some i when not (found.ContainsKey i) -> found <- found.Add(i, message)
+                            | _ -> ()
+                        match m.Groups.[3].Value with
+                        | "error" when inProbe -> attribute m.Groups.[4].Value; pending <- None
+                        | "error" -> pending <- Some m.Groups.[4].Value
+                        | _ when inProbe -> pending |> Option.iter attribute
+                        | _ -> ()
+                found
+            Ok { Values = number "_fs_macro_value_"; Types = types; Addresses = number "_fs_macro_address_"; Errors = errors }
+        finally
+            try File.Delete tempFile with _ -> ()
+
+    /// Each object macro of a unit as clang evaluates it (#193): a composed integer (or an alias
+    /// of one) becomes `IntegerConstant` with clang's value; a cast of an integer to a
+    /// function-pointer type becomes `FunctionPointerSentinel` (#192); a string literal
+    /// `StringConstant`; anything else `Unevaluated` with clang's reason. A plain integer
+    /// literal, an empty definition and a function-like macro are left as written, and a
+    /// pointer cast clang finds no sentinel in stays `TypeCast`. No macro is dropped here.
+    let evaluateObjectMacros (options: HeaderParserOptions) (macros: MacroDecl list) : MacroDecl list =
+        let definitionOf (m: MacroDecl) =
+            match m.Kind with
+            | SimpleValue v when v <> "" && not (plainLiteralFits v) -> Some v
+            | Expression v when not (plainLiteralFits v) -> Some v
+            | TypeCast _ -> Some m.RawValue
+            | _ -> None
+        let candidates = macros |> List.indexed |> List.choose (fun (i, m) -> definitionOf m |> Option.map (fun d -> i, m, d))
+        if candidates.IsEmpty then macros
+        else
+        let probed, refused = candidates |> List.partition (fun (_, _, d) -> not (notAnExpression d))
+        let run batch =
+            match probeObjectMacros options (batch |> List.map (fun (i, (m: MacroDecl), _) -> i, m.Name)) with
+            | Ok facts -> facts
+            | Error _ -> { Values = Map.empty; Types = Map.empty; Addresses = Map.empty; Errors = Map.empty }
+        let batch = run probed
+        // A macro the batch gives neither a value nor an error of its own is probed alone, so no
+        // neighbour's failure stands in for its own.
+        let silent = probed |> List.filter (fun (i, _, _) -> not (batch.Values.ContainsKey i) && not (batch.Errors.ContainsKey i))
+        let alone =
+            if silent.Length > 32 then Map.empty
+            else silent |> List.map (fun (i, m, d) -> i, run [ i, m, d ]) |> Map.ofList
+        let factsOf i = alone |> Map.tryFind i |> Option.defaultValue batch
+        let int64Of (v: bigint) = if v >= bigint Int64.MinValue && v <= bigint Int64.MaxValue then Some (int64 v) else None
+        let functionPointer = System.Text.RegularExpressions.Regex(@"\(\s*\*\s*\)\s*\(")
+        let stringLiteral (d: string) =
+            let t = d.TrimStart('(', ' ', '\t')
+            t.StartsWith "\"" || t.StartsWith "L\"" || t.StartsWith "u8\"" || t.StartsWith "u\"" || t.StartsWith "U\""
+        let evaluated =
+            (refused |> List.map (fun (i, m, d) ->
+                i, Unevaluated (d, "its definition holds a brace, a semicolon or unbalanced parentheses, so it is no expression clang can evaluate")))
+            @ (probed |> List.map (fun (i, m, d) ->
+                let facts = factsOf i
+                let kind =
+                    match facts.Values.TryFind i |> Option.map (fun v -> v, int64Of v), facts.Types.TryFind i with
+                    | Some (_, Some v), _ -> IntegerConstant (d, v)
+                    | Some (v, None), _ -> Unevaluated (d, $"clang evaluates it to {v}, outside the signed 64-bit carrier of a constant")
+                    | None, Some (spelled, canonical) when functionPointer.IsMatch canonical && (facts.Addresses.TryFind i |> Option.bind int64Of).IsSome ->
+                        FunctionPointerSentinel (d, spelled, canonical, (facts.Addresses.[i] |> int64Of).Value)
+                    | None, Some (_, canonical) when canonical.EndsWith "]" && stringLiteral d -> StringConstant (d, canonical)
+                    | None, _ ->
+                        match m.Kind, facts.Errors.TryFind i with
+                        | TypeCast _, _ -> m.Kind
+                        | _, Some error -> Unevaluated (d, $"clang: {error}")
+                        | _ -> Unevaluated (d, "clang gives it no integer value and no diagnostic")
+                i, kind))
+            |> Map.ofList
+        macros |> List.mapi (fun i m -> match evaluated.TryFind i with Some kind -> { m with Kind = kind } | None -> m)
+
+    // =========================================================================
     // Typedef Attributes a Record Reaches (#175)
     // =========================================================================
 
@@ -2738,6 +2956,8 @@ module CppParser =
                                     |> Array.choose parseMacroLine
                                     |> Array.filter (fun m -> isUserMacro m.Name options.MacroPrefixes)
                                     |> List.ofArray
+                                    // Each object macro as clang evaluates it in this unit (#193).
+                                    |> evaluateObjectMacros options
 
                                 if options.Verbose then
                                     printfn "[CppParser] Extracted %d macros" (List.length allMacros)

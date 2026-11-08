@@ -59,6 +59,14 @@ let showConfiguration (options: GenerationOptions) =
 
     printLine ""
 
+/// Every parsed macro generation emitted as no constant, by name and kind (#193).
+let printUnemittedMacros (result: GenerationResult) =
+    if not result.UnemittedMacros.IsEmpty then
+        printColorLine $"Macros emitted as no constant: {result.UnemittedMacros.Length}" ConsoleColor.Yellow
+        for macro in result.UnemittedMacros do
+            printColorLine $"  {macro.Name}: {FidelityCodeGenerator.describeUnemittedMacroKind macro.Kind}" ConsoleColor.Yellow
+        printLine ""
+
 let runGeneration (options: GenerationOptions) : Result<GenerationResult, Diagnostics.Refusal> =
     // Show generating message
     printHeader "Generating Clef bindings..."
@@ -75,6 +83,7 @@ let runGeneration (options: GenerationOptions) : Result<GenerationResult, Diagno
         for file in result.OutputFiles do
             printColorLine $"  {file}" ConsoleColor.Cyan
         printLine ""
+        printUnemittedMacros result
         Ok result
 
 let showNextSteps (options: GenerationOptions) =
@@ -505,6 +514,7 @@ let projectGenerateCommand =
             for advisory in result.Advisories do
                 printColorLine $"Advisory: {advisory}" ConsoleColor.Yellow
             if not result.Advisories.IsEmpty then printLine ""
+            printUnemittedMacros result
             0
 
     command "project" {

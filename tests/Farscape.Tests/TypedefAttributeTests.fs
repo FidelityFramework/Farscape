@@ -139,7 +139,7 @@ let ``a value struct whose field type reaches an aligned typedef is refused befo
     let header = fixturePath "typedef-attributes/value.h"
     withPilot [header] ["value_structs = [\"fx_wide_value\"]"] ["fx_wide_value_use"] (fun result output ->
         Assert.Equal(
-            Error "Binding generation failed: Value struct 'fx_wide_value' field 'value' has a type reaching typedef 'fx_wide_int', which carries attribute 'AlignedAttr' that its Clef record's field type cannot represent; a plain record with scalar or pointer fields is required.",
+            Error "Binding generation failed: FS9183: Value struct 'fx_wide_value' field 'value' has a type reaching typedef 'fx_wide_int', which carries attribute 'AlignedAttr' that its Clef record's field type cannot represent; a plain record with scalar or pointer fields is required.",
             result |> Result.map ignore)
         noOutput output)
     clangConfirms header [ "sizeof(struct fx_wide_value) == 16"; "offsetof(struct fx_wide_value, value) == 8" ]

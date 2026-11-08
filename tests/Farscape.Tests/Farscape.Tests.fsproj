@@ -44,6 +44,9 @@
     <Compile Include="IntrospectionTests.fs" />
     <Compile Include="BindingGeneratorTests.fs" />
     <Compile Include="DiagnosticsTests.fs" />
+    <Compile Include="MacroEvaluationTests.fs" />
+    <Compile Include="DestructorSentinelTests.fs" />
+    <Compile Include="CodedRefusalTests.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

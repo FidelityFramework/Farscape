@@ -709,11 +709,28 @@ module BindingGenerator =
     /// disagreeing definitions is refused here, while the declaration lists are still paired
     /// with their headers, naming the macro, each distinct definition (as first spelled) and
     /// every header that gives it. Agreeing definitions merge silently.
+    /// Identical text is not agreement on its own: an object macro is evaluated by clang in each
+    /// unit (#192, #193), and the same text over a dependency each unit defines differently
+    /// (`(PRIVATE + 7)`) evaluates differently. Two definitions agree only when clang's
+    /// evaluations in their units agree too (the integer, the sentinel's type and address, the
+    /// string's type, or that clang evaluates neither).
     let agreeMacros (headers: (string * bool * CppParser.Declaration list) list) : Result<unit, Diagnostics.Refusal> =
-        let definition cpp (m: CppParser.MacroDecl) =
+        let evaluation (m: CppParser.MacroDecl) =
             match m.Kind with
-            | CppParser.FunctionLike (args, body) -> (Some args, macroTokens cpp body), "(" + String.concat ", " args + ") " + body
-            | _ -> (None, macroTokens cpp m.RawValue), m.RawValue
+            | CppParser.IntegerConstant (_, value) -> Some ($"integer {value}", $"{value}")
+            | CppParser.FunctionPointerSentinel (_, pointerType, canonical, value) -> Some ($"sentinel {pointerType} {canonical} {value}", $"({pointerType}){value}")
+            | CppParser.StringConstant (_, clangType) -> Some ($"string {clangType}", $"a string of type {clangType}")
+            // clang's reason can name the unit's own paths: the key is only that it found no value.
+            | CppParser.Unevaluated _ -> Some ("unevaluated", "no value")
+            | CppParser.SimpleValue _ | CppParser.Expression _ | CppParser.FunctionLike _ | CppParser.TypeCast _ -> None
+        let definition cpp (m: CppParser.MacroDecl) =
+            let (shape, spelling) =
+                match m.Kind with
+                | CppParser.FunctionLike (args, body) -> (Some args, macroTokens cpp body), "(" + String.concat ", " args + ") " + body
+                | _ -> (None, macroTokens cpp m.RawValue), m.RawValue
+            match evaluation m with
+            | Some (key, described) -> (shape, Some key), ($"'{spelling}'", $"'{spelling}' (clang evaluates {described} in that unit)")
+            | None -> (shape, None), ($"'{spelling}'", $"'{spelling}' (not evaluated by clang)")
         let perHeader =
             headers |> List.map (fun (header, cpp, decls) ->
                 header,
@@ -728,12 +745,16 @@ module BindingGenerator =
                 let keys = givers |> List.map (fun (key, _, _) -> key) |> List.distinct
                 if keys.Length < 2 then None
                 else
+                    // The evaluation is named only where the text alone does not tell the
+                    // definitions apart.
+                    let evaluated = (keys |> List.map fst |> List.distinct).Length < keys.Length
                     let described =
                         keys |> List.map (fun key ->
                             let same = givers |> List.filter (fun (k, _, _) -> k = key)
-                            let _, spelling, _ = List.head same
+                            let _, (text, withEvaluation), _ = List.head same
+                            let spelling = if evaluated then withEvaluation else text
                             let hs = same |> List.map (fun (_, _, h) -> $"'{h}'") |> String.concat ", "
-                            $"'{spelling}' in {hs}")
+                            $"{spelling} in {hs}")
                         |> String.concat "; "
                     // `clang -E -dM` lists macro definitions without locations: each defining
                     // header is known, no line in it.
@@ -774,6 +795,9 @@ module BindingGenerator =
         DeclarationCount: int
         /// Advisory messages for the developer (e.g., missing error conventions)
         Advisories: string list
+        /// Every parsed macro (each one the pilot's `macro_prefixes` select) generation emits as
+        /// no constant, by name and kind (#193): none is dropped without a word.
+        UnemittedMacros: FidelityCodeGenerator.UnemittedMacro list
     }
 
     /// Generate Clef bindings from a C/C++ header file.
@@ -827,6 +851,7 @@ module BindingGenerator =
                 OutputFiles = outputPath :: (wrapperOutputs |> List.map fst)
                 DeclarationCount = declarations.Length
                 Advisories = []
+                UnemittedMacros = FidelityCodeGenerator.unemittedMacros declarations
             }
 
     /// Generate bindings from one header (`farscape generate`). A failure carries the structured
@@ -1029,12 +1054,13 @@ module BindingGenerator =
     /// When generateWrappers is true, also generates Layer 2 idiomatic wrappers.
     let private generateFromProjectCore (aliasRows: string -> TypeMapper.AbiRepr option) (projectPath: string) (verbose: bool) (generateWrappers: bool) (dataModel: PlatformABI) : Result<GenerationResult, Diagnostics.Refusal> =
         let uncoded = Diagnostics.uncoded
-        match PilotSerializer.loadFromFile projectPath with
-        | Error e -> Error (uncoded $"Failed to load project: {e}")
+        match PilotSerializer.loadFromFileDiagnosed projectPath with
+        | Error refusal -> Error (Diagnostics.prefixed "Failed to load project: " refusal)
         | Ok _ when dataModel <> PlatformABI.LP64 ->
             Error (uncoded "Project generation currently declares a Linux x86_64 LP64 target. A different ABI requires an explicit target, header/sysroot and link contract; emitting it with the Linux manifest would be incorrect. No bindings were written.")
         | Ok project when project.Options |> Option.exists (fun opts -> opts.NativePointerSurface) ->
-            Error (uncoded "experimental_native_pointer_surface exposes addresses in Clef source and violates the FFI boundary contract. Remove this option and declare CHandle, callback, reference and ownership projections in the pilot. No bindings were written.")
+            FidelityCodeGenerator.nativePointerSurfaceRefusal (Diagnostics.Located.Unknown "experimental_native_pointer_surface is pilot input, not a header declaration")
+            |> Diagnostics.refusalOf |> Diagnostics.suffixed " No bindings were written." |> Error
         | Ok project when not project.Library.XmlProtocols.IsEmpty
                           && not (project.Options |> Option.exists (fun opts -> opts.TypedProtocol)) ->
             Error (uncoded "XML protocol generation requires options.typed_protocol = true. The legacy protocol generator exposes pointer operations in Clef source. No bindings were written.")
@@ -1123,9 +1149,9 @@ module BindingGenerator =
                 let introspection =
                     if project.Library.Introspection.IsEmpty then None
                     else
-                        match IntrospectionParser.load project.Library.Introspection with
+                        match IntrospectionParser.loadDiagnosed project.Library.Introspection with
                         | Ok repo -> Some repo
-                        | Error e -> failwith e
+                        | Error d -> Diagnostics.refuse d
 
                 let typedProtocol = project.Options |> Option.exists (fun o -> o.TypedProtocol)
                 let declarations = DeclarationAlgebra.mergeDeclarations headerDeclLists
@@ -1203,7 +1229,11 @@ module BindingGenerator =
                         let probeCtx = FidelityCodeGenerator.buildGenerationContext declarations dataModel Map.empty
                         let units =
                             measurementUnits probeCtx declarations (List.zip project.Library.Headers headerDeclLists) abiStructNames
-                            |> Result.defaultWith failwith
+                            |> Result.defaultWith (fun message ->
+                                Diagnostics.diagnostic Diagnostics.AbiStorageUnitDisagrees message
+                                    (Diagnostics.Located.Unknown "the measuring unit and the pilot's declaring header are named in the message")
+                                |> Diagnostics.withPilotKey "options.abi_critical_structs" None
+                                |> Diagnostics.refuse)
                         units
                         |> List.map (fun (headerFile, names) ->
                             let measured =
@@ -1212,7 +1242,11 @@ module BindingGenerator =
                             logVerbose $"Extracted layouts for {measured.Count} ABI-critical struct(s) in {headerFile}" verbose
                             headerFile, measured)
                         |> agreeMeasurements
-                        |> Result.defaultWith failwith
+                        |> Result.defaultWith (fun message ->
+                            Diagnostics.diagnostic Diagnostics.AbiStorageMeasurementDivergent message
+                                (Diagnostics.Located.Unknown "the two measuring units are named in the message")
+                            |> Diagnostics.withPilotKey "options.abi_critical_structs" None
+                            |> Diagnostics.refuse)
 
                 let ctx =
                     let baseCtx = FidelityCodeGenerator.buildGenerationContext declarations dataModel structLayouts
@@ -1225,23 +1259,31 @@ module BindingGenerator =
                                 if requested.StartsWith("struct ") then Some false
                                 elif requested.StartsWith("union ") then Some true
                                 else None
-                            if requested.StartsWith("typedef ") && not (baseCtx.TypedefMap.ContainsKey name) then
-                                failwithf "ABI-critical typedef '%s' is not declared." name
                             let declared = baseCtx.Structs.TryFind name
+                            // Each entry is refused under `options.abi_critical_structs` (#199), at
+                            // the record's clang location when a header declares it.
+                            let refuse code message =
+                                let source =
+                                    declared |> Option.map _.Location.Location
+                                    |> Option.defaultValue (Diagnostics.Located.Unknown $"no parsed header declares a record named '{name}'")
+                                Diagnostics.diagnostic code message source
+                                |> Diagnostics.withPilotKey "options.abi_critical_structs" None
+                                |> Diagnostics.refuse
+                            if requested.StartsWith("typedef ") && not (baseCtx.TypedefMap.ContainsKey name) then
+                                refuse Diagnostics.AbiStorageUndeclared $"ABI-critical typedef '{name}' is not declared."
                             if expectedUnion |> Option.exists (fun expected -> declared |> Option.exists (fun record -> record.IsUnion <> expected)) then
-                                failwithf "ABI-critical storage '%s' does not match the requested record kind." name
+                                refuse Diagnostics.AbiStorageKindMismatch $"ABI-critical storage '{name}' does not match the requested record kind."
                             if declared.IsSome then
                                 if not (structLayouts.ContainsKey name) then
-                                    if nativeCarrier then
-                                        failwithf "Native carrier storage '%s' requires a measured layout; header probe did not provide it." name
-                                    else
-                                        failwithf "ABI-critical storage '%s' requires a measured layout; header probe did not provide it." name
+                                    let what = if nativeCarrier then "Native carrier" else "ABI-critical"
+                                    refuse Diagnostics.AbiStorageUnmeasured $"{what} storage '{name}' requires a measured layout; header probe did not provide it."
                             else
                                 let unit = FidelityCodeGenerator.inUnitOf "typedef" name { baseCtx with DeclarationUnits = unitTypedefMaps }
                                 match FidelityCodeGenerator.resolveCType unit.TypedefMap dataModel Set.empty unit.Delegates unit.Enums name with
                                 | FidelityCodeGenerator.Scalar r when expectedUnion.IsNone && r.Bits > 0 -> ()
-                                | _ when nativeCarrier -> failwithf "Native carrier storage '%s' has no known scalar or measured record representation." name
-                                | _ -> failwithf "ABI-critical storage '%s' has no known scalar or measured record representation." name
+                                | _ ->
+                                    let what = if nativeCarrier then "Native carrier" else "ABI-critical"
+                                    refuse Diagnostics.AbiStorageUndeclared $"{what} storage '{name}' has no known scalar or measured record representation."
                     | _ -> ()
                     // An external contract must survive neither duplicate-map collapse
                     // nor namespace filtering. Refuse before any generation effects.
@@ -1327,9 +1369,9 @@ module BindingGenerator =
                         |> Diagnostics.withPilotKey "library.introspection" None
                         |> Diagnostics.refuse
                     | Some repo ->
-                        match IntrospectionParser.select repo selected with
+                        match IntrospectionParser.selectDiagnosed repo selected with
                         | Ok signals -> signals
-                        | Error e -> failwith e
+                        | Error d -> Diagnostics.refuse d
                 let signalTypes = TypedSignalGenerator.requiredTypes signals declarations ctx
                 let ctx = { ctx with PhantomMarkers = Set.union ctx.PhantomMarkers signalTypes }
                 let signalCode = TypedSignalGenerator.render nsPrefix signals declarations ctx
@@ -1806,6 +1848,7 @@ module BindingGenerator =
                     OutputFiles = allOutputFiles
                     DeclarationCount = declarations.Length
                     Advisories = advisories
+                    UnemittedMacros = FidelityCodeGenerator.unemittedMacros declarations
                 }
 
     /// The pilot key whose input causes each refusal code that pilot input causes (#184): a

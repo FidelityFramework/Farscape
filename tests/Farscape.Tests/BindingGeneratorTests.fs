@@ -809,7 +809,7 @@ let ``a measured record's typedef'd nested record must be declared in the measur
     let user = fixturePath "typedef-records/node-user.h"
     withPilot [node; user] ["c_header_mode = true"; "abi_critical_structs = [\"struct fx_user\"]"] [] (fun result output ->
         Assert.Equal(
-            Error $"Binding generation failed: ABI-critical storage 'fx_user' is measured in '{user}', but its nested record 'fx_shared_node' is not declared by that header; a measured layout requires every nested record in one unit.",
+            Error $"Binding generation failed: FS9188: ABI-critical storage 'fx_user' is measured in '{user}', but its nested record 'fx_shared_node' is not declared by that header; a measured layout requires every nested record in one unit.",
             result |> Result.map ignore)
         Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
 
@@ -856,7 +856,7 @@ let ``a union returned by value without a declared value type is refused before 
             Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
     // Declaring it is not enough: a value type is a plain record, which a union is not.
     withPilot [header] ["value_structs = [\"fx_word\"]"] ["fx_get_word"] (fun result output ->
-        Assert.Equal(Error "Binding generation failed: Value struct 'fx_word' requires a plain record with scalar or pointer fields", result |> Result.map ignore)
+        Assert.Equal(Error "Binding generation failed: FS9183: Value struct 'fx_word' is a union; a plain record with scalar or pointer fields is required.", result |> Result.map ignore)
         Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
 
 let private chainAgreesWithClang () =

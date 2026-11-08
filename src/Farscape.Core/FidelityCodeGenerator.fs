@@ -91,7 +91,18 @@ module FidelityCodeGenerator =
         /// The unit's typedefs as declared, with the attributes clang attaches to each (#181):
         /// a by-value type reaching an attributed one is admitted only on clang's measurement.
         TypedefInfos: Map<string, CppParser.TypedefInfo>
+        /// The unit's macros as clang evaluated them in that unit (#192, #193): a sentinel or
+        /// constant a function names is the one its declaring unit evaluates, never another
+        /// unit's evaluation of the same name.
+        Macros: Map<string, CppParser.MacroDecl>
     }
+
+    /// The unit's macros by name, first definition winning, as clang evaluated them in it.
+    let macrosOf (declarations: CppParser.Declaration list) : Map<string, CppParser.MacroDecl> =
+        (Map.empty, declarations) ||> List.fold (fun acc decl ->
+            match decl with
+            | CppParser.Declaration.Macro m when not (acc.ContainsKey m.Name) -> acc.Add(m.Name, m)
+            | _ -> acc)
 
     /// The unit's typedefs as declared, first declaration of a name winning.
     let typedefInfosOf (declarations: CppParser.Declaration list) : Map<string, CppParser.TypedefInfo> =
@@ -110,7 +121,8 @@ module FidelityCodeGenerator =
                 | CppParser.Declaration.Enum e when e.Name <> "" && not (acc.ContainsKey e.Name) -> acc.Add(e.Name, e)
                 | _ -> acc)
           OpaqueHandles = detectOpaqueHandles declarations
-          TypedefInfos = typedefInfosOf declarations }
+          TypedefInfos = typedefInfosOf declarations
+          Macros = macrosOf declarations }
 
     /// A C pointer typedef supplies a nominal marker, never a record exposing its address.
     /// Values of the typedef cross through CHandle<marker>; only the boundary constructs them.
@@ -296,6 +308,15 @@ module FidelityCodeGenerator =
 
     /// Where type resolution meets a callback value it refuses, the declaration using the type is
     /// unknown to it: the refusal says so (FS9145, FS9146).
+    /// The retired experimental native-pointer surface (#199): raw addresses and width-named
+    /// carriers in Clef source violate the FFI boundary contract. Refused at `source`, under the
+    /// pilot key that selects it.
+    let nativePointerSurfaceRefusal (source: Diagnostics.Located<Diagnostics.SourceLocation>) : Diagnostics.Diagnostic =
+        Diagnostics.diagnostic Diagnostics.NativePointerSurfaceRetired
+            "experimental_native_pointer_surface cannot emit Clef source: raw addresses and width-named carriers violate the FFI boundary contract. Remove this option and declare CHandle, callback, reference and ownership projections in the pilot."
+            source
+        |> Diagnostics.withPilotKey "options.experimental_native_pointer_surface" None
+
     let private unlocatedCallbackValue (typ: string) =
         Diagnostics.Located.Unknown $"type resolution sees callback type '{typ}' without the declaration that uses it"
 
@@ -509,11 +530,14 @@ module FidelityCodeGenerator =
         /// Clang's measurements of the by-value parameters and result of the function whose unit
         /// the context is in (`inFunctionUnit`) that reach an attributed typedef (#181).
         ByValueTypedefs: CppParser.ByValueTypedef list
+        /// The parsed macros by name, as clang evaluated them: a `constant_parameters` entry on
+        /// a function-pointer parameter names a `FunctionPointerSentinel` among them (#192).
+        Macros: Map<string, CppParser.MacroDecl>
     }
 
     /// A context holding one unit's facts in place of the merged ones.
     let withUnitFacts (facts: UnitFacts) (ctx: GenerationContext) : GenerationContext =
-        { ctx with TypedefMap = facts.Typedefs; Enums = facts.Enums; OpaqueHandles = facts.OpaqueHandles; TypedefInfos = facts.TypedefInfos }
+        { ctx with TypedefMap = facts.Typedefs; Enums = facts.Enums; OpaqueHandles = facts.OpaqueHandles; TypedefInfos = facts.TypedefInfos; Macros = facts.Macros }
 
     /// The context of one declaration: its declaring unit's facts (typedefs, measured enums,
     /// opaque handles) when the pilot recorded them, the merged facts otherwise (a single
@@ -561,7 +585,7 @@ module FidelityCodeGenerator =
                     (Diagnostics.inFile (fst (List.head resolutions)) unlocated)
                 |> Diagnostics.withRelated (resolutions |> List.tail |> List.map (fun (header, _) -> { Diagnostics.SourceLocation.Path = header; Diagnostics.SourceLocation.Position = Diagnostics.Located.Unknown unlocated }))
                 |> Diagnostics.refuse
-        | _ when (TypeMapper.tryScalar ctx.DataModel name).IsSome -> withUnitFacts { Typedefs = Map.empty; Enums = Map.empty; OpaqueHandles = Set.empty; TypedefInfos = Map.empty } ctx
+        | _ when (TypeMapper.tryScalar ctx.DataModel name).IsSome -> withUnitFacts { Typedefs = Map.empty; Enums = Map.empty; OpaqueHandles = Set.empty; TypedefInfos = Map.empty; Macros = ctx.Macros } ctx
         | _ ->
             Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.GirTypeUndeclared
                                     $"{where}: C type '{name}' is declared by no pilot unit; a GIR spelling cannot supply its representation."
@@ -749,6 +773,96 @@ module FidelityCodeGenerator =
                                     $"by-value type '{cType}' {reason}; a descriptor carries no attribute of a typedef."
                                     (Diagnostics.Located.Unknown $"the descriptor guard sees type '{cType}' without the declaration that uses it"))
 
+    // =========================================================================
+    // Macro constants and the report of every macro not emitted (#193)
+    // =========================================================================
+
+    /// Why a macro the parse reports (every one its pilot's `macro_prefixes` select) is emitted
+    /// as no constant. Nothing is dropped without one of these.
+    [<RequireQualifiedAccess>]
+    type UnemittedMacroKind =
+        /// `#define SQLITE_API`: a linkage or attribute marker with no value.
+        | EmptyDefinition
+        | FunctionLike
+        /// A string literal, with the array type clang gives it.
+        | StringLiteral of clangType: string
+        /// A cast of an integer to a function-pointer type: usable as a `constant_parameters`
+        /// value on a parameter of that type (#192), but no Clef constant.
+        | FunctionPointerSentinel of pointerType: string * value: int64
+        /// A cast to a data pointer type: an address, which no Clef constant carries.
+        | PointerCast of typeName: string
+        /// No integer constant expression: clang's reason, or why it gave none.
+        | NotIntegerConstant of reason: string
+        /// A compiler-predefined or reserved name (`linux`, `_FOO`).
+        | ReservedName
+
+    /// One macro the parse reports and generation emits as no constant.
+    type UnemittedMacro = { Name: string; Kind: UnemittedMacroKind; Definition: string }
+
+    /// The kind as the report prints it.
+    let describeUnemittedMacroKind (kind: UnemittedMacroKind) =
+        match kind with
+        | UnemittedMacroKind.EmptyDefinition -> "empty definition (linkage or attribute marker)"
+        | UnemittedMacroKind.FunctionLike -> "function-like macro"
+        | UnemittedMacroKind.StringLiteral t -> $"string literal ({t})"
+        | UnemittedMacroKind.FunctionPointerSentinel (t, v) -> $"function-pointer sentinel ({t}){v}, a constant_parameters value for a parameter of that type"
+        | UnemittedMacroKind.PointerCast t -> $"cast to data pointer type {t}"
+        | UnemittedMacroKind.NotIntegerConstant reason -> $"no integer constant: {reason}"
+        | UnemittedMacroKind.ReservedName -> "predefined or reserved name"
+
+    /// A macro's disposition: the constant generation emits for it, or why it emits none.
+    type MacroDisposition =
+        | EmittedConstant of FsDecl list
+        | NotEmitted of UnemittedMacro
+
+    /// Each macro's disposition (#193). An integer literal is emitted as written; a composed
+    /// integer or an alias with the value clang evaluates (`SQLITE_IOERR_READ = 266`); every
+    /// other macro is reported with its kind.
+    let macroDisposition (m: CppParser.MacroDecl) : MacroDisposition =
+        let unemitted kind = NotEmitted { Name = m.Name; Kind = kind; Definition = m.RawValue }
+        match m.Name with
+        | CompilerBuiltin | InternalMacro | PredefinedMacro -> unemitted UnemittedMacroKind.ReservedName
+        | UserMacro when m.Name.StartsWith "_" -> unemitted UnemittedMacroKind.ReservedName
+        | UserMacro ->
+            match m.Kind with
+            | CppParser.SimpleValue "" -> unemitted UnemittedMacroKind.EmptyDefinition
+            | CppParser.SimpleValue (IntegerLiteral n) -> EmittedConstant [ LiteralBinding(m.Name, string n) ]
+            | CppParser.Expression v ->
+                match v.Trim().TrimStart('(').TrimEnd(')') with
+                | IntegerLiteral n -> EmittedConstant [ LiteralBinding(m.Name, string n) ]
+                | _ -> unemitted (UnemittedMacroKind.NotIntegerConstant "clang has not evaluated it")
+            | CppParser.SimpleValue _ -> unemitted (UnemittedMacroKind.NotIntegerConstant "its definition is no integer literal clang has evaluated")
+            | CppParser.IntegerConstant (_, value) -> EmittedConstant [ LiteralBinding(m.Name, string value) ]
+            | CppParser.FunctionLike _ -> unemitted UnemittedMacroKind.FunctionLike
+            | CppParser.TypeCast (typeName, _) -> unemitted (UnemittedMacroKind.PointerCast (typeName + "*"))
+            | CppParser.FunctionPointerSentinel (_, pointerType, _, value) -> unemitted (UnemittedMacroKind.FunctionPointerSentinel (pointerType, value))
+            | CppParser.StringConstant (_, clangType) -> unemitted (UnemittedMacroKind.StringLiteral clangType)
+            | CppParser.Unevaluated (_, reason) -> unemitted (UnemittedMacroKind.NotIntegerConstant reason)
+
+    /// Every macro among `declarations` generation emits as no constant, in order, each with
+    /// its name and kind (#193).
+    let unemittedMacros (declarations: CppParser.Declaration list) : UnemittedMacro list =
+        declarations |> List.choose (function
+            | CppParser.Declaration.Macro m -> (match macroDisposition m with NotEmitted u -> Some u | EmittedConstant _ -> None)
+            | _ -> None)
+
+    /// The pilot's `constant_parameters` entry for parameter `index` of `func`, when it fixes one.
+    let private constantParameterOf (ctx: GenerationContext) (func: CppParser.FunctionDecl) (index: int) : string option =
+        ctx.Bindings |> Map.tryFind func.Name
+        |> Option.bind (fun b -> List.tryItem index b.ConstantParameters)
+        |> Option.filter (System.String.IsNullOrWhiteSpace >> not)
+
+    /// The function-pointer sentinel parameter `index` of `func` is fixed to (#192): the macro
+    /// the pilot's `constant_parameters` names and the integer clang evaluates for it. Such a
+    /// parameter has no Clef parameter; its descriptor records `Fixed (EntrySentinel ...)`.
+    /// `generateFunctionDecls` refuses every other constant on a function-pointer parameter.
+    let fixedSentinelOf (ctx: GenerationContext) (func: CppParser.FunctionDecl) (index: int) : (string * int64) option =
+        constantParameterOf ctx func index
+        |> Option.bind (fun name ->
+            match ctx.Macros.TryFind name |> Option.map _.Kind with
+            | Some (CppParser.FunctionPointerSentinel (_, _, _, value)) -> Some (name, value)
+            | _ -> None)
+
     /// The Layer 2 `Expr<FunctionDescriptor>` quotation beside an extern (platform-bindings.md,
     /// "Binding Libraries"): the C name, each parameter's and the return's ABI representation
     /// (family and bits under the profile) and passing, the calling convention, and ownership.
@@ -764,11 +878,19 @@ module FidelityCodeGenerator =
                 let represented = if reference then element |> Option.defaultWith (fun () -> cType.Substring(0, cType.LastIndexOf('*')).Trim()) else cType
                 let typeRef, provenance = abiClaim ctx represented
                 let clefName = (cleanParamName name).Replace("``", "")
+                // A parameter fixed to a function-pointer sentinel crosses as that constant (#192):
+                // the Clef signature has no parameter for it.
+                let passBy, provenance =
+                    match fixedSentinelOf ctx func index with
+                    | Some (macro, value) ->
+                        $"Fixed (EntrySentinel ({quoteString macro}, {value}L))",
+                        provenance + $"; fixed by the pilot to sentinel {macro} = {value}, which clang evaluates; no entry crosses"
+                    | None -> (if readOnly then "ReadOnlyReference" elif reference then "Reference" else "Value"), provenance
                 Commented(
                     RecordConstruction [
                         "Name", Literal (quoteString clefName)
                         "Type", Literal typeRef
-                        "PassBy", Identifier (if readOnly then "ReadOnlyReference" elif reference then "Reference" else "Value") ],
+                        "PassBy", Identifier passBy ],
                     provenance))
         let returnRef, returnProvenance = abiClaim ctx func.ReturnType
         let ownership, ownershipNote =
@@ -809,6 +931,9 @@ module FidelityCodeGenerator =
     let private callbackEntries (ctx: GenerationContext) (namespace': string) (func: CppParser.FunctionDecl) =
         let ctx = inFunctionUnit ctx func
         func.Parameters |> List.mapi (fun index (name, cType) ->
+          // A parameter a constant fixes carries no entry (#192); generateFunctionDecls admits
+          // only a function-pointer sentinel there.
+          if (constantParameterOf ctx func index).IsSome then None else
           relocateCallbackValue func.Location.Location (Some (bindingKey func.Name "", Some index)) (fun () ->
             resolveCallbackNativeSignature ctx cType |> Option.map (fun (ret, args) ->
                 let identity = if cType.Contains "(*)" then func.Name + "::" + name else cType
@@ -850,7 +975,8 @@ module FidelityCodeGenerator =
                 let represented = if reference then element |> Option.defaultWith (fun () -> cType.Substring(0, cType.LastIndexOf('*')).Trim()) else cType
                 $"parameter '{name}'", represented)
         let callbacks =
-            func.Parameters |> List.collect (fun (name, cType) ->
+            func.Parameters |> List.indexed |> List.collect (fun (index, (name, cType)) ->
+                if (constantParameterOf ctx func index).IsSome then [] else
                 match resolveCallbackNativeSignature ctx cType with
                 | Some (ret, args) ->
                     (args |> List.map (fun (arg, t) -> $"argument '{arg}' of callback parameter '{name}'", t))
@@ -1018,7 +1144,7 @@ module FidelityCodeGenerator =
         // Every resolution for this declaration uses its declaring unit's typedefs.
         let ctx = inFunctionUnit ctx func
         if ctx.NativePointerSurface then
-            failwith "experimental_native_pointer_surface cannot emit Clef source: raw addresses and width-named carriers violate the FFI boundary contract."
+            Diagnostics.refuse (nativePointerSurfaceRefusal func.Location.Location)
         let mapType = resolveIn ctx >> clefTypeOf
         let projection = Map.tryFind func.Name ctx.Bindings
         let nonnullAnnotations = ctx.NonnullAnnotations
@@ -1045,11 +1171,51 @@ module FidelityCodeGenerator =
             keys |> List.tryPick (fun (key, indices) ->
                 if projection |> Option.exists (fun b -> List.contains idx (indices b)) then Some (bindingKey func.Name key) else None)
 
-        // Map parameters with nullability awareness
-        let parameters =
+        // A constant on a function-pointer parameter fixes it to a sentinel the library defines
+        // as a cast integer (#192): SQLite's SQLITE_TRANSIENT, `((sqlite3_destructor_type)-1)`.
+        // It must name a parsed macro clang evaluates to a sentinel of the parameter's type, and
+        // a null sentinel (SQLITE_STATIC) is refused: the library then keeps using the bound
+        // value after the call, which only a declared borrow lifetime could admit.
+        let sentinels =
+            let compact (text: string) = text |> String.filter (System.Char.IsWhiteSpace >> not)
+            let canonicalOf (cType: string) =
+                let bare = stripNullability cType
+                ctx.TypedefMap |> Map.tryFind (TypeMapper.cleanTypeName bare) |> Option.defaultValue bare |> compact
+            func.Parameters |> List.mapi (fun idx (name, cType) ->
+                match projection |> Option.bind (fun b -> List.tryItem idx b.ConstantParameters) |> Option.filter (System.String.IsNullOrWhiteSpace >> not), resolveIn ctx cType with
+                | Some value, FunctionPointer _ ->
+                    let key = Some (bindingKey func.Name "constant_parameters")
+                    let refuse code reason = refuse code key (Some idx) reason
+                    let parameterType = canonicalOf cType
+                    match ctx.Macros.TryFind value |> Option.map _.Kind with
+                    | Some (CppParser.FunctionPointerSentinel (_, spelled, canonical, address))
+                        when parameterType = canonicalOf spelled || parameterType = compact canonical ->
+                        if address = 0L then
+                            refuse Diagnostics.SentinelBorrowUndeclared
+                                $"constant '{value}' fixes function-pointer parameter '{name}' to the null sentinel ({spelled})0, under which the library uses the bound value after the call without copying it; no pilot key declares a borrow lifetime for that value, so the null sentinel is not admitted. Fix a copying sentinel (SQLite's SQLITE_TRANSIENT) instead."
+                        Some (idx, (value, address))
+                    | Some (CppParser.FunctionPointerSentinel (_, spelled, canonical, _)) ->
+                        refuse Diagnostics.SentinelProjectionInvalid
+                            $"constant '{value}' is a sentinel of type '{spelled}' ({canonical}), not of parameter '{name}''s type '{cType}'"
+                    | Some _ ->
+                        let kind =
+                            match macroDisposition ctx.Macros.[value] with
+                            | NotEmitted u -> describeUnemittedMacroKind u.Kind
+                            | EmittedConstant _ -> "an integer constant"
+                        refuse Diagnostics.SentinelProjectionInvalid
+                            $"constant '{value}' on function-pointer parameter '{name}' names a macro clang evaluates to no function-pointer sentinel: {kind}"
+                    | None ->
+                        refuse Diagnostics.SentinelProjectionInvalid
+                            $"constant '{value}' on function-pointer parameter '{name}' names no parsed macro; a function-pointer parameter is fixed only to a sentinel macro the pilot's macro_prefixes select"
+                | _ -> None)
+            |> List.choose id |> Map.ofList
+
+        // Map parameters with nullability awareness. A parameter fixed to a sentinel has none.
+        let slots =
             func.Parameters
             |> List.mapi (fun idx (name, cType) ->
-              relocateCallbackValue func.Location.Location (Some (bindingKey func.Name "", Some idx)) (fun () ->
+              if sentinels.ContainsKey idx then idx, None else
+              idx, Some (relocateCallbackValue func.Location.Location (Some (bindingKey func.Name "", Some idx)) (fun () ->
                 let refuse code key reason = refuse code key (Some idx) reason
                 let reference, _ = referencePassing projection idx cType
                 let element = projection |> Option.bind (fun b -> List.tryItem idx b.ReferenceElements) |> Option.filter ((<>) "")
@@ -1111,7 +1277,8 @@ module FidelityCodeGenerator =
                     else mapType cType
                 let isNullable = nullableCallback || (not reference && isDataPointerIn ctx cType && not provenNonnull)
                 let finalType = if isNullable then wrapOption fsType else fsType
-                { FsParam.Name = cleanParamName name; Type = finalType }))
+                { FsParam.Name = cleanParamName name; Type = finalType })))
+        let parameters = slots |> List.choose snd
 
         // Return type: nullable unless proven nonnull
         let returnIsPointer = isDataPointerIn ctx func.ReturnType
@@ -1143,27 +1310,36 @@ module FidelityCodeGenerator =
 
         let symbol = projection |> Option.map (fun b -> b.Symbol) |> Option.defaultValue func.Name
         let constants = projection |> Option.map (fun p -> p.ConstantParameters) |> Option.defaultValue []
-        let fixedAt index = constants |> List.tryItem index |> Option.filter ((<>) "")
-        let projected = constants |> List.exists ((<>) "")
+        // An integer constant: one the wrapper passes as a literal. A sentinel has no Clef value;
+        // its descriptor carries it.
+        let fixedAt index = if sentinels.ContainsKey index then None else constants |> List.tryItem index |> Option.filter ((<>) "")
+        let projected = constants |> List.indexed |> List.exists (fun (index, _) -> (fixedAt index).IsSome)
         let nativeName = if projected then func.Name + "Native" else func.Name
         let nativeFunction = { func with Name = nativeName }
         let descriptorContext =
             match projection with
-            | Some p when projected -> { ctx with Bindings = Map.add nativeName { p with Name = nativeName; ConstantParameters = [] } ctx.Bindings }
+            | Some p when projected ->
+                let sentinelsOnly = p.ConstantParameters |> List.mapi (fun index value -> if sentinels.ContainsKey index then value else "")
+                { ctx with Bindings = Map.add nativeName { p with Name = nativeName; ConstantParameters = sentinelsOnly } ctx.Bindings }
             | _ -> ctx
         let wrapper =
             if not projected then [] else
-            let args = parameters |> List.mapi (fun index p ->
-                match fixedAt index with
-                | None -> Identifier p.Name
-                | Some value ->
-                    match System.Int64.TryParse value, p.Type with
-                    | (true, _), Named "int" -> Literal value
-                    | _ -> refuse Diagnostics.ConstantProjectionInvalid (Some (bindingKey func.Name "constant_parameters")) (Some index) "constant projection requires an integer literal and scalar integer parameter")
-            let publicParameters = parameters |> List.indexed |> List.choose (fun(i,p)->if (fixedAt i).IsSome then None else Some p)
+            let args = slots |> List.choose (fun (index, p) ->
+                p |> Option.map (fun p ->
+                    match fixedAt index with
+                    | None -> Identifier p.Name
+                    | Some value ->
+                        match System.Int64.TryParse value, p.Type with
+                        | (true, _), Named "int" -> Literal value
+                        | _ -> refuse Diagnostics.ConstantProjectionInvalid (Some (bindingKey func.Name "constant_parameters")) (Some index) "constant projection requires an integer literal and scalar integer parameter"))
+            let publicParameters = slots |> List.choose (fun (i, p) -> if (fixedAt i).IsSome then None else p)
             [ LetBinding(func.Name, publicParameters, finalReturnType, FunctionCall("", nativeName, args), []) ]
         let callbackNotes =
             func.Parameters |> List.mapi (fun idx (name, cType) ->
+                match sentinels.TryFind idx with
+                | Some (macro, value) ->
+                    Some (XmlDoc $"Parameter `{name}` is fixed by the pilot to the function-pointer sentinel {macro} ({value}, as clang evaluates it): no entry crosses, and the library's meaning for that sentinel applies.")
+                | None ->
                 match resolveIn ctx cType with
                 | FunctionPointer _ ->
                     let evidence =
@@ -1203,7 +1379,10 @@ module FidelityCodeGenerator =
             not entries.IsEmpty &&
             (ctx.Bindings |> Map.tryFind func.Name |> Option.bind _.Resource |> Option.isNone) &&
             (entries |> List.forall (fun (ordinal, _, _) ->
-                match parameters[ordinal].Type with Generic("option", Generic("FnPtr", _)) -> true | _ -> false)) &&
+                // By name: a parameter fixed to a sentinel (#192) has no Clef parameter.
+                match parameters |> List.tryFind (fun p -> p.Name = cleanParamName (fst func.Parameters[ordinal])) |> Option.map _.Type with
+                | Some (Generic("option", Generic("FnPtr", _))) -> true
+                | _ -> false)) &&
             not (raw |> List.exists (function LetBinding(publicName, _, _, _, []) when publicName = func.Name -> true | _ -> false))
         if not entries.IsEmpty && name = func.Name && not unchangedOptional then name + "Native" else name
 
@@ -1311,8 +1490,8 @@ module FidelityCodeGenerator =
         let nativeName, nativeParameters, returnType =
             raw |> List.pick (function LetBinding(name, parameters, ret, _, attrs) when not attrs.IsEmpty -> Some (name, parameters, ret) | _ -> None)
         let callbackTypes = entries |> List.choose (fun (i, name, _) ->
-            match nativeParameters[i].Type with
-            | Generic("option", Generic("FnPtr", _)) -> None
+            match nativeParameters |> List.tryFind (fun p -> p.Name = cleanParamName (fst func.Parameters.[i])) |> Option.map _.Type with
+            | Some (Generic("option", Generic("FnPtr", _))) -> None
             | _ -> Some (cleanParamName (fst func.Parameters.[i]), name)) |> Map.ofList
         let emittedName = nativeDeclarationName ctx func entries raw
         let needsAdapter = emittedName <> func.Name
@@ -1380,17 +1559,27 @@ module FidelityCodeGenerator =
                 | None -> DescriptorGenerator.UnknownField cType
         let valueDecls =
             if ctx.ValueStructs.Contains s.Name then
-                if s.IsUnion || s.Fields |> List.exists (fun field -> field.IsArray || field.IsBitfield) then
-                    failwith $"Value struct '{s.Name}' requires a plain record with scalar or pointer fields"
-                // A value struct's Clef record is laid out from its field types, which hold
-                // neither an unnamed bit-field (#176) nor a typedef's attribute (#175).
+                // A value struct's Clef record of named fields is laid out from its field types
+                // (#199): a union, an array or bit-field member, an unnamed bit-field (#176) or a
+                // typedef attribute a field type reaches (#175) is none of those.
+                let refuseShape message =
+                    Diagnostics.diagnostic Diagnostics.ValueStructUnrepresentable message s.Location.Location
+                    |> Diagnostics.withPilotKey "options.value_structs" None
+                    |> Diagnostics.refuse
+                if s.IsUnion then
+                    refuseShape $"Value struct '{s.Name}' is a union; a plain record with scalar or pointer fields is required."
+                match s.Fields |> List.tryFind (fun field -> field.IsArray || field.IsBitfield) with
+                | Some field ->
+                    let what = if field.IsArray then "an array" else "a bit-field"
+                    refuseShape $"Value struct '{s.Name}' field '{field.Name}' is {what}; a plain record with scalar or pointer fields is required."
+                | None -> ()
                 match s.UnnamedBitFields with
                 | b :: _ ->
-                    failwith $"Value struct '{s.Name}' carries {CppParser.describeUnnamedBitField b}, which its Clef record of named fields cannot represent; a plain record with scalar or pointer fields is required."
+                    refuseShape $"Value struct '{s.Name}' carries {CppParser.describeUnnamedBitField b}, which its Clef record of named fields cannot represent; a plain record with scalar or pointer fields is required."
                 | [] -> ()
                 match s.TypedefAttributes |> List.tryPick (fun a -> match a.Site with CppParser.FieldType field -> Some (field, a) | CppParser.RecordName -> None) with
                 | Some (field, a) ->
-                    failwith $"Value struct '{s.Name}' field '{field}' has a type reaching typedef '{a.Typedef}', which carries attribute '{a.Attribute.Kind}' that its Clef record's field type cannot represent; a plain record with scalar or pointer fields is required."
+                    refuseShape $"Value struct '{s.Name}' field '{field}' has a type reaching typedef '{a.Typedef}', which carries attribute '{a.Attribute.Kind}' that its Clef record's field type cannot represent; a plain record with scalar or pointer fields is required."
                 | None -> ()
                 // A value struct's callback slot is refused at the record's clang location and
                 // its `options.value_structs` entry (#195).
@@ -1416,28 +1605,6 @@ module FidelityCodeGenerator =
             { Structs = ctx.Structs; Layouts = layouts; Model = ctx.DataModel; Shape = shape; FlexibleArrays = ctx.FlexibleArrays }
             s
 
-    /// Generate FsDecl list for a macro constant (numeric values only).
-    /// Uses CompilerBuiltin/InternalMacro/UserMacro active patterns for classification
-    /// and IntegerLiteral active pattern for numeric parsing.
-    let private generateMacroDeclIfNumeric (m: CppParser.MacroDecl) : FsDecl list =
-        match m.Name with
-        | CompilerBuiltin | InternalMacro | PredefinedMacro -> []
-        | UserMacro ->
-            // Also filter names starting with underscore (matches existing broad filter)
-            if m.Name.StartsWith("_") then []
-            else
-                match m.Kind with
-                | CppParser.SimpleValue v ->
-                    match v with
-                    | IntegerLiteral n -> [ LiteralBinding(m.Name, string n) ]
-                    | _ -> []
-                | CppParser.Expression v ->
-                    let trimmed = v.Trim().TrimStart('(').TrimEnd(')')
-                    match trimmed with
-                    | IntegerLiteral n -> [ LiteralBinding(m.Name, string n) ]
-                    | _ -> []
-                | _ -> []
-
     // =========================================================================
     // Catamorphism-Based Generation
     // =========================================================================
@@ -1448,6 +1615,7 @@ module FidelityCodeGenerator =
         | GStruct of FsDecl list
         | GFunc of CppParser.FunctionDecl
         | GMacro of FsDecl list
+        | GUnemittedMacro of UnemittedMacro
         | GNone
 
     /// Generation algebra: maps each Declaration variant to a DeclGroup.
@@ -1468,8 +1636,9 @@ module FidelityCodeGenerator =
             let isDeprecated = f.Attributes |> List.exists (fun a -> a.Kind = "DeprecatedAttr")
             if isDeprecated then GNone else GFunc f
         OnMacro = fun m ->
-            let decls = generateMacroDeclIfNumeric m
-            if decls.IsEmpty then GNone else GMacro decls
+            match macroDisposition m with
+            | EmittedConstant decls -> GMacro decls
+            | NotEmitted u -> GUnemittedMacro u
         OnTypedef = fun td ->
             if ctx.Bindings.IsEmpty then GNone
             else
@@ -1496,7 +1665,7 @@ module FidelityCodeGenerator =
                 | Some (field, a) ->
                     Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.TypedefAttributeUnmeasured $"C++ record '{c.Name}' field '{field}' has a type reaching typedef '{a.Typedef}', which carries attribute '{a.Attribute.Kind}', and clang has no measurement of '{c.Name}' in its declaring unit; natural alignment of the declared field types never stands in for the typedef's attribute." c.Location.Location)
                 | None -> ()
-            failwith $"C++ class '{c.Name}' requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source."
+            Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.CppClassAbiUnadmitted $"C++ class '{c.Name}' requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source." c.Location.Location)
         OnDelegate = fun _ -> GNone // A delegate is spelled FnPtr<'F> where it is used; no type of its own
     }
 
@@ -1538,7 +1707,10 @@ module FidelityCodeGenerator =
           PhantomMarkers = Set.empty
           KnownClasses = CppClassAnalysis.buildClassMap declarations
           TypedefInfos = typedefInfosOf declarations
-          ByValueTypedefs = [] }
+          ByValueTypedefs = []
+          // First definition wins, as the merge keeps the first declaration of a name; a
+          // declaration with a recorded unit uses that unit's own macros (`withUnitFacts`).
+          Macros = macrosOf declarations }
 
     /// Generate a Clef module with explicit control over what gets emitted.
     /// Uses the full GenerationContext for type resolution, but only declares
@@ -1556,7 +1728,7 @@ module FidelityCodeGenerator =
         : string =
 
         if ctx.NativePointerSurface then
-            failwith "experimental_native_pointer_surface cannot emit Clef source: raw addresses and width-named carriers violate the FFI boundary contract."
+            Diagnostics.refuse (nativePointerSurfaceRefusal (Diagnostics.Located.Unknown "experimental_native_pointer_surface is pilot input, not a header declaration"))
         let opaqueHandleDecls = generateOpaqueHandleDecls handlesToDeclare
         let markerDecls =
             let declared =
@@ -1592,6 +1764,14 @@ module FidelityCodeGenerator =
         let macroSection =
             if macros.IsEmpty then []
             else Comment "// Macro constants" :: macros @ [BlankLine]
+        // Every macro of this module emitted as no constant, by name and kind (#193).
+        let unemittedSection =
+            match groups |> List.choose (function GUnemittedMacro u -> Some u | _ -> None) with
+            | [] -> []
+            | unemitted ->
+                Comment "// Macros emitted as no constant (name: kind)"
+                :: (unemitted |> List.map (fun u -> Comment $"//   {u.Name}: {describeUnemittedMacroKind u.Kind}"))
+                @ [BlankLine]
 
         let vocabularyOpens =
             [ if not structs.IsEmpty then "BAREWire.Hardware"
@@ -1600,7 +1780,7 @@ module FidelityCodeGenerator =
             match (openModules @ vocabularyOpens) |> List.distinct with
             | [] -> []
             | opens -> (opens |> List.map OpenModule) @ [BlankLine]
-        let allDecls = openDecls @ opaqueHandleDecls @ markerDecls @ enums @ structs @ callbackDeclarations @ functions @ macroSection
+        let allDecls = openDecls @ opaqueHandleDecls @ markerDecls @ enums @ structs @ callbackDeclarations @ functions @ macroSection @ unemittedSection
         let moduleDecl = Module(namespace', comment, allDecls)
 
         CodeRenderer.render moduleDecl

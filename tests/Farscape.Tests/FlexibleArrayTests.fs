@@ -246,8 +246,8 @@ let ``options.flexible_arrays round-trips through the pilot serializer`` () =
 let ``a malformed options.flexible_arrays entry is refused with its exact reason`` shape =
     let lines, expected =
         match shape with
-        | "rule" -> entry "cmsghdr" "__cmsg_data" "cmsg_len" "bytes", "options.flexible_arrays count_rule 'bytes' is neither element_count nor record_bytes"
-        | "unknown" -> entry "cmsghdr" "__cmsg_data" "cmsg_len" "record_bytes" @ ["bias = 16"], "options.flexible_arrays has unknown field 'bias'"
-        | "empty" -> entry "cmsghdr" "__cmsg_data" "" "record_bytes", "options.flexible_arrays requires nonempty count_field"
-        | _ -> entry "cmsghdr" "__cmsg_data" "cmsg_len" "record_bytes" @ entry "cmsghdr" "__cmsg_data" "cmsg_len" "record_bytes", "options.flexible_arrays declares record 'cmsghdr' more than once; a struct has at most one flexible array member"
+        | "rule" -> entry "cmsghdr" "__cmsg_data" "cmsg_len" "bytes", "FS9201: options.flexible_arrays count_rule 'bytes' is neither element_count nor record_bytes"
+        | "unknown" -> entry "cmsghdr" "__cmsg_data" "cmsg_len" "record_bytes" @ ["bias = 16"], "FS9200: options.flexible_arrays has unknown field 'bias'"
+        | "empty" -> entry "cmsghdr" "__cmsg_data" "" "record_bytes", "FS9201: options.flexible_arrays requires nonempty count_field"
+        | _ -> entry "cmsghdr" "__cmsg_data" "cmsg_len" "record_bytes" @ entry "cmsghdr" "__cmsg_data" "cmsg_len" "record_bytes", "FS9202: options.flexible_arrays declares record 'cmsghdr' more than once; a struct has at most one flexible array member"
     Assert.Equal(Error expected, parsePilot (pilotWith lines) |> Result.map ignore)
