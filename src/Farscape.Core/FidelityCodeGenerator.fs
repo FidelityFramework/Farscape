@@ -521,6 +521,7 @@ module FidelityCodeGenerator =
         /// Retired source profile, retained only so legacy configurations receive a precise error.
         NativePointerSurface: bool
         Bindings: Map<string, BindingProjection>
+        Anchors: Map<string, string * CppParser.FunctionDecl * FsDecl list>
         ValueStructs: Set<string>
         /// Declared count sources of flexible array members, by struct (BAREWire #11).
         FlexibleArrays: Map<string, FlexibleArrayCount>
@@ -2043,6 +2044,7 @@ module FidelityCodeGenerator =
           NonnullAnnotations = None
           NativePointerSurface = false
           Bindings = Map.empty
+          Anchors = Map.empty
           ValueStructs = Set.empty
           FlexibleArrays = Map.empty
           PhantomMarkers = Set.empty
@@ -2052,6 +2054,22 @@ module FidelityCodeGenerator =
           // First definition wins, as the merge keeps the first declaration of a name; a
           // declaration with a recorded unit uses that unit's own macros (`withUnitFacts`).
           Macros = macrosOf declarations }
+
+    let private prepareFunction ctx namespace' libraryName func =
+        func, callbackEntries ctx namespace' func, generateFunctionDecls ctx libraryName func
+
+    let private anchorFor ctx namespace' ((func: CppParser.FunctionDecl), entries, raw) =
+        namespace' + "." + func.Name, (namespace' + "." + nativeDeclarationName ctx func entries raw, func, raw)
+
+    /// Prepare the selected native declarations that other namespaces can reference.
+    let selectedAnchors ctx namespace' libraryName declarations =
+        declarations
+        |> List.choose (function
+            | CppParser.Declaration.Function f when not (f.Attributes |> List.exists (fun a -> a.Kind = "DeprecatedAttr")) -> Some f
+            | _ -> None)
+        |> List.distinctBy _.Name
+        |> List.map (prepareFunction ctx namespace' libraryName >> anchorFor ctx namespace')
+        |> Map.ofList
 
     /// Generate a Clef module with explicit control over what gets emitted.
     /// Uses the full GenerationContext for type resolution, but only declares
@@ -2095,10 +2113,8 @@ module FidelityCodeGenerator =
             functionDeclarations |> List.collect (callbackEntries ctx namespace')
             |> List.distinctBy (fun (_, name, _) -> name)
             |> List.collect (fun (_, _, declarations) -> declarations)
-        let prepared = functionDeclarations |> List.map (fun func ->
-            func, callbackEntries ctx namespace' func, generateFunctionDecls ctx libraryName func)
-        let anchors = prepared |> List.map (fun (func, entries, raw) ->
-            namespace' + "." + func.Name, (namespace' + "." + nativeDeclarationName ctx func entries raw, func, raw)) |> Map.ofList
+        let prepared = functionDeclarations |> List.map (prepareFunction ctx namespace' libraryName)
+        let anchors = prepared |> List.map (anchorFor ctx namespace') |> List.fold (fun acc (key, value) -> Map.add key value acc) ctx.Anchors
         let functions = prepared |> List.collect (fun (func, entries, raw) -> declaredFunctionDecls ctx namespace' (Some anchors) func entries raw)
         let macros = groups |> List.collect (function GMacro d -> d | _ -> [])
 

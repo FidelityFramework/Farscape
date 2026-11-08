@@ -1779,6 +1779,9 @@ module CppParser =
             args.Add("-x")
             args.Add("c++")
             args.Add("-std=c++17")
+        else
+            args.Add("-x")
+            args.Add("c")
 
         args.AddRange(searchArguments options.IncludePaths options.SystemIncludePaths options.Defines)
         args
@@ -1963,13 +1966,13 @@ module CppParser =
         runClang args ["-E"; "-dM"; options.HeaderFile] options.Verbose
 
     /// Run clang with -fdump-record-layouts-simple to extract struct layout info.
-    /// Generates a temporary C file that forces layout computation for the named structs
+    /// Generates a temporary translation unit that forces layout computation for the named structs
     /// by referencing sizeof() for each. Layout data appears on stderr.
     /// A refusal keeps its structured diagnostics (#186): a malformed define is FS9124, refused
     /// before clang runs; a failure that is no FS91xx refusal carries its text only.
-    let extractStructLayoutsDiagnosed
+    let extractStructLayoutsForModeDiagnosed
         (headerFile: string) (includePaths: string list) (systemIncludePaths: string list) (defines: string list)
-        (structNames: string list) (verbose: bool)
+        (structNames: string list) (cppMode: bool) (verbose: bool)
         : Result<Map<string, StructLayoutInfo>, Diagnostics.Refusal> =
 
         match requireWellFormedDefines defines with
@@ -1998,7 +2001,9 @@ module CppParser =
                     |> String.concat "\n"
                 File.WriteAllText(tempFile, $"{includeDirective}\n{sizeofRefs}\n")
 
-                let args = ResizeArray<string>(searchArguments includePaths systemIncludePaths defines)
+                let args = ResizeArray<string>()
+                if cppMode then args.AddRange(["-x"; "c++"; "-std=c++17"])
+                args.AddRange(searchArguments includePaths systemIncludePaths defines)
                 for arg in ["-Xclang"; "-fdump-record-layouts-simple"; "-fsyntax-only"; tempFile] do
                     args.Add(arg)
 
@@ -2032,6 +2037,10 @@ module CppParser =
                 Error (Diagnostics.uncoded $"Failed to extract struct layouts: {ex.Message}")
         try File.Delete(tempFile) with _ -> ()
         result
+
+    /// Measure in the detected language when no explicit parse mode is supplied.
+    let extractStructLayoutsDiagnosed headerFile includePaths systemIncludePaths defines structNames verbose =
+        extractStructLayoutsForModeDiagnosed headerFile includePaths systemIncludePaths defines structNames (detectCppMode headerFile) verbose
 
     /// `extractStructLayoutsDiagnosed` with no system include paths, reporting a failure as its text.
     let extractStructLayouts

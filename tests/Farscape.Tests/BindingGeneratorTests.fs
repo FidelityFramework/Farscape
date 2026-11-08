@@ -130,6 +130,81 @@ let ``clang-parsed headers with a divergent macro are refused before any output`
 let private typesOf (output: string) =
     System.IO.File.ReadAllLines(System.IO.Path.Combine(output, "Types.clef")) |> Array.map (fun line -> line.Trim())
 
+[<Theory>]
+[<InlineData(true)>]
+[<InlineData(false)>]
+let ``retention and borrowed results resolve selected anchors in another namespace`` includeExtent =
+    let directory = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "../..", "test-results", "scratch", "cross-namespace", System.Guid.NewGuid().ToString("N")))
+    System.IO.Directory.CreateDirectory(directory) |> ignore
+    try
+        let header = System.IO.Path.Combine(directory, "anchors.h")
+        System.IO.File.WriteAllText(header, "typedef struct fx_owner fx_owner;\ntypedef void (*fx_callback)(void *, int);\nvoid fx_register(fx_owner *owner, fx_callback callback, void *userdata);\nconst char *fx_text(fx_owner *owner);\nint fx_length(fx_owner *owner);\nvoid fx_release(fx_owner *owner);\n")
+        let bindings =
+            [ "c_header_mode = true"
+              "[[options.bindings]]"; "name = \"fx_register\""
+              "callback_invocations = [ { parameter = 1, identity = \"fx.callback\", version = \"1\", source = \"fixture\", scope = \"retained\", absence_hypothesis = { identity = \"fx.absent\", version = \"1\", source = \"fixture\" }, context = { argument = 0, parameter = 2 }, retention = { owner_parameter = 0, releases = [ { binding = \"Test.Release.fx_release\", parameter = 0 } ] } } ]"
+              "[[options.bindings]]"; "name = \"fx_text\""
+              "borrowed_result = { content = \"text\", owner_parameter = 0, extent = { binding = \"Test.Release.fx_length\", arguments = [0] }, invalidated_by = [ { binding = \"Test.Release.fx_release\", parameter = 0 } ], hypothesis = { identity = \"fx.text\", version = \"1\", source = \"fixture\" } }" ]
+        let otherFunctions = if includeExtent then "\"fx_length\", \"fx_release\"" else "\"fx_release\""
+        let other = [ "[[namespace]]"; "name = \"Test.Release\""; "description = \"release\""; "library = \"fixture\""; $"functions = [{otherFunctions}]" ]
+        withPilotGenerating (fun project -> BindingGenerator.generateFromProject project false true Types.LP64)
+            [header] [] bindings ["fx_register"; "fx_text"] other [] (fun result output ->
+                match includeExtent, result with
+                | false, Error error ->
+                    Assert.Contains("FS9141", error)
+                    Assert.Contains("Test.Release.fx_length", error)
+                    Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories))
+                | false, Ok _ -> failwith "an unselected extent must be refused"
+                | true, Error error -> failwithf "cross-namespace generation failed: %s" error
+                | true, Ok _ ->
+                    let text = System.IO.Directory.GetFiles(output, "*.clef", System.IO.SearchOption.AllDirectories) |> Array.map System.IO.File.ReadAllText |> String.concat "\n"
+                    Assert.Contains("OwnerRelease ({ Binding = \"Test.Release.fx_release\"; Parameter = 0 })", text)
+                    Assert.Contains("CompanionCall (\"Test.Release.fx_length\", [|0|])", text)
+                    Assert.Contains("OwnerCall ({ Binding = \"Test.Release.fx_release\"; Parameter = 0 })", text))
+    finally
+        System.IO.Directory.Delete(directory, true)
+
+[<Theory>]
+[<InlineData(false, 16, 8)>]
+[<InlineData(true, 8, 4)>]
+let ``measured layout uses the header's actual parse language`` forceC expectedSize expectedOffset =
+    let directory = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "../..", "test-results", "scratch", "layout-language", System.Guid.NewGuid().ToString("N")))
+    System.IO.Directory.CreateDirectory(directory) |> ignore
+    try
+        let header = System.IO.Path.Combine(directory, "language.hpp")
+        System.IO.File.WriteAllText(header, "#ifdef __cplusplus\nnamespace fx_marker {}\n#endif\nstruct fx_language { char prefix;\n#ifdef __cplusplus\nlong value;\n#else\nint value;\n#endif\n};\nvoid fx_inspect(struct fx_language *value);\n")
+        let parserOptions = { CppParser.defaultOptions header with CppMode = not forceC }
+        let declarations =
+            match CppParser.parseHeader parserOptions with
+            | Ok value -> value
+            | Error error -> failwithf "Header parsing failed: %s" error
+        let fields =
+            declarations |> List.pick (function
+                | CppParser.Declaration.Struct record when record.Name = "fx_language" -> Some record.Fields
+                | CppParser.Declaration.Class record when record.Name = "fx_language" -> Some record.Fields
+                | _ -> None)
+        let field = fields |> List.find (fun field -> field.Name = "value")
+        Assert.Equal((if forceC then "int" else "long"), field.Type)
+        let layouts =
+            match CppParser.extractStructLayoutsForModeDiagnosed header [] [] [] ["struct fx_language"] (not forceC) false with
+            | Ok value -> value
+            | Error error -> failwithf "Layout measurement failed: %s" error.Text
+        Assert.Equal(expectedSize * 8, layouts.["fx_language"].SizeBits)
+        Assert.Equal<int list>([0; expectedOffset * 8], layouts.["fx_language"].FieldOffsetsBits)
+        let options = ["abi_critical_structs = [\"struct fx_language\"]"] @ (if forceC then ["c_header_mode = true"] else [])
+        withPilot [header] options ["fx_inspect"] (fun result output ->
+            match forceC, result with
+            | false, Error error -> Assert.Contains("FS9185", error)
+            | false, Ok _ -> failwith "Expected the unsupported C++ record to be refused"
+            | true, Error error -> failwithf "Layout generation failed: %s" error
+            | true, Ok _ ->
+                let text = typesOf output |> String.concat "\n"
+                Assert.Contains("layout measured", text)
+                Assert.Contains($"let Size = {expectedSize}", text)
+                Assert.Contains($"let valueOffset = {expectedOffset}", text))
+    finally
+        System.IO.Directory.Delete(directory, true)
+
 [<Fact>]
 let ``a unit declaring dev_t as unsigned short is refused naming both widths`` () =
     let header = fixturePath "typedef-profile/short-dev.h"

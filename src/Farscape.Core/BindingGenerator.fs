@@ -1079,6 +1079,8 @@ module BindingGenerator =
                 if Path.IsPathRooted(project.Output.Directory) then project.Output.Directory
                 else Path.GetFullPath(Path.Combine(projectDir, project.Output.Directory))
             let dependencies = resolveProjectDependencies project (projectDirectoryForOutput outputDir)
+            let cHeaders = project.Options |> Option.exists (fun opts -> opts.NativePointerSurface || opts.CHeaderMode)
+            let headerCppMode header = not cHeaders && CppParser.detectCppMode header
             // Parse C/C++ headers
             let headerResults =
                 project.Library.Headers |> List.map (fun headerPath ->
@@ -1089,7 +1091,7 @@ module BindingGenerator =
                         |> List.tryFind (fun ip ->
                             let fullIp = Path.GetFullPath ip
                             fullPath.StartsWith fullIp)
-                    if project.Options |> Option.exists (fun opts -> opts.NativePointerSurface || opts.CHeaderMode) then
+                    if cHeaders then
                         // Native carrier pilots bind the C ABI. pthread.h also contains guarded
                         // C++ cleanup classes, which must not turn its public unions into C++ PODs.
                         CppParser.parseHeaderUnitDiagnosed {
@@ -1104,7 +1106,7 @@ module BindingGenerator =
                             SystemIncludePaths = project.Library.SystemIncludePaths
                             Defines = project.Library.Defines; IncludeRoot = includeRoot
                             MacroPrefixes = project.Library.MacroPrefixes; IncludeMacros = true
-                            Verbose = verbose; CppMode = CppParser.detectCppMode headerPath })
+                            Verbose = verbose; CppMode = headerCppMode headerPath })
 
             let headerErrors = headerResults |> List.choose (function Error e -> Some e | _ -> None)
             if not headerErrors.IsEmpty then
@@ -1136,9 +1138,8 @@ module BindingGenerator =
                     |> Map.ofList
                 // Before the merge discards provenance: one macro definition per pilot.
                 // Each header is tokenized in the language it was parsed in.
-                let cHeaders = project.Options |> Option.exists (fun opts -> opts.NativePointerSurface || opts.CHeaderMode)
                 let units = List.zip project.Library.Headers headerDeclLists
-                agreeMacros (units |> List.map (fun (header, decls) -> header, (not cHeaders && CppParser.detectCppMode header), decls)) |> Result.defaultWith Diagnostics.raiseRefusal
+                agreeMacros (units |> List.map (fun (header, decls) -> header, headerCppMode header, decls)) |> Result.defaultWith Diagnostics.raiseRefusal
                 agreeEnums included units |> Result.defaultWith Diagnostics.raiseRefusal
                 requireMeasuredEnumUses included units |> Result.defaultWith Diagnostics.raiseRefusal
                 agreeRecords units |> Result.defaultWith Diagnostics.raiseRefusal
@@ -1237,7 +1238,7 @@ module BindingGenerator =
                         units
                         |> List.map (fun (headerFile, names) ->
                             let measured =
-                                CppParser.extractStructLayoutsDiagnosed headerFile project.Library.IncludePaths project.Library.SystemIncludePaths project.Library.Defines names verbose
+                                CppParser.extractStructLayoutsForModeDiagnosed headerFile project.Library.IncludePaths project.Library.SystemIncludePaths project.Library.Defines names (headerCppMode headerFile) verbose
                                 |> requireLayoutProbe
                             logVerbose $"Extracted layouts for {measured.Count} ABI-critical struct(s) in {headerFile}" verbose
                             headerFile, measured)
@@ -1446,6 +1447,15 @@ module BindingGenerator =
                 logVerbose $"Type classification: {sharedCount} shared, {localCounts} local across {project.Namespaces.Length} namespaces" verbose
 
                 let sharedTypesNs = $"{nsPrefix}.Types"
+                let selectedAnchors =
+                    project.Namespaces
+                    |> List.collect (fun ns ->
+                        let selected =
+                            if typedProtocol && not ns.XmlInterfaces.IsEmpty then []
+                            else PilotAnalyzer.filterDeclarationsWithTypes ns Set.empty declarations
+                        FidelityCodeGenerator.selectedAnchors ctx ns.Name ns.Library selected |> Map.toList)
+                    |> Map.ofList
+                let ctx = { ctx with Anchors = selectedAnchors }
                 // Complete native declaration rendering before any output write.
                 // Retain these same results for emission; preflight must not be a
                 // second, weaker source of boundary-contract decisions.
@@ -1623,8 +1633,20 @@ module BindingGenerator =
                                             | CppParser.Declaration.Function f -> Some f.Name
                                             | _ -> None))
                                     |> Set.ofList
+                                let retainedRegistrations =
+                                    projections
+                                    |> List.collect (fun binding ->
+                                        match declarations |> List.tryPick (function CppParser.Declaration.Function f when f.Name = binding.Name -> Some f | _ -> None) with
+                                        | None -> []
+                                        | Some func ->
+                                            binding.CallbackInvocations
+                                            |> List.choose (fun callback ->
+                                                if callback.Scope = "retained" && callback.Parameter >= 0 && callback.Parameter < func.Parameters.Length then
+                                                    Some (binding.Name, fst func.Parameters[callback.Parameter])
+                                                else None))
+                                    |> Set.ofList
                                 { rawSpec with
-                                    Registrations = rawSpec.Registrations |> List.filter (fun r -> claimedFunctions.Contains r.Function) }
+                                    Registrations = rawSpec.Registrations |> List.filter (fun r -> claimedFunctions.Contains r.Function && not (retainedRegistrations.Contains (r.Function, r.CallbackParam))) }
                         if spec.Registrations.IsEmpty && spec.ListenerStructs.IsEmpty then
                             logVerbose "No callback patterns detected" verbose
                             None
