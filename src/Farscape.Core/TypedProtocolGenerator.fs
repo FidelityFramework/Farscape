@@ -34,6 +34,8 @@ module TypedProtocolGenerator =
           $"          Layout = {{ Size = {size}; Alignment = {alignment}; Fields = [|"
           ] @ (fields |> List.map (fun(n,_,o,r)-> $"              {{ Name = {q n}; Offset = {o}; Repr = {r}; Count = 1; Access = AccessKind.ReadWrite; BitFields = [||]; Documentation = Some \"XML field projected through measured native layout\" }}")) @ [
           "          |] }"
+          "          MayAlias = false"
+          "          FlexibleArray = None"
           "          Documentation = Some \"Generated from installed Wayland XML and measured header layouts\" }"
           "" ]
     let private argRef arg = match arg.Type with Int|Fixed|Fd -> integer | Uint|NewId -> unsigned | _ -> pointer

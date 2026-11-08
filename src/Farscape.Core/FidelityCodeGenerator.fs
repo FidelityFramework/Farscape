@@ -490,6 +490,8 @@ module FidelityCodeGenerator =
         NativePointerSurface: bool
         Bindings: Map<string, BindingProjection>
         ValueStructs: Set<string>
+        /// Declared count sources of flexible array members, by struct (BAREWire #11).
+        FlexibleArrays: Map<string, FlexibleArrayCount>
         PhantomMarkers: Set<string>
     }
 
@@ -1353,7 +1355,7 @@ module FidelityCodeGenerator =
                 [ RecordType(s.Name, s.Fields |> List.map (fun field -> cleanParamName field.Name, fieldType field), s.Documentation, []) ]
             else []
         valueDecls @ DescriptorGenerator.structDecls
-            { Structs = ctx.Structs; Layouts = layouts; Model = ctx.DataModel; Shape = shape }
+            { Structs = ctx.Structs; Layouts = layouts; Model = ctx.DataModel; Shape = shape; FlexibleArrays = ctx.FlexibleArrays }
             s
 
     /// Generate FsDecl list for a macro constant (numeric values only).
@@ -1460,6 +1462,7 @@ module FidelityCodeGenerator =
           NativePointerSurface = false
           Bindings = Map.empty
           ValueStructs = Set.empty
+          FlexibleArrays = Map.empty
           PhantomMarkers = Set.empty
           KnownClasses = CppClassAnalysis.buildClassMap declarations }
 

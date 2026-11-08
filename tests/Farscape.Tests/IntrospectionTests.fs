@@ -427,7 +427,7 @@ let private signalProject (directory: string) (header: string) =
           Nonnull = Some { Parameters = Map.ofList ["g_signal_connect_data", [2; 4]]; Returns = Set.empty }
           ProtocolConfig = None; Layer3 = None; CppConfig = None
           Options = Some { AbiCriticalStructs = []; GenerateDescriptors = true; NativePointerSurface = false; CHeaderMode = true
-                           Bindings = []; DescriptorOnlyDependencies = true; ValueStructs = []; TypedProtocol = false; LinkLibraries = false; MappedReturns = [] } }
+                           Bindings = []; DescriptorOnlyDependencies = true; ValueStructs = []; TypedProtocol = false; LinkLibraries = false; MappedReturns = []; FlexibleArrays = [] } }
     let path = Path.Combine(directory, "signals.pilot.toml")
     PilotSerializer.saveToFile path project |> function Ok _ -> () | Error error -> failwith error
     path, output

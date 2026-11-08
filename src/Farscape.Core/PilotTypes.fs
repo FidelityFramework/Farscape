@@ -185,6 +185,30 @@ module PilotTypes =
         FailureStatus: int
     }
 
+    /// How a flexible array member's run-time element count is read from its count field: the
+    /// BAREWire `CountRule` vocabulary (BAREWire #11).
+    type FlexibleArrayCountRule =
+        /// `element_count`: the count field holds the number of elements.
+        | ElementCount
+        /// `record_bytes`: the count field holds the byte length of the record from its first
+        /// byte through the array's last element, header included (glibc's `cmsghdr.cmsg_len`).
+        | RecordBytes
+
+    /// The declared count source of one C flexible array member (BAREWire #11), from the pilot's
+    /// `[[options.flexible_arrays]]`. A C header states no count for `T member[]`; the library's
+    /// contract does, so the pilot declares it and `Source` names where that contract is written.
+    type FlexibleArrayCount = {
+        /// The struct whose last field is the flexible array member (`cmsghdr`).
+        Record: string
+        /// The flexible array member (`__cmsg_data`).
+        Field: string
+        /// The preceding integer field of the same struct the count is read from (`cmsg_len`).
+        CountField: string
+        Rule: FlexibleArrayCountRule
+        /// Where the library states the count relation; recorded in the descriptor.
+        Source: string
+    }
+
     /// Generation options from [options] section of .pilot.toml
     type ProjectOptions = {
         /// Struct names requiring ABI-exact layout (e.g., ioctl args, DMA descriptors)
@@ -202,6 +226,8 @@ module PilotTypes =
         TypedProtocol: bool
         LinkLibraries: bool
         MappedReturns: MappedReturnProjection list
+        /// Declared count sources of flexible array members (`[[options.flexible_arrays]]`).
+        FlexibleArrays: FlexibleArrayCount list
     }
 
     // =========================================================================

@@ -28,6 +28,7 @@
     <Compile Include="EnumErrorModuleGeneratorTests.fs" />
     <Compile Include="StructLayoutTests.fs" />
     <Compile Include="AttributeContractsTests.fs" />
+    <Compile Include="FlexibleArrayTests.fs" />
     <Compile Include="TypedefAttributeTests.fs" />
     <Compile Include="UnnamedBitFieldTests.fs" />
     <Compile Include="ProtocolParserTests.fs" />

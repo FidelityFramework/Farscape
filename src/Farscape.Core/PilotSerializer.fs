@@ -207,6 +207,15 @@ module PilotSerializer =
             |> TomlTable.add "failure_status" (TomlValue.Integer (int64 m.FailureStatus))
             |> TomlValue.Table)
         let table = if mappings.IsEmpty then table else TomlTable.add "mapped_returns" (TomlValue.Array mappings) table
+        let flexibleArrays = opts.FlexibleArrays |> List.map (fun f ->
+            TomlTable.empty
+            |> TomlTable.add "record" (TomlValue.String f.Record)
+            |> TomlTable.add "field" (TomlValue.String f.Field)
+            |> TomlTable.add "count_field" (TomlValue.String f.CountField)
+            |> TomlTable.add "count_rule" (TomlValue.String (match f.Rule with ElementCount -> "element_count" | RecordBytes -> "record_bytes"))
+            |> TomlTable.add "source" (TomlValue.String f.Source)
+            |> TomlValue.Table)
+        let table = if flexibleArrays.IsEmpty then table else TomlTable.add "flexible_arrays" (TomlValue.Array flexibleArrays) table
         TomlValue.Table table
 
     /// Serialize a CallbackSpec to a TOML table value.
@@ -629,6 +638,33 @@ module PilotSerializer =
         match Toml.getValue "options" doc with
         | None -> None
         | Some (TomlValue.Table table) ->
+            // Each flexible array member's declared count source (BAREWire #11): every key
+            // required and nonempty, no unknown key, one entry per record.
+            let flexibleArrays =
+                match TomlTable.tryFind "flexible_arrays" table with
+                | None -> []
+                | Some (TomlValue.Array items) ->
+                    let entries = items |> List.map (function
+                        | TomlValue.Table entry | TomlValue.InlineTable entry ->
+                            let allowed = Set.ofList ["record"; "field"; "count_field"; "count_rule"; "source"]
+                            match entry |> Map.toList |> List.tryFind (fun (key, _) -> not (Set.contains key allowed)) with
+                            | Some (key, _) -> failwith $"options.flexible_arrays has unknown field '{key}'"
+                            | None -> ()
+                            let text key =
+                                match TomlTable.tryFind key entry with
+                                | Some (TomlValue.String value) when not (System.String.IsNullOrWhiteSpace value) -> value
+                                | _ -> failwith $"options.flexible_arrays requires nonempty {key}"
+                            let rule =
+                                match text "count_rule" with
+                                | "element_count" -> ElementCount
+                                | "record_bytes" -> RecordBytes
+                                | other -> failwith $"options.flexible_arrays count_rule '{other}' is neither element_count nor record_bytes"
+                            { Record = text "record"; Field = text "field"; CountField = text "count_field"; Rule = rule; Source = text "source" }
+                        | _ -> failwith "options.flexible_arrays requires tables")
+                    match entries |> List.countBy _.Record |> List.tryFind (fun (_, n) -> n > 1) with
+                    | Some (record, _) -> failwith $"options.flexible_arrays declares record '{record}' more than once; a struct has at most one flexible array member"
+                    | None -> entries
+                | Some _ -> failwith "options.flexible_arrays requires an array of tables"
             let abiStructs =
                 match TomlTable.tryFind "abi_critical_structs" table with
                 | Some (TomlValue.Array items) ->
@@ -693,6 +729,7 @@ module PilotSerializer =
                    LinkLibraries = TomlTable.tryFind "link_libraries" table = Some (TomlValue.Boolean true)
                    TypedProtocol = TomlTable.tryFind "typed_protocol" table = Some (TomlValue.Boolean true)
                    MappedReturns = mappedReturns
+                   FlexibleArrays = flexibleArrays
                    ValueStructs = match TomlTable.tryFind "value_structs" table with Some (TomlValue.Array values) -> values |> List.map (function TomlValue.String name -> name | _ -> failwith "value_structs requires type names") | _ -> [] }
         | _ -> None
 

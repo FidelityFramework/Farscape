@@ -37,11 +37,16 @@ module AttributeContracts =
     let MayAliasFact =
         "aliasing: may_alias (clang MayAliasAttr); access through this type is exempt from type-based alias analysis and may alias an object of any type, so Layer 2 may reinterpret another record's storage through it"
 
+    /// clang's attribute kind for `__attribute__((__may_alias__))`. A record carrying it gets
+    /// `MayAlias = true` in its BAREWire descriptor (BAREWire #12).
+    [<Literal>]
+    let MayAliasAttr = "MayAliasAttr"
+
     /// The classification of one clang attribute kind, or None when it is unclassified.
     let contractOf (kind: string) : LayoutContract option =
         match kind with
         | "PackedAttr" | "AlignedAttr" | "MaxFieldAlignmentAttr" -> Some LayoutAffecting
-        | "MayAliasAttr" -> Some (LayoutNeutral MayAliasFact)
+        | MayAliasAttr -> Some (LayoutNeutral MayAliasFact)
         | _ -> None
 
     /// The fact a layout-neutral attribute carries, or None for any other attribute.

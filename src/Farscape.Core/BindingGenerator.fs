@@ -1256,6 +1256,7 @@ module BindingGenerator =
                         NonnullAnnotations = project.Nonnull
                         Bindings = projections |> List.map (fun binding -> binding.Name, binding) |> Map.ofList
                         ValueStructs = project.Options |> Option.map (fun opts -> Set.ofList opts.ValueStructs) |> Option.defaultValue Set.empty
+                        FlexibleArrays = project.Options |> Option.map (fun opts -> opts.FlexibleArrays |> List.map (fun f -> f.Record, f) |> Map.ofList) |> Option.defaultValue Map.empty
                         NativePointerSurface = project.Options |> Option.exists (fun opts -> opts.NativePointerSurface) }
 
                 // Every descriptor an emitted function carries has a width or a record: refuse
@@ -1273,6 +1274,11 @@ module BindingGenerator =
                 |> Result.defaultWith Diagnostics.raiseRefusal
                 requireRepresentedDescriptorTypes ctx (List.zip project.Library.Headers headerDeclLists) emittedFunctions
                 |> Result.defaultWith Diagnostics.raiseRefusal
+                // A declared flexible array count source names a struct some header declares
+                // (BAREWire #11); the struct's own layout then checks the member it names.
+                for declared in ctx.FlexibleArrays |> Map.toList |> List.map snd do
+                    if not (ctx.Structs.ContainsKey declared.Record) then
+                        invalidOp $"options.flexible_arrays declares a count source for '{declared.Record}' field '{declared.Field}', but no parsed header declares struct '{declared.Record}'; a count source names a declared struct."
 
                 // Derive common namespace prefix for the project
                 let nsPrefix = deriveNamespacePrefix project

@@ -78,7 +78,11 @@ let ``glibc's may_alias socket addresses are measured and emitted at clang's lay
     Assert.Contains("let sa_dataOffset = 2\n", address)
     Assert.Contains("{ Name = \"sa_data\"; Offset = 2; Repr = Repr.I8; Count = 14;", address)
     Assert.Contains($"Documentation = Some \"{mayAliasContract}\"", address)
+    // The aliasing fact is a typed field of the descriptor (BAREWire #12), not only prose.
+    Assert.Contains("MayAlias = true\n", address)
+    Assert.Contains("FlexibleArray = None\n", address)
     let storageModule = recordModule output "sockaddr_storage"
+    Assert.Contains("MayAlias = true\n", storageModule)
     Assert.Contains("/// C struct `sockaddr_storage`: layout measured (clang record layout dump).", output)
     Assert.Contains("let Size = 128\n", storageModule)
     Assert.Contains("let Alignment = 8\n", storageModule)
@@ -116,12 +120,14 @@ let ``a may_alias record is generated with clang's layout and the aliasing fact 
             Assert.Contains("let dataOffset = 2", aliased)
             // The contract comes first; the header's own comment on the record follows it.
             Assert.Contains($"Documentation = Some \"{mayAliasContract} A may_alias record (glibc's struct sockaddr shape", aliased)
+            Assert.Contains("MayAlias = true\n", aliased)
             // The unattributed record is laid out from its fields, with no aliasing fact.
             let plain = recordModule types "fx_addr_plain"
             Assert.Contains("/// C struct `fx_addr_plain`: layout declared", types)
             Assert.Contains("let Size = 16", plain)
             Assert.Contains("let dataOffset = 2", plain)
             Assert.DoesNotContain("may_alias", plain)
+            Assert.Contains("MayAlias = false\n", plain)
             clangConfirms header [
                 "sizeof(struct fx_addr) == 16"; "_Alignof(struct fx_addr) == 2"; "offsetof(struct fx_addr, data) == 2"
                 "sizeof(struct fx_addr_plain) == 16"; "_Alignof(struct fx_addr_plain) == 2"; "offsetof(struct fx_addr_plain, data) == 2" ])
@@ -185,7 +191,7 @@ let ``a may_alias record without a clang measurement is refused, not laid out fr
     let record =
         { mkStruct "fx_addr" [mkField "family" "int"; mkField "data" "int"] None with Attributes = [mkAttr "MayAliasAttr" [] None] }
     let source : DescriptorGenerator.LayoutSource =
-        { Structs = Map.ofList ["fx_addr", record]; Layouts = Map.empty; Model = Types.LP64
+        { Structs = Map.ofList ["fx_addr", record]; Layouts = Map.empty; Model = Types.LP64; FlexibleArrays = Map.empty
           Shape = function
             | "int" -> DescriptorGenerator.ScalarField { Family = TypeMapper.Signed; Bits = 32; Stratum = TypeMapper.Declared; CType = "int" }
             | spelling -> DescriptorGenerator.UnknownField spelling }
@@ -203,7 +209,7 @@ let ``a may_alias record clang measures unlike its copy without the attribute is
             Measured = Some layout
             Unattributed = Some (CppParser.UnattributedMeasured (mkLayout "fx_addr" 128 64 [0; 64])) }
     let source : DescriptorGenerator.LayoutSource =
-        { Structs = Map.ofList ["fx_addr", record]; Layouts = Map.empty; Model = Types.LP64
+        { Structs = Map.ofList ["fx_addr", record]; Layouts = Map.empty; Model = Types.LP64; FlexibleArrays = Map.empty
           Shape = function
             | "int" -> DescriptorGenerator.ScalarField { Family = TypeMapper.Signed; Bits = 32; Stratum = TypeMapper.Declared; CType = "int" }
             | spelling -> DescriptorGenerator.UnknownField spelling }

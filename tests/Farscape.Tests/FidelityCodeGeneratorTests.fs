@@ -445,7 +445,7 @@ let ``TOML nonnull annotations override nullable default`` () =
           StructLayouts = Map.empty
           NonnullAnnotations = nonnull
           KnownClasses = Map.empty
-          NativePointerSurface = false; Bindings = Map.empty; ValueStructs = Set.empty; PhantomMarkers = Set.empty }
+          NativePointerSurface = false; Bindings = Map.empty; ValueStructs = Set.empty; FlexibleArrays = Map.empty; PhantomMarkers = Set.empty }
     let result = FidelityCodeGenerator.generateModule ctx Set.empty decls "Test" "lib" "test" []
     // ctx (idx 0) is nonnull via TOML
     Assert.Contains("(ctx: CHandle<unit>)", result)
@@ -469,7 +469,7 @@ let ``TOML nonnull_returns prevents Option on return type`` () =
           StructLayouts = Map.empty
           NonnullAnnotations = nonnull
           KnownClasses = Map.empty
-          NativePointerSurface = false; Bindings = Map.empty; ValueStructs = Set.empty; PhantomMarkers = Set.empty }
+          NativePointerSurface = false; Bindings = Map.empty; ValueStructs = Set.empty; FlexibleArrays = Map.empty; PhantomMarkers = Set.empty }
     let result = FidelityCodeGenerator.generateModule ctx Set.empty decls "Test" "lib" "test" []
     // Return is nonnull via TOML
     Assert.Contains(": CHandle<unit> =", result)

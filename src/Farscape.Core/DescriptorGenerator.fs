@@ -33,6 +33,8 @@ module DescriptorGenerator =
         Layouts: Map<string, CppParser.StructLayoutInfo>
         Model: PlatformABI
         Shape: string -> FieldShape
+        /// Declared count sources of flexible array members, by struct (BAREWire #11).
+        FlexibleArrays: Map<string, PilotTypes.FlexibleArrayCount>
     }
 
     /// The stratum's name as it appears in documentation.
@@ -100,9 +102,23 @@ module DescriptorGenerator =
         | false, _ -> 1
         | true, Some count when count > 0 -> count
         | true, None ->
-            invalidOp $"Struct '{structName}' field '{f.Name}' has an array with no fixed element count; a supported dynamic array representation contract is required."
+            invalidOp $"Struct '{structName}' field '{f.Name}' is a flexible array member with no declared count source; an options.flexible_arrays entry naming its count field and count rule is required."
         | true, Some count ->
             invalidOp $"Struct '{structName}' field '{f.Name}' has array element count {count}; a positive fixed element count is required."
+
+    /// A C flexible array member (C11 6.7.2.1p18): an array field with no element count.
+    let isFlexibleArrayMember (f: CppParser.FieldDecl) = f.IsArray && f.ArraySize.IsNone
+
+    /// The element extent of one field: a fixed inline count, or the declared count source of a
+    /// flexible array member, whose count is a run-time fact (BAREWire #11).
+    type FieldExtent =
+        | FixedCount of int
+        | FlexibleCount of PilotTypes.FlexibleArrayCount
+
+    /// How a count rule is spelled in BAREWire source and in documentation.
+    let private countRuleSource = function
+        | PilotTypes.ElementCount -> "CountRule.ElementCount", "element count"
+        | PilotTypes.RecordBytes -> "CountRule.RecordBytes", "record bytes through the array's last element"
 
     /// Bytes and alignment of a scalar representation. `long double` occupies 16 bytes at 16 on
     /// the x86-64 profile; every other scalar is naturally aligned at its own size.
@@ -149,9 +165,55 @@ module DescriptorGenerator =
                 invalidOp $"Struct '{structName}' field '{field.Name}' has nested record type '{name}' with no available declaration; a complete C representation contract is required."
             | Some nested when nested.Fields.IsEmpty ->
                 invalidOp $"Struct '{structName}' field '{field.Name}' has fieldless nested record type '{name}'; a supported empty or opaque record representation contract is required."
+            | Some nested when nested.Fields |> List.exists isFlexibleArrayMember ->
+                invalidOp $"Struct '{structName}' field '{field.Name}' holds record type '{name}' by value, which ends in a flexible array member; a record ending in a flexible array member has no fixed extent to hold by value."
             | Some nested -> RepresentedStruct nested
         | UnknownField name ->
             invalidOp $"Struct '{structName}' field '{field.Name}' has no known representation for type '{name}'; a complete C representation contract is required."
+
+    /// The extent of one field of `s`. A flexible array member is admitted only as the last field
+    /// of a struct, of scalar elements, with a declared count source naming a preceding integer
+    /// field of the same struct (BAREWire #11); each missing part is refused with its reason.
+    let private fieldExtentOf (src: LayoutSource) (s: CppParser.StructDecl) (shape: RepresentedFieldShape) (f: CppParser.FieldDecl) : FieldExtent =
+        if not (isFlexibleArrayMember f) then FixedCount (elementCount s.Name f)
+        else
+            match Map.tryFind s.Name src.FlexibleArrays with
+            | None -> FixedCount (elementCount s.Name f)
+            | Some declared when declared.Field <> f.Name ->
+                invalidOp $"Struct '{s.Name}' field '{f.Name}' is a flexible array member, but options.flexible_arrays declares the count source of '{s.Name}' for field '{declared.Field}'; a count source naming '{f.Name}' is required."
+            | Some declared ->
+                if s.IsUnion then
+                    invalidOp $"Union '{s.Name}' field '{f.Name}' is a flexible array member; a flexible array member trails the fixed fields of a struct, and a union has none to trail."
+                let following = s.Fields |> List.skipWhile (fun field -> field.Name <> f.Name) |> List.tail
+                match following with
+                | next :: _ ->
+                    invalidOp $"Struct '{s.Name}' field '{f.Name}' is a flexible array member followed by field '{next.Name}'; a flexible array member must be the last field of its struct."
+                | [] -> ()
+                match shape with
+                | RepresentedStruct nested ->
+                    invalidOp $"Struct '{s.Name}' flexible array member '{f.Name}' has elements of record type '{nested.Name}'; a flexible array member of scalar elements is required."
+                | RepresentedScalar _ -> ()
+                let preceding = s.Fields |> List.takeWhile (fun field -> field.Name <> f.Name)
+                match preceding |> List.tryFind (fun field -> field.Name = declared.CountField) with
+                | None ->
+                    invalidOp $"Struct '{s.Name}' flexible array member '{f.Name}' declares count field '{declared.CountField}', which names no preceding field of '{s.Name}'; a preceding integer field of the same struct is required."
+                | Some counter ->
+                    let integer =
+                        not counter.IsArray && not counter.IsBitfield
+                        && (match src.Shape (elementType s.Name counter) with
+                            | ScalarField r -> r.Family = Signed || r.Family = Unsigned
+                            | _ -> false)
+                    if not integer then
+                        invalidOp $"Struct '{s.Name}' flexible array member '{f.Name}' declares count field '{counter.Name}', which is not one integer scalar; a preceding integer field of the same struct is required."
+                FlexibleCount declared
+
+    /// A declared count source names the flexible array member of its struct: refused when the
+    /// struct has none.
+    let private requireDeclaredFlexibleArray (src: LayoutSource) (s: CppParser.StructDecl) =
+        match Map.tryFind s.Name src.FlexibleArrays with
+        | Some declared when not (s.Fields |> List.exists isFlexibleArrayMember) ->
+            invalidOp $"options.flexible_arrays declares a count source for '{s.Name}' field '{declared.Field}', but '{s.Name}' has no flexible array member; a count source names the last, element-count-free field of its struct."
+        | _ -> ()
 
     /// The layout-neutral attributes (`AttributeContracts.LayoutNeutral`) a record or its fields
     /// carry, each kind once, with the fact it records in the record's descriptor (#174).
@@ -172,7 +234,8 @@ module DescriptorGenerator =
         let fields =
             s.Fields |> List.map (fun field ->
                 let shape = representedFieldShape src s.Name field
-                field.Name, shape, elementCount s.Name field)
+                field.Name, shape, fieldExtentOf src s shape field)
+        requireDeclaredFlexibleArray src s
         // A layout the pilot measured as ABI-critical storage, or the one the parse measured in
         // the record's declaring unit (anonymous records and the records enclosing them); two
         // measurements of one record must agree.
@@ -246,7 +309,9 @@ module DescriptorGenerator =
                     if bits % 8 <> 0 then
                         invalidOp $"Struct '{s.Name}' field '{field.Name}' has measured bit offset {bits}, which is not byte-aligned; a supported bit-precise descriptor representation is required."
                     let offset = bits / 8
-                    if offset < 0 || offset >= size then
+                    // A flexible array member adds no bytes: it may begin at the record's end.
+                    let beyond = if isFlexibleArrayMember field then offset > size else offset >= size
+                    if offset < 0 || beyond then
                         invalidOp $"Struct '{s.Name}' field '{field.Name}' has measured byte offset {offset} outside the measured storage 0..{size - 1}; a measured layout consistent with its record size is required."
                     offset)
                 |> List.ofSeq
@@ -278,19 +343,26 @@ module DescriptorGenerator =
             | Some (field, a) ->
                 Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.TypedefAttributeUnmeasured $"{kind} '{s.Name}' field '{field}' has a type reaching typedef '{a.Typedef}', which carries {classified a.Attribute.Kind}, and clang has no measurement of '{s.Name}' in its declaring unit; natural alignment of the declared field types never stands in for the typedef's attribute." s.Location.Location)
             | None -> ()
-            let fieldExtent fieldName count shape : int * int =
-                match shape with
-                | RepresentedScalar r ->
+            let fieldExtent fieldName extent shape : int * int =
+                match extent, shape with
+                // A flexible array member adds no bytes; its element alignment places it and
+                // joins the record's (C11 6.7.2.1p18).
+                | FlexibleCount _, RepresentedScalar r ->
+                    let _, align = scalarExtent r
+                    0, align
+                | FlexibleCount _, RepresentedStruct nested ->
+                    invalidOp $"Struct '{s.Name}' flexible array member '{fieldName}' has elements of record type '{nested.Name}'; a flexible array member of scalar elements is required."
+                | FixedCount count, RepresentedScalar r ->
                     scalarFieldExtent s.Name fieldName count r
-                | RepresentedStruct nested when depth >= 16 && not (Map.containsKey nested.Name src.Layouts) ->
+                | FixedCount _, RepresentedStruct nested when depth >= 16 && not (Map.containsKey nested.Name src.Layouts) ->
                     invalidOp $"Struct '{s.Name}' field '{fieldName}' nests record type '{nested.Name}' beyond the supported declared-layout depth of 16; a measured layout or a shallower complete representation contract is required."
-                | RepresentedStruct nested ->
+                | FixedCount count, RepresentedStruct nested ->
                     let _, size, align, _ = layoutOf src (depth + 1) nested
                     descriptorInt $"Struct '{s.Name}' field '{fieldName}' extent" (int64 size * int64 count), align
             let (endOffset, maxAlign, offsets) =
                 fields
-                |> List.fold (fun (offset, maxAlign, offsets) (fieldName, shape, count) ->
-                    let size, align = fieldExtent fieldName count shape
+                |> List.fold (fun (offset, maxAlign, offsets) (fieldName, shape, extent) ->
+                    let size, align = fieldExtent fieldName extent shape
                     let at = if s.IsUnion then 0 else descriptorInt $"Struct '{s.Name}' field '{fieldName}' aligned offset" (alignUp offset (int64 align))
                     let next = if s.IsUnion then max offset (int64 size) else int64 at + int64 size
                     next, max maxAlign align, offsets @ [at])
@@ -336,6 +408,38 @@ module DescriptorGenerator =
             "BitFields", Literal "[||]"
             "Documentation", Literal (optionSource (Some doc))
         ]
+
+    /// The BAREWire `FlexibleArrayDescriptor` of a struct's trailing flexible array member at its
+    /// offset, with its declared count source (BAREWire #11). `layoutOf` has admitted it: last
+    /// field, scalar elements, a preceding integer count field.
+    let private flexibleArrayDescriptor (src: LayoutSource) structName (offsetStratum: Stratum) (size: int) (f: CppParser.FieldDecl) (offset: int) (declared: PilotTypes.FlexibleArrayCount) : FsExpr =
+        let access = if f.IsConst then "AccessKind.ReadOnly" else "AccessKind.ReadWrite"
+        let r =
+            match representedFieldShape src structName f with
+            | RepresentedScalar r -> r
+            | RepresentedStruct nested ->
+                invalidOp $"Struct '{structName}' flexible array member '{f.Name}' has elements of record type '{nested.Name}'; a flexible array member of scalar elements is required."
+        if offset > size then
+            invalidOp $"Struct '{structName}' flexible array member '{f.Name}' begins at {stratumName offsetStratum} offset {offset}, beyond the record size {size}; a measured layout consistent with its field representation is required."
+        let rule, ruleText = countRuleSource declared.Rule
+        let doc = $"offset {stratumName offsetStratum}; repr {stratumName r.Stratum}: {r.CType} under {src.Model}; flexible array member, count from '{declared.CountField}' ({ruleText}), declared by options.flexible_arrays: {declared.Source}"
+        FunctionCall("", "Some", [
+            RecordConstruction [
+                "Name", Literal (quote f.Name)
+                "Offset", Literal (string offset)
+                "Repr", Literal (reprSource r)
+                "Access", Literal access
+                "CountField", Literal (quote declared.CountField)
+                "CountRule", Literal rule
+                "Documentation", Literal (optionSource (Some doc))
+            ] ])
+
+    /// True when the record itself carries `may_alias` (clang `MayAliasAttr`): the aliasing fact
+    /// its descriptor's `MayAlias` field carries (BAREWire #12). `layoutOf` has confirmed it moves
+    /// no byte. A field's own attribute, or one reached through a field's typedef, is not the
+    /// record's.
+    let mayAlias (s: CppParser.StructDecl) =
+        s.Attributes |> List.exists (fun a -> a.Kind = AttributeContracts.MayAliasAttr)
 
     /// The declarations for one C struct: the layout module of literal offsets and, inside it,
     /// the `StructDescriptor` contract.
@@ -386,13 +490,20 @@ module DescriptorGenerator =
             | facts, None -> Some (String.concat " " facts)
             | facts, Some doc -> Some (String.concat " " facts + " " + doc)
         let descriptor =
+            let fixedPairs = fieldPairs |> List.filter (fun (f, _) -> not (isFlexibleArrayMember f))
+            let flexible =
+                match fieldPairs |> List.tryFind (fun (f, _) -> isFlexibleArrayMember f) with
+                | Some (f, offset) -> flexibleArrayDescriptor src s.Name stratum size f offset (Map.find s.Name src.FlexibleArrays)
+                | None -> Literal "None"
             RecordBlock [
                 "Name", Literal (quote s.Name)
                 "Layout", RecordBlock [
                     "Size", Literal (string size)
                     "Alignment", Literal (string align)
-                    "Fields", ArrayBlock (fieldPairs |> List.map (fun (f, offset) -> fieldDescriptor src s.Name s.TypedefAttributes stratum size f offset))
+                    "Fields", ArrayBlock (fixedPairs |> List.map (fun (f, offset) -> fieldDescriptor src s.Name s.TypedefAttributes stratum size f offset))
                 ]
+                "MayAlias", Literal (if mayAlias s then "true" else "false")
+                "FlexibleArray", flexible
                 "Documentation", Literal (optionSource documentation)
             ]
         let headline = $"/// C {kind} `{s.Name}`: layout {how}."

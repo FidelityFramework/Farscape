@@ -130,7 +130,8 @@ let ``a field whose typedef carries may_alias is laid out by clang and records t
                 $"Documentation = Some \"offset measured; repr declared: int under LP64; type reaches typedef 'fx_alias_int' carrying MayAliasAttr (laid out by clang's measurement of this record): {AttributeContracts.MayAliasFact}\" }}",
                 aliased)
             // The fact is the field type's, not the record's.
-            Assert.Contains("Documentation = None", aliased))
+            Assert.Contains("Documentation = None", aliased)
+            Assert.Contains("MayAlias = false\n", aliased))
     clangConfirms header [ "sizeof(struct fx_aliased) == 8"; "_Alignof(struct fx_aliased) == 4"; "offsetof(struct fx_aliased, value) == 4" ]
 
 [<Fact>]

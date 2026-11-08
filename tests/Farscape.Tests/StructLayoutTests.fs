@@ -248,6 +248,7 @@ module GeneratorDispatch =
         { Structs = records |> List.map (fun (record: CppParser.StructDecl) -> record.Name, record) |> Map.ofList
           Layouts = layouts
           Model = Types.LP64
+          FlexibleArrays = Map.empty
           Shape = function
             | "char" -> scalar "char" 8
             | "int" -> scalar "int" 32
@@ -606,7 +607,7 @@ module GeneratorDispatch =
             | 0 -> mkField "payload" "Mystery", "Struct 'P' field 'payload' has no known representation for type 'Mystery'; a complete C representation contract is required."
             | 1 -> mkBitField "payload" "int" 1, "Struct 'P' field 'payload' is a bitfield; a supported bit-precise descriptor representation is required."
             | 2 -> mkField "payload" "int[2][3]", "Struct 'P' field 'payload' has array declarator 'int[2][3]'; a supported one-dimensional trailing array declarator or a complete declarator representation contract is required."
-            | _ -> {mkField "payload" "int" with IsArray = true; ArraySize = None}, "Struct 'P' field 'payload' has an array with no fixed element count; a supported dynamic array representation contract is required."
+            | _ -> {mkField "payload" "int" with IsArray = true; ArraySize = None}, "Struct 'P' field 'payload' is a flexible array member with no declared count source; an options.flexible_arrays entry naming its count field and count rule is required."
         let record = {mkStruct "P" [mkField "lead" "char"; field] None with Attributes = [mkAttr "PackedAttr" [] None]}
         let source = attributeLayoutSource [record] Map.empty
         let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 0 record |> ignore)
@@ -823,6 +824,7 @@ module GeneratorDispatch =
             { Structs = Map.ofList [holder.Name, holder]
               Layouts = if measured then Map.ofList [holder.Name, mkLayout holder.Name 32 32 [0]] else Map.empty
               Model = Types.LP64
+              FlexibleArrays = Map.empty
               Shape = fun _ -> DescriptorGenerator.StructField "Missing" }
         let error = Assert.Throws<System.InvalidOperationException>(fun () ->
             if measured then DescriptorGenerator.structDecls source holder |> ignore
@@ -848,6 +850,7 @@ module GeneratorDispatch =
             { Structs = Map.ofList [empty.Name, empty; holder.Name, holder]
               Layouts = Map.ofList ["Empty", mkLayout "Empty" 8 8 []; "Holder", mkLayout "Holder" 8 8 [0]]
               Model = Types.LP64
+              FlexibleArrays = Map.empty
               Shape = fun _ -> DescriptorGenerator.StructField "Empty" }
         let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source holder |> ignore)
         Assert.Equal("Struct 'Holder' field 'payload' has fieldless nested record type 'Empty'; a supported empty or opaque record representation contract is required.", error.Message)
@@ -883,6 +886,7 @@ module GeneratorDispatch =
             { Structs = Map.ofList ["Empty", empty; "Mid", middle; "Outer", outer]
               Layouts = Map.empty
               Model = Types.LP64
+              FlexibleArrays = Map.empty
               Shape = fun name -> DescriptorGenerator.StructField name }
         let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 0 outer |> ignore)
         Assert.Equal("Struct 'Mid' field 'e' has fieldless nested record type 'Empty'; a supported empty or opaque record representation contract is required.", error.Message)
@@ -957,7 +961,7 @@ module GeneratorDispatch =
                 let error = Assert.Throws<System.InvalidOperationException>(fun () -> generate () |> ignore)
                 let expected =
                     match count with
-                    | None -> "Struct 'Payload' field 'data' has an array with no fixed element count; a supported dynamic array representation contract is required."
+                    | None -> "Struct 'Payload' field 'data' is a flexible array member with no declared count source; an options.flexible_arrays entry naming its count field and count rule is required."
                     | Some value -> $"Struct 'Payload' field 'data' has array element count {value}; a positive fixed element count is required."
                 Assert.Equal(expected, error.Message))
 
@@ -975,10 +979,11 @@ module GeneratorDispatch =
             { Structs = Map.ofList [record.Name, record]
               Layouts = if measured then Map.ofList [record.Name, mkLayout record.Name 32 8 [0]] else Map.empty
               Model = Types.LP64
+              FlexibleArrays = Map.empty
               Shape = fun _ -> DescriptorGenerator.ScalarField {Family = TypeMapper.Unsigned; Bits = 8; Stratum = TypeMapper.Declared; CType = "unsigned char"} }
         let expected =
             if hasCount then $"Struct 'Payload' field 'data' has array element count {count}; a positive fixed element count is required."
-            else "Struct 'Payload' field 'data' has an array with no fixed element count; a supported dynamic array representation contract is required."
+            else "Struct 'Payload' field 'data' is a flexible array member with no declared count source; an options.flexible_arrays entry naming its count field and count rule is required."
         let layoutError = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 0 record |> ignore)
         let descriptorError = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source record |> ignore)
         Assert.Equal(expected, layoutError.Message)
@@ -998,7 +1003,7 @@ module GeneratorDispatch =
         let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts |> ignore)
         let expected =
             if hasCount then "Struct 'Holder' field 'arr' has array element count 0; a positive fixed element count is required."
-            else "Struct 'Holder' field 'arr' has an array with no fixed element count; a supported dynamic array representation contract is required."
+            else "Struct 'Holder' field 'arr' is a flexible array member with no declared count source; an options.flexible_arrays entry naming its count field and count rule is required."
         Assert.Equal(expected, error.Message)
 
     [<Theory>]
@@ -1057,6 +1062,7 @@ module GeneratorDispatch =
             { Structs = Map.ofList [holder.Name, holder]
               Layouts = if measured then Map.ofList [holder.Name, mkLayout holder.Name 192 64 [0]] else Map.empty
               Model = Types.LP64
+              FlexibleArrays = Map.empty
               Shape = fun _ -> Assert.Fail("Shape must not receive an unsupported declarator"); DescriptorGenerator.UnknownField "unreachable" }
         let expected = $"Struct 'Holder' field 'payload' has array declarator '{spelling}'; a supported one-dimensional trailing array declarator or a complete declarator representation contract is required."
         let layoutError = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 0 holder |> ignore)
@@ -1146,7 +1152,7 @@ module GeneratorDispatch =
                         [field; mkField "tail" "int"]
                 name, mkStruct name fields None) |> Map.ofList
         let source : DescriptorGenerator.LayoutSource =
-            { Structs = records; Layouts = Map.empty; Model = Types.LP64
+            { Structs = records; Layouts = Map.empty; Model = Types.LP64; FlexibleArrays = Map.empty
               Shape = fun typ ->
                   if typ = "int" then DescriptorGenerator.ScalarField {Family = TypeMapper.Signed; Bits = 32; Stratum = TypeMapper.Declared; CType = typ}
                   elif typ.StartsWith("struct ") then DescriptorGenerator.StructField(typ.Substring(7))
@@ -1260,7 +1266,7 @@ module GeneratorDispatch =
                 "Struct 'R0' field 'payload' has nested record type 'R1' with no available declaration; a complete C representation contract is required."
             | 1 ->
                 source, {root with Fields = [{root.Fields.Head with IsArray = true; ArraySize = None}]},
-                "Struct 'R0' field 'payload' has an array with no fixed element count; a supported dynamic array representation contract is required."
+                "Struct 'R0' field 'payload' is a flexible array member with no declared count source; an options.flexible_arrays entry naming its count field and count rule is required."
             | _ ->
                 source, {root with Fields = root.Fields @ [mkField "later" "mystery_t"]},
                 "Struct 'R0' field 'later' has no known representation for type 'mystery_t'; a complete C representation contract is required."
@@ -1272,7 +1278,7 @@ module GeneratorDispatch =
     let private extentSource declarations =
         let records = declarations |> List.choose (function CppParser.Declaration.Struct s -> Some (s.Name, s) | _ -> None) |> Map.ofList
         let source : DescriptorGenerator.LayoutSource =
-            { Structs = records; Layouts = Map.empty; Model = Types.LP64
+            { Structs = records; Layouts = Map.empty; Model = Types.LP64; FlexibleArrays = Map.empty
               Shape = fun typ ->
                   if typ.StartsWith("struct ") then DescriptorGenerator.StructField(typ.Substring(7))
                   elif typ = "char" || typ = "int" then
@@ -1459,7 +1465,7 @@ generate_descriptors = true
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
             ErrorConventions = None
-            Options = Some { AbiCriticalStructs = ["drm_mode_create_dumb"]; GenerateDescriptors = true; NativePointerSurface = false; CHeaderMode = false; Bindings = []; DescriptorOnlyDependencies = false; ValueStructs = []; TypedProtocol = false; LinkLibraries = false; MappedReturns = [] }
+            Options = Some { AbiCriticalStructs = ["drm_mode_create_dumb"]; GenerateDescriptors = true; NativePointerSurface = false; CHeaderMode = false; Bindings = []; DescriptorOnlyDependencies = false; ValueStructs = []; TypedProtocol = false; LinkLibraries = false; MappedReturns = []; FlexibleArrays = [] }
             Callbacks = None
             Nonnull = None
             ProtocolConfig = None
@@ -1514,6 +1520,7 @@ module DescriptorGen =
             { Structs = Map.ofList [structure.Name, structure]
               Layouts = if measured then Map.ofList [structure.Name, mkLayout structure.Name 32 32 [0]] else Map.empty
               Model = Types.LP64
+              FlexibleArrays = Map.empty
               Shape = fun _ -> DescriptorGenerator.UnknownField "missing_t" }
         let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 0 structure |> ignore)
         Assert.Equal("Struct 'Unknown' field 'payload' has no known representation for type 'missing_t'; a complete C representation contract is required.", error.Message)
@@ -1533,6 +1540,7 @@ module DescriptorGen =
             { Structs = Map.ofList ["Inner", inner; "Outer", outer]
               Layouts = layouts
               Model = Types.LP64
+              FlexibleArrays = Map.empty
               Shape = function
                 | "Inner" -> DescriptorGenerator.StructField "Inner"
                 | _ -> DescriptorGenerator.UnknownField "missing_t" }
@@ -1549,6 +1557,7 @@ module DescriptorGen =
             { Structs = Map.ofList [structure.Name, structure]
               Layouts = if measured then Map.ofList [structure.Name, mkLayout structure.Name 32 32 [0]] else Map.empty
               Model = Types.LP64
+              FlexibleArrays = Map.empty
               Shape = fun _ -> DescriptorGenerator.ScalarField (repr TypeMapper.Unsigned 32) }
         let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 0 structure |> ignore)
         Assert.Equal("Struct 'Incomplete' field 'flag' is a bitfield; a supported bit-precise descriptor representation is required.", error.Message)
@@ -1568,6 +1577,7 @@ module DescriptorGen =
             { Structs = Map.ofList ["Inner", inner; "Outer", outer]
               Layouts = layouts
               Model = Types.LP64
+              FlexibleArrays = Map.empty
               Shape = function
                 | "Inner" -> DescriptorGenerator.StructField "Inner"
                 | _ -> DescriptorGenerator.ScalarField (repr TypeMapper.Unsigned 32) }
@@ -1582,6 +1592,7 @@ module DescriptorGen =
             { Structs = Map.ofList ["Bits", union; "Outer", outer]
               Layouts = Map.ofList ["Bits", mkLayout "Bits" 32 32 [0; 0]; "Outer", mkLayout "Outer" 32 32 [0]]
               Model = Types.LP64
+              FlexibleArrays = Map.empty
               Shape = function
                 | "Bits" -> DescriptorGenerator.StructField "Bits"
                 | _ -> DescriptorGenerator.ScalarField (repr TypeMapper.Unsigned 32) }
