@@ -29,27 +29,37 @@ module CallbackWrapperGenerator =
             invalidOp "Integer-address callback wrappers violate the Clef FFI boundary."
         let wrappers =
             spec.Registrations |> List.collect (fun reg ->
+                // A registration refusal names its [callbacks] registrations entry (#195).
+                let key = $"callbacks.registrations[{reg.Function}]"
+                let refuseAt code source key parameter message =
+                    Diagnostics.diagnostic code message source |> Diagnostics.withPilotKey key parameter |> Diagnostics.refuse
                 let f =
                     declarations |> List.tryPick (function
                         | CppParser.Declaration.Function f when f.Name = reg.Function -> Some f
                         | _ -> None)
-                    |> Option.defaultWith (fun () -> invalidOp $"Callback registration '{reg.Function}' is missing from the parsed declarations.")
+                    |> Option.defaultWith (fun () ->
+                        refuseAt Diagnostics.BindingSymbolUndeclared (Diagnostics.Located.Unknown $"no parsed header declares C symbol '{reg.Function}'")
+                                 (key + ".function") None $"Callback registration '{reg.Function}' is missing from the parsed declarations.")
+                let refuse code field parameter message = refuseAt code f.Location.Location (key + "." + field) parameter message
+                let indexOf field name =
+                    f.Parameters |> List.tryFindIndex (fun (parameter, _) -> parameter = name)
+                    |> Option.defaultWith (fun () ->
+                        refuse Diagnostics.ParameterNameUndeclared field None $"Callback registration '{reg.Function}' names parameter '{name}', which its native declaration does not declare.")
                 // The registration's types resolve through its declaring unit's typedefs.
                 let unit = FidelityCodeGenerator.inFunctionUnit ctx f
                 let resolve typ =
                     FidelityCodeGenerator.resolveCType unit.TypedefMap unit.DataModel unit.OpaqueHandles unit.Delegates unit.Enums typ
-                let callbackType =
-                    f.Parameters |> List.tryFind (fun (name, _) -> name = reg.CallbackParam)
-                    |> Option.map (snd >> resolve)
-                match callbackType with
-                | Some (FidelityCodeGenerator.FunctionPointer _) -> ()
-                | _ -> invalidOp $"Callback registration '{reg.Function}' requires function-pointer parameter '{reg.CallbackParam}'."
+                let callbackIndex = indexOf "callback_param" reg.CallbackParam
+                match resolve (snd f.Parameters[callbackIndex]) with
+                | FidelityCodeGenerator.FunctionPointer _ -> ()
+                | _ -> refuse Diagnostics.CallbackNotFunctionPointer "callback_param" (Some callbackIndex) $"Callback registration '{reg.Function}' requires function-pointer parameter '{reg.CallbackParam}'."
                 match reg.DataParam with
                 | None -> ()
                 | Some name ->
-                    match f.Parameters |> List.tryFind (fun (parameter, _) -> parameter = name) |> Option.map (snd >> resolve) with
-                    | Some (FidelityCodeGenerator.DataPointer _ | FidelityCodeGenerator.OpaqueHandle _) -> ()
-                    | _ -> invalidOp $"Callback registration '{reg.Function}' requires data-pointer environment parameter '{name}'."
+                    let dataIndex = indexOf "data_param" name
+                    match resolve (snd f.Parameters[dataIndex]) with
+                    | FidelityCodeGenerator.DataPointer _ | FidelityCodeGenerator.OpaqueHandle _ -> ()
+                    | _ -> refuse Diagnostics.CallbackEnvironmentNotDataPointer "data_param" (Some dataIndex) $"Callback registration '{reg.Function}' requires data-pointer environment parameter '{name}'."
                 FidelityCodeGenerator.generateDeclaredFunctionDecls ctx "" (resolveModule f.Name) f
                 |> List.choose (function
                     | LetBinding(name, parameters, returnType, _, _) when name = f.Name ->
@@ -88,4 +98,11 @@ module CallbackWrapperGenerator =
         (spec: CallbackSpec) (_declarations: CppParser.Declaration list)
         (_namespace': string) (_openModules: string list) : string option =
         if spec.ListenerStructs.IsEmpty then None
-        else invalidOp "Generic listener builders require declared native entry records and initialized fields; integer-address listener builders are not admitted Clef source."
+        else
+            spec.ListenerStructs
+            |> List.map (fun listener ->
+                Diagnostics.diagnostic Diagnostics.GenericListenerUnadmitted
+                    $"listener struct '{listener.Name}': generic listener builders require declared native entry records and initialized fields; integer-address listener builders are not admitted Clef source."
+                    (Diagnostics.Located.Unknown "generateL2 receives listener names without their declarations")
+                |> Diagnostics.withPilotKey "callbacks.listener_structs" None)
+            |> fun ds -> Diagnostics.raiseRefusal (Diagnostics.refusalsOf ds "")

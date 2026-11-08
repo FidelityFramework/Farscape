@@ -47,7 +47,13 @@ module TypedProtocolGenerator =
 
     /// Validate the complete projection and retain its contents before any output effects.
     let render (project: PilotTypes.PilotProject) (protocols: Protocol list) (declarations: CppParser.Declaration list) (ctx: FidelityCodeGenerator.GenerationContext) outputDir =
-        if ctx.DataModel <> Types.LP64 then failwith "Typed Wayland currently requires the measured LP64 host profile"
+        // Each refusal names `[options] typed_protocol` (#195), located at the native declaration
+        // it concerns, or with the reason none is known (protocol XML keeps no positions).
+        let refuseAt code source message =
+            Diagnostics.diagnostic code message source |> Diagnostics.withPilotKey "options.typed_protocol" None |> Diagnostics.refuse
+        if ctx.DataModel <> Types.LP64 then
+            refuseAt Diagnostics.TypedProtocolProfile (Diagnostics.Located.Unknown "the profile is generation input, not a header declaration")
+                "Typed Wayland currently requires the measured LP64 host profile"
         // Reject drift or missing parsing instead of silently emitting hand-assumed
         // native declarations. Only the record/array projection is profile-defined.
         let functions = declarations |> List.choose (function CppParser.Declaration.Function f -> Some(f.Name,f) | _ -> None) |> Map.ofList
@@ -58,10 +64,14 @@ module TypedProtocolGenerator =
             FidelityCodeGenerator.abiReprOf ctx.DataModel cType resolved
             |> Option.map (fun r -> r.Family, r.Bits)
         let verify symbol expectedParams expectedReturn =
-            let f = functions |> Map.tryFind symbol |> Option.defaultWith(fun()->failwith $"Typed protocol requires parsed C declaration '{symbol}'")
+            let f =
+                functions |> Map.tryFind symbol
+                |> Option.defaultWith(fun()->
+                    refuseAt Diagnostics.BindingSymbolUndeclared (Diagnostics.Located.Unknown $"no parsed header declares C symbol '{symbol}'")
+                        $"Typed protocol requires parsed C declaration '{symbol}'")
             let actual = f.Parameters |> List.map (snd >> representation f)
             if actual <> List.map Some expectedParams || representation f f.ReturnType <> Some expectedReturn then
-                failwith $"Typed protocol C signature '{symbol}' does not match the declared LP64 projection"
+                refuseAt Diagnostics.TypedProtocolSignatureMismatch f.Location.Location $"Typed protocol C signature '{symbol}' does not match the declared LP64 projection"
         let ptr = TypeMapper.Pointer, 64
         let u32 = TypeMapper.Unsigned, 32
         let i32 = TypeMapper.Signed, 32
@@ -73,9 +83,15 @@ module TypedProtocolGenerator =
         verify "wl_proxy_marshal_array_flags" [ptr;u32;ptr;u32;u32;ptr] ptr
         verify "wl_proxy_add_listener" [ptr;ptr;ptr] i32
         verify "wl_proxy_get_version" [ptr] u32
-        let layout name = ctx.StructLayouts |> Map.tryFind name |> Option.defaultWith (fun()->failwith $"Typed protocol requires measured {name}")
+        let recordSource name =
+            declarations |> List.tryPick (function CppParser.Declaration.Struct s when s.Name = name -> Some s.Location.Location | _ -> None)
+            |> Option.defaultValue (Diagnostics.Located.Unknown $"no parsed header declares record '{name}'")
+        let layout name =
+            ctx.StructLayouts |> Map.tryFind name
+            |> Option.defaultWith (fun()-> refuseAt Diagnostics.TypedProtocolLayoutUnmeasured (recordSource name) $"Typed protocol requires measured {name}")
         let argument, message, ifaceLayout = layout "wl_argument", layout "wl_message", layout "wl_interface"
-        if argument.SizeBits <> 64 || argument.AlignmentBits <> 64 then failwith "Typed Wayland requires 64-bit measured wl_argument cells"
+        if argument.SizeBits <> 64 || argument.AlignmentBits <> 64 then
+            refuseAt Diagnostics.TypedProtocolLayoutMismatch (recordSource "wl_argument") "Typed Wayland requires 64-bit measured wl_argument cells"
         let allInterfaces = protocols |> List.collect (fun p -> p.Interfaces)
         let wanted = project.Namespaces |> List.collect (fun n -> n.XmlInterfaces) |> Set.ofList
         let interfaces = allInterfaces |> List.filter (fun i -> wanted.Contains i.Name)
@@ -170,7 +186,10 @@ module TypedProtocolGenerator =
                 let result = if ctor.IsSome then optional else "unit"
                 let paramsSource = ("(proxy: "+handle+")") :: (args |> List.map(fun a -> let t = match a.Type with Int|Uint|Fixed|Fd->"int"|String->"string"|_ -> if a.AllowNull then optional else handle in "("+a.Name+": "+t+")")) |> String.concat " "
                 let strings = args |> List.filter(fun a->a.Type=String)
-                if ctor.IsSome && not strings.IsEmpty then failwith "Typed constructor string arguments need an explicit ownership profile"
+                if ctor.IsSome && not strings.IsEmpty then
+                    refuseAt Diagnostics.TypedProtocolConstructorStrings
+                        (Diagnostics.Located.Unknown $"request '{name}' comes from protocol XML, which Fidelity.Data.XML keeps no line positions for")
+                        $"Typed constructor string arguments need an explicit ownership profile ('{name}')"
                 let indent = if strings.IsEmpty then "    " else "        "
                 let initializers =
                     r.Args |> List.collect(fun a ->

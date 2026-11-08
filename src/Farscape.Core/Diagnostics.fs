@@ -36,6 +36,53 @@ namespace Farscape.Core
 /// | FS9128 | a typedef naming a record carries an attribute its record layout dump omits   |
 /// | FS9129 | a record carries an unnamed bit-field, and clang has no layout of it          |
 /// | FS9130 | a protocol enum entry's value is no (negated) C integer constant in int64     |
+/// | FS9131 | a header parameter name is the positional name of an unnamed sibling          |
+/// | FS9132 | a pilot binding contract list names one native parameter twice                |
+/// | FS9133 | a pilot binding key names a parameter outside the native arity                |
+/// | FS9134 | a pilot hypothesis has an empty identity, version or source                   |
+/// | FS9135 | a pilot contract needs the untranslated parameter list its binding translates |
+/// | FS9136 | a callback invocation's scope is neither during_call nor process_exit         |
+/// | FS9137 | a callback invocation carries a field its declared scope forbids or lacks     |
+/// | FS9138 | a callback that may be NULL has an invocation contract outside during_call    |
+/// | FS9139 | a callback's absence hypothesis reuses its activation identity                |
+/// | FS9140 | a process_exit callback is no zero-argument void entry with signed32 result   |
+/// | FS9141 | a contract names a binding that is no selected generated declaration          |
+/// | FS9142 | a pilot callback key names a parameter with no native function-pointer type   |
+/// | FS9143 | a zero-argument native entry is no explicit (void) prototype returning void   |
+/// | FS9144 | a callback entry argument or result type is outside the admitted profile      |
+/// | FS9145 | nonnull evidence for a pointer contradicts nullable evidence for it           |
+/// | FS9146 | a native function pointer that may be NULL has no admitted absence contract   |
+/// | FS9147 | a reference projection's cell is no scalar or opaque pointer cell             |
+/// | FS9148 | a string projection names a parameter that is no char pointer                 |
+/// | FS9149 | a handle projection names a parameter or result that is no data pointer       |
+/// | FS9150 | a constant projection is no integer literal for a scalar integer parameter    |
+/// | FS9151 | a result range bounds a non-integer result or by a non-integer argument       |
+/// | FS9152 | a result range's constant bounds are contradictory                            |
+/// | FS9153 | an owned nullable return is no option<CHandle> released through parameter 0   |
+/// | FS9154 | a release binding is no unary matching CHandle Value parameter, void result   |
+/// | FS9155 | a writable buffer names one parameter as both buffer and count                |
+/// | FS9156 | a writable buffer is no writable unsigned8 byte reference                     |
+/// | FS9157 | a writable buffer's count is no scalar integer Value parameter                |
+/// | FS9158 | a pilot binding declares one parameter both writable and read-only reference  |
+/// | FS9159 | a C function a pilot key names or requires is declared by no parsed header    |
+/// | FS9160 | two pilot binding entries carrying a contract name one binding                |
+/// | FS9161 | a pilot binding carrying a contract is not exactly one selected declaration   |
+/// | FS9162 | a callback parameter's function-pointer type yields no native entry signature   |
+/// | FS9163 | wrapper generation meets a listener struct; no generic listener builder exists  |
+/// | FS9164 | a pilot key names a parameter its native function does not declare              |
+/// | FS9165 | a callback registration's environment parameter is no data pointer              |
+/// | FS9166 | a mapped return's acquisition or release signature lacks the mapped shape       |
+/// | FS9167 | a mapped return's declared value is outside its admitted set                    |
+/// | FS9168 | a signal value's native pointee has no carrier in the binding Types module      |
+/// | FS9169 | GIR nullability evidence names a value that is no native data pointer           |
+/// | FS9170 | g_signal_connect_data's declaration lacks the shape signal binding requires     |
+/// | FS9171 | a GIR signal's callback parameter names are missing or repeated                 |
+/// | FS9172 | a namespace lists signals but the pilot names no introspection files            |
+/// | FS9173 | the typed protocol projection is requested under a profile other than LP64      |
+/// | FS9174 | a C function the typed protocol calls has another representation than declared  |
+/// | FS9175 | a record the typed protocol projection reads has no clang measurement           |
+/// | FS9176 | a record the typed protocol reads is measured with another layout than declared |
+/// | FS9177 | a typed protocol constructor carries string arguments with no ownership profile |
 ///
 /// Each refusal reason has exactly one code and each code one reason.
 ///
@@ -137,6 +184,147 @@ module Diagnostics =
     [<Literal>]
     let ProtocolEnumValueMalformed = "FS9130" // protocol enum entry value no (negated) decimal, hex or octal C constant in int64 (#160)
 
+    [<Literal>]
+    let ParameterNameCollision = "FS9131" // header parameter name equals an unnamed sibling's positional name (#194)
+
+    [<Literal>]
+    let ContractDuplicateParameter = "FS9132" // pilot contract list naming one native parameter twice (#195)
+
+    [<Literal>]
+    let ContractParameterOutOfRange = "FS9133" // pilot binding key naming a parameter outside the native arity (#195)
+
+    [<Literal>]
+    let HypothesisFieldEmpty = "FS9134" // pilot hypothesis with an empty identity, version or source (#195)
+
+    [<Literal>]
+    let ContractRequiresUntranslated = "FS9135" // pilot contract on a binding whose projection translates its parameters (#195)
+
+    [<Literal>]
+    let CallbackScopeUnknown = "FS9136" // callback invocation scope neither during_call nor process_exit (#195)
+
+    [<Literal>]
+    let CallbackScopeFieldConflict = "FS9137" // callback invocation field its scope forbids or lacks (#195)
+
+    [<Literal>]
+    let NullableCallbackScope = "FS9138" // callback that may be NULL with a contract outside during_call (#195)
+
+    [<Literal>]
+    let AbsenceIdentityReused = "FS9139" // absence hypothesis identity equal to the activation identity (#195)
+
+    [<Literal>]
+    let ProcessExitSignature = "FS9140" // process_exit callback not a zero-argument void entry with a signed32 registration (#195)
+
+    [<Literal>]
+    let ContractBindingUnselected = "FS9141" // contract naming a binding that is no selected generated declaration (#195)
+
+    [<Literal>]
+    let CallbackNotFunctionPointer = "FS9142" // pilot callback key on a parameter with no native function-pointer type or signature (#195)
+
+    [<Literal>]
+    let CallbackZeroArgumentPrototype = "FS9143" // zero-argument native entry without an explicit (void) prototype and void result (#195)
+
+    [<Literal>]
+    let CallbackEntryTypeUnadmitted = "FS9144" // callback entry argument or result type outside the admitted profile (#195)
+
+    [<Literal>]
+    let NonnullContradiction = "FS9145" // nonnull evidence contradicting nullable evidence for one pointer (#195)
+
+    [<Literal>]
+    let NullableCallbackUnadmitted = "FS9146" // native function pointer that may be NULL, with no admitted absence contract (#195)
+
+    [<Literal>]
+    let ReferenceCellUnsupported = "FS9147" // reference projection whose cell is no scalar or opaque pointer cell (#195)
+
+    [<Literal>]
+    let StringProjectionNotCharPointer = "FS9148" // string projection on a parameter that is no char pointer (#195)
+
+    [<Literal>]
+    let HandleProjectionNotDataPointer = "FS9149" // handle projection on a parameter or result that is no data pointer (#195)
+
+    [<Literal>]
+    let ConstantProjectionInvalid = "FS9150" // constant projection that is no integer literal for a scalar integer parameter (#195)
+
+    [<Literal>]
+    let ResultRangeNotInteger = "FS9151" // result range on a non-integer result or bounded by a non-integer argument (#195)
+
+    [<Literal>]
+    let ResultRangeBoundsContradictory = "FS9152" // result range with contradictory constant bounds (#195)
+
+    [<Literal>]
+    let ResourceReturnShape = "FS9153" // owned nullable return not option<CHandle> released through parameter 0 (#195)
+
+    [<Literal>]
+    let ResourceReleaseShape = "FS9154" // release binding not a unary matching CHandle Value parameter with a void result (#195)
+
+    [<Literal>]
+    let WritableBufferSameParameter = "FS9155" // writable buffer naming one parameter as buffer and count (#195)
+
+    [<Literal>]
+    let WritableBufferNotByteReference = "FS9156" // writable buffer that is no writable unsigned8 byte reference (#195)
+
+    [<Literal>]
+    let WritableBufferCountNotInteger = "FS9157" // writable buffer count that is no scalar integer Value parameter (#195)
+
+    [<Literal>]
+    let ReferenceAccessConflict = "FS9158" // pilot binding parameter both writable and read-only reference (#195)
+
+    [<Literal>]
+    let BindingSymbolUndeclared = "FS9159" // C function a pilot key names or requires, declared by no parsed header (#195)
+
+    [<Literal>]
+    let BindingDuplicate = "FS9160"        // two pilot binding entries with a contract naming one binding (#195)
+
+    [<Literal>]
+    let ContractBindingNotSelectedOnce = "FS9161" // pilot binding with a contract not exactly one selected declaration (#195)
+
+    [<Literal>]
+    let CallbackSignatureUnrecovered = "FS9162" // a callback parameter's function-pointer type yields no native entry signature (#195)
+
+    [<Literal>]
+    let GenericListenerUnadmitted = "FS9163" // wrapper generation meets a listener struct; no generic listener builder exists (#195)
+
+    [<Literal>]
+    let ParameterNameUndeclared = "FS9164" // a pilot key names a parameter its native function does not declare (#195)
+
+    [<Literal>]
+    let CallbackEnvironmentNotDataPointer = "FS9165" // a callback registration's environment parameter is no data pointer (#195)
+
+    [<Literal>]
+    let MappedSignatureShape = "FS9166" // a mapped return's acquisition or release signature lacks the mapped shape (#195)
+
+    [<Literal>]
+    let MappedValueInvalid = "FS9167" // a mapped return's declared value is outside its admitted set (#195)
+
+    [<Literal>]
+    let SignalCarrierUndeclared = "FS9168" // a signal value's native pointee has no carrier in the binding Types module (#195)
+
+    [<Literal>]
+    let NullabilityOnNonPointer = "FS9169" // GIR nullability evidence names a value that is no native data pointer (#195)
+
+    [<Literal>]
+    let SignalConnectShape = "FS9170" // g_signal_connect_data's declaration lacks the shape signal binding requires (#195)
+
+    [<Literal>]
+    let SignalParameterNamesInvalid = "FS9171" // a GIR signal's callback parameter names are missing or repeated (#195)
+
+    [<Literal>]
+    let SignalsWithoutIntrospection = "FS9172" // a namespace lists signals but the pilot names no introspection files (#195)
+
+    [<Literal>]
+    let TypedProtocolProfile = "FS9173" // the typed protocol projection is requested under a profile other than LP64 (#195)
+
+    [<Literal>]
+    let TypedProtocolSignatureMismatch = "FS9174" // a C function the typed protocol calls has another representation than declared (#195)
+
+    [<Literal>]
+    let TypedProtocolLayoutUnmeasured = "FS9175" // a record the typed protocol projection reads has no clang measurement (#195)
+
+    [<Literal>]
+    let TypedProtocolLayoutMismatch = "FS9176" // a record the typed protocol reads is measured with another layout than declared (#195)
+
+    [<Literal>]
+    let TypedProtocolConstructorStrings = "FS9177" // a typed protocol constructor carries string arguments with no ownership profile (#195)
+
     // =========================================================================
     // Structured diagnostics (#184)
     // =========================================================================
@@ -161,9 +349,13 @@ module Diagnostics =
     /// position in it when one is known.
     type SourceLocation = { Path: string; Position: Located<SourcePosition> }
 
-    /// The pilot input that caused a refusal: the `.pilot.toml` file and the TOML key (dotted,
-    /// `library.defines`) whose value the refusal names.
-    type PilotLocation = { PilotFile: string; Key: string }
+    /// The pilot input that caused a refusal: the `.pilot.toml` file, the TOML key (dotted,
+    /// `library.defines`; a binding entry as `options.bindings[<name>]`, a key of it as
+    /// `options.bindings[<name>].string_parameters`) whose value the refusal names, and the native
+    /// parameter index the refusal names under that key, when it names one (#195). Generation
+    /// knows the key but not the pilot file: it leaves `PilotFile` empty, and the project step
+    /// that read the pilot binds it (`BindingGenerator`).
+    type PilotLocation = { PilotFile: string; Key: string; Parameter: int option }
 
     /// One structured refusal (#184).
     type Diagnostic = {
@@ -184,6 +376,23 @@ module Diagnostics =
     /// The text Farscape prints for a diagnostic: `CODE: message`.
     let render (d: Diagnostic) = d.Code + ": " + d.Message
 
+    /// Where a diagnostic's cause is declared and which pilot input caused it, one line each, as
+    /// the CLI prints them under the refusal's text (#195): `CODE declared at path:line:column`
+    /// (or the file and why no position is known, or why no source is known), then, when pilot
+    /// input caused it, `CODE pilot key KEY[, parameter N] in FILE`.
+    let renderLocation (d: Diagnostic) : string list =
+        let source =
+            match d.Source with
+            | Located.Known { Path = path; Position = Located.Known p } -> $"{d.Code} declared at {path}:{p.Line}:{p.Column}"
+            | Located.Known { Path = path; Position = Located.Unknown reason } -> $"{d.Code} declared in {path} ({reason})"
+            | Located.Unknown reason -> $"{d.Code} source unknown: {reason}"
+        let pilot =
+            d.Pilot |> Option.map (fun p ->
+                let parameter = p.Parameter |> Option.map (fun i -> $", parameter {i}") |> Option.defaultValue ""
+                let file = if p.PilotFile = "" then "" else $" in {p.PilotFile}"
+                $"{d.Code} pilot key {p.Key}{parameter}{file}")
+        source :: Option.toList pilot
+
     /// An FS91xx refusal with the given source and no pilot location.
     let diagnostic (code: string) (message: string) (source: Located<SourceLocation>) : Diagnostic =
         { Code = code; Message = message; Severity = Severity.Error; Source = source; Related = []; Pilot = None }
@@ -194,6 +403,11 @@ module Diagnostics =
 
     /// The diagnostic with the given pilot cause.
     let withPilot (pilot: PilotLocation) (d: Diagnostic) = { d with Pilot = Some pilot }
+
+    /// The diagnostic with the given pilot key and parameter index, its pilot file left for the
+    /// project step to bind (#195).
+    let withPilotKey (key: string) (parameter: int option) (d: Diagnostic) =
+        { d with Pilot = Some { PilotFile = ""; Key = key; Parameter = parameter } }
 
     /// The diagnostic with further named declarations.
     let withRelated (related: SourceLocation list) (d: Diagnostic) = { d with Related = related }

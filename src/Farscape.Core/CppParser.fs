@@ -602,6 +602,30 @@ module CppParser =
             Some { Kind = kind; Args = args; StringArg = stringArg })
         |> List.ofSeq
 
+    /// The name an unnamed C parameter takes: its position, as callback entry descriptors name
+    /// their arguments (`arg0`, `arg1`, …) (#194).
+    let positionalParameterName (index: int) = $"arg{index}"
+
+    /// A function's parameters with each unnamed one named by its position (#194), so no binding
+    /// or descriptor binds one name twice. A header name equal to an unnamed sibling's positional
+    /// name is refused (FS9131): it is never renamed, since the header's name is its spelling.
+    let nameParametersByPosition (functionName: string) (location: Diagnostics.Provenance)
+                                 (parameters: (string option * string) list) : (string * string) list =
+        let positional =
+            parameters |> List.indexed
+            |> List.choose (fun (index, (name, _)) -> if name.IsNone then Some (positionalParameterName index, index) else None)
+            |> Map.ofList
+        parameters |> List.mapi (fun index (name, cType) ->
+            match name with
+            | None -> positionalParameterName index, cType
+            | Some name ->
+                match Map.tryFind name positional with
+                | Some unnamed ->
+                    Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.ParameterNameCollision
+                                            $"function '{functionName}' names parameter {index} '{name}', which is the positional name of its unnamed parameter {unnamed}; the binding and its descriptor would bind '{name}' twice."
+                                            location.Location)
+                | None -> name, cType)
+
     /// Process FunctionDecl AST node
     let private processFunctionDecl (location: Diagnostics.Provenance) (node: JsonValue) : FunctionDecl option =
         match getString node "name" with
@@ -612,10 +636,9 @@ module CppParser =
                 |> Seq.filter (fun inner ->
                     getStringOr inner "kind" "" = "ParmVarDecl")
                 |> Seq.map (fun param ->
-                    let paramName = getStringOr param "name" "param"
-                    let paramType = getQualType param
-                    (paramName, paramType))
+                    getString param "name" |> Option.filter (fun n -> n <> ""), getQualType param)
                 |> List.ofSeq
+                |> nameParametersByPosition name location
 
             let returnType = extractReturnType (getQualType node)
             let isStatic = getStringOr node "storageClass" "" = "static"

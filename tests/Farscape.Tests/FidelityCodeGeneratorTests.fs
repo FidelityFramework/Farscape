@@ -1297,7 +1297,7 @@ let ``owned nullable resource generation refuses nonoptional marker and translat
     let error = Assert.ThrowsAny<System.Exception>(fun () ->
         ownedResourceSource (Some ownedResource) "void" "void *" true false profile |> ignore)
     if profile = "translated" then
-        Assert.Equal(reason, error.Message)
+        Assert.Equal("FS9150: " + reason, error.Message)
     else
         Assert.Contains("resource", error.Message)
         Assert.Contains(reason, error.Message)
@@ -1840,7 +1840,7 @@ let ``an owned resource's release parameter resolves in the release declaration'
     Assert.Contains("Binding = \"Test.Storage.freeFirst\"", source)
     // fx_ptr_t is a pointer only in the owner's unit: the release's own unit refuses its handle.
     let error = Assert.ThrowsAny<exn>(fun () -> crossUnitRelease true false () |> ignore)
-    Assert.Equal("freeFirst parameter 0: handle projection requires a C data pointer", error.Message)
+    Assert.Equal("FS9149: freeFirst parameter 0: handle projection requires a C data pointer", error.Message)
 
 [<Fact>]
 let ``a descriptor never carries an unknown width for a by-value enum`` () =
@@ -1877,3 +1877,143 @@ let ``a by-value record is claimed by the record a typedef chain reaches`` () =
     // A record only forward-declared has no layout to cite.
     Assert.Equal(FidelityCodeGenerator.ResolvesNowhere, claim "struct fx_forward")
     Assert.Equal(FidelityCodeGenerator.ResolvesNowhere, claim "fx_missing_t")
+
+// ═══════════════════════════════════════════════════════════════════
+// Callback and projection refusals are structured (#195): each carries its FS91xx code, the
+// declaring function's location, and the pilot key and native parameter index whose input it
+// names (the pilot file is bound by the project step; generation leaves it empty).
+// ═══════════════════════════════════════════════════════════════════
+
+/// The one diagnostic `f` refuses with.
+let private refusedBy (f: unit -> unit) : Diagnostics.Diagnostic =
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> f ())
+    match error.Refusal.Diagnostics with
+    | [ d ] ->
+        Assert.Equal(Diagnostics.render d, error.Refusal.Text)
+        d
+    | ds -> failwithf "one diagnostic expected, got %d: %s" ds.Length error.Refusal.Text
+
+let private projectedModule (func: CppParser.FunctionDecl) (projection: PilotTypes.BindingProjection) () =
+    let declarations = [CppParser.Declaration.Function func]
+    let ctx = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
+    FidelityCodeGenerator.generateModule { ctx with Bindings = Map.ofList [func.Name, projection] } Set.empty declarations "Test.Native" "test" "test" [] |> ignore
+
+let private plainProjection name = { rangeProjection with Name = name; Symbol = name; ResultRange = None }
+
+[<Theory>]
+[<InlineData("duplicate", "FS9132", "call_twice", "callback_invocations", 0, "duplicate parameter indices")>]
+[<InlineData("arity", "FS9133", "call_twice", "callback_invocations", 3, "parameter 3 is outside native arity 1")>]
+[<InlineData("hypothesis", "FS9134", "call_twice", "callback_invocations", 0, "requires nonempty source")>]
+[<InlineData("range-hypothesis", "FS9134", "read", "result_range", -1, "requires nonempty source")>]
+[<InlineData("untranslated", "FS9135", "call_twice", "callback_invocations", 0, "requires an untranslated native parameter list")>]
+[<InlineData("scope", "FS9136", "call_twice", "callback_invocations", 0, "scope must be during_call or process_exit")>]
+[<InlineData("scope-field", "FS9137", "call_twice", "callback_invocations", 0, "during_call forbids exit_binding and success_status")>]
+[<InlineData("nullable-scope", "FS9138", "call_twice", "callback_invocations", 0, "nullable callback parameters require only during_call invocation contracts.")>]
+[<InlineData("absence-identity", "FS9139", "call_twice", "callback_invocations", 0, "absence_hypothesis identity must differ from activation identity")>]
+[<InlineData("process-exit", "FS9140", "call_twice", "callback_invocations", 0, "process_exit requires a signed32 registration result")>]
+[<InlineData("release-unselected", "FS9141", "mallocFirst", "resource", -1, "release_binding must name an exact selected qualified generated declaration")>]
+[<InlineData("not-function-pointer", "FS9142", "call_twice", "callback_invocations", 0, "parameter 0 is not a native function pointer")>]
+[<InlineData("nonnull-not-function-pointer", "FS9142", "call_twice", "nonnull_callbacks", 0, "nonnull_callbacks requires a C function pointer")>]
+[<InlineData("signature-unrecovered", "FS9162", "call_twice", "callback_invocations", 0, "parameter 0 type 'NativeCallback[1]' resolves to a native function pointer, but no native entry signature is recoverable from it")>]
+[<InlineData("zero-argument", "FS9143", "call_twice", "callback_invocations", 0, "zero-argument native entries require an explicit (void) prototype")>]
+[<InlineData("entry-type", "FS9144", "call_twice", "callback_invocations", 0, "unsupported native entry signature type 'void *'")>]
+[<InlineData("nonnull-contradiction", "FS9145", "call_twice", "nonnull_callbacks", 0, "nullable native type conflicts with a nonnull contract")>]
+[<InlineData("absence-nonnull", "FS9145", "call_twice", "callback_invocations", 0, "absence_hypothesis conflicts with a nonnull contract")>]
+[<InlineData("missing-evidence", "FS9146", "call_twice", "", 0, "a native function-pointer parameter requires explicit nonnull evidence; nullable callback parameters require a supported boundary adapter.")>]
+[<InlineData("reference", "FS9147", "inspect", "reference_parameters", 0, "Reference requires a scalar cell or one opaque pointer cell")>]
+[<InlineData("string", "FS9148", "inspect", "string_parameters", 0, "string projection requires char pointer")>]
+[<InlineData("handle", "FS9149", "inspect", "parameter_handles", 0, "handle projection requires a C data pointer")>]
+[<InlineData("return-handle", "FS9149", "inspect", "return_handle", -1, "return_handle requires a C data pointer")>]
+[<InlineData("constant", "FS9150", "inspect", "constant_parameters", 0, "constant projection requires an integer literal and scalar integer parameter")>]
+[<InlineData("range-result", "FS9151", "read", "result_range", -1, "requires a scalar integer native result")>]
+[<InlineData("range-argument", "FS9151", "read", "result_range", 1, "argument 1 requires a scalar integer Value parameter")>]
+[<InlineData("range-bounds", "FS9152", "read", "result_range", -1, "constant bounds are contradictory")>]
+[<InlineData("resource-ordinal", "FS9153", "mallocFirst", "resource", -1, "owned_nullable_return requires release_parameter 0")>]
+[<InlineData("release-shape", "FS9154", "mallocFirst", "resource", -1, "release requires unary matching CHandle Value parameter 0 and a raw Void result")>]
+[<InlineData("buffer-same", "FS9155", "read", "writable_buffers", 1, "requires distinct buffer and count parameters")>]
+[<InlineData("buffer-element", "FS9156", "read", "writable_buffers", 1, "buffer parameter requires an explicit unsigned8 byte reference element contract")>]
+[<InlineData("buffer-count", "FS9157", "read", "writable_buffers", 2, "count parameter requires scalar integer Value passing")>]
+let ``each callback and projection refusal carries its code, its declaration's location and its pilot key`` shape (code: string) (binding: string) (key: string) (parameter: int) (reason: string) =
+    let c = invocationContract
+    let nullable = { invocationProjection with NonnullCallbacks = [] }
+    let invocation projection signature () = renderInvocation projection "NativeCallback" signature |> ignore
+    let range projection func () = renderResultRange projection func |> ignore
+    let range' = rangeProjection.ResultRange.Value
+    let owned resource releaseType () = ownedResourceSource (Some resource) releaseType "void *" true false "normal" |> ignore
+    let run : unit -> unit =
+        match shape with
+        | "duplicate" -> invocation { invocationProjection with CallbackInvocations = [c; c] } "int (*)(int)"
+        | "arity" -> invocation { invocationProjection with CallbackInvocations = [c; { c with Parameter = 3 }] } "int (*)(int)"
+        | "hypothesis" -> invocation { invocationProjection with CallbackInvocations = [{ c with Source = " " }] } "int (*)(int)"
+        | "range-hypothesis" -> range { rangeProjection with ResultRange = Some { range' with Source = " " } } readFunction
+        | "untranslated" -> invocation { nullable with ConstantParameters = [""; "3"] } "int (*)(int)"
+        | "scope" -> invocation { invocationProjection with CallbackInvocations = [{ c with Scope = "retained" }] } "int (*)(int)"
+        | "scope-field" -> invocation { invocationProjection with CallbackInvocations = [{ c with ExitBinding = Some "Test.Native.exit" }] } "int (*)(int)"
+        | "nullable-scope" -> invocation { nullable with CallbackInvocations = [{ c with Scope = "process_exit"; SuccessStatus = Some 0 }] } "void (*)(void)"
+        | "absence-identity" -> invocation { nullable with CallbackInvocations = [{ c with AbsenceHypothesis = Some { absenceHypothesis with Identity = c.Identity } }] } "void (*)(void)"
+        | "process-exit" -> invocation { invocationProjection with CallbackInvocations = [{ c with Scope = "process_exit"; SuccessStatus = Some 0 }] } "void (*)(void)"
+        | "release-unselected" -> owned { ownedResource with ReleaseBinding = "Test.Storage.missing" } "void"
+        | "not-function-pointer" -> fun () -> renderInvocation nullable "int" "int (*)(int)" |> ignore
+        | "nonnull-not-function-pointer" -> fun () -> renderInvocation { invocationProjection with CallbackInvocations = [] } "int" "int (*)(int)" |> ignore
+        // CTypeParser reads 'NativeCallback[1]' through its base word to the function-pointer
+        // typedef, while the signature lookup keys on the whole spelling and finds none.
+        | "signature-unrecovered" -> fun () -> renderInvocation invocationProjection "NativeCallback[1]" "int (*)(int)" |> ignore
+        | "zero-argument" -> invocation invocationProjection "void (*)()"
+        | "entry-type" -> invocation nullable "int (*)(void *)"
+        | "nonnull-contradiction" -> fun () -> renderInvocation { invocationProjection with CallbackInvocations = [] } "NativeCallback _Nullable" "int (*)(int)" |> ignore
+        | "absence-nonnull" -> invocation { invocationProjection with CallbackInvocations = [{ c with AbsenceHypothesis = Some absenceHypothesis }] } "void (*)(void)"
+        | "missing-evidence" -> invocation { nullable with CallbackInvocations = [] } "int (*)(int)"
+        | "reference" -> projectedModule (mkFunc "inspect" "void" ["cell", "int ***"]) { plainProjection "inspect" with ReferenceParameters = [0] }
+        | "string" -> projectedModule (mkFunc "inspect" "void" ["text", "int *"]) { plainProjection "inspect" with StringParameters = [0] }
+        | "handle" -> projectedModule (mkFunc "inspect" "void" ["value", "int"]) { plainProjection "inspect" with ParameterHandles = ["unit"] }
+        | "return-handle" -> projectedModule (mkFunc "inspect" "int" []) { plainProjection "inspect" with ReturnHandle = Some "unit" }
+        | "constant" -> projectedModule (mkFunc "inspect" "void" ["value", "int"]) { plainProjection "inspect" with ConstantParameters = ["x"] }
+        | "range-result" -> range rangeProjection { readFunction with ReturnType = "double" }
+        | "range-argument" -> range { rangeProjection with ResultRange = Some { range' with Upper = PilotTypes.ResultRangeBound.Argument 1 } } readFunction
+        | "range-bounds" -> range { rangeProjection with ResultRange = Some { range' with Lower = PilotTypes.ResultRangeBound.Constant 5; Upper = PilotTypes.ResultRangeBound.Constant 4 } } readFunction
+        | "resource-ordinal" -> owned { ownedResource with ReleaseParameter = 1 } "void"
+        | "release-shape" -> owned ownedResource "int"
+        | "buffer-same" -> range { writableProjection with WritableBuffers = [{ writableContract with CountParameter = 1 }] } readFunction
+        | "buffer-element" -> range { writableProjection with ReferenceElements = [""; "int"] } readFunction
+        | "buffer-count" -> range { writableProjection with ResultRange = None } { readFunction with Parameters = ["fd", "int"; "buffer", "void *"; "count", "double"] }
+        | other -> failwith $"unknown shape {other}"
+    let d = refusedBy run
+    Assert.Equal(code, d.Code)
+    // The message is the refusal's text before #195, after its code: `<binding> …: <reason>`.
+    Assert.True(d.Message.StartsWith(binding + " ") || d.Message.StartsWith(binding + ":"), d.Message)
+    Assert.EndsWith(": " + reason, d.Message)
+    // Every function these build is constructed, so its location is the test's provenance.
+    Assert.Equal(TestHelpers.constructed.Location, d.Source)
+    Assert.Equal(Diagnostics.Severity.Error, d.Severity)
+    let expectedKey = if key = "" then $"options.bindings[{binding}]" else $"options.bindings[{binding}].{key}"
+    Assert.Equal(Some { Diagnostics.PilotLocation.PilotFile = ""; Diagnostics.PilotLocation.Key = expectedKey
+                        Diagnostics.PilotLocation.Parameter = (if parameter >= 0 then Some parameter else None) }, d.Pilot)
+
+[<Fact>]
+let ``a nonnull result annotation contradicting a nullable native result names the annotation key`` () =
+    let func = mkFunc "inspect" "void * _Nullable" []
+    let declarations = [CppParser.Declaration.Function func]
+    let ctx = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
+    let ctx = { ctx with NonnullAnnotations = Some { Parameters = Map.empty; Returns = Set.singleton "inspect" } }
+    let d = refusedBy (fun () -> FidelityCodeGenerator.generateModule ctx Set.empty declarations "Test.Native" "test" "test" [] |> ignore)
+    Assert.Equal(Diagnostics.NonnullContradiction, d.Code)
+    Assert.Equal("inspect: nullable native result conflicts with a nonnull contract", d.Message)
+    Assert.Equal(Some { Diagnostics.PilotLocation.PilotFile = ""; Diagnostics.PilotLocation.Key = "annotations.nonnull.nonnull_returns"; Diagnostics.PilotLocation.Parameter = None }, d.Pilot)
+
+[<Fact>]
+let ``a callback result without nonnull evidence names the result annotation key`` () =
+    let d = refusedBy (projectedModule (mkFunc "inspect" "void (*)(void)" []) (plainProjection "inspect"))
+    Assert.Equal(Diagnostics.NullableCallbackUnadmitted, d.Code)
+    Assert.Equal("inspect: a native function-pointer result requires explicit nonnull evidence; nullable callback results require a supported boundary adapter.", d.Message)
+    Assert.Equal(Some { Diagnostics.PilotLocation.PilotFile = ""; Diagnostics.PilotLocation.Key = "annotations.nonnull.nonnull_returns"; Diagnostics.PilotLocation.Parameter = None }, d.Pilot)
+
+[<Fact>]
+let ``a nested nullable callback value type resolution refuses is located at the parameter that uses it`` () =
+    // Type resolution sees the callback value without its declaration; the parameter site binds it.
+    let func = { mkFunc "inspect" "void" ["outer", "void (*)(void (*)(void))"] with
+                   Location = Diagnostics.Provenance (Diagnostics.Located.Known { Path = "fx.h"; Position = Diagnostics.Located.Known { Line = 4; Column = 6 } }) }
+    let d = refusedBy (projectedModule func { plainProjection "inspect" with NonnullCallbacks = [0] })
+    Assert.Equal(Diagnostics.NullableCallbackUnadmitted, d.Code)
+    Assert.Equal("Nested native function-pointer value 'void (*)(void)' requires explicit nonnull evidence; nullable callback values require a supported boundary adapter.", d.Message)
+    Assert.Equal(func.Location.Location, d.Source)
+    Assert.Equal(Some { Diagnostics.PilotLocation.PilotFile = ""; Diagnostics.PilotLocation.Key = "options.bindings[inspect]"; Diagnostics.PilotLocation.Parameter = Some 0 }, d.Pilot)

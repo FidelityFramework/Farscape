@@ -34,6 +34,19 @@ module TypedSignalGenerator =
 
     let private builtinPointees = Set.ofList ["unit"; "int"; "float"; "bool"]
 
+    /// Where a signal refusal's cause is declared and which pilot key carries it (#195): GIR
+    /// evidence (the `[library] introspection` files, which carry no source position) or the
+    /// clang declaration of `g_signal_connect_data`.
+    type private Site = { Source: Diagnostics.Located<Diagnostics.SourceLocation>; Pilot: (string * int option) option }
+
+    let private girSite where =
+        { Source = Diagnostics.Located.Unknown $"GIR introspection data carries no source position for {where}"
+          Pilot = Some ("library.introspection", None) }
+
+    let private refuseAt (site: Site) code message =
+        let d = Diagnostics.diagnostic code message site.Source
+        Diagnostics.refuse (match site.Pilot with Some (key, parameter) -> Diagnostics.withPilotKey key parameter d | None -> d)
+
     let rec private carrierNames = function
         | Generic("CHandle", Named name) when not (builtinPointees.Contains name) -> Set.singleton name
         | Generic(_, inner) -> carrierNames inner
@@ -41,7 +54,7 @@ module TypedSignalGenerator =
 
     let private requireNativeType (ctx: FidelityCodeGenerator.GenerationContext) where name =
         if not (ctx.OpaqueHandles.Contains name || ctx.Structs.ContainsKey name || ctx.TypedefMap.ContainsKey name) then
-            failwith $"{where}: native pointee '{name}' is not declared in the parsed headers; GIR alone cannot supply its carrier"
+            refuseAt (girSite where) Diagnostics.GirTypeUndeclared $"{where}: native pointee '{name}' is not declared in the parsed headers; GIR alone cannot supply its carrier"
 
     /// Known nominal carriers which a project must include in its shared Types module.
     /// Names come from resolved header types; GIR-only pointer names are refused.
@@ -71,49 +84,50 @@ module TypedSignalGenerator =
 
     /// A nominal handle must name a carrier supplied by the binding's Types module.
     /// GIR's C spelling alone does not declare an interior marker or resource contract.
-    let rec private requireDeclaredCarrier (ctx: FidelityCodeGenerator.GenerationContext) where = function
+    let rec private requireDeclaredCarrier (ctx: FidelityCodeGenerator.GenerationContext) (site: Site) where = function
         | Generic("CHandle", Named name) when not (builtinPointees.Contains name) ->
             requireNativeType ctx where name
             let declared =
                 ctx.OpaqueHandles.Contains name || ctx.PhantomMarkers.Contains name
                 || (ctx.Structs.ContainsKey name && ctx.ValueStructs.Contains name)
             if not declared then
-                failwith $"{where}: native pointee '{name}' has no declared carrier in the binding Types module"
-        | Generic(_, inner) -> requireDeclaredCarrier ctx where inner
+                refuseAt site Diagnostics.SignalCarrierUndeclared $"{where}: native pointee '{name}' has no declared carrier in the binding Types module"
+        | Generic(_, inner) -> requireDeclaredCarrier ctx site where inner
         | _ -> ()
 
     /// Incoming callback values use the same outer-nullability policy as header callbacks.
     /// Explicit GIR evidence supplements the native declaration; omission proves nothing.
-    let private carrierOf (ctx: FidelityCodeGenerator.GenerationContext) where cType nullable nonnull : Carrier =
+    let private carrierOf (ctx: FidelityCodeGenerator.GenerationContext) (site: Site) where cType nullable nonnull : Carrier =
+        let refuse code message = refuseAt site code message
         let resolved = resolve ctx cType
-        if nullable && nonnull then failwith $"{where}: contradictory GIR nullability evidence"
+        if nullable && nonnull then refuse Diagnostics.NonnullContradiction $"{where}: contradictory GIR nullability evidence"
         match resolved with
         | FidelityCodeGenerator.Scalar r when r.Family = TypeMapper.Float ->
-            failwith $"{where}: floating-point C type '{cType}' has no supported callback entry declaration, so the signal is not projected"
-        | FidelityCodeGenerator.FunctionPointer _ -> failwith $"{where}: a function-pointer value '{cType}' requires a supported signal callback adapter"
+            refuse Diagnostics.CallbackEntryTypeUnadmitted $"{where}: floating-point C type '{cType}' has no supported callback entry declaration, so the signal is not projected"
+        | FidelityCodeGenerator.FunctionPointer _ -> refuse Diagnostics.CallbackEntryTypeUnadmitted $"{where}: a function-pointer value '{cType}' requires a supported signal callback adapter"
         | _ -> ()
         if (nullable || nonnull) && not (isDataPointer resolved) then
-            failwith $"{where}: GIR nullability evidence does not describe a native data pointer"
+            refuse Diagnostics.NullabilityOnNonPointer $"{where}: GIR nullability evidence does not describe a native data pointer"
         let repr =
             FidelityCodeGenerator.abiReprOf ctx.DataModel cType resolved
-            |> Option.defaultWith (fun () -> failwith $"{where}: the C type '{cType}' is not declared in the parsed headers")
+            |> Option.defaultWith (fun () -> refuse Diagnostics.ByValueTypeUnresolved $"{where}: the C type '{cType}' is not declared in the parsed headers")
         let qualified = cType + (if nullable then " _Nullable" elif nonnull then " _Nonnull" else "")
         let valueType =
             match resolve ctx (qualified + " (*)(void)") with
             | FidelityCodeGenerator.FunctionPointer([], ret) -> ret
-            | _ -> failwith $"{where}: no complete native callback value contract for '{cType}'"
-        requireDeclaredCarrier ctx where valueType
+            | _ -> refuse Diagnostics.CallbackEntryTypeUnadmitted $"{where}: no complete native callback value contract for '{cType}'"
+        requireDeclaredCarrier ctx site where valueType
         { Clef = CodeRenderer.renderType valueType; Ref = DescriptorGenerator.typeRefSource repr; Type = valueType }
 
-    let private requirePointer ctx where cType =
+    let private requirePointer ctx site where cType =
         if not (isDataPointer (resolve ctx cType)) then
-            failwith $"{where}: requires a declared native data-pointer parameter"
+            refuseAt site Diagnostics.SignalConnectShape $"{where}: requires a declared native data-pointer parameter"
 
-    let private requireInteger ctx where cType =
+    let private requireInteger ctx site where cType =
         match resolve ctx cType with
         | FidelityCodeGenerator.CEnum _ -> ()
         | FidelityCodeGenerator.Scalar r when r.Family = TypeMapper.Signed || r.Family = TypeMapper.Unsigned -> ()
-        | _ -> failwith $"{where}: requires a declared native integer representation"
+        | _ -> refuseAt site Diagnostics.SignalConnectShape $"{where}: requires a declared native integer representation"
 
     let private isCharPointer (ctx: FidelityCodeGenerator.GenerationContext) cType =
         match cType with
@@ -130,51 +144,56 @@ module TypedSignalGenerator =
             failwith "GObject signals cannot use experimental_native_pointer_surface; raw address carriers violate the Clef FFI boundary."
         let connect =
             declarations |> List.tryPick (function CppParser.Declaration.Function f when f.Name = "g_signal_connect_data" -> Some f | _ -> None)
-            |> Option.defaultWith (fun () -> failwith "GObject signals require `g_signal_connect_data`; list glib-object.h among the pilot headers")
+            |> Option.defaultWith (fun () ->
+                refuseAt { Source = Diagnostics.Located.Unknown "no parsed header declares C symbol 'g_signal_connect_data'"; Pilot = Some ("library.headers", None) }
+                         Diagnostics.BindingSymbolUndeclared "GObject signals require `g_signal_connect_data`; list glib-object.h among the pilot headers")
+        // The connect declaration's own shape is header evidence: located there, no pilot key.
+        let connectSite = { Source = connect.Location.Location; Pilot = None }
+        let connectShape message = refuseAt connectSite Diagnostics.SignalConnectShape message
         if connect.Parameters.Length <> 6 then
-            failwith "g_signal_connect_data requires its complete six-parameter native declaration"
+            connectShape "g_signal_connect_data requires its complete six-parameter native declaration"
         // The connect declaration's parameters, including the destroy notifier and its
         // arguments, resolve in connect's declaring unit. GIR payload names resolve only in the
         // unit that declares each (`payload`), never through another unit's typedefs.
         let girCtx = ctx
         let ctx = FidelityCodeGenerator.inFunctionUnit ctx connect
         let payload where cType nullable nonnull =
-            carrierOf (FidelityCodeGenerator.declaringUnitOf girCtx where cType) where cType nullable nonnull
+            carrierOf (FidelityCodeGenerator.declaringUnitOf girCtx where cType) (girSite where) where cType nullable nonnull
         let nativeTypes = connect.Parameters |> List.map snd
-        requirePointer ctx "g_signal_connect_data instance" nativeTypes.[0]
+        requirePointer ctx connectSite "g_signal_connect_data instance" nativeTypes.[0]
         if not (isCharPointer ctx nativeTypes.[1]) then
-            failwith "g_signal_connect_data detailed_signal requires a declared native char-pointer text parameter"
-        requirePointer ctx "g_signal_connect_data data" nativeTypes.[3]
-        requireInteger ctx "g_signal_connect_data flags" nativeTypes.[5]
-        requireInteger ctx "g_signal_connect_data result" connect.ReturnType
+            connectShape "g_signal_connect_data detailed_signal requires a declared native char-pointer text parameter"
+        requirePointer ctx connectSite "g_signal_connect_data data" nativeTypes.[3]
+        requireInteger ctx connectSite "g_signal_connect_data flags" nativeTypes.[5]
+        requireInteger ctx connectSite "g_signal_connect_data result" connect.ReturnType
         match resolve ctx nativeTypes.[2] with
         | FidelityCodeGenerator.FunctionPointer([], ret) when CodeRenderer.renderType ret = "unit" -> ()
-        | _ -> failwith "g_signal_connect_data handler requires its declared generic void callback slot"
+        | _ -> connectShape "g_signal_connect_data handler requires its declared generic void callback slot"
         let releaseRet, releaseArgs =
             FidelityCodeGenerator.resolveCallbackNativeSignature ctx nativeTypes.[4]
-            |> Option.defaultWith (fun () -> failwith "g_signal_connect_data destroy_data requires its declared native release callback")
+            |> Option.defaultWith (fun () -> connectShape "g_signal_connect_data destroy_data requires its declared native release callback")
         if releaseArgs.Length <> 2 || CodeRenderer.renderType (resolve ctx releaseRet |> FidelityCodeGenerator.clefTypeOf) <> "unit" then
-            failwith "g_signal_connect_data destroy_data requires a two-parameter callback with native void result"
-        releaseArgs |> List.iteri (fun index (_, cType) -> requirePointer ctx $"g_signal_connect_data destroy_data parameter {index}" cType)
+            connectShape "g_signal_connect_data destroy_data requires a two-parameter callback with native void result"
+        releaseArgs |> List.iteri (fun index (_, cType) -> requirePointer ctx connectSite $"g_signal_connect_data destroy_data parameter {index}" cType)
         // Resolving the release slot also rejects unsupported optional entry contracts.
         match resolve ctx nativeTypes.[4] with
         | FidelityCodeGenerator.FunctionPointer _ -> ()
-        | _ -> failwith "g_signal_connect_data destroy_data is not a declared native callback slot"
-        let releaseData = carrierOf ctx "GClosureNotify data" (snd releaseArgs.[0]) false false
-        let releaseClosure = carrierOf ctx "GClosureNotify closure" (snd releaseArgs.[1]) false false
+        | _ -> connectShape "g_signal_connect_data destroy_data is not a declared native callback slot"
+        let releaseData = carrierOf ctx connectSite "GClosureNotify data" (snd releaseArgs.[0]) false false
+        let releaseClosure = carrierOf ctx connectSite "GClosureNotify closure" (snd releaseArgs.[1]) false false
         let release = "FnPtr<" + releaseData.Clef + " -> " + releaseClosure.Clef + " -> unit>"
         let releaseRecord = callbackIdentifier nsPrefix + "_SignalReleaseEntry"
         let releaseSignature = functionRecord (nsPrefix + "::GClosureNotify") [ "data", releaseData.Ref; "closure", releaseClosure.Ref ] "Void"
-        let flags = carrierOf ctx "g_signal_connect_data flags" nativeTypes.[5] false false
-        let handlerId = carrierOf ctx "g_signal_connect_data result" connect.ReturnType false false
+        let flags = carrierOf ctx connectSite "g_signal_connect_data flags" nativeTypes.[5] false false
+        let handlerId = carrierOf ctx connectSite "g_signal_connect_data result" connect.ReturnType false false
         let pointer = DescriptorGenerator.typeRefSource (TypeMapper.pointerRepr ctx.DataModel "native signal entry")
-        let userData = carrierOf ctx "signal user_data" nativeTypes.[3] false false
+        let userData = carrierOf ctx connectSite "signal user_data" nativeTypes.[3] false false
         let signalDecls =
             signals |> List.collect (fun s ->
                 let where = $"signal '{s.Namespace}.{s.Class}::{s.Name}'"
                 let names = s.Parameters |> List.map (fun (name, _, _) -> name)
                 if (names |> List.contains "") || (List.distinct names).Length <> names.Length then
-                    failwith $"{where}: callback parameter names must be present and unique for nullability admission"
+                    refuseAt (girSite where) Diagnostics.SignalParameterNamesInvalid $"{where}: callback parameter names must be present and unique for nullability admission"
                 let instance = payload ($"{where}: instance") (s.ClassCType + " *") false false
                 let instanceHandle =
                     match instance.Type with Generic("option", inner) -> CodeRenderer.renderType inner | typ -> CodeRenderer.renderType typ

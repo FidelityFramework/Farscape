@@ -471,9 +471,14 @@ let projectGenerateCommand =
         printHeader "Generating Fidelity bindings from project..."
         printLine ""
 
-        match BindingGenerator.generateFromProject project.FullName verbose wrappers Farscape.Core.Types.LP64 with
-        | Error e ->
-            showError e
+        match BindingGenerator.generateFromProjectDiagnosed project.FullName verbose wrappers Farscape.Core.Types.LP64 with
+        | Error refusal ->
+            showError refusal.Text
+            // Each FS91xx refusal's clang location and pilot key (#195).
+            for d in refusal.Diagnostics do
+                for line in Diagnostics.renderLocation d do
+                    printColorLine $"  {line}" ConsoleColor.Red
+            if not refusal.Diagnostics.IsEmpty then printLine ""
             1
         | Ok result ->
             printColorLine "Generation Complete" ConsoleColor.Green

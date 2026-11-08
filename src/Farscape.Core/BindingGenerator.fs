@@ -322,17 +322,19 @@ module BindingGenerator =
         let refusals =
             functions |> List.collect (fun f ->
                 let unit = FidelityCodeGenerator.inFunctionUnit ctx f
-                FidelityCodeGenerator.descriptorTypeSites ctx f
-                |> List.choose (fun (site, cType) ->
-                    match FidelityCodeGenerator.descriptorClaimOf unit cType with
-                    | FidelityCodeGenerator.ResolvesNowhere ->
-                        Some (Diagnostics.diagnostic Diagnostics.ByValueTypeUnresolved $"by-value type '{cType}' of the {site} of function '{f.Name}' in '{unitOf f}' resolves through no typedef, record or profile entry of that unit; a descriptor cannot carry an unknown width." f.Location.Location)
-                    // A descriptor citing a record names X.Descriptor, and the binding names the
-                    // record's type: both exist only for a declared value struct (its record
-                    // type and layout module are emitted in every mode).
-                    | FidelityCodeGenerator.RecordByValue (record, ("struct" | "union" as kind)) when not (ctx.ValueStructs.Contains record) ->
-                        Some (Diagnostics.diagnostic Diagnostics.RecordWithoutValueType $"{kind} '{record}' is the type of the {site} of function '{f.Name}' in '{unitOf f}', but the pilot declares no value type for it, so neither its record type nor {record}.Descriptor would be emitted for the binding that cites them; declare it in [options] value_structs." f.Location.Location)
-                    | _ -> None))
+                // A callback value type resolution refuses is located at this function (#195).
+                FidelityCodeGenerator.relocateCallbackValue f.Location.Location (Some (FidelityCodeGenerator.bindingKey f.Name "", None)) (fun () ->
+                    FidelityCodeGenerator.descriptorTypeSites ctx f
+                    |> List.choose (fun (site, cType) ->
+                        match FidelityCodeGenerator.descriptorClaimOf unit cType with
+                        | FidelityCodeGenerator.ResolvesNowhere ->
+                            Some (Diagnostics.diagnostic Diagnostics.ByValueTypeUnresolved $"by-value type '{cType}' of the {site} of function '{f.Name}' in '{unitOf f}' resolves through no typedef, record or profile entry of that unit; a descriptor cannot carry an unknown width." f.Location.Location)
+                        // A descriptor citing a record names X.Descriptor, and the binding names the
+                        // record's type: both exist only for a declared value struct (its record
+                        // type and layout module are emitted in every mode).
+                        | FidelityCodeGenerator.RecordByValue (record, ("struct" | "union" as kind)) when not (ctx.ValueStructs.Contains record) ->
+                            Some (Diagnostics.diagnostic Diagnostics.RecordWithoutValueType $"{kind} '{record}' is the type of the {site} of function '{f.Name}' in '{unitOf f}', but the pilot declares no value type for it, so neither its record type nor {record}.Descriptor would be emitted for the binding that cites them; declare it in [options] value_structs." f.Location.Location)
+                        | _ -> None)))
         match refusals |> List.distinctBy Diagnostics.render with
         | [] -> Ok ()
         | refusals -> Error (Diagnostics.refusalsOf refusals " No bindings were written.")
@@ -891,7 +893,7 @@ module BindingGenerator =
         (outputDir: string)
         (dependencies: string option * string option * string)
         (allFiles: string list)
-        (verbose: bool) : string option =
+        (verbose: bool) : string =
         let packageName = nsPrefix
         let platformPath, platformDescription, metadataPath = dependencies
         let fidprojDir = projectDirectoryForOutput outputDir
@@ -957,7 +959,7 @@ module BindingGenerator =
         let fidprojPath = Path.Combine(fidprojDir, fidprojName)
         File.WriteAllText(fidprojPath, content)
         logVerbose $"Generated fidproj: {fidprojPath}" verbose
-        Some fidprojPath
+        fidprojPath
 
     /// Derive the common namespace prefix from project namespace names.
     /// e.g., ["Fidelity.ROCm.Device"; "Fidelity.ROCm.Memory"] → "Fidelity.ROCm"
@@ -1100,15 +1102,28 @@ module BindingGenerator =
                 let aliases = projections |> List.choose (fun binding ->
                     let original = declarations |> List.tryPick (function CppParser.Declaration.Function f when f.Name = binding.Symbol -> Some f | _ -> None)
                     match original with
-                    | None -> failwith $"Binding projection '{binding.Name}' requires C symbol '{binding.Symbol}' in the parsed headers"
+                    | None ->
+                        Diagnostics.diagnostic Diagnostics.BindingSymbolUndeclared
+                            $"Binding projection '{binding.Name}' requires C symbol '{binding.Symbol}' in the parsed headers"
+                            (Diagnostics.Located.Unknown $"no parsed header declares C symbol '{binding.Symbol}'")
+                        |> Diagnostics.withPilotKey (FidelityCodeGenerator.bindingKey binding.Name "symbol") None
+                        |> Diagnostics.refuse
                     | Some original ->
-                        for index in binding.ReferenceParameters @ binding.ReadOnlyReferenceParameters @ binding.NonnullCallbacks @ binding.StringParameters do
-                            if index < 0 || index >= original.Parameters.Length then failwith $"Binding projection '{binding.Name}' has invalid parameter index {index}"
-                        if binding.ReferenceParameters |> List.exists (fun index -> List.contains index binding.ReadOnlyReferenceParameters) then
-                            failwith $"Binding projection '{binding.Name}' declares a parameter both writable and read-only"
-                        if binding.ConstantParameters.Length > original.Parameters.Length then failwith $"Binding projection '{binding.Name}' has too many constant parameters"
-                        if binding.ReferenceElements.Length > original.Parameters.Length then failwith $"Binding projection '{binding.Name}' has too many reference elements"
-                        if binding.ParameterHandles.Length > original.Parameters.Length then failwith $"Binding projection '{binding.Name}' has too many parameter handles"
+                        let refuse code key parameter message =
+                            FidelityCodeGenerator.refuseContract original code (Some (FidelityCodeGenerator.bindingKey binding.Name key, parameter)) message
+                        for key, indices in [ "reference_parameters", binding.ReferenceParameters; "read_only_reference_parameters", binding.ReadOnlyReferenceParameters
+                                              "nonnull_callbacks", binding.NonnullCallbacks; "string_parameters", binding.StringParameters ] do
+                            for index in indices do
+                                if index < 0 || index >= original.Parameters.Length then
+                                    refuse Diagnostics.ContractParameterOutOfRange key (Some index) $"Binding projection '{binding.Name}' has invalid parameter index {index}"
+                        match binding.ReferenceParameters |> List.tryFind (fun index -> List.contains index binding.ReadOnlyReferenceParameters) with
+                        | Some index -> refuse Diagnostics.ReferenceAccessConflict "read_only_reference_parameters" (Some index) $"Binding projection '{binding.Name}' declares a parameter both writable and read-only"
+                        | None -> ()
+                        for key, length, what in [ "constant_parameters", binding.ConstantParameters.Length, "constant parameters"
+                                                   "reference_elements", binding.ReferenceElements.Length, "reference elements"
+                                                   "parameter_handles", binding.ParameterHandles.Length, "parameter handles" ] do
+                            if length > original.Parameters.Length then
+                                refuse Diagnostics.ContractParameterOutOfRange key (Some original.Parameters.Length) $"Binding projection '{binding.Name}' has too many {what}"
                         if binding.Name = binding.Symbol then None
                         else Some (CppParser.Declaration.Function { original with Name = binding.Name }))
                 let declarations = declarations @ aliases
@@ -1119,8 +1134,20 @@ module BindingGenerator =
                 agreeUnitProfileTypedefs dataModel included (List.zip project.Library.Headers headerDeclLists) |> Result.defaultWith Diagnostics.raiseRefusal
                 if generateWrappers then
                     let callbacks = project.Callbacks |> Option.defaultWith (fun () -> PilotAnalyzer.discoverCallbacks declarations)
+                    // Each listener struct is refused at its clang location (#195). The key is
+                    // [callbacks] listener_structs: it names the struct, or, absent, the structs
+                    // are discovered from the headers in its place.
                     if not callbacks.ListenerStructs.IsEmpty then
-                        failwith "Generic listener builders require declared native entry records and initialized fields. The legacy integer-address builder is not admitted; use typed protocol or signal projections. No bindings were written."
+                        callbacks.ListenerStructs
+                        |> List.map (fun listener ->
+                            let source =
+                                declarations |> List.tryPick (function CppParser.Declaration.Struct s when s.Name = listener.Name -> Some s.Location.Location | _ -> None)
+                                |> Option.defaultValue (Diagnostics.Located.Unknown $"no parsed header declares listener struct '{listener.Name}'")
+                            Diagnostics.diagnostic Diagnostics.GenericListenerUnadmitted
+                                $"listener struct '{listener.Name}': generic listener builders require declared native entry records and initialized fields. The legacy integer-address builder is not admitted; use typed protocol or signal projections."
+                                source
+                            |> Diagnostics.withPilotKey "callbacks.listener_structs" None)
+                        |> fun ds -> Diagnostics.raiseRefusal (Diagnostics.refusalsOf ds " No bindings were written.")
                 let sourceCount = project.Library.Headers.Length + project.Library.XmlProtocols.Length
                 logVerbose $"Merged {declarations.Length} declarations from {sourceCount} source(s)" verbose
 
@@ -1191,14 +1218,22 @@ module BindingGenerator =
                     let bindings = project.Options |> Option.map _.Bindings |> Option.defaultValue []
                     for binding in resultBindings do
                         let contract = if not binding.WritableBuffers.IsEmpty then "writable_buffers" elif binding.ResultRange.IsSome then "result_range" else "callback_invocations"
+                        // Located at the binding's declaration when the headers declare it.
+                        let refuse code message =
+                            let source =
+                                declarations |> List.tryPick (function CppParser.Declaration.Function f when f.Name = binding.Name -> Some f.Location.Location | _ -> None)
+                                |> Option.defaultValue (Diagnostics.Located.Unknown $"no parsed header declares '{binding.Name}'")
+                            Diagnostics.diagnostic code message source
+                            |> Diagnostics.withPilotKey (FidelityCodeGenerator.bindingKey binding.Name contract) None
+                            |> Diagnostics.refuse
                         if bindings |> List.filter (fun other -> other.Name = binding.Name) |> List.length <> 1 then
-                            failwith $"{binding.Name} {contract}: duplicate binding projections"
+                            refuse Diagnostics.BindingDuplicate $"{binding.Name} {contract}: duplicate binding projections"
                         let selected = project.Namespaces |> List.collect (fun ns ->
                             PilotAnalyzer.filterDeclarationsForNamespace ns declarations
                             |> List.choose (function CppParser.Declaration.Function func when func.Name = binding.Name && not (func.Attributes |> List.exists (fun attribute -> attribute.Kind = "DeprecatedAttr")) -> Some(ns.Name, func) | _ -> None))
                         let unique = selected |> List.distinct
                         if unique.Length <> 1 then
-                            failwith $"{binding.Name} {contract}: requires exactly one selected native declaration"
+                            refuse Diagnostics.ContractBindingNotSelectedOnce $"{binding.Name} {contract}: requires exactly one selected native declaration"
                     let selectedNames = project.Namespaces |> List.collect (fun n -> n.Functions) |> Set.ofList
                     let rec markers = function
                         | CodeAST.Generic("CHandle", CodeAST.Named n) when not (Set.contains n (Set.ofList ["unit"; "int"; "float"; "bool"; "string"])) -> [n]
@@ -1249,7 +1284,11 @@ module BindingGenerator =
                     let selected = project.Namespaces |> List.collect (fun n -> n.Signals)
                     if selected.IsEmpty then [] else
                     match introspection with
-                    | None -> failwith "[[namespace]] signals require [library] introspection files"
+                    | None ->
+                        Diagnostics.diagnostic Diagnostics.SignalsWithoutIntrospection "[[namespace]] signals require [library] introspection files"
+                            (Diagnostics.Located.Unknown "a namespace's signals and the library's introspection files are pilot input, not a header declaration")
+                        |> Diagnostics.withPilotKey "library.introspection" None
+                        |> Diagnostics.refuse
                     | Some repo ->
                         match IntrospectionParser.select repo selected with
                         | Ok signals -> signals
@@ -1589,7 +1628,7 @@ module BindingGenerator =
                         let bridgeDir = Path.Combine(Path.GetDirectoryName(outputDir), $"{libLastSegment}Bridge")
                         Directory.CreateDirectory(bridgeDir) |> ignore
 
-                        let fidprojDir = fidprojFile |> Option.map Path.GetDirectoryName |> Option.defaultValue outputDir
+                        let fidprojDir = Path.GetDirectoryName fidprojFile
 
                         // Build function-to-namespace resolver for callbacks
                         let functionToNs =
@@ -1671,8 +1710,8 @@ module BindingGenerator =
                                 let platformDep = Path.GetRelativePath(fidprojDir, platformPath).Replace('\\', '/')
                                 sb.AppendLine($"\"Fidelity.Platform\" = {{ path = \"{platformDep}\" }}") |> ignore
                             | None -> ()
-                            let libDep = fidprojFile |> Option.defaultWith (fun () -> invalidOp "Callback bridge requires its generated binding project")
-                                         |> fun path -> Path.GetRelativePath(fidprojDir, path).Replace('\\', '/')
+                            // The binding project always exists: generateFidproj returns its path (#195).
+                            let libDep = Path.GetRelativePath(fidprojDir, fidprojFile).Replace('\\', '/')
                             sb.AppendLine($"\"{nsPrefix}\" = {{ path = \"{libDep}\" }}") |> ignore
 
                             let bridgeFidprojPath = Path.Combine(fidprojDir, $"{bridgeName}.fidproj")
@@ -1723,11 +1762,7 @@ module BindingGenerator =
                     | _ -> []
 
                 let allOutputFiles =
-                    let baseFiles =
-                        match fidprojFile with
-                        | Some fp -> allFiles @ [fp]
-                        | None -> allFiles
-                    baseFiles @ layer3Files
+                    allFiles @ [fidprojFile] @ layer3Files
 
                 Ok {
                     OutputFiles = allOutputFiles
@@ -1749,7 +1784,8 @@ module BindingGenerator =
     /// A project generation's failure: an FS91xx refusal raised inside generation keeps its
     /// diagnostics, any other failure keeps its text, both after "Binding generation failed: ";
     /// a failure the pilot checks report directly keeps its text as it is. Each diagnostic a
-    /// pilot key causes carries the pilot file and that key.
+    /// pilot key causes carries the pilot file and that key; a diagnostic generation keyed
+    /// (#195) gets the pilot file bound here.
     let private projectFailure (projectPath: string) (run: unit -> Result<GenerationResult, Diagnostics.Refusal>) =
         let failure =
             try run ()
@@ -1759,7 +1795,8 @@ module BindingGenerator =
         let pilotFile = Path.GetFullPath projectPath
         failure |> Result.mapError (Diagnostics.mapDiagnostics (fun d ->
             match d.Pilot, pilotKeyOf d.Code with
-            | None, Some key -> Diagnostics.withPilot { PilotFile = pilotFile; Key = key } d
+            | None, Some key -> Diagnostics.withPilot { PilotFile = pilotFile; Key = key; Parameter = None } d
+            | Some pilot, _ when pilot.PilotFile = "" -> Diagnostics.withPilot { pilot with PilotFile = pilotFile } d
             | _ -> d))
 
     /// Generate bindings from a `.pilot.toml` project. A failure carries the structured

@@ -271,6 +271,39 @@ module FidelityCodeGenerator =
             $"typedef '{name}' is declared by {by} as '{underlying}' ({unitRepr}), but the {model} profile row for '{name}' is {describeRepr profile}; the unit's declaration and the profile must agree."
             source
 
+    /// A binding entry's pilot key, or one key of it, as a refusal names it (#195):
+    /// `options.bindings[<name>]`, `options.bindings[<name>].<key>`.
+    let bindingKey (name: string) (key: string) =
+        if key = "" then $"options.bindings[{name}]" else $"options.bindings[{name}].{key}"
+
+    /// Refuse a callback or projection contract of `func` (#195): the code, the message, the
+    /// function's clang location, and the pilot key and native parameter index whose input the
+    /// refusal names (None when header evidence alone causes it).
+    let refuseContract (func: CppParser.FunctionDecl) (code: string) (pilot: (string * int option) option) (message: string) : 'T =
+        let d = Diagnostics.diagnostic code message func.Location.Location
+        Diagnostics.refuse (match pilot with Some (key, parameter) -> Diagnostics.withPilotKey key parameter d | None -> d)
+
+    /// Where type resolution meets a callback value it refuses, the declaration using the type is
+    /// unknown to it: the refusal says so (FS9145, FS9146).
+    let private unlocatedCallbackValue (typ: string) =
+        Diagnostics.Located.Unknown $"type resolution sees callback type '{typ}' without the declaration that uses it"
+
+    /// Run `f` for one site of a declaration: a callback-value refusal type resolution raised
+    /// without the declaration that uses the type (FS9145, FS9146) is given `source` and `pilot`.
+    let relocateCallbackValue (source: Diagnostics.Located<Diagnostics.SourceLocation>) (pilot: (string * int option) option) (f: unit -> 'T) : 'T =
+        try f ()
+        with :? Diagnostics.RefusalException as refused ->
+            refused.Refusal
+            |> Diagnostics.mapDiagnostics (fun d ->
+                match d.Source with
+                | Diagnostics.Located.Unknown _ when d.Code = Diagnostics.NonnullContradiction || d.Code = Diagnostics.NullableCallbackUnadmitted ->
+                    let d = { d with Source = source }
+                    match pilot, d.Pilot with
+                    | Some (key, parameter), None -> Diagnostics.withPilotKey key parameter d
+                    | _ -> d
+                | _ -> d)
+            |> Diagnostics.raiseRefusal
+
     /// The profile row of a scalar spelling, checked against the unit's own typedef chain for
     /// that name: the row stands when the chain's family and bits agree with it (or the unit
     /// does not declare the name); otherwise the name, its unit spelling, the unit's
@@ -312,18 +345,18 @@ module FidelityCodeGenerator =
         let cleaned = TypeMapper.cleanTypeName cType
         let functionPointer (ret: string) (parameters: string list) =
             if nullabilityIn typedefMap "_Nullable" originalType then
-                failwith $"Nullable function-pointer contract '{originalType}' requires a supported boundary adapter; it cannot be represented as a nonnull native entry."
+                Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.NullableCallbackUnadmitted $"Nullable function-pointer contract '{originalType}' requires a supported boundary adapter; it cannot be represented as a nonnull native entry." (unlocatedCallbackValue originalType))
             let nativeValueType typ =
                 let resolved = recur typ
                 let nonnull = nullabilityIn typedefMap "_Nonnull" typ
                 let nullable = nullabilityIn typedefMap "_Nullable" typ
                 if nonnull && nullable then
-                    failwith $"Callback value '{typ}' has contradictory native nullability evidence."
+                    Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.NonnullContradiction $"Callback value '{typ}' has contradictory native nullability evidence." (unlocatedCallbackValue typ))
                 match resolved with
                 | DataPointer _ | OpaqueHandle _ when not nonnull -> Generic("option", clefTypeOf resolved)
                 | Scalar r when r.Family = TypeMapper.Pointer && not nonnull -> Generic("option", clefTypeOf resolved)
                 | FunctionPointer _ when not nonnull ->
-                    failwith $"Nested native function-pointer value '{typ}' requires explicit nonnull evidence; nullable callback values require a supported boundary adapter."
+                    Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.NullableCallbackUnadmitted $"Nested native function-pointer value '{typ}' requires explicit nonnull evidence; nullable callback values require a supported boundary adapter." (unlocatedCallbackValue typ))
                 | _ -> clefTypeOf resolved
             FunctionPointer (parameters |> List.map nativeValueType, nativeValueType ret)
         // A profile scalar name the unit itself declares as a typedef resolves through the unit's
@@ -716,6 +749,7 @@ module FidelityCodeGenerator =
     let private callbackEntries (ctx: GenerationContext) (namespace': string) (func: CppParser.FunctionDecl) =
         let ctx = inFunctionUnit ctx func
         func.Parameters |> List.mapi (fun index (name, cType) ->
+          relocateCallbackValue func.Location.Location (Some (bindingKey func.Name "", Some index)) (fun () ->
             resolveCallbackNativeSignature ctx cType |> Option.map (fun (ret, args) ->
                 let identity = if cType.Contains "(*)" then func.Name + "::" + name else cType
                 let recordName = "Callback_" + callbackIdentifier (namespace' + "::" + identity) + "Entry"
@@ -740,7 +774,7 @@ module FidelityCodeGenerator =
                                 "ReturnType", Commented(Literal returnRef, returnProvenance)
                                 "CallingConvention", Identifier "CDecl"
                                 "OwnershipTransfer", Identifier "Undeclared" ] ])) ]
-                index, recordName, declarations)) |> List.choose id
+                index, recordName, declarations))) |> List.choose id
 
     /// Every type a function's descriptors claim, with the site that claims it: each parameter
     /// (the pointee a reference projection passes) and the result of its `FunctionDescriptor`,
@@ -771,27 +805,28 @@ module FidelityCodeGenerator =
         match Map.tryFind func.Name ctx.Bindings |> Option.bind _.ResultRange with
         | None -> []
         | Some range ->
-            let refuse reason = failwith $"{func.Name} result_range: {reason}"
+            let key = bindingKey func.Name "result_range"
+            let refuse code parameter reason = refuseContract func code (Some (key, parameter)) $"{func.Name} result_range: {reason}"
             for name, value in ["identity", range.Identity; "version", range.Version; "source", range.Source] do
-                if System.String.IsNullOrWhiteSpace value then refuse $"requires nonempty {name}"
+                if System.String.IsNullOrWhiteSpace value then refuse Diagnostics.HypothesisFieldEmpty None $"requires nonempty {name}"
             let projection = ctx.Bindings[func.Name]
             if hasAdapter || (projection.ConstantParameters |> List.exists (System.String.IsNullOrWhiteSpace >> not)) then
-                refuse "requires an ordinary untranslated native binding"
+                refuse Diagnostics.ContractRequiresUntranslated None "requires an ordinary untranslated native binding"
             let integer cType =
                 match resolveIn ctx cType with
                 | Scalar r when r.Family = TypeMapper.Signed || r.Family = TypeMapper.Unsigned -> true
                 | _ -> false
-            if not (integer func.ReturnType) then refuse "requires a scalar integer native result"
+            if not (integer func.ReturnType) then refuse Diagnostics.ResultRangeNotInteger None "requires a scalar integer native result"
             let endpoint = function
                 | ResultRangeBound.Constant value -> Literal (if value < 0 then $"Constant ({value})" else $"Constant {value}")
                 | ResultRangeBound.Argument index ->
-                    if index < 0 || index >= func.Parameters.Length then refuse $"argument {index} is outside native arity {func.Parameters.Length}"
+                    if index < 0 || index >= func.Parameters.Length then refuse Diagnostics.ContractParameterOutOfRange (Some index) $"argument {index} is outside native arity {func.Parameters.Length}"
                     let reference, _ = referencePassing (Some projection) index (snd func.Parameters[index])
-                    if reference || not (integer (snd func.Parameters[index])) then refuse $"argument {index} requires a scalar integer Value parameter"
+                    if reference || not (integer (snd func.Parameters[index])) then refuse Diagnostics.ResultRangeNotInteger (Some index) $"argument {index} requires a scalar integer Value parameter"
                     Literal $"Argument {index}"
             let lower, upper = endpoint range.Lower, endpoint range.Upper
             match range.Lower, range.Upper with
-            | ResultRangeBound.Constant lo, ResultRangeBound.Constant hi when lo > hi -> refuse "constant bounds are contradictory"
+            | ResultRangeBound.Constant lo, ResultRangeBound.Constant hi when lo > hi -> refuse Diagnostics.ResultRangeBoundsContradictory None "constant bounds are contradictory"
             | _ -> ()
             [ XmlDoc "Result range is a supplied external execution hypothesis; it grants no ABI, loading or lifetime authority."
               ValueBinding(nativeName + "ResultRange", Generic("Expr", Named "ResultRangeDescriptor"),
@@ -807,71 +842,75 @@ module FidelityCodeGenerator =
     let private callbackInvocationDecls (ctx: GenerationContext) namespace' (anchors: Map<string, string * CppParser.FunctionDecl * FsDecl list>) (func: CppParser.FunctionDecl) nativeName =
         let ctx = inFunctionUnit ctx func
         let contracts = ctx.Bindings |> Map.tryFind func.Name |> Option.map _.CallbackInvocations |> Option.defaultValue []
-        let refuse reason = failwith $"{func.Name} callback_invocations: {reason}"
-        if (contracts |> List.map _.Parameter |> Set.ofList).Count <> contracts.Length then refuse "duplicate parameter indices"
+        let key = bindingKey func.Name "callback_invocations"
+        let refuseAt code parameter reason = refuseContract func code (Some (key, parameter)) $"{func.Name} callback_invocations: {reason}"
+        match contracts |> List.countBy _.Parameter |> List.tryFind (fun (_, count) -> count > 1) with
+        | Some (duplicate, _) -> refuseAt Diagnostics.ContractDuplicateParameter (Some duplicate) "duplicate parameter indices"
+        | None -> ()
         let entries = contracts |> List.map (fun contract ->
+            let refuse code reason = refuseAt code (Some contract.Parameter) reason
             for key, value in ["identity", contract.Identity; "version", contract.Version; "source", contract.Source] do
-                if System.String.IsNullOrWhiteSpace value then refuse $"requires nonempty {key}"
+                if System.String.IsNullOrWhiteSpace value then refuse Diagnostics.HypothesisFieldEmpty $"requires nonempty {key}"
             match contract.AbsenceHypothesis with
             | Some hypothesis ->
                 for key, value in ["identity", hypothesis.Identity; "version", hypothesis.Version; "source", hypothesis.Source] do
-                    if System.String.IsNullOrWhiteSpace value then refuse $"absence_hypothesis requires nonempty {key}"
+                    if System.String.IsNullOrWhiteSpace value then refuse Diagnostics.HypothesisFieldEmpty $"absence_hypothesis requires nonempty {key}"
                 if hypothesis.Identity = contract.Identity then
-                    refuse "absence_hypothesis identity must differ from activation identity"
+                    refuse Diagnostics.AbsenceIdentityReused "absence_hypothesis identity must differ from activation identity"
                 if contract.Scope <> "during_call" then
-                    refuse "absence_hypothesis requires during_call"
+                    refuse Diagnostics.CallbackScopeFieldConflict "absence_hypothesis requires during_call"
             | None -> ()
             let scopeType, scopeFields =
                 match contract.Scope, contract.ExitBinding, contract.SuccessStatus with
                 | "during_call", None, None -> "ScopedCallbackDescriptor", []
-                | "during_call", _, _ -> refuse "during_call forbids exit_binding and success_status"
+                | "during_call", _, _ -> refuse Diagnostics.CallbackScopeFieldConflict "during_call forbids exit_binding and success_status"
                 | "process_exit", anchor, Some status ->
                     match resolveIn ctx func.ReturnType with
                     | Scalar r when r.Family = TypeMapper.Signed && r.Bits = 32 -> ()
-                    | _ -> refuse "process_exit requires a signed32 registration result"
+                    | _ -> refuse Diagnostics.ProcessExitSignature "process_exit requires a signed32 registration result"
                     let anchorValue =
                         match anchor with
                         | None -> Identifier "None"
                         | Some selected ->
                             match Map.tryFind selected anchors with
                             | Some (actual, _, _) -> Literal ("Some " + quoteString actual)
-                            | None -> refuse "exit_binding must name a selected qualified generated declaration"
+                            | None -> refuse Diagnostics.ContractBindingUnselected "exit_binding must name a selected qualified generated declaration"
                     "ProcessExitCallbackDescriptor", ["ExitBinding", anchorValue; "SuccessStatus", Literal (string status)]
-                | "process_exit", _, None -> refuse "process_exit requires signed32 success_status"
-                | _ -> refuse "scope must be during_call or process_exit"
+                | "process_exit", _, None -> refuse Diagnostics.CallbackScopeFieldConflict "process_exit requires signed32 success_status"
+                | _ -> refuse Diagnostics.CallbackScopeUnknown "scope must be during_call or process_exit"
             if contract.Parameter < 0 || contract.Parameter >= func.Parameters.Length then
-                refuse $"parameter {contract.Parameter} is outside native arity {func.Parameters.Length}"
+                refuse Diagnostics.ContractParameterOutOfRange $"parameter {contract.Parameter} is outside native arity {func.Parameters.Length}"
             let projection = ctx.Bindings[func.Name]
             if not projection.ReferenceParameters.IsEmpty || not projection.ReadOnlyReferenceParameters.IsEmpty
                || not projection.StringParameters.IsEmpty || (projection.ConstantParameters |> List.exists (System.String.IsNullOrWhiteSpace >> not)) then
-                refuse "requires an untranslated native parameter list"
+                refuse Diagnostics.ContractRequiresUntranslated "requires an untranslated native parameter list"
             let name, cType = func.Parameters[contract.Parameter]
             match resolveIn ctx cType with
             | FunctionPointer _ -> ()
-            | _ -> refuse $"parameter {contract.Parameter} is not a native function pointer"
-            let ret, parameters = resolveCallbackNativeSignature ctx cType |> Option.defaultWith (fun () -> refuse "native entry signature is unavailable")
+            | _ -> refuse Diagnostics.CallbackNotFunctionPointer $"parameter {contract.Parameter} is not a native function pointer"
+            let ret, parameters = resolveCallbackNativeSignature ctx cType |> Option.defaultWith (fun () -> refuse Diagnostics.CallbackSignatureUnrecovered $"parameter {contract.Parameter} type '{cType}' resolves to a native function pointer, but no native entry signature is recoverable from it")
             if parameters.IsEmpty then
                 let declaredType =
                     Map.tryFind (TypeMapper.cleanTypeName (stripNullability cType)) ctx.TypedefMap
                     |> Option.defaultValue cType
                 match splitFunctionPointerPrototype declaredType with
                 | Some (_, [], true) -> ()
-                | _ -> refuse "zero-argument native entries require an explicit (void) prototype"
+                | _ -> refuse Diagnostics.CallbackZeroArgumentPrototype "zero-argument native entries require an explicit (void) prototype"
                 match resolveIn ctx ret with
                 | Scalar r when r.Family = TypeMapper.Void -> ()
-                | _ -> refuse "zero-argument native entries require a void result"
+                | _ -> refuse Diagnostics.CallbackZeroArgumentPrototype "zero-argument native entries require a void result"
             if contract.Scope = "process_exit" then
                 match parameters, resolveIn ctx ret with
                 | [], Scalar r when r.Family = TypeMapper.Void -> ()
-                | _ -> refuse "process_exit requires a zero-argument void callback"
+                | _ -> refuse Diagnostics.ProcessExitSignature "process_exit requires a zero-argument void callback"
             let nativeType isReturn (cType: string) =
-                if cType.Contains('&') then refuse $"unsupported native entry reference signature type '{cType}'"
+                if cType.Contains('&') then refuse Diagnostics.CallbackEntryTypeUnadmitted $"unsupported native entry reference signature type '{cType}'"
                 match resolveIn ctx cType with
                 | Scalar r when (r.Family = TypeMapper.Signed || r.Family = TypeMapper.Unsigned) && (r.Bits = 32 || r.Bits = 64) -> ()
                 | Scalar r when r.Family = TypeMapper.Bool ->
-                    refuse "Boolean native entry signatures are outside the admitted ordered integer callback profile"
+                    refuse Diagnostics.CallbackEntryTypeUnadmitted "Boolean native entry signatures are outside the admitted ordered integer callback profile"
                 | Scalar r when isReturn && r.Family = TypeMapper.Void -> ()
-                | _ -> refuse $"unsupported native entry signature type '{cType}'"
+                | _ -> refuse Diagnostics.CallbackEntryTypeUnadmitted $"unsupported native entry signature type '{cType}'"
                 abiClaim ctx cType
             let infos = parameters |> List.map (fun (name, typ) ->
                 let typeRef, provenance = nativeType false typ
@@ -937,34 +976,52 @@ module FidelityCodeGenerator =
             |> Set.ofList
         let nonnullIndices = Set.union clangNonnull tomlNonnull
 
+        let refuse code key parameter (reason: string) =
+            refuseContract func code (key |> Option.map (fun key -> key, parameter)) $"{func.Name} parameter {parameter.Value}: {reason}"
+        let refuseResult code key (reason: string) =
+            refuseContract func code (key |> Option.map (fun key -> key, None)) $"{func.Name}: {reason}"
+        // The pilot key carrying an index's projection: the first of `keys` whose list holds it.
+        let keyHolding idx (keys: (string * (BindingProjection -> int list)) list) =
+            keys |> List.tryPick (fun (key, indices) ->
+                if projection |> Option.exists (fun b -> List.contains idx (indices b)) then Some (bindingKey func.Name key) else None)
+
         // Map parameters with nullability awareness
         let parameters =
             func.Parameters
             |> List.mapi (fun idx (name, cType) ->
+              relocateCallbackValue func.Location.Location (Some (bindingKey func.Name "", Some idx)) (fun () ->
+                let refuse code key reason = refuse code key (Some idx) reason
                 let reference, _ = referencePassing projection idx cType
                 let element = projection |> Option.bind (fun b -> List.tryItem idx b.ReferenceElements) |> Option.filter ((<>) "")
                 let stringParameter = projection |> Option.exists (fun b -> List.contains idx b.StringParameters)
                 let callbackNonnull = projection |> Option.exists (fun b -> List.contains idx b.NonnullCallbacks)
                 let handle = projection |> Option.bind (fun b -> List.tryItem idx b.ParameterHandles) |> Option.filter ((<>) "")
                 let provenNonnull = nonnullIndices.Contains idx || outerNullabilityIn ctx "_Nonnull" cType || callbackNonnull
+                // Pilot nonnull evidence names its key; clang's attribute and _Nonnull are header evidence.
+                let nonnullKey =
+                    if tomlNonnull.Contains idx then Some $"annotations.nonnull.{func.Name}"
+                    elif callbackNonnull then Some (bindingKey func.Name "nonnull_callbacks")
+                    else None
                 if provenNonnull && outerNullabilityIn ctx "_Nullable" cType then
-                    failwith $"{func.Name} parameter {idx}: nullable native type conflicts with a nonnull contract"
+                    refuse Diagnostics.NonnullContradiction nonnullKey "nullable native type conflicts with a nonnull contract"
                 if provenNonnull && (projection |> Option.exists (fun binding ->
                     binding.CallbackInvocations |> List.exists (fun contract -> contract.Parameter = idx && contract.AbsenceHypothesis.IsSome))) then
-                    failwith $"{func.Name} parameter {idx}: absence_hypothesis conflicts with a nonnull contract"
+                    refuse Diagnostics.NonnullContradiction (Some (bindingKey func.Name "callback_invocations")) "absence_hypothesis conflicts with a nonnull contract"
                 let nullableCallback =
                     match resolveIn ctx cType with
                     | FunctionPointer _ when not provenNonnull ->
                         let contracts = projection |> Option.map _.CallbackInvocations |> Option.defaultValue []
                         if not (contracts |> List.exists (fun contract -> contract.Parameter = idx)) then
-                            failwith $"{func.Name} parameter {idx}: a native function-pointer parameter requires explicit nonnull evidence; nullable callback parameters require a supported boundary adapter."
+                            refuse Diagnostics.NullableCallbackUnadmitted (Some (bindingKey func.Name "")) "a native function-pointer parameter requires explicit nonnull evidence; nullable callback parameters require a supported boundary adapter."
                         if contracts |> List.exists (fun contract -> contract.Scope <> "during_call") then
-                            failwith $"{func.Name} parameter {idx}: nullable callback parameters require only during_call invocation contracts."
+                            refuse Diagnostics.NullableCallbackScope (Some (bindingKey func.Name "callback_invocations")) "nullable callback parameters require only during_call invocation contracts."
                         // Reuse the complete receiving-contract validator before raw emission.
                         // This profile has no process-exit anchors to resolve.
                         callbackInvocationDecls ctx "" Map.empty func func.Name |> ignore
                         true
                     | _ -> false
+                let referenceKey =
+                    keyHolding idx [ "reference_parameters", _.ReferenceParameters; "read_only_reference_parameters", _.ReadOnlyReferenceParameters ]
                 let fsType =
                     if reference then
                         match cType with
@@ -975,26 +1032,26 @@ module FidelityCodeGenerator =
                                 Named (CodeRenderer.renderType (wrapOption (clefTypeOf pointee)) + " array")
                             | Scalar r when r.Family = TypeMapper.Pointer ->
                                 Named (CodeRenderer.renderType (wrapOption (clefTypeOf (Scalar r))) + " array")
-                            | _ -> failwith $"{func.Name} parameter {idx}: Reference requires a scalar or opaque pointer cell"
+                            | _ -> refuse Diagnostics.ReferenceCellUnsupported referenceKey "Reference requires a scalar or opaque pointer cell"
                         | ParsedCType info when info.PointerDepth = 2 ->
                             let pointerType = cType.Substring(0, cType.LastIndexOf('*')).Trim()
                             let element = resolveIn ctx pointerType |> clefTypeOf |> wrapOption
                             Named (CodeRenderer.renderType element + " array")
-                        | _ -> failwith $"{func.Name} parameter {idx}: Reference requires a scalar cell or one opaque pointer cell"
+                        | _ -> refuse Diagnostics.ReferenceCellUnsupported referenceKey "Reference requires a scalar cell or one opaque pointer cell"
                     elif stringParameter then
                         if isCharPointerIn ctx cType then Named "string"
-                        else failwith $"{func.Name} parameter {idx}: string projection requires char pointer"
+                        else refuse Diagnostics.StringProjectionNotCharPointer (Some (bindingKey func.Name "string_parameters")) "string projection requires char pointer"
                     elif handle.IsSome then
-                        if not (isDataPointerIn ctx cType) then failwith $"{func.Name} parameter {idx}: handle projection requires a C data pointer"
+                        if not (isDataPointerIn ctx cType) then refuse Diagnostics.HandleProjectionNotDataPointer (Some (bindingKey func.Name "parameter_handles")) "handle projection requires a C data pointer"
                         Generic("CHandle", Named handle.Value)
                     elif callbackNonnull then
                         match mapType cType with
                         | Generic("FnPtr", _) as ty -> ty
-                        | _ -> failwith $"{func.Name} parameter {idx}: nonnull_callbacks requires a C function pointer"
+                        | _ -> refuse Diagnostics.CallbackNotFunctionPointer (Some (bindingKey func.Name "nonnull_callbacks")) "nonnull_callbacks requires a C function pointer"
                     else mapType cType
                 let isNullable = nullableCallback || (not reference && isDataPointerIn ctx cType && not provenNonnull)
                 let finalType = if isNullable then wrapOption fsType else fsType
-                { FsParam.Name = cleanParamName name; Type = finalType })
+                { FsParam.Name = cleanParamName name; Type = finalType }))
 
         // Return type: nullable unless proven nonnull
         let returnIsPointer = isDataPointerIn ctx func.ReturnType
@@ -1005,16 +1062,18 @@ module FidelityCodeGenerator =
         let hasReturnsNonnullAttr =
             func.Attributes |> List.exists (fun a -> a.Kind = "ReturnsNonNullAttr")
         let provenReturnNonnull = returnNonnull || hasReturnsNonnullAttr || outerNullabilityIn ctx "_Nonnull" func.ReturnType
+        let returnsKey = Some "annotations.nonnull.nonnull_returns"
         if provenReturnNonnull && outerNullabilityIn ctx "_Nullable" func.ReturnType then
-            failwith $"{func.Name}: nullable native result conflicts with a nonnull contract"
-        match resolveIn ctx func.ReturnType with
-        | FunctionPointer _ when not provenReturnNonnull ->
-            failwith $"{func.Name}: a native function-pointer result requires explicit nonnull evidence; nullable callback results require a supported boundary adapter."
-        | _ -> ()
+            refuseResult Diagnostics.NonnullContradiction (if returnNonnull then returnsKey else None) "nullable native result conflicts with a nonnull contract"
+        relocateCallbackValue func.Location.Location (if returnNonnull then Some (returnsKey.Value, None) else None) (fun () ->
+            match resolveIn ctx func.ReturnType with
+            | FunctionPointer _ when not provenReturnNonnull ->
+                refuseResult Diagnostics.NullableCallbackUnadmitted returnsKey "a native function-pointer result requires explicit nonnull evidence; nullable callback results require a supported boundary adapter."
+            | _ -> ())
         let returnType =
             match projection |> Option.bind (fun b -> b.ReturnHandle) with
             | Some name ->
-                if not (isDataPointerIn ctx func.ReturnType) then failwith $"{func.Name}: return_handle requires a C data pointer"
+                if not (isDataPointerIn ctx func.ReturnType) then refuseResult Diagnostics.HandleProjectionNotDataPointer (Some (bindingKey func.Name "return_handle")) "return_handle requires a C data pointer"
                 Generic("CHandle", Named name)
             | None -> mapType func.ReturnType
         let finalReturnType =
@@ -1040,7 +1099,7 @@ module FidelityCodeGenerator =
                 | Some value ->
                     match System.Int64.TryParse value, p.Type with
                     | (true, _), Named "int" -> Literal value
-                    | _ -> failwith $"{func.Name} parameter {index}: constant projection requires an integer literal and scalar integer parameter")
+                    | _ -> refuse Diagnostics.ConstantProjectionInvalid (Some (bindingKey func.Name "constant_parameters")) (Some index) "constant projection requires an integer literal and scalar integer parameter")
             let publicParameters = parameters |> List.indexed |> List.choose (fun(i,p)->if (fixedAt i).IsSome then None else Some p)
             [ LetBinding(func.Name, publicParameters, finalReturnType, FunctionCall("", nativeName, args), []) ]
         let callbackNotes =
@@ -1095,10 +1154,10 @@ module FidelityCodeGenerator =
         match ctx.Bindings |> Map.tryFind func.Name |> Option.bind _.Resource with
         | None -> []
         | Some resource ->
-            let refuse reason = failwith $"{func.Name} resource: {reason}"
+            let refuse code reason = refuseContract func code (Some (bindingKey func.Name "resource", None)) $"{func.Name} resource: {reason}"
             for key, value in ["identity", resource.Identity; "version", resource.Version; "source", resource.Source] do
-                if System.String.IsNullOrWhiteSpace value then refuse $"requires nonempty {key}"
-            if resource.ReleaseParameter <> 0 then refuse "owned_nullable_return requires release_parameter 0"
+                if System.String.IsNullOrWhiteSpace value then refuse Diagnostics.HypothesisFieldEmpty $"requires nonempty {key}"
+            if resource.ReleaseParameter <> 0 then refuse Diagnostics.ResourceReturnShape "owned_nullable_return requires release_parameter 0"
             let signature declarations =
                 declarations |> List.pick (function
                     | LetBinding(_, parameters, result, _, attrs) when not attrs.IsEmpty -> Some (parameters, result)
@@ -1106,10 +1165,10 @@ module FidelityCodeGenerator =
             let marker =
                 match signature raw |> snd with
                 | Generic("option", Generic("CHandle", Named marker)) when isDataPointerIn ctx func.ReturnType -> marker
-                | _ -> refuse "owned_nullable_return requires a native data pointer returned as option<CHandle<marker>>"
+                | _ -> refuse Diagnostics.ResourceReturnShape "owned_nullable_return requires a native data pointer returned as option<CHandle<marker>>"
             let releaseName, release, releaseRaw =
                 anchors |> Map.tryFind resource.ReleaseBinding
-                |> Option.defaultWith (fun () -> refuse "release_binding must name an exact selected qualified generated declaration")
+                |> Option.defaultWith (fun () -> refuse Diagnostics.ContractBindingUnselected "release_binding must name an exact selected qualified generated declaration")
             let parameters, result = signature releaseRaw
             // The release declaration's return and parameter resolve in its own unit.
             let releaseCtx = inFunctionUnit ctx release
@@ -1117,12 +1176,12 @@ module FidelityCodeGenerator =
             | [_, typ], [parameter], Named "unit", Scalar repr
                 when repr.Family = TypeMapper.Void && isDataPointerIn releaseCtx typ
                      && parameter.Type = Generic("CHandle", Named marker) -> ()
-            | _ -> refuse "release requires unary matching CHandle Value parameter 0 and a raw Void result"
+            | _ -> refuse Diagnostics.ResourceReleaseShape "release requires unary matching CHandle Value parameter 0 and a raw Void result"
             match ctx.Bindings |> Map.tryFind release.Name with
             | Some projection when not projection.ReferenceParameters.IsEmpty || not projection.ReadOnlyReferenceParameters.IsEmpty
                                    || not projection.StringParameters.IsEmpty
                                    || (projection.ConstantParameters |> List.exists (System.String.IsNullOrWhiteSpace >> not)) ->
-                refuse "release requires an untranslated unary Value parameter"
+                refuse Diagnostics.ContractRequiresUntranslated "release requires an untranslated unary Value parameter"
             | _ -> ()
             [ XmlDoc "Owned nullable return contract: explicit source cleanup and alias retirement remain required; no spatial or retention authority."
               ValueBinding(nativeName + "ResourceDescriptor", Generic("Expr", Named "ResourceDescriptor"),
@@ -1140,31 +1199,35 @@ module FidelityCodeGenerator =
         let ctx = inFunctionUnit ctx func
         let projection = ctx.Bindings |> Map.tryFind func.Name
         let contracts = projection |> Option.map _.WritableBuffers |> Option.defaultValue []
-        let refuse reason = failwith $"{func.Name} writable_buffers: {reason}"
-        if (contracts |> List.map _.Parameter |> Set.ofList).Count <> contracts.Length then
-            refuse "duplicate parameter indices"
+        let key = bindingKey func.Name "writable_buffers"
+        let refuseAt code parameter reason = refuseContract func code (Some (key, parameter)) $"{func.Name} writable_buffers: {reason}"
+        match contracts |> List.countBy _.Parameter |> List.tryFind (fun (_, count) -> count > 1) with
+        | Some (duplicate, _) -> refuseAt Diagnostics.ContractDuplicateParameter (Some duplicate) "duplicate parameter indices"
+        | None -> ()
         contracts |> List.collect (fun contract ->
+            let refuse code reason = refuseAt code (Some contract.Parameter) reason
             for key, value in ["identity", contract.Identity; "version", contract.Version; "source", contract.Source] do
-                if System.String.IsNullOrWhiteSpace value then refuse $"requires nonempty {key}"
+                if System.String.IsNullOrWhiteSpace value then refuse Diagnostics.HypothesisFieldEmpty $"requires nonempty {key}"
             let projection = projection.Value
             if hasAdapter || not projection.StringParameters.IsEmpty
                || (projection.ConstantParameters |> List.exists (System.String.IsNullOrWhiteSpace >> not)) then
-                refuse "requires an untranslated native parameter list"
+                refuse Diagnostics.ContractRequiresUntranslated "requires an untranslated native parameter list"
             let parameter index =
-                if index < 0 || index >= func.Parameters.Length then refuse $"parameter {index} is outside native arity {func.Parameters.Length}"
+                if index < 0 || index >= func.Parameters.Length then
+                    refuseAt Diagnostics.ContractParameterOutOfRange (Some index) $"parameter {index} is outside native arity {func.Parameters.Length}"
                 snd func.Parameters[index]
             let buffer, count = parameter contract.Parameter, parameter contract.CountParameter
-            if contract.Parameter = contract.CountParameter then refuse "requires distinct buffer and count parameters"
+            if contract.Parameter = contract.CountParameter then refuse Diagnostics.WritableBufferSameParameter "requires distinct buffer and count parameters"
             let reference, readOnly = referencePassing (Some projection) contract.Parameter buffer
             if not reference || readOnly || not (isDataPointerIn ctx buffer) then
-                refuse "buffer parameter requires writable Reference passing"
+                refuse Diagnostics.WritableBufferNotByteReference "buffer parameter requires writable Reference passing"
             match List.tryItem contract.Parameter projection.ReferenceElements |> Option.map (resolveIn ctx) with
             | Some (Scalar element) when element.Family = TypeMapper.Unsigned && element.Bits = 8 -> ()
-            | _ -> refuse "buffer parameter requires an explicit unsigned8 byte reference element contract"
+            | _ -> refuse Diagnostics.WritableBufferNotByteReference "buffer parameter requires an explicit unsigned8 byte reference element contract"
             let countReference, _ = referencePassing (Some projection) contract.CountParameter count
             match resolveIn ctx count with
             | Scalar scalar when not countReference && (scalar.Family = TypeMapper.Signed || scalar.Family = TypeMapper.Unsigned) -> ()
-            | _ -> refuse "count parameter requires scalar integer Value passing"
+            | _ -> refuseAt Diagnostics.WritableBufferCountNotInteger (Some contract.CountParameter) "count parameter requires scalar integer Value passing"
             [ XmlDoc "Call-bounded writable byte promise: actual capacity, guards, source uses and encoding require independent source evidence."
               ValueBinding(nativeName + "WritableBuffer" + string contract.Parameter + "Descriptor", Generic("Expr", Named "WritableBufferDescriptor"),
                   Quoted(RecordBlock [
@@ -1269,17 +1332,24 @@ module FidelityCodeGenerator =
                 | Some (field, a) ->
                     failwith $"Value struct '{s.Name}' field '{field}' has a type reaching typedef '{a.Typedef}', which carries attribute '{a.Attribute.Kind}' that its Clef record's field type cannot represent; a plain record with scalar or pointer fields is required."
                 | None -> ()
+                // A value struct's callback slot is refused at the record's clang location and
+                // its `options.value_structs` entry (#195).
+                let refuseField code message =
+                    Diagnostics.diagnostic code message s.Location.Location
+                    |> Diagnostics.withPilotKey "options.value_structs" None
+                    |> Diagnostics.refuse
                 let fieldType (field: CppParser.FieldDecl) =
+                  relocateCallbackValue s.Location.Location (Some ("options.value_structs", None)) (fun () ->
                     let resolved = resolveIn unitCtx field.Type
                     let nonnull = outerNullabilityIn unitCtx "_Nonnull" field.Type
                     if nonnull && outerNullabilityIn unitCtx "_Nullable" field.Type then
-                        failwith $"Value struct '{s.Name}' field '{field.Name}' has contradictory native nullability evidence."
+                        refuseField Diagnostics.NonnullContradiction $"Value struct '{s.Name}' field '{field.Name}' has contradictory native nullability evidence."
                     match resolved with
                     | DataPointer _ | OpaqueHandle _ when not nonnull -> wrapOption (clefTypeOf resolved)
                     | Scalar r when r.Family = TypeMapper.Pointer && not nonnull -> wrapOption (clefTypeOf resolved)
                     | FunctionPointer _ when not nonnull ->
-                        failwith $"Value struct '{s.Name}' field '{field.Name}' requires explicit nonnull callback-slot evidence; nullable callback fields require a supported boundary adapter."
-                    | _ -> clefTypeOf resolved
+                        refuseField Diagnostics.NullableCallbackUnadmitted $"Value struct '{s.Name}' field '{field.Name}' requires explicit nonnull callback-slot evidence; nullable callback fields require a supported boundary adapter."
+                    | _ -> clefTypeOf resolved)
                 [ RecordType(s.Name, s.Fields |> List.map (fun field -> cleanParamName field.Name, fieldType field), s.Documentation, []) ]
             else []
         valueDecls @ DescriptorGenerator.structDecls

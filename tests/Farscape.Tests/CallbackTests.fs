@@ -377,24 +377,42 @@ module BoundaryGenerationTests =
         Assert.Contains("Callback_First", output)
         Assert.Contains("Callback_Second", output)
 
+    /// The one structured refusal (#195) a registration meets.
+    let private refused registrations : Diagnostics.Diagnostic =
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> render LP64 registrations |> ignore)
+        match error.Refusal.Diagnostics with
+        | [ d ] -> Assert.Equal(Diagnostics.render d, error.Refusal.Text); d
+        | ds -> failwithf "one diagnostic expected, got %d" ds.Length
+
+    let private registrationKey field parameter =
+        Some { Diagnostics.PilotLocation.PilotFile = ""; Diagnostics.PilotLocation.Key = "callbacks.registrations[register_event]." + field; Diagnostics.PilotLocation.Parameter = parameter }
+
     [<Fact>]
     let ``missing registration declaration is diagnosed instead of silently omitted`` () =
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> render LP64 [{registration with Function = "missing"}] |> ignore)
-        Assert.Contains("missing from the parsed declarations", error.Message)
+        let d = refused [{registration with Function = "missing"}]
+        Assert.Equal(Diagnostics.BindingSymbolUndeclared, d.Code)
+        Assert.Equal("Callback registration 'missing' is missing from the parsed declarations.", d.Message)
+        Assert.Equal(Diagnostics.Located.Unknown "no parsed header declares C symbol 'missing'", d.Source)
+        Assert.Equal(Some { Diagnostics.PilotLocation.PilotFile = ""; Diagnostics.PilotLocation.Key = "callbacks.registrations[missing].function"; Diagnostics.PilotLocation.Parameter = None }, d.Pilot)
 
     [<Theory>]
-    [<InlineData("missing")>]
-    [<InlineData("data")>]
-    let ``callback parameter must exist and be a function pointer`` name =
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> render LP64 [{registration with CallbackParam = name}] |> ignore)
-        Assert.Contains("requires function-pointer parameter", error.Message)
+    [<InlineData("missing", "FS9164", -1, "Callback registration 'register_event' names parameter 'missing', which its native declaration does not declare.")>]
+    [<InlineData("data", "FS9142", 1, "Callback registration 'register_event' requires function-pointer parameter 'data'.")>]
+    let ``callback parameter must exist and be a function pointer`` name (code: string) (parameter: int) (message: string) =
+        let d = refused [{registration with CallbackParam = name}]
+        Assert.Equal(code, d.Code)
+        Assert.Equal(message, d.Message)
+        Assert.Equal(TestHelpers.constructed.Location, d.Source)
+        Assert.Equal(registrationKey "callback_param" (if parameter >= 0 then Some parameter else None), d.Pilot)
 
     [<Theory>]
-    [<InlineData("missing")>]
-    [<InlineData("handler")>]
-    let ``environment parameter must exist and be a data pointer`` name =
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> render LP64 [{registration with DataParam = Some name}] |> ignore)
-        Assert.Contains("requires data-pointer environment", error.Message)
+    [<InlineData("missing", "FS9164", -1, "Callback registration 'register_event' names parameter 'missing', which its native declaration does not declare.")>]
+    [<InlineData("handler", "FS9165", 0, "Callback registration 'register_event' requires data-pointer environment parameter 'handler'.")>]
+    let ``environment parameter must exist and be a data pointer`` name (code: string) (parameter: int) (message: string) =
+        let d = refused [{registration with DataParam = Some name}]
+        Assert.Equal(code, d.Code)
+        Assert.Equal(message, d.Message)
+        Assert.Equal(registrationKey "data_param" (if parameter >= 0 then Some parameter else None), d.Pilot)
 
     [<Fact>]
     let ``missing binding module cannot produce an unowned callback entry`` () =
@@ -415,8 +433,11 @@ module BoundaryGenerationTests =
     [<Fact>]
     let ``listener fields cannot be defaulted into foreign function addresses`` () =
         let listeners : CallbackSpec = { Registrations = []; ListenerStructs = [{ Name = "listener"; RegistrationFunction = None }] }
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> CallbackWrapperGenerator.generateL2 listeners [] "Test.Listeners" [] |> ignore)
-        Assert.Contains("declared native entry records and initialized fields", error.Message)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> CallbackWrapperGenerator.generateL2 listeners [] "Test.Listeners" [] |> ignore)
+        let d = error.Refusal.Diagnostics |> List.exactlyOne
+        Assert.Equal(Diagnostics.GenericListenerUnadmitted, d.Code)
+        Assert.Contains("listener struct 'listener': generic listener builders require declared native entry records and initialized fields", d.Message)
+        Assert.Equal(Some { Diagnostics.PilotLocation.PilotFile = ""; Diagnostics.PilotLocation.Key = "callbacks.listener_structs"; Diagnostics.PilotLocation.Parameter = None }, d.Pilot)
 
     [<Fact>]
     let ``empty callback configuration generates no bridge`` () =

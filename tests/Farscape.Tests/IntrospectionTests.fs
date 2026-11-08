@@ -629,3 +629,49 @@ let ``result range project validates every supplied contract before output write
       Assert.Equal<string array>([|sentinel|], Directory.GetFiles(output, "*", SearchOption.AllDirectories))
   finally
     if Directory.Exists directory then Directory.Delete(directory, true)
+
+// Signal refusals are structured (#195): GIR evidence is sited at the introspection files
+// (GIR keeps no positions); g_signal_connect_data's own shape at its clang declaration.
+[<Theory>]
+[<InlineData("carrier", "FS9168", "script-message-received", "native pointee 'WebKitJavascriptResult' has no declared carrier in the binding Types module")>]
+[<InlineData("nullability", "FS9169", "load-accepted", "GIR nullability evidence does not describe a native data pointer")>]
+[<InlineData("contradictory", "FS9145", "script-message-received", "contradictory GIR nullability evidence")>]
+[<InlineData("float", "FS9144", "progress-changed", "has no supported callback entry declaration, so the signal is not projected")>]
+[<InlineData("names", "FS9171", "script-message-received", "callback parameter names must be present and unique for nullability admission")>]
+[<InlineData("connect", "FS9170", "closed", "g_signal_connect_data handler requires its declared generic void callback slot")>]
+[<InlineData("connect-missing", "FS9159", "closed", "GObject signals require `g_signal_connect_data`; list glib-object.h among the pilot headers")>]
+let ``each signal refusal carries its code, its site and its pilot key`` shape (code: string) (signalName: string) (reason: string) =
+    let signal = (selectedSignals gir [ $"UserContentManager::{signalName}" ]).Head
+    let signal =
+        match shape with
+        | "nullability" -> { signal with Parameters = signal.Parameters |> List.mapi (fun i (n, t, nullable) -> n, t, nullable || i = 1) }
+        | "contradictory" -> { signal with Parameters = signal.Parameters |> List.map (fun (n, t, _) -> n, t, true); NonnullParameters = Set.singleton "value" }
+        | "names" -> { signal with Parameters = signal.Parameters @ signal.Parameters }
+        | _ -> signal
+    let declarations =
+        headerDecls |> List.choose (function
+            | CppParser.Declaration.Function f when f.Name = "g_signal_connect_data" ->
+                if shape = "connect-missing" then None
+                elif shape = "connect" then Some (CppParser.Declaration.Function { f with Parameters = f.Parameters |> List.mapi (fun i (n, t) -> if i = 2 then n, "void *" else n, t) })
+                else Some (CppParser.Declaration.Function f)
+            | declaration -> Some declaration)
+    let context =
+        { FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty with
+            PhantomMarkers = if shape = "carrier" then Set.ofList ["WebKitUserContentManager"; "GClosure"] else (signalContext Types.LP64).PhantomMarkers }
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> TypedSignalGenerator.render "Fidelity.WebKit.Native" [signal] declarations context |> ignore)
+    let d = error.Refusal.Diagnostics |> List.exactlyOne
+    Assert.Equal(code, d.Code)
+    Assert.EndsWith(reason, d.Message)
+    match shape with
+    | "connect" ->
+        Assert.Equal(TestHelpers.constructed.Location, d.Source)
+        Assert.Equal(None, d.Pilot)
+    | "connect-missing" ->
+        Assert.Equal(Diagnostics.Located.Unknown "no parsed header declares C symbol 'g_signal_connect_data'", d.Source)
+        Assert.Equal(Some { Diagnostics.PilotLocation.PilotFile = ""; Diagnostics.PilotLocation.Key = "library.headers"; Diagnostics.PilotLocation.Parameter = None }, d.Pilot)
+    | _ ->
+        Assert.StartsWith($"signal 'WebKit2.UserContentManager::{signalName}'", d.Message)
+        match d.Source with
+        | Diagnostics.Located.Unknown why -> Assert.StartsWith("GIR introspection data carries no source position for signal 'WebKit2.UserContentManager::", why)
+        | known -> failwithf "GIR evidence has no position, got %A" known
+        Assert.Equal(Some { Diagnostics.PilotLocation.PilotFile = ""; Diagnostics.PilotLocation.Key = "library.introspection"; Diagnostics.PilotLocation.Parameter = None }, d.Pilot)
