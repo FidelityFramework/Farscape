@@ -64,11 +64,11 @@ module DeclarationAlgebra =
         OnDelegate  = fun _ -> None
     }
 
-    /// Extract names of fully-defined structs (those with fields).
-    /// Forward-declared structs (zero fields) are excluded.
+    /// Extract names of fully-defined structs (those with members: fields, or only unnamed
+    /// bit-fields, #183). Forward-declared structs (no members) are excluded.
     /// Used by opaque handle detection to distinguish defined vs incomplete types.
     let definedStructNameAlgebra : DeclarationAlgebra<string option> = {
-        OnStruct    = fun s -> if s.Name <> "" && not s.Fields.IsEmpty then Some s.Name else None
+        OnStruct    = fun s -> if s.Name <> "" && CppParser.isDefinedRecord s then Some s.Name else None
         OnClass     = fun c -> if c.Methods.IsEmpty && c.Name <> "" then Some c.Name else None
         OnFunction  = fun _ -> None
         OnEnum      = fun _ -> None

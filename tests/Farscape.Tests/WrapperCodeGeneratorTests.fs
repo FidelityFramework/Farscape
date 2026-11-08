@@ -410,7 +410,7 @@ let ``wrapper preserves nominal CHandle when unwrapping an opaque nullable retur
               ReturnType = "hipStream_t"
               Parameters = [("flags", "unsigned int")]
               Documentation = None
-              IsVirtual = false; IsStatic = false; IsInline = false; Attributes = []; MangledName = None; Location = TestHelpers.constructed }
+              IsVirtual = false; IsStatic = false; IsInline = false; Attributes = []; MangledName = None; Location = TestHelpers.constructed; ByValueTypedefs = [] }
     ]
     let output = WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" (UseReturnCode ("Test", "Fidelity.Test.ReturnCode")) Types.LP64 None
     Assert.Contains("Result<CHandle<hipStream_t>, string>", output)
@@ -427,7 +427,7 @@ let ``pointer allocation wrapper returns an opaque CHandle result`` () =
               ReturnType = "void *"
               Parameters = [("addr", "void *"); ("length", "size_t")]
               Documentation = None
-              IsVirtual = false; IsStatic = false; IsInline = false; Attributes = []; MangledName = None; Location = TestHelpers.constructed }
+              IsVirtual = false; IsStatic = false; IsInline = false; Attributes = []; MangledName = None; Location = TestHelpers.constructed; ByValueTypedefs = [] }
     ]
     let output = WrapperCodeGenerator.generate decls "Wrappers.Test" "testlib" "Platform.Bindings.Test" (UseReturnCode ("Test", "Fidelity.Test.ReturnCode")) Types.LP64 None
     // A C void pointer stays opaque in Clef.

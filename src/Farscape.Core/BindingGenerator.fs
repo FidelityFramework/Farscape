@@ -67,7 +67,7 @@ module BindingGenerator =
         : Result<(string * string list) list, string> =
         let bareName (name: string) = name.Replace("typedef ", "").Replace("struct ", "").Replace("union ", "")
         let definitions (decls: CppParser.Declaration list) =
-            decls |> List.choose (function CppParser.Declaration.Struct s when s.Name <> "" && not s.Fields.IsEmpty -> Some (s.Name, s) | _ -> None) |> Map.ofList
+            decls |> List.choose (function CppParser.Declaration.Struct s when s.Name <> "" && CppParser.isDefinedRecord s -> Some (s.Name, s) | _ -> None) |> Map.ofList
         // First declaration wins, as the merge itself keeps the first typedef of a name.
         let typedefs (decls: CppParser.Declaration list) =
             (Map.empty, decls) ||> List.fold (fun acc decl ->
@@ -328,7 +328,14 @@ module BindingGenerator =
                 // A callback value type resolution refuses is located at this function (#195).
                 FidelityCodeGenerator.relocateCallbackValue f.Location.Location (Some (FidelityCodeGenerator.bindingKey f.Name "", None)) (fun () ->
                     FidelityCodeGenerator.descriptorTypeSites ctx f
-                    |> List.choose (fun (site, cType) ->
+                    |> List.collect (fun (site, cType) ->
+                      // A typedef's attribute the type reaches is admitted only on clang's
+                      // measurement of the type in its declaring unit (#181).
+                      (match FidelityCodeGenerator.typedefAttributeEvidence unit cType with
+                       | Some (Error reason) ->
+                           [ Diagnostics.diagnostic Diagnostics.ByValueTypedefAttribute $"by-value type '{cType}' of the {site} of function '{f.Name}' in '{unitOf f}' {reason}; a descriptor carries no attribute of a typedef." f.Location.Location ]
+                       | _ -> [])
+                      @ Option.toList (
                         match FidelityCodeGenerator.descriptorClaimOf unit cType with
                         | FidelityCodeGenerator.ResolvesNowhere ->
                             Some (Diagnostics.diagnostic Diagnostics.ByValueTypeUnresolved $"by-value type '{cType}' of the {site} of function '{f.Name}' in '{unitOf f}' resolves through no typedef, record or profile entry of that unit; a descriptor cannot carry an unknown width." f.Location.Location)
@@ -337,7 +344,7 @@ module BindingGenerator =
                         // type and layout module are emitted in every mode).
                         | FidelityCodeGenerator.RecordByValue (record, ("struct" | "union" as kind)) when not (ctx.ValueStructs.Contains record) ->
                             Some (Diagnostics.diagnostic Diagnostics.RecordWithoutValueType $"{kind} '{record}' is the type of the {site} of function '{f.Name}' in '{unitOf f}', but the pilot declares no value type for it, so neither its record type nor {record}.Descriptor would be emitted for the binding that cites them; declare it in [options] value_structs." f.Location.Location)
-                        | _ -> None)))
+                        | _ -> None))))
         match refusals |> List.distinctBy Diagnostics.render with
         | [] -> Ok ()
         | refusals -> Error (Diagnostics.refusalsOf refusals " No bindings were written.")
@@ -418,7 +425,7 @@ module BindingGenerator =
                         (aliases: (string * string) list)
         : Map<string * string, FidelityCodeGenerator.UnitFacts> =
         let identity = function
-            | CppParser.Declaration.Struct s when s.Name <> "" && not s.Fields.IsEmpty -> Some (("struct", s.Name), declaredShape s)
+            | CppParser.Declaration.Struct s when s.Name <> "" && CppParser.isDefinedRecord s -> Some (("struct", s.Name), declaredShape s)
             | CppParser.Declaration.Function f -> Some (("function", f.Name), sprintf "%s(%A)" f.ReturnType f.Parameters)
             | CppParser.Declaration.Typedef t -> Some (("typedef", t.Name), t.UnderlyingType)
             | _ -> None
@@ -527,14 +534,14 @@ module BindingGenerator =
     /// record's attributes, whether or not the pilot measures the record, and on every layout
     /// clang measured for it in those units. Otherwise the pilot is refused naming the record,
     /// each distinct definition with every header giving it, and the first field at which a
-    /// definition differs from the first. A forward declaration (no fields) is not a definition.
+    /// definition differs from the first. A forward declaration (no members) is not a definition.
     /// Checked while declaration lists are still paired with their headers, before the merge
     /// keeps the first definition; identical definitions merge.
     let agreeRecords (headers: (string * CppParser.Declaration list) list) : Result<unit, Diagnostics.Refusal> =
         let definitionsOf (decls: CppParser.Declaration list) =
             (Map.empty, decls) ||> List.fold (fun acc decl ->
                 match decl with
-                | CppParser.Declaration.Struct s when s.Name <> "" && not s.Fields.IsEmpty && not (Map.containsKey s.Name acc) -> Map.add s.Name s acc
+                | CppParser.Declaration.Struct s when s.Name <> "" && CppParser.isDefinedRecord s && not (Map.containsKey s.Name acc) -> Map.add s.Name s acc
                 | _ -> acc)
         let perHeader = headers |> List.map (fun (header, decls) -> header, definitionsOf decls)
         let names = perHeader |> List.collect (fun (_, defs) -> defs |> Map.toList |> List.map fst) |> List.distinct |> List.sort

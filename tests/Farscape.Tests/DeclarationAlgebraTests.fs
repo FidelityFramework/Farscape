@@ -36,6 +36,7 @@ let ``structNameAlgebra extracts struct names`` () =
         CppParser.Declaration.Function (mkFunc "foo" "void" [])
         CppParser.Declaration.Class {
             Name = "MyClass"; Fields = []; Documentation = None; Methods = []; IsAbstract = false; Constructors = []; HasUserDestructor = false; HasUserCopyConstructor = false; HasUserMoveConstructor = false; DestructorMangledName = None; BaseClasses = []
+            UnnamedBitFields = []; TypedefAttributes = []; Measured = None; QualifiedName = Some "MyClass"; Location = TestHelpers.constructed
         }
     ]
     let results =

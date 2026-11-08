@@ -171,7 +171,7 @@ module IntegrationTests =
                   ReturnType = "int"
                   Parameters = [("stream", "hipStream_t")]
                   Documentation = None
-                  IsVirtual = false; IsStatic = false; IsInline = false; Attributes = []; MangledName = None; Location = TestHelpers.constructed }
+                  IsVirtual = false; IsStatic = false; IsInline = false; Attributes = []; MangledName = None; Location = TestHelpers.constructed; ByValueTypedefs = [] }
         ]
         let output = FidelityCodeGenerator.generate decls "Fidelity.ROCm.Stream" "amdhip64" Types.LP64 Map.empty
         Assert.Contains("type hipStream_t = private | Opaque_hipStream_t", output)
@@ -198,7 +198,7 @@ module IntegrationTests =
                   ReturnType = "int"
                   Parameters = [("stream", "hipStream_t")]
                   Documentation = None
-                  IsVirtual = false; IsStatic = false; IsInline = false; Attributes = []; MangledName = None; Location = TestHelpers.constructed }
+                  IsVirtual = false; IsStatic = false; IsInline = false; Attributes = []; MangledName = None; Location = TestHelpers.constructed; ByValueTypedefs = [] }
         ]
         let output = FidelityCodeGenerator.generate decls "Fidelity.ROCm" "amdhip64" Types.LP64 Map.empty
         Assert.Contains("(stream: option<CHandle<hipStream_t>>)", output)
@@ -214,7 +214,7 @@ module IntegrationTests =
                   ReturnType = "int"
                   Parameters = [("event", "hipEvent_t"); ("stream", "hipStream_t")]
                   Documentation = None
-                  IsVirtual = false; IsStatic = false; IsInline = false; Attributes = []; MangledName = None; Location = TestHelpers.constructed }
+                  IsVirtual = false; IsStatic = false; IsInline = false; Attributes = []; MangledName = None; Location = TestHelpers.constructed; ByValueTypedefs = [] }
         ]
         let output = FidelityCodeGenerator.generate decls "Fidelity.ROCm" "amdhip64" Types.LP64 Map.empty
         Assert.Contains("type hipStream_t = private | Opaque_hipStream_t", output)

@@ -83,6 +83,8 @@ namespace Farscape.Core
 /// | FS9175 | a record the typed protocol projection reads has no clang measurement           |
 /// | FS9176 | a record the typed protocol reads is measured with another layout than declared |
 /// | FS9177 | a typed protocol constructor carries string arguments with no ownership profile |
+/// | FS9178 | a by-value type reaches an attributed typedef clang measures unlike its claim |
+/// | FS9179 | a record of only unnamed bit-fields measures zero bytes, which no descriptor has |
 ///
 /// Each refusal reason has exactly one code and each code one reason.
 ///
@@ -324,6 +326,12 @@ module Diagnostics =
 
     [<Literal>]
     let TypedProtocolConstructorStrings = "FS9177" // a typed protocol constructor carries string arguments with no ownership profile (#195)
+
+    [<Literal>]
+    let ByValueTypedefAttribute = "FS9178" // by-value type reaches an attributed typedef, unmeasured or measured unlike its descriptor's type (#181)
+
+    [<Literal>]
+    let PaddingOnlyRecordEmpty = "FS9179" // record of only unnamed bit-fields clang measures at zero bytes (#183)
 
     // =========================================================================
     // Structured diagnostics (#184)

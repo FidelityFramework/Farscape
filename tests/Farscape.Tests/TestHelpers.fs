@@ -15,15 +15,15 @@ let refusalText (result: Result<'a, Diagnostics.Refusal>) : Result<'a, string> =
 
 let mkFunc name retType parms : CppParser.FunctionDecl =
     { Name = name; ReturnType = retType; Parameters = parms; Documentation = None
-      IsVirtual = false; IsStatic = false; IsInline = false; Attributes = []; MangledName = None; Location = constructed }
+      IsVirtual = false; IsStatic = false; IsInline = false; Attributes = []; MangledName = None; Location = constructed; ByValueTypedefs = [] }
 
 let mkFuncWithAttrs name retType parms attrs : CppParser.FunctionDecl =
     { Name = name; ReturnType = retType; Parameters = parms; Documentation = None
-      IsVirtual = false; IsStatic = false; IsInline = false; Attributes = attrs; MangledName = None; Location = constructed }
+      IsVirtual = false; IsStatic = false; IsInline = false; Attributes = attrs; MangledName = None; Location = constructed; ByValueTypedefs = [] }
 
 let mkFuncWithDoc name retType parms doc : CppParser.FunctionDecl =
     { Name = name; ReturnType = retType; Parameters = parms; Documentation = doc
-      IsVirtual = false; IsStatic = false; IsInline = false; Attributes = []; MangledName = None; Location = constructed }
+      IsVirtual = false; IsStatic = false; IsInline = false; Attributes = []; MangledName = None; Location = constructed; ByValueTypedefs = [] }
 
 // ─── Typedef / Enum / Struct helpers ───
 
@@ -81,7 +81,7 @@ let mkClass name fields methods ctors isAbstract hasDtor hasCopyCtor hasMoveCtor
       Documentation = None; IsAbstract = isAbstract
       HasUserDestructor = hasDtor; HasUserCopyConstructor = hasCopyCtor
       HasUserMoveConstructor = hasMoveCtor; DestructorMangledName = dtorMangled
-      BaseClasses = [] }
+      BaseClasses = []; UnnamedBitFields = []; TypedefAttributes = []; Measured = None; QualifiedName = Some name; Location = constructed }
 
 /// Minimal empty class (opaque/forward-declared)
 let mkClassEmpty name : CppParser.ClassDecl =
@@ -184,15 +184,16 @@ let glibcSocketHeader () =
     else
         "/usr/include/x86_64-linux-gnu/sys/socket.h", ["/usr/include"; "/usr/include/x86_64-linux-gnu"]
 
-/// Clang's own answer, independent of its record layout dump: compile `header` with each
-/// `assertion` as a `_Static_assert` (`sizeof`, `_Alignof`, `offsetof`) and fail with clang's
+/// Compile `header` as `language` with each assertion a static assertion, failing with clang's
 /// diagnostics unless every one holds.
-let clangConfirms (header: string) (assertions: string list) =
+let private clangConfirmsIn (language: string) (header: string) (assertions: string list) =
     let probe = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "farscape-confirm-" + System.Guid.NewGuid().ToString("N") + ".c")
     try
-        let body = assertions |> List.map (fun a -> $"_Static_assert({a}, \"{a.Replace('\"', '\'')}\");") |> String.concat "\n"
+        let check = if language = "c++" then "static_assert" else "_Static_assert"
+        let body = assertions |> List.map (fun a -> $"{check}({a}, \"{a.Replace('\"', '\'')}\");") |> String.concat "\n"
         System.IO.File.WriteAllText(probe, $"#include <stddef.h>\n#include \"{header}\"\n{body}\n")
-        let info = System.Diagnostics.ProcessStartInfo("clang", $"-fsyntax-only {probe}")
+        let standard = if language = "c++" then " -std=c++17" else ""
+        let info = System.Diagnostics.ProcessStartInfo("clang", $"-x {language}{standard} -fsyntax-only {probe}")
         info.RedirectStandardError <- true
         info.RedirectStandardOutput <- true
         use proc = System.Diagnostics.Process.Start info
@@ -202,6 +203,17 @@ let clangConfirms (header: string) (assertions: string list) =
         if proc.ExitCode <> 0 then failwithf "clang does not confirm the layout of %s: %s" header errors
     finally
         try System.IO.File.Delete probe with _ -> ()
+
+/// Clang's own answer, independent of its record layout dump: compile `header` with each
+/// `assertion` as a `_Static_assert` (`sizeof`, `_Alignof`, `offsetof`) and fail with clang's
+/// diagnostics unless every one holds.
+let clangConfirms (header: string) (assertions: string list) =
+    clangConfirmsIn "c" header assertions
+
+/// `clangConfirms` with clang compiling `header` as C++17, the parse's C++ mode (#182):
+/// `static_assert` with `sizeof`, `alignof` and `offsetof`.
+let clangConfirmsCpp (header: string) (assertions: string list) =
+    clangConfirmsIn "c++" header assertions
 
 /// Every emitted `Types.clef` of a generated package, its lines trimmed, in path order.
 let allTypesOf (output: string) =

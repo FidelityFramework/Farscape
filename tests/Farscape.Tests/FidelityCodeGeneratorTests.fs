@@ -445,7 +445,8 @@ let ``TOML nonnull annotations override nullable default`` () =
           StructLayouts = Map.empty
           NonnullAnnotations = nonnull
           KnownClasses = Map.empty
-          NativePointerSurface = false; Bindings = Map.empty; ValueStructs = Set.empty; FlexibleArrays = Map.empty; PhantomMarkers = Set.empty }
+          NativePointerSurface = false; Bindings = Map.empty; ValueStructs = Set.empty; FlexibleArrays = Map.empty; PhantomMarkers = Set.empty
+          TypedefInfos = Map.empty; ByValueTypedefs = [] }
     let result = FidelityCodeGenerator.generateModule ctx Set.empty decls "Test" "lib" "test" []
     // ctx (idx 0) is nonnull via TOML
     Assert.Contains("(ctx: CHandle<unit>)", result)
@@ -469,7 +470,8 @@ let ``TOML nonnull_returns prevents Option on return type`` () =
           StructLayouts = Map.empty
           NonnullAnnotations = nonnull
           KnownClasses = Map.empty
-          NativePointerSurface = false; Bindings = Map.empty; ValueStructs = Set.empty; FlexibleArrays = Map.empty; PhantomMarkers = Set.empty }
+          NativePointerSurface = false; Bindings = Map.empty; ValueStructs = Set.empty; FlexibleArrays = Map.empty; PhantomMarkers = Set.empty
+          TypedefInfos = Map.empty; ByValueTypedefs = [] }
     let result = FidelityCodeGenerator.generateModule ctx Set.empty decls "Test" "lib" "test" []
     // Return is nonnull via TOML
     Assert.Contains(": CHandle<unit> =", result)
@@ -1826,7 +1828,7 @@ let private crossUnitRelease ownerPointer releasePointer =
             // The merged map keeps the owner's unit's spelling; the release has its own unit.
             TypedefMap = Map.ofList ["fx_ptr_t", spelling ownerPointer]
             DeclarationUnits =
-                let facts pointer : FidelityCodeGenerator.UnitFacts = { Typedefs = Map.ofList ["fx_ptr_t", spelling pointer]; Enums = Map.empty; OpaqueHandles = Set.empty }
+                let facts pointer : FidelityCodeGenerator.UnitFacts = { Typedefs = Map.ofList ["fx_ptr_t", spelling pointer]; Enums = Map.empty; OpaqueHandles = Set.empty; TypedefInfos = Map.empty }
                 Map.ofList [ ("function", "mallocFirst"), facts ownerPointer; ("function", "freeFirst"), facts releasePointer ]
             Bindings = Map.ofList ["mallocFirst", acquisition; "freeFirst", retirement]
             NonnullAnnotations = Some { Parameters = Map.ofList ["freeFirst", [0]]; Returns = Set.empty } }

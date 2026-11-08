@@ -132,3 +132,65 @@ let ``two headers whose one record differs only in an unnamed bit-field are refu
             Error $"Binding generation failed: FS9116: record 'fx_div_pad' is defined differently by the pilot's headers: '{padded}' (struct fx_div_pad {{ char a; char b }} (member 2, the unnamed bit-field 'int : 3')); '{plain}' (struct fx_div_pad {{ char a; char b }}); first difference at its unnamed bit-fields: [member 2, the unnamed bit-field 'int : 3'] in '{padded}', [] in '{plain}'. One definition per pilot is required. No bindings were written.",
             result |> Result.map ignore)
         noOutput output)
+
+// ═══════════════════════════════════════════════════════════════════
+// Records whose only members are unnamed bit-fields (issue #183): C names no field of them,
+// but clang lays them out. Such a record is defined, measured in its declaring unit and emitted
+// at clang's size and alignment, and a record holding it by value places it by that layout;
+// a zero-byte measurement is refused with its exact reason.
+// ═══════════════════════════════════════════════════════════════════
+
+[<Fact>]
+let ``a record whose only member is an unnamed bit-field is emitted at clang's size and alignment`` () =
+    let header = fixturePath "unnamed-bitfields/only.h"
+    let declarations = parseFixture "unnamed-bitfields/only.h"
+    let only = recordIn declarations "fx_only"
+    Assert.Empty(only.Fields)
+    Assert.Equal<(int * string * int option) list>([0, "int", Some 8], only.UnnamedBitFields |> List.map (fun b -> b.Position, b.Type, b.Width))
+    Assert.True(CppParser.isDefinedRecord only)
+    Assert.Equal((1, 1, [0], []), measured only)
+    // An unnamed record of only an unnamed bit-field, named from its parent and field (#159).
+    let unnamed = recordIn declarations "fx_only_named_pad"
+    Assert.Empty(unnamed.Fields)
+    Assert.Equal<(int * string * int option) list>([0, "int", Some 8], unnamed.UnnamedBitFields |> List.map (fun b -> b.Position, b.Type, b.Width))
+    Assert.Equal((1, 1, [0], []), measured unnamed)
+    Assert.Equal((3, 1, [0; 1; 2], [0; 1; 2]), measured (recordIn declarations "fx_only_named"))
+    withPilot [header] [] ["fx_only_use"] (fun result output ->
+        match result with
+        | Error error -> failwithf "The record of only an unnamed bit-field was refused: %s" error
+        | Ok _ ->
+            let types = allTypesOf output
+            let record = recordModule types "fx_only"
+            Assert.Contains("/// C struct `fx_only`: layout measured (clang record layout dump).", types)
+            Assert.Contains("let Size = 1\n", record)
+            Assert.Contains("let Alignment = 1\n", record)
+            // No descriptor field: its one member is padding.
+            Assert.Equal(0, record.Split("\"; Offset = ").Length - 1)
+            // A record holding it by value places it by clang's layout of it.
+            let holder = recordModule types "fx_only_holder"
+            Assert.Contains("let Size = 3\n", holder)
+            Assert.Contains("let padOffset = 1\n", holder)
+            Assert.Contains("let bOffset = 2\n", holder)
+            Assert.Contains("nested struct fx_only by value, as bytes; see fx_only.Descriptor", holder)
+            let named = recordModule types "fx_only_named"
+            Assert.Contains("let Size = 3\n", named)
+            Assert.Contains("let padOffset = 1\n", named)
+            Assert.Contains("let bOffset = 2\n", named)
+            Assert.Contains("let Size = 1\n", recordModule types "fx_only_named_pad"))
+    clangConfirms header [
+        "sizeof(struct fx_only) == 1"; "_Alignof(struct fx_only) == 1"
+        "sizeof(struct fx_only_holder) == 3"; "offsetof(struct fx_only_holder, pad) == 1"; "offsetof(struct fx_only_holder, b) == 2"
+        "sizeof(struct fx_only_named) == 3"; "offsetof(struct fx_only_named, pad) == 1"; "sizeof(((struct fx_only_named *)0)->pad) == 1"
+        "offsetof(struct fx_only_named, b) == 2" ]
+
+[<Fact>]
+let ``a record whose only member is a zero-width unnamed bit-field, measured at zero bytes, is refused before output`` () =
+    let header = fixturePath "unnamed-bitfields/only-zero.h"
+    let record = recordIn (parseFixture "unnamed-bitfields/only-zero.h") "fx_only_zero"
+    Assert.Equal((0, 1, [0], []), measured record)
+    withPilot [header] [] ["fx_only_zero_use"] (fun result output ->
+        Assert.Equal(
+            Error "Binding generation failed: FS9179: struct 'fx_only_zero' has no named field, only member 1, the unnamed bit-field 'int : 0', and clang measures it at 0 bytes in its declaring unit (a GNU C empty record); a descriptor has no zero-byte record representation.",
+            result |> Result.map ignore)
+        noOutput output)
+    clangConfirms header [ "sizeof(struct fx_only_zero) == 0" ]

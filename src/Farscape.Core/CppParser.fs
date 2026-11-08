@@ -49,6 +49,34 @@ module CppParser =
         Attributes: AttributeData list
     }
 
+    /// Clang's measurement of one type in a translation unit, in bytes: `sizeof` and the
+    /// alignment `_Alignof` (`alignof` in C++) gives.
+    type TypeExtent = {
+        Size: int
+        Alignment: int
+    }
+
+    /// A by-value parameter or result whose type reaches a typedef carrying an attribute
+    /// (`aligned(16)`, `may_alias`, `mode`), measured by clang in the declaring unit (#181). A
+    /// descriptor claims the type the typedefs stand for, `Unattributed`, and has no slot for a
+    /// typedef's attribute, so the claim is faithful only when clang measures the spelled type
+    /// and `Unattributed` alike.
+    type ByValueTypedef = {
+        /// `parameter 'v'` or `result`, as a refusal names it.
+        Site: string
+        /// The type as the declaration spells it.
+        Spelling: string
+        /// Each typedef the spelling reaches that carries an attribute, with the attribute
+        /// (`typedefAttributesOf`).
+        Reached: (string * AttributeData) list
+        /// The spelling with each typedef that carries or reaches an attribute replaced by its
+        /// underlying type (`unattributedSpelling`): the type its descriptor claims.
+        Unattributed: string
+        /// Clang's measurement of `Spelling` and of `Unattributed` in the declaring unit, or the
+        /// reason clang gave none.
+        Measured: Result<TypeExtent * TypeExtent, string>
+    }
+
     /// Represents a C/C++ function declaration
     type FunctionDecl = {
         Name: string
@@ -66,6 +94,9 @@ module CppParser =
         MangledName: string option
         /// Where clang locates the declaration (#184); not part of its shape.
         Location: Diagnostics.Provenance
+        /// Its by-value parameters and result whose types reach an attributed typedef, each with
+        /// clang's measurement in the declaring unit (#181). Empty when none does.
+        ByValueTypedefs: ByValueTypedef list
     }
 
     // =========================================================================
@@ -184,15 +215,26 @@ module CppParser =
         Location: Diagnostics.Provenance
     }
 
+    /// A record clang defines: it declares members, named fields or only unnamed bit-fields
+    /// (`struct pad { int : 8; }`, #183), and clang lays it out. A record with neither is a
+    /// forward declaration, which has no layout.
+    let isDefinedRecord (s: StructDecl) = not s.Fields.IsEmpty || not s.UnnamedBitFields.IsEmpty
+
+    /// Clang's member offsets of a record without those of its unnamed bit-fields. Offsets
+    /// clang dumps for a different number of members are returned as dumped, so the count check
+    /// refuses them.
+    let private namedMemberOffsetsBits (fieldCount: int) (padding: UnnamedBitField list) (layout: StructLayoutInfo) : int list =
+        if padding.IsEmpty || layout.FieldOffsetsBits.Length <> fieldCount + padding.Length then
+            layout.FieldOffsetsBits
+        else
+            let positions = padding |> List.map _.Position |> Set.ofList
+            layout.FieldOffsetsBits |> List.indexed |> List.filter (fun (position, _) -> not (positions.Contains position)) |> List.map snd
+
     /// A measured layout's offsets of the record's fields: clang's member offsets without those
     /// of its unnamed bit-fields. Offsets clang dumps for a different number of members are
     /// returned as dumped, so the count check refuses them.
     let fieldOffsetsBits (s: StructDecl) (layout: StructLayoutInfo) : int list =
-        if s.UnnamedBitFields.IsEmpty || layout.FieldOffsetsBits.Length <> s.Fields.Length + s.UnnamedBitFields.Length then
-            layout.FieldOffsetsBits
-        else
-            let padding = s.UnnamedBitFields |> List.map _.Position |> Set.ofList
-            layout.FieldOffsetsBits |> List.indexed |> List.filter (fun (position, _) -> not (padding.Contains position)) |> List.map snd
+        namedMemberOffsetsBits s.Fields.Length s.UnnamedBitFields layout
 
     /// How a refusal names an unnamed bit-field: its member position, counted from 1, and its
     /// declaration.
@@ -336,7 +378,29 @@ module CppParser =
         /// Base class type strings from clang AST "bases" array.
         /// Used to detect inherited pimpl pattern (e.g., "detail::pimpl<xclbin_impl>").
         BaseClasses: string list
+        /// The class's unnamed bit-fields, in member order (#182, as `StructDecl` for #176).
+        UnnamedBitFields: UnnamedBitField list
+        /// The attributes of the typedefs its fields' types reach in its declaring unit (#182,
+        /// as `StructDecl` for #175). Clang lays out a base subobject by its record, not by a
+        /// typedef naming it, so a base reaches no site.
+        TypedefAttributes: TypedefAttribute list
+        /// Clang's record layout of the class in its declaring unit, when the parse measured it:
+        /// every class carrying an unnamed bit-field or whose field type reaches an attributed
+        /// typedef (`measureRecordLayouts`). Its field offsets are its own members'; base
+        /// subobjects lie inside its size. None for classes the parse did not measure.
+        Measured: StructLayoutInfo option
+        /// The class's name qualified by its enclosing namespaces and records (`ns::G`), as a
+        /// probe at file scope spells it and clang's layout dump names it. None for a class
+        /// inside a template or function, which no probe at file scope names.
+        QualifiedName: string option
+        /// Where clang locates the class (#184); not part of its shape.
+        Location: Diagnostics.Provenance
     }
+
+    /// A measured C++ class's offsets of its fields: clang's member offsets without those of its
+    /// unnamed bit-fields (#182).
+    let classFieldOffsetsBits (c: ClassDecl) (layout: StructLayoutInfo) : int list =
+        namedMemberOffsetsBits c.Fields.Length c.UnnamedBitFields layout
 
     // =========================================================================
     // Parser Options
@@ -668,6 +732,7 @@ module CppParser =
                 Attributes = attributes
                 MangledName = mangledName
                 Location = location
+                ByValueTypedefs = []
             }
 
     /// The constant width clang gives a bit-field FieldDecl.
@@ -728,7 +793,8 @@ module CppParser =
         | Some n, _ when not (String.IsNullOrEmpty(n)) ->
             Some { Name = n; Fields = fields; Documentation = documentation; IsUnion = isUnion; Attributes = attributes; Anonymous = None; Measured = None; Unattributed = None
                    UnnamedBitFields = padding; TypedefAttributes = []; Location = location }
-        | _, fs when not fs.IsEmpty ->
+        // An unnamed record of only unnamed bit-fields is a defined record too (#183).
+        | _, fs when not fs.IsEmpty || not padding.IsEmpty ->
             Some { Name = ""; Fields = fields; Documentation = documentation; IsUnion = isUnion; Attributes = attributes; Anonymous = None; Measured = None; Unattributed = None
                    UnnamedBitFields = padding; TypedefAttributes = []; Location = location }
         | _ -> None
@@ -1273,6 +1339,13 @@ module CppParser =
                             HasUserCopyConstructor = hasUserCopyConstructor
                             HasUserMoveConstructor = hasUserMoveConstructor
                             BaseClasses = baseClasses
+                            // Unnamed bit-fields are kept as padding, as the C record path keeps
+                            // them (#182, #176); clang dumps an offset for each.
+                            UnnamedBitFields = unnamedBitFieldsOf node
+                            TypedefAttributes = []
+                            Measured = None
+                            QualifiedName = scope |> Option.map (fun parents -> (parents |> List.map snd) @ [name] |> String.concat "::")
+                            Location = located node
                         })
                     | _ -> ()
 
@@ -1507,7 +1580,8 @@ module CppParser =
             parser {
                 do! pSpaces
                 do! pstring "Type: " >>% ()
-                do! optional ((pstring "struct " <|> pstring "union ") >>% ()) >>% ()
+                // A C++ record dumps as `class X` as well (#182).
+                do! optional ((pstring "struct " <|> pstring "union " <|> pstring "class ") >>% ()) >>% ()
                 // The whole rest of the line: an unnamed nested record is spelled
                 // `Parent::(unnamed at path:line:col)`, which a first-space cut would collapse.
                 let! name = many1Chars (satisfyL (fun c -> c <> '\n' && c <> '\r') "name char")
@@ -1557,6 +1631,15 @@ module CppParser =
                 return []
             }
 
+        /// A C++ record's `BaseOffsets: [...]>` or `VBaseOffsets: [...]>` line (#182). Its base
+        /// subobjects lie inside the record's measured size; their offsets are not carried.
+        static let pBaseOffsets label =
+            parser {
+                do! pSpaces
+                do! pstring label >>% ()
+                do! pSkipLine
+            }
+
         static let pLayoutBlock =
             parser {
                 let! name = pStructName
@@ -1565,6 +1648,8 @@ module CppParser =
                 let! size = pIntField "Size:"
                 let! dataSize = pIntField "DataSize:"
                 let! alignment = pIntField "Alignment:"
+                do! optional (pBaseOffsets "BaseOffsets: [") >>% ()
+                do! optional (pBaseOffsets "VBaseOffsets: [") >>% ()
                 let! offsets = pEmptyFieldOffsets <|> pFieldOffsets
                 do! pSkipLine // closing ">" line
                 return {
@@ -1940,11 +2025,11 @@ module CppParser =
     // Enum Representation Measurement (clang evaluates sizeof and signedness)
     // =========================================================================
 
-    /// Parse clang's filtered text AST of the probe variables: `_fs_enum_<kind>_<i> 'char[N]'`.
-    let private parseEnumProbe (output: string) : Map<string, int> =
+    /// Parse clang's filtered text AST of the probe variables named `<prefix><kind>_<i> 'char[N]'` (`_fs_enum_`, `_fs_byvalue_`): each variable's array extent, which clang evaluated.
+    let private parseProbeExtents (prefix: string) (output: string) : Map<string, int> =
         output.Split([| '\n'; '\r' |], StringSplitOptions.RemoveEmptyEntries)
         |> Array.choose (fun line ->
-            let at = line.IndexOf(" _fs_enum_")
+            let at = line.IndexOf(" " + prefix)
             if not (line.Contains("VarDecl")) || at < 0 then None
             else
                 let rest = line.Substring(at + 1)
@@ -1995,7 +2080,7 @@ module CppParser =
                 match runClang (buildClangArgs options) ["-Xclang"; "-ast-dump"; "-Xclang"; "-ast-dump-filter=_fs_enum_"; "-fsyntax-only"; tempFile] options.Verbose with
                 | Error error -> Error error
                 | Ok output ->
-                    let facts = parseEnumProbe output
+                    let facts = parseProbeExtents "_fs_enum_" output
                     batch |> List.fold (fun state (i, spelling) ->
                         state |> Result.bind (fun (acc: Map<string, EnumRepresentation>) ->
                             match facts.TryFind $"_fs_enum_size_{i}", facts.TryFind $"_fs_enum_sign_{i}" with
@@ -2072,6 +2157,113 @@ module CppParser =
                     s.Fields |> List.collect (fun f ->
                         typedefAttributesOf typedefs f.Type |> List.map (fun (typedef, a) -> { Site = FieldType f.Name; Typedef = typedef; Attribute = a }))
                 Struct { s with TypedefAttributes = named @ fields }
+            // A C++ class's fields reach typedefs as a C record's do (#182).
+            | Class c when c.Name <> "" ->
+                let fields =
+                    c.Fields |> List.collect (fun f ->
+                        typedefAttributesOf typedefs f.Type |> List.map (fun (typedef, a) -> { Site = FieldType f.Name; Typedef = typedef; Attribute = a }))
+                Class { c with TypedefAttributes = fields }
+            | decl -> decl)
+
+    /// A type spelling with each typedef that carries or reaches an attribute replaced by its
+    /// underlying type, recursively (#181): `fx_wide` (`typedef int fx_wide
+    /// __attribute__((aligned(16)))`) becomes `int`, and `const fx_pair16` (`typedef struct
+    /// fx_pair fx_pair16 __attribute__((aligned(16)))`) becomes `const struct fx_pair`. The result
+    /// reaches no attributed typedef: it is the type a descriptor claims for the spelling. A tag
+    /// name (`struct T`) names no typedef, and a typedef reaching no attribute is kept as spelled.
+    let unattributedSpelling (typedefs: Map<string, TypedefInfo>) (spelling: string) : string =
+        let rec strip (visited: Set<string>) (spelling: string) =
+            identifierSpelling.Replace(spelling, System.Text.RegularExpressions.MatchEvaluator(fun m ->
+                let before = spelling.Substring(0, m.Index).TrimEnd()
+                let tagged = ["struct"; "union"; "enum"; "class"] |> List.exists (fun tag ->
+                    before.EndsWith tag && (before.Length = tag.Length || not (Char.IsLetterOrDigit before[before.Length - tag.Length - 1] || before[before.Length - tag.Length - 1] = '_')))
+                match typedefs.TryFind m.Value with
+                | Some t when not tagged && not (visited.Contains t.Name) && not (typedefAttributesOf typedefs t.Name).IsEmpty ->
+                    strip (visited.Add t.Name) t.UnderlyingType
+                | _ -> m.Value))
+        strip Set.empty spelling
+
+    /// Measure with clang, in the parsed unit, every by-value parameter and result of the unit's
+    /// own functions whose type reaches a typedef carrying an attribute (#181), from the typedefs
+    /// of that same unit, its own and those reached through its includes. The probe includes the
+    /// header under the parse's own flags and declares, for the spelled type and for its
+    /// unattributed type (`unattributedSpelling`), `char size[sizeof(T)]` and `char
+    /// align[_Alignof(T)]` (`alignof` in C++), and reads clang's evaluation back from its AST. A
+    /// pointer, reference, array or function spelling is no by-value use of a typedef: a
+    /// pointer's layout is a pointer's; its pointee, which a reference projection's descriptor
+    /// claims, is measured as its own site. A batch clang cannot compile is measured one type at a
+    /// time; a type clang still cannot measure carries that reason, and the generator refuses it.
+    let measureByValueTypedefs (options: HeaderParserOptions) (unit: Declaration list) (declarations: Declaration list)
+        : Declaration list =
+        let typedefs =
+            (Map.empty, unit) ||> List.fold (fun (acc: Map<string, TypedefInfo>) decl ->
+                match decl with
+                | Typedef t when not (acc.ContainsKey t.Name) -> acc.Add(t.Name, t)
+                | _ -> acc)
+        let byValue (spelling: string) =
+            not (spelling.Contains '*' || spelling.Contains '(' || spelling.Contains '&' || spelling.Contains '[')
+        // A pointer parameter's pointee, spelled as a reference projection's descriptor claims it
+        // (`FidelityCodeGenerator.generateDescriptorDecls`), is measured too.
+        let pointee (cType: string) =
+            if not (cType.Contains '*') || cType.Contains '(' then None
+            else Some (cType.Substring(0, cType.LastIndexOf '*').Trim())
+        let sitesOf (f: FunctionDecl) =
+            ("result", f.ReturnType)
+            :: (f.Parameters |> List.collect (fun (name, cType) ->
+                    ($"parameter '{name}'", cType)
+                    :: (pointee cType |> Option.map (fun element -> $"pointee of parameter '{name}'", element) |> Option.toList)))
+            |> List.choose (fun (site, spelling) ->
+                if not (byValue spelling) then None
+                else
+                    match typedefAttributesOf typedefs spelling with
+                    | [] -> None
+                    | reached -> Some (site, spelling, reached, unattributedSpelling typedefs spelling))
+        if typedefs |> Map.forall (fun _ t -> t.Attributes.IsEmpty) then declarations
+        else
+        let sites = declarations |> List.collect (function Function f -> sitesOf f | _ -> [])
+        if sites.IsEmpty then declarations
+        else
+        let spellings = sites |> List.collect (fun (_, spelling, _, unattributed) -> [spelling; unattributed]) |> List.distinct |> List.indexed
+        let alignOf = if options.CppMode then "alignof" else "_Alignof"
+        let tempDir = Path.Combine(Path.GetTempPath(), "farscape-byvalue")
+        Directory.CreateDirectory(tempDir) |> ignore
+        let probe (batch: (int * string) list) : Map<string, TypeExtent> =
+            let tempFile = Path.Combine(tempDir, "_farscape_byvalue_probe_" + Guid.NewGuid().ToString("N") + ".c")
+            try
+                let body =
+                    batch |> List.map (fun (i, spelling) ->
+                        $"char _fs_byvalue_size_{i}[sizeof({spelling})]; char _fs_byvalue_align_{i}[{alignOf}({spelling})];")
+                    |> String.concat "\n"
+                File.WriteAllText(tempFile, $"#include \"{Path.GetFullPath options.HeaderFile}\"\n{body}\n")
+                match runClang (buildClangArgs options) ["-Xclang"; "-ast-dump"; "-Xclang"; "-ast-dump-filter=_fs_byvalue_"; "-fsyntax-only"; tempFile] options.Verbose with
+                | Error _ -> Map.empty
+                | Ok output ->
+                    let facts = parseProbeExtents "_fs_byvalue_" output
+                    batch |> List.choose (fun (i, spelling) ->
+                        match facts.TryFind $"_fs_byvalue_size_{i}", facts.TryFind $"_fs_byvalue_align_{i}" with
+                        | Some size, Some alignment -> Some (spelling, { Size = size; Alignment = alignment })
+                        | _ -> None)
+                    |> Map.ofList
+            finally
+                try File.Delete tempFile with _ -> ()
+        let measured =
+            let batch = probe spellings
+            if batch.Count = spellings.Length then batch
+            else spellings |> List.fold (fun acc item -> Map.fold (fun m k v -> Map.add k v m) acc (probe [item])) Map.empty
+        let extentOf (spelling: string) (role: string) =
+            match measured.TryFind spelling with
+            | Some extent -> Ok extent
+            | None -> Error $"clang measures no size and alignment of '{spelling}'{role} in its declaring unit"
+        declarations |> List.map (function
+            | Function f ->
+                let measuredSites =
+                    sitesOf f |> List.map (fun (site, spelling, reached, unattributed) ->
+                        let measurement =
+                            match extentOf spelling "", extentOf unattributed ", the type its typedefs stand for" with
+                            | Ok spelled, Ok plain -> Ok (spelled, plain)
+                            | Error reason, _ | _, Error reason -> Error reason
+                        { Site = site; Spelling = spelling; Reached = reached; Unattributed = unattributed; Measured = measurement })
+                Function { f with ByValueTypedefs = measuredSites }
             | decl -> decl)
 
     // =========================================================================
@@ -2103,21 +2295,31 @@ module CppParser =
     /// or with two blocks of different layouts (two unnamed records one macro expansion spells
     /// at one location), stays
     /// unmeasured, and the generator refuses it (FS9113): an anonymous record's layout is never
-    /// computed from its declared fields. A batch clang cannot compile is measured one record at
-    /// a time.
+    /// computed from its declared fields. A C++ class carrying an unnamed bit-field or whose field
+    /// type reaches an attributed typedef is measured the same way (#182), by its qualified name,
+    /// which its dump block names; a class no probe at file scope names stays unmeasured, and
+    /// the generator refuses it. A batch clang cannot compile is measured one record at a time.
     let measureRecordLayouts (options: HeaderParserOptions) (typedefNamed: Set<string>) (declarations: Declaration list)
         : Declaration list =
         let records = declarations |> List.choose (function Struct s when s.Name <> "" -> Some s | _ -> None)
         let anonymous = records |> List.filter (fun s -> s.Anonymous.IsSome)
         let attributed =
             records |> List.filter (fun s ->
-                not s.Fields.IsEmpty
+                isDefinedRecord s
                 && (s.Attributes @ (s.Fields |> List.collect _.Attributes)) |> List.exists (fun a -> (AttributeContracts.neutralFact a.Kind).IsSome))
         // A record whose field type reaches an attributed typedef (#175), or carrying an unnamed
         // bit-field (#176): its layout is clang's, never computed from its declared fields.
         let reaching = records |> List.filter (fun s -> s.TypedefAttributes |> List.exists (fun a -> a.Site <> RecordName))
         let padded = records |> List.filter (fun s -> not s.UnnamedBitFields.IsEmpty)
-        if anonymous.IsEmpty && attributed.IsEmpty && reaching.IsEmpty && padded.IsEmpty then declarations
+        // C++ classes carrying an unnamed bit-field or reaching an attributed typedef (#182),
+        // by the qualified name their dump block carries.
+        let classes =
+            declarations
+            |> List.choose (function
+                | Class c when c.Name <> "" && (not c.UnnamedBitFields.IsEmpty || not c.TypedefAttributes.IsEmpty) -> c.QualifiedName
+                | _ -> None)
+            |> List.distinct
+        if anonymous.IsEmpty && attributed.IsEmpty && reaching.IsEmpty && padded.IsEmpty && classes.IsEmpty then declarations
         else
         let byName = records |> List.rev |> List.map (fun s -> s.Name, s) |> Map.ofList
         let rec outermost (visited: Set<string>) (s: StructDecl) =
@@ -2152,10 +2354,10 @@ module CppParser =
         let synthesized = copies |> List.choose (fun (_, copy) -> match copy with Ok c -> Some c | Error _ -> None)
         let tempDir = Path.Combine(Path.GetTempPath(), "farscape-layout")
         Directory.CreateDirectory(tempDir) |> ignore
-        let probe (batch: StructDecl list) (copyBatch: (int * string * string list) list) : Result<StructLayoutInfo list, string> =
+        let probe (batch: string list) (copyBatch: (int * string * string list) list) : Result<StructLayoutInfo list, string> =
             let tempFile = Path.Combine(tempDir, "_farscape_record_probe_" + Guid.NewGuid().ToString("N") + ".c")
             try
-                let body = batch |> List.mapi (fun i s -> $"char _fs_record_{i}[sizeof({spelling s})];") |> String.concat "\n"
+                let body = batch |> List.mapi (fun i spelled -> $"char _fs_record_{i}[sizeof({spelled})];") |> String.concat "\n"
                 let undefs = copyBatch |> List.collect (fun (_, _, names) -> names) |> List.distinct |> List.map (fun n -> $"#undef {n}") |> String.concat "\n"
                 let copyText = copyBatch |> List.map (fun (_, text, _) -> text) |> String.concat "\n"
                 File.WriteAllText(tempFile, $"#include \"{Path.GetFullPath options.HeaderFile}\"\n{body}\n{undefs}\n{copyText}\n")
@@ -2163,11 +2365,12 @@ module CppParser =
                 |> Result.bind parseRecordLayoutBlocks
             finally
                 try File.Delete tempFile with _ -> ()
+        let spelled = (roots |> List.map spelling) @ classes
         let blocks =
-            match probe roots synthesized with
+            match probe spelled synthesized with
             | Ok blocks -> blocks
             | Error _ ->
-                (roots |> List.collect (fun root -> match probe [root] [] with Ok blocks -> blocks | Error _ -> []))
+                (spelled |> List.collect (fun root -> match probe [root] [] with Ok blocks -> blocks | Error _ -> []))
                 @ (synthesized |> List.collect (fun copy -> match probe [] [copy] with Ok blocks -> blocks | Error _ -> []))
         // A field's unnamed record is dumped `P::(unnamed at loc)`, an anonymous member's
         // record `P::(anonymous at loc)`.
@@ -2202,9 +2405,16 @@ module CppParser =
                 s.Name, evidence)
             |> Map.ofList
         let measured = Set.ofList ((roots @ anonymous @ attributed @ reaching @ padded) |> List.map _.Name)
+        let classMeasured (qualified: string) =
+            match blocks |> List.filter (fun block -> block.Name = qualified)
+                         |> List.distinctBy (fun l -> l.SizeBits, l.DataSizeBits, l.AlignmentBits, l.FieldOffsetsBits) with
+            | [ layout ] -> Some layout
+            | _ -> None
         declarations |> List.map (function
             | Struct s when s.Name <> "" && measured.Contains s.Name ->
                 Struct { s with Measured = measuredOf s; Unattributed = Map.tryFind s.Name unattributedOf }
+            | Class c when c.QualifiedName |> Option.exists (fun q -> List.contains q classes) ->
+                Class { c with Measured = c.QualifiedName |> Option.bind classMeasured |> Option.map (fun layout -> { layout with Name = c.Name }) }
             | decl -> decl)
 
     /// The names Farscape gives anonymous records must name nothing else in their unit: no
@@ -2216,7 +2426,7 @@ module CppParser =
         else
         let others =
             declarations |> List.choose (function
-                | Struct s when s.Name <> "" && s.Anonymous.IsNone && not s.Fields.IsEmpty -> Some (s.Name, "record")
+                | Struct s when s.Name <> "" && s.Anonymous.IsNone && isDefinedRecord s -> Some (s.Name, "record")
                 | Struct s when s.Name <> "" && s.Anonymous.IsNone -> Some (s.Name, "record declaration")
                 | Typedef t -> Some (t.Name, "typedef")
                 | Enum e when e.Name <> "" -> Some (e.Name, "enum")
@@ -2335,7 +2545,7 @@ module CppParser =
                 | Error error -> Error (firstError error)
                 | Ok output ->
                     let lines = output.Split([| '\n'; '\r' |], StringSplitOptions.RemoveEmptyEntries)
-                    let sizes = parseEnumProbe (output.Replace(" _fs_alias_", " _fs_enum_"))
+                    let sizes = parseProbeExtents "_fs_alias_" output
                     batch |> List.fold (fun state (i, f) ->
                         state |> Result.bind (fun (acc: Map<int, string * EnumRepresentation>) ->
                             let canonical =
@@ -2351,7 +2561,7 @@ module CppParser =
                                         match last.IndexOf('\'') with
                                         | -1 -> None
                                         | close -> Some (last.Substring(0, close)))
-                            match canonical, sizes.TryFind $"_fs_enum_size_{i}", sizes.TryFind $"_fs_enum_sign_{i}" with
+                            match canonical, sizes.TryFind $"_fs_alias_size_{i}", sizes.TryFind $"_fs_alias_sign_{i}" with
                             | Some c, Some bytes, Some sign when sign = 1 || sign = 2 ->
                                 Ok (acc.Add(i, (c, { Bits = bytes * 8; IsSigned = (sign = 1) })))
                             | _ -> Error $"clang reported no canonical type and measurement for the result of '{f.Name}'")) (Ok Map.empty)
@@ -2502,6 +2712,9 @@ module CppParser =
                     | collisions -> raise (AnonymousNameCollision (Diagnostics.refusalsOf collisions ""))
                     // Each record's typedef attributes, from this unit's typedefs (#175).
                     let declarations = annotateTypedefAttributes typedefNamedTags (declarations @ included) declarations
+                    // By-value parameters and results reaching an attributed typedef (#181),
+                    // measured in this same unit.
+                    let declarations = measureByValueTypedefs options (declarations @ included) declarations
                     // Anonymous records, the records enclosing them, records carrying a
                     // layout-neutral attribute, records whose field types reach an attributed
                     // typedef and records carrying an unnamed bit-field are measured in this

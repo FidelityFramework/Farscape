@@ -31,6 +31,8 @@
     <Compile Include="FlexibleArrayTests.fs" />
     <Compile Include="TypedefAttributeTests.fs" />
     <Compile Include="UnnamedBitFieldTests.fs" />
+    <Compile Include="ByValueTypedefTests.fs" />
+    <Compile Include="CppRecordLayoutTests.fs" />
     <Compile Include="ProtocolParserTests.fs" />
     <Compile Include="DocumentationExtractionTests.fs" />
     <Compile Include="OpaqueHandleTests.fs" />

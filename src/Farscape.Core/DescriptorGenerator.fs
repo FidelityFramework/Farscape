@@ -144,6 +144,13 @@ module DescriptorGenerator =
         if measured.SizeBits % 8 <> 0 then
             invalidOp $"Measured layout '{s.Name}' has size {measured.SizeBits} bits, which is not whole bytes; a supported bit-precise descriptor representation is required."
         let size = descriptorInt $"Measured layout '{s.Name}' size" (int64 measured.SizeBits / 8L)
+        // A record of only unnamed bit-fields (#183) clang may measure at 0 bytes: in C a
+        // zero-width `int : 0` alone makes a GNU empty record.
+        match s.Fields, s.UnnamedBitFields with
+        | [], b :: _ when size = 0 ->
+            let kind = if s.IsUnion then "union" else "struct"
+            Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.PaddingOnlyRecordEmpty $"{kind} '{s.Name}' has no named field, only {CppParser.describeUnnamedBitField b}, and clang measures it at 0 bytes in its declaring unit (a GNU C empty record); a descriptor has no zero-byte record representation." s.Location.Location)
+        | _ -> ()
         if size = 0 then
             invalidOp $"Measured layout '{s.Name}' has size 0 bytes for {s.Fields.Length} fields; a supported empty or opaque record representation contract is required."
         if measured.AlignmentBits % 8 <> 0 then
@@ -163,7 +170,8 @@ module DescriptorGenerator =
             match Map.tryFind name src.Structs with
             | None ->
                 invalidOp $"Struct '{structName}' field '{field.Name}' has nested record type '{name}' with no available declaration; a complete C representation contract is required."
-            | Some nested when nested.Fields.IsEmpty ->
+            // A record of only unnamed bit-fields is defined (#183): clang's layout places it.
+            | Some nested when not (CppParser.isDefinedRecord nested) ->
                 invalidOp $"Struct '{structName}' field '{field.Name}' has fieldless nested record type '{name}'; a supported empty or opaque record representation contract is required."
             | Some nested when nested.Fields |> List.exists isFlexibleArrayMember ->
                 invalidOp $"Struct '{structName}' field '{field.Name}' holds record type '{name}' by value, which ends in a flexible array member; a record ending in a flexible array member has no fixed extent to hold by value."

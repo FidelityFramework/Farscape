@@ -88,7 +88,17 @@ module FidelityCodeGenerator =
         Typedefs: Map<string, string>
         Enums: Map<string, CppParser.EnumDecl>
         OpaqueHandles: Set<string>
+        /// The unit's typedefs as declared, with the attributes clang attaches to each (#181):
+        /// a by-value type reaching an attributed one is admitted only on clang's measurement.
+        TypedefInfos: Map<string, CppParser.TypedefInfo>
     }
+
+    /// The unit's typedefs as declared, first declaration of a name winning.
+    let typedefInfosOf (declarations: CppParser.Declaration list) : Map<string, CppParser.TypedefInfo> =
+        (Map.empty, declarations) ||> List.fold (fun acc decl ->
+            match decl with
+            | CppParser.Declaration.Typedef t when not (acc.ContainsKey t.Name) -> acc.Add(t.Name, t)
+            | _ -> acc)
 
     /// The facts a unit's own declaration list declares (first declaration of an enum name wins,
     /// as within one translation unit a tag has one definition).
@@ -99,7 +109,8 @@ module FidelityCodeGenerator =
                 match decl with
                 | CppParser.Declaration.Enum e when e.Name <> "" && not (acc.ContainsKey e.Name) -> acc.Add(e.Name, e)
                 | _ -> acc)
-          OpaqueHandles = detectOpaqueHandles declarations }
+          OpaqueHandles = detectOpaqueHandles declarations
+          TypedefInfos = typedefInfosOf declarations }
 
     /// A C pointer typedef supplies a nominal marker, never a record exposing its address.
     /// Values of the typedef cross through CHandle<marker>; only the boundary constructs them.
@@ -493,11 +504,16 @@ module FidelityCodeGenerator =
         /// Declared count sources of flexible array members, by struct (BAREWire #11).
         FlexibleArrays: Map<string, FlexibleArrayCount>
         PhantomMarkers: Set<string>
+        /// The typedefs of the context's unit as declared, with their attributes (#181).
+        TypedefInfos: Map<string, CppParser.TypedefInfo>
+        /// Clang's measurements of the by-value parameters and result of the function whose unit
+        /// the context is in (`inFunctionUnit`) that reach an attributed typedef (#181).
+        ByValueTypedefs: CppParser.ByValueTypedef list
     }
 
     /// A context holding one unit's facts in place of the merged ones.
     let withUnitFacts (facts: UnitFacts) (ctx: GenerationContext) : GenerationContext =
-        { ctx with TypedefMap = facts.Typedefs; Enums = facts.Enums; OpaqueHandles = facts.OpaqueHandles }
+        { ctx with TypedefMap = facts.Typedefs; Enums = facts.Enums; OpaqueHandles = facts.OpaqueHandles; TypedefInfos = facts.TypedefInfos }
 
     /// The context of one declaration: its declaring unit's facts (typedefs, measured enums,
     /// opaque handles) when the pilot recorded them, the merged facts otherwise (a single
@@ -509,9 +525,10 @@ module FidelityCodeGenerator =
         | Some facts -> withUnitFacts facts ctx
         | None -> ctx
 
-    /// The context of a function declaration: its declaring unit's typedef map.
+    /// The context of a function declaration: its declaring unit's typedef map, and clang's
+    /// measurements of its by-value types that reach an attributed typedef (#181).
     let inFunctionUnit (ctx: GenerationContext) (func: CppParser.FunctionDecl) : GenerationContext =
-        inUnitOf "function" func.Name ctx
+        { inUnitOf "function" func.Name ctx with ByValueTypedefs = func.ByValueTypedefs }
 
     /// The context in which a C type named by a non-C source (a GIR c:type) resolves: the unit
     /// that declares its base name, with that unit's own facts (typedefs, measured enums, opaque
@@ -544,7 +561,7 @@ module FidelityCodeGenerator =
                     (Diagnostics.inFile (fst (List.head resolutions)) unlocated)
                 |> Diagnostics.withRelated (resolutions |> List.tail |> List.map (fun (header, _) -> { Diagnostics.SourceLocation.Path = header; Diagnostics.SourceLocation.Position = Diagnostics.Located.Unknown unlocated }))
                 |> Diagnostics.refuse
-        | _ when (TypeMapper.tryScalar ctx.DataModel name).IsSome -> withUnitFacts { Typedefs = Map.empty; Enums = Map.empty; OpaqueHandles = Set.empty } ctx
+        | _ when (TypeMapper.tryScalar ctx.DataModel name).IsSome -> withUnitFacts { Typedefs = Map.empty; Enums = Map.empty; OpaqueHandles = Set.empty; TypedefInfos = Map.empty } ctx
         | _ ->
             Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.GirTypeUndeclared
                                     $"{where}: C type '{name}' is declared by no pilot unit; a GIR spelling cannot supply its representation."
@@ -564,7 +581,7 @@ module FidelityCodeGenerator =
             let bare = spelling.Replace("const ", "").Replace("volatile ", "").Trim()
             let record () =
                 match ctx.Structs.TryFind name with
-                | Some s when not s.Fields.IsEmpty -> Some (name, if s.IsUnion then "union" else "struct")
+                | Some s when CppParser.isDefinedRecord s -> Some (name, if s.IsUnion then "union" else "struct")
                 | _ when ctx.KnownClasses.ContainsKey name -> Some (name, "C++ class")
                 | _ -> None
             if bare.StartsWith "struct " || bare.StartsWith "union " || bare.StartsWith "class " then record ()
@@ -673,11 +690,37 @@ module FidelityCodeGenerator =
                 | Some (name, kind) -> RecordByValue (name, kind)
                 | None -> ResolvesNowhere
 
-    /// The `TypeRef` source and the provenance note of one parameter or return. The last
-    /// guard before emission: the pilot is refused before any binding is written
-    /// (`BindingGenerator.requireRepresentedDescriptorTypes`) for the same claims, there
-    /// naming the declaration and its unit.
-    let private abiClaim (ctx: GenerationContext) (cType: string) : string * string =
+    /// How a by-value type reaching an attributed typedef stands at its descriptor (#181): None
+    /// when it reaches none; `Ok note` when clang measures it, in its declaring unit, at the size
+    /// and alignment of the type its descriptor claims (`CppParser.unattributedSpelling`), the
+    /// note recording the typedefs, their attributes and clang's measurement; `Error reason`
+    /// when clang has no measurement of it there (a callback entry's types are not measured) or
+    /// measures it otherwise. A descriptor has no slot for a typedef's attribute, so only clang's
+    /// agreement admits the claim.
+    let typedefAttributeEvidence (ctx: GenerationContext) (cType: string) : Result<string, string> option =
+        match CppParser.typedefAttributesOf ctx.TypedefInfos cType with
+        | [] -> None
+        | reached ->
+            let carried =
+                reached
+                |> List.map (fun (typedef, a) -> $"typedef '{typedef}' carrying {a.Kind}")
+                |> List.distinct
+                |> String.concat ", "
+            let unattributed = CppParser.unattributedSpelling ctx.TypedefInfos cType
+            let extent (e: CppParser.TypeExtent) = $"{e.Size} bytes, alignment {e.Alignment}"
+            match ctx.ByValueTypedefs |> List.tryFind (fun m -> m.Spelling = cType) with
+            | None ->
+                Some (Error $"reaches {carried}, and clang has no measurement of '{cType}' in its declaring unit")
+            | Some { Measured = Error reason } ->
+                Some (Error $"reaches {carried}, and {reason}")
+            | Some { Measured = Ok (spelled, plain); Unattributed = claimed } when spelled <> plain ->
+                Some (Error $"reaches {carried}, and clang measures '{cType}' at {extent spelled} but '{claimed}', the type its descriptor claims, at {extent plain}")
+            | Some { Measured = Ok (spelled, _) } ->
+                Some (Ok $"type reaches {carried}; clang measures it at {extent spelled}, as '{unattributed}'")
+
+    /// The `TypeRef` source and the provenance note a descriptor claim gives a type, before the
+    /// typedef attributes it reaches are examined (`abiClaim`).
+    let private claimOf (ctx: GenerationContext) (cType: string) : string * string =
         match descriptorClaimOf ctx cType with
         | Represented r -> DescriptorGenerator.typeRefSource r, DescriptorGenerator.widthProvenance ctx.DataModel r
         | UnmeasuredEnum ->
@@ -689,6 +732,21 @@ module FidelityCodeGenerator =
         | ResolvesNowhere ->
             Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.ByValueTypeUnresolved
                                     $"by-value type '{cType}' resolves through no typedef, record or profile entry of its declaring unit; a descriptor cannot carry an unknown width."
+                                    (Diagnostics.Located.Unknown $"the descriptor guard sees type '{cType}' without the declaration that uses it"))
+
+    /// The `TypeRef` source and the provenance note of one parameter or return. The last
+    /// guard before emission: the pilot is refused before any binding is written
+    /// (`BindingGenerator.requireRepresentedDescriptorTypes`) for the same claims, there
+    /// naming the declaration and its unit.
+    let private abiClaim (ctx: GenerationContext) (cType: string) : string * string =
+        let typeRef, provenance = claimOf ctx cType
+        // A typedef's attribute is admitted only on clang's measurement (#181).
+        match typedefAttributeEvidence ctx cType with
+        | None -> typeRef, provenance
+        | Some (Ok note) -> typeRef, provenance + "; " + note
+        | Some (Error reason) ->
+            Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.ByValueTypedefAttribute
+                                    $"by-value type '{cType}' {reason}; a descriptor carries no attribute of a typedef."
                                     (Diagnostics.Located.Unknown $"the descriptor guard sees type '{cType}' without the declaration that uses it"))
 
     /// The Layer 2 `Expr<FunctionDescriptor>` quotation beside an extern (platform-bindings.md,
@@ -1401,7 +1459,9 @@ module FidelityCodeGenerator =
         OnEnum = fun e -> if e.Name <> "" then GEnum (generateEnumDecl e) else GNone
         OnStruct = fun s ->
             if s.Name = "" then GNone
-            elif s.Fields.IsEmpty then GNone  // Fieldless structs are opaque — no layout (nothing to lay out)
+            // A forward declaration has no layout; a record of only unnamed bit-fields (#183) is
+            // defined, and laid out by clang's measurement.
+            elif not (CppParser.isDefinedRecord s) then GNone
             else GStruct (generateStructDecl ctx s)
         OnFunction = fun f ->
             // Skip functions marked with __attribute__((deprecated))
@@ -1424,7 +1484,19 @@ module FidelityCodeGenerator =
         OnNamespace = fun _ -> GNone
         OnClass = fun c ->
             if c.Name = "" then GNone
-            else failwith $"C++ class '{c.Name}' requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source."
+            else
+            // A C++ record carrying an unnamed bit-field or a field whose type reaches an
+            // attributed typedef has clang's layout or none, as a C record does (#182).
+            if c.Measured.IsNone then
+                match c.UnnamedBitFields with
+                | b :: _ ->
+                    Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.UnnamedBitFieldUnmeasured $"C++ record '{c.Name}' carries {CppParser.describeUnnamedBitField b}, which moves bytes natural alignment of the declared field types cannot place, and clang has no measurement of '{c.Name}' in its declaring unit; an unnamed bit-field is never dropped from its record." c.Location.Location)
+                | [] -> ()
+                match c.TypedefAttributes |> List.tryPick (fun a -> match a.Site with CppParser.FieldType field -> Some (field, a) | CppParser.RecordName -> None) with
+                | Some (field, a) ->
+                    Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.TypedefAttributeUnmeasured $"C++ record '{c.Name}' field '{field}' has a type reaching typedef '{a.Typedef}', which carries attribute '{a.Attribute.Kind}', and clang has no measurement of '{c.Name}' in its declaring unit; natural alignment of the declared field types never stands in for the typedef's attribute." c.Location.Location)
+                | None -> ()
+            failwith $"C++ class '{c.Name}' requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source."
         OnDelegate = fun _ -> GNone // A delegate is spelled FnPtr<'F> where it is used; no type of its own
     }
 
@@ -1464,7 +1536,9 @@ module FidelityCodeGenerator =
           ValueStructs = Set.empty
           FlexibleArrays = Map.empty
           PhantomMarkers = Set.empty
-          KnownClasses = CppClassAnalysis.buildClassMap declarations }
+          KnownClasses = CppClassAnalysis.buildClassMap declarations
+          TypedefInfos = typedefInfosOf declarations
+          ByValueTypedefs = [] }
 
     /// Generate a Clef module with explicit control over what gets emitted.
     /// Uses the full GenerationContext for type resolution, but only declares

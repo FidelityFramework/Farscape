@@ -34,12 +34,17 @@ module CppClassAnalysis =
         | RegisterReturn
         | SretReturn
 
-    /// Estimate class size in bytes from visible field types.
-    /// This is a conservative lower bound; actual size may include padding,
+    /// Class size in bytes: clang's measurement when the parse measured the class (#182), else
+    /// an estimate from visible field types. The estimate is a conservative lower bound; actual size may include padding,
     /// vtable pointer, or base class storage. For binding generation, the
     /// precise size comes from the pilot.toml [cpp.class] size override
     /// or from clang's -fdump-record-layouts-simple output.
     let private estimateClassSize (cls: CppParser.ClassDecl) : int =
+        match cls.Measured with
+        // Clang's measurement of the class in its declaring unit (#182): an unnamed bit-field
+        // or a typedef's attribute moves bytes the visible field types cannot place.
+        | Some layout -> layout.SizeBits / 8
+        | None ->
         if cls.Fields.IsEmpty then 0
         else
             cls.Fields
@@ -124,7 +129,8 @@ module CppClassAnalysis =
     let classifyClass (cls: CppParser.ClassDecl) : CppClassKind =
         if cls.IsAbstract then
             InterfaceClass
-        elif cls.Fields.IsEmpty && cls.Methods.IsEmpty && cls.Constructors.IsEmpty &&
+        // A class of only unnamed bit-fields (#183) has storage clang lays out: not opaque.
+        elif cls.Fields.IsEmpty && cls.UnnamedBitFields.IsEmpty && cls.Methods.IsEmpty && cls.Constructors.IsEmpty &&
              cls.BaseClasses.IsEmpty then
             OpaqueClass
         else
