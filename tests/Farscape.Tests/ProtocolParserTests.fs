@@ -722,3 +722,125 @@ let ``an entry of a protocol built outside the parser is refused the same way`` 
                             Entries = [ { Name = "bad"; Value = "seven"; Summary = None } ] } ] } ] }
     let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> ProtocolParser.toTypeDeclarations protocol |> ignore)
     Assert.Equal("FS9130: protocol 'fx_built' enum 'fx_shape.kind' entry 'bad' has value 'seven', which is not a decimal, 0x hexadecimal or 0-prefixed octal integer, optionally negated, the forms the Wayland protocol definition gives an entry value in; an entry value is never read as 0.", error.Message)
+
+[<Fact>]
+let ``C integer-constant typing follows the target data model across LP64, ILP32, LLP64 and IP16`` () =
+    let repr cType family bits : TypeMapper.AbiRepr =
+        { Family = family; Bits = bits; Stratum = TypeMapper.Declared; CType = cType }
+    let common32 =
+        [ "0", "int", TypeMapper.Signed, 32
+          "2147483647", "int", TypeMapper.Signed, 32
+          "-2147483647", "int", TypeMapper.Signed, 32
+          "0x7FFFFFFF", "int", TypeMapper.Signed, 32
+          "-0x7FFFFFFF", "int", TypeMapper.Signed, 32
+          "0x80000000", "unsigned int", TypeMapper.Unsigned, 32
+          "0xFFFFFFFF", "unsigned int", TypeMapper.Unsigned, 32
+          "020000000000", "unsigned int", TypeMapper.Unsigned, 32 ]
+    for model in [ Types.LP64; Types.ILP32; Types.LLP64 ] do
+        for text, cType, family, bits in common32 do
+            Assert.Equal(Ok (repr cType family bits), ProtocolParser.constantTypeFor model text)
+    let ip16Constants =
+        [ "0", "int", TypeMapper.Signed, 16
+          "32767", "int", TypeMapper.Signed, 16
+          "0x7FFF", "int", TypeMapper.Signed, 16
+          "0x8000", "unsigned int", TypeMapper.Unsigned, 16
+          "0xFFFF", "unsigned int", TypeMapper.Unsigned, 16
+          "32768", "long", TypeMapper.Signed, 32
+          "2147483647", "long", TypeMapper.Signed, 32
+          "0x10000", "long", TypeMapper.Signed, 32
+          "0x80000000", "unsigned long", TypeMapper.Unsigned, 32 ]
+    for text, cType, family, bits in ip16Constants do
+        Assert.Equal(Ok (repr cType family bits), ProtocolParser.constantTypeFor Types.IP16 text)
+    let wideSigned = [ "2147483648"; "9223372036854775807"; "0x100000000"; "-0x100000000"; "0x7FFFFFFFFFFFFFFF"; "040000000000" ]
+    for text in wideSigned do
+        Assert.Equal(Ok (repr "long" TypeMapper.Signed 64), ProtocolParser.constantTypeFor Types.LP64 text)
+        Assert.Equal(Ok (repr "long long" TypeMapper.Signed 64), ProtocolParser.constantTypeFor Types.ILP32 text)
+        Assert.Equal(Ok (repr "long long" TypeMapper.Signed 64), ProtocolParser.constantTypeFor Types.LLP64 text)
+        Assert.Equal(Ok (repr "long long" TypeMapper.Signed 64), ProtocolParser.constantTypeFor Types.IP16 text)
+    let wideUnsigned = [ "0x8000000000000000"; "0xFFFFFFFFFFFFFFFF"; "01000000000000000000000" ]
+    for text in wideUnsigned do
+        Assert.Equal(Ok (repr "unsigned long" TypeMapper.Unsigned 64), ProtocolParser.constantTypeFor Types.LP64 text)
+        Assert.Equal(Ok (repr "unsigned long long" TypeMapper.Unsigned 64), ProtocolParser.constantTypeFor Types.ILP32 text)
+        Assert.Equal(Ok (repr "unsigned long long" TypeMapper.Unsigned 64), ProtocolParser.constantTypeFor Types.LLP64 text)
+        Assert.Equal(Ok (repr "unsigned long long" TypeMapper.Unsigned 64), ProtocolParser.constantTypeFor Types.IP16 text)
+    let rankOf cType =
+        match cType with
+        | "int" -> 1
+        | "unsigned int" -> 2
+        | "long" -> 3
+        | "unsigned long" -> 4
+        | "long long" -> 5
+        | "unsigned long long" -> 6
+        | other -> failwith $"Unexpected C constant type '{other}'"
+    let lp64Constants =
+        [ "0"; "2147483647"; "0x7FFFFFFF"; "0x80000000"; "0xFFFFFFFF"; "020000000000"
+          "2147483648"; "9223372036854775807"; "0x100000000"; "0x7FFFFFFFFFFFFFFF"; "040000000000"
+          "0x8000000000000000"; "0xFFFFFFFFFFFFFFFF"; "01000000000000000000000" ]
+    let clangChecks =
+        lp64Constants |> List.map (fun c ->
+            match ProtocolParser.constantTypeFor Types.LP64 c with
+            | Ok r ->
+                let expectedRank = rankOf r.CType
+                $"_Generic(({c}), int: 1, unsigned int: 2, long: 3, unsigned long: 4, long long: 5, unsigned long long: 6) == {expectedRank}"
+            | Error why -> failwith why)
+    let header = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "farscape-constant-types-" + System.Guid.NewGuid().ToString("N") + ".h")
+    try
+        System.IO.File.WriteAllText(header, "\n")
+        TestHelpers.clangConfirms header clangChecks
+    finally
+        System.IO.File.Delete header
+
+[<Fact>]
+let ``entry value signedness and negation honour the selected data model`` () =
+    Assert.Equal(Ok -32768L, ProtocolParser.entryValueFor Types.LP64 "-0x8000")
+    Assert.Equal(Ok -32768L, ProtocolParser.entryValueFor Types.ILP32 "-0x8000")
+    Assert.Equal(Ok -32768L, ProtocolParser.entryValueFor Types.LLP64 "-0x8000")
+    Assert.Equal(Ok -32767L, ProtocolParser.entryValueFor Types.IP16 "-0x7FFF")
+    Assert.Equal(Ok -65536L, ProtocolParser.entryValueFor Types.IP16 "-0x10000")
+    Assert.Equal(
+        Error "value '-0x8000', whose constant '0x8000' C types as unsigned (C11 6.4.4.1), so the negation wayland-scanner emits wraps (C11 6.2.5) instead of giving a negative value",
+        ProtocolParser.entryValueFor Types.IP16 "-0x8000")
+    let xmlWithNeg0x8000 = bitfieldProtocol.Replace("value=\"2\"", "value=\"-0x8000\"")
+    for model in [ Types.LP64; Types.ILP32; Types.LLP64 ] do
+        match ProtocolParser.parseProtocolXmlFor model xmlWithNeg0x8000 with
+        | Error e -> failwith e
+        | Ok proto ->
+            let enumDecl =
+                ProtocolParser.toTypeDeclarationsFor model proto
+                |> List.pick (function CppParser.Declaration.Enum e -> Some e | _ -> None)
+            Assert.Equal(-32768L, enumDecl.Values.[2].Value)
+    match ProtocolParser.parseProtocolXmlFor Types.IP16 xmlWithNeg0x8000 with
+    | Ok _ -> failwith "IP16 must refuse -0x8000 because 0x8000 types as 16-bit unsigned int"
+    | Error refusal ->
+        Assert.Equal(
+            "FS9130: protocol 'test' enum 'wl_output.transform' entry 'rotate_180' has value '-0x8000', whose constant '0x8000' C types as unsigned (C11 6.4.4.1), so the negation wayland-scanner emits wraps (C11 6.2.5) instead of giving a negative value; an entry value is never read as 0.",
+            refusal)
+    let ip16AdmittedXml = bitfieldProtocol.Replace("value=\"1\"", "value=\"-0x7FFF\"").Replace("value=\"2\"", "value=\"-0x10000\"")
+    match ProtocolParser.parseProtocolXmlFor Types.IP16 ip16AdmittedXml with
+    | Error e -> failwith e
+    | Ok proto ->
+        let enumDecl =
+            ProtocolParser.toTypeDeclarationsFor Types.IP16 proto
+            |> List.pick (function CppParser.Declaration.Enum e -> Some e | _ -> None)
+        Assert.Equal<(string * int64) list>(
+            [ "normal", 0L; "rotate_90", -32767L; "rotate_180", -65536L ],
+            enumDecl.Values |> List.map (fun v -> v.Name, v.Value))
+    let xmlPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "farscape-ip16-protocol-" + System.Guid.NewGuid().ToString("N") + ".xml")
+    try
+        System.IO.File.WriteAllText(xmlPath, xmlWithNeg0x8000)
+        for model in [ Types.LP64; Types.ILP32; Types.LLP64 ] do
+            match ProtocolParser.parseFileDiagnosedFor model xmlPath with
+            | Error refusal -> failwith refusal.Text
+            | Ok proto ->
+                let enumDecl =
+                    ProtocolParser.toTypeDeclarationsFor model proto
+                    |> List.pick (function CppParser.Declaration.Enum e -> Some e | _ -> None)
+                Assert.Equal(-32768L, enumDecl.Values.[2].Value)
+        match ProtocolParser.parseFileDiagnosedFor Types.IP16 xmlPath with
+        | Ok _ -> failwith "IP16 must refuse -0x8000 from file"
+        | Error refusal ->
+            Assert.Equal(
+                "FS9130: protocol 'test' enum 'wl_output.transform' entry 'rotate_180' has value '-0x8000', whose constant '0x8000' C types as unsigned (C11 6.4.4.1), so the negation wayland-scanner emits wraps (C11 6.2.5) instead of giving a negative value; an entry value is never read as 0.",
+                refusal.Text)
+    finally
+        System.IO.File.Delete xmlPath

@@ -167,34 +167,67 @@ module ProtocolParser =
     /// to 2^63-1 (long or long long under LP64, LLP64 and ILP32 alike).
     /// The value is read into the signed 64-bit carrier enum values have; a value outside it is
     /// refused, never wrapped. Anything else is the reason it cannot be read.
-    let entryValue (text: string) : Result<int64, string> =
+    let private parseConstant (model: Types.PlatformABI) (text: string) : Result<bool * string * bigint * TypeMapper.AbiRepr, string> =
         let negative = text.StartsWith "-"
         let constant = if negative then text.Substring 1 else text
         let matches (pattern: string) = System.Text.RegularExpressions.Regex.IsMatch(constant, pattern)
-        let int64Max = bigint System.Int64.MaxValue
         let outside = Error $"value '{text}', outside the signed 64-bit range enum values carry"
         let magnitudeOf (radix: int) (digits: string) =
             digits |> Seq.fold (fun (acc: bigint) c -> acc * bigint radix + bigint (System.Convert.ToInt32(string c, 16))) 0I
-        // The constant's magnitude, negated when C's type for it is signed.
-        let read (decimal: bool) (magnitude: bigint) =
-            if not negative then
-                if magnitude > int64Max then outside else Ok (int64 magnitude)
-            elif decimal then
-                if magnitude > int64Max then
+        let intBits = TypeMapper.intWidth model
+        let longBits = TypeMapper.longWidth model
+        let longLongBits = TypeMapper.longLongWidth model
+        let signedMax (bits: int) = (1I <<< (bits - 1)) - 1I
+        let unsignedMax (bits: int) = (1I <<< bits) - 1I
+        let classify (decimal: bool) (magnitude: bigint) =
+            let ladder =
+                if decimal then
+                    [ "int", TypeMapper.Signed, intBits, signedMax intBits
+                      "long", TypeMapper.Signed, longBits, signedMax longBits
+                      "long long", TypeMapper.Signed, longLongBits, signedMax longLongBits ]
+                else
+                    [ "int", TypeMapper.Signed, intBits, signedMax intBits
+                      "unsigned int", TypeMapper.Unsigned, intBits, unsignedMax intBits
+                      "long", TypeMapper.Signed, longBits, signedMax longBits
+                      "unsigned long", TypeMapper.Unsigned, longBits, unsignedMax longBits
+                      "long long", TypeMapper.Signed, longLongBits, signedMax longLongBits
+                      "unsigned long long", TypeMapper.Unsigned, longLongBits, unsignedMax longLongBits ]
+            match ladder |> List.tryFind (fun (_, _, _, maxVal) -> magnitude <= maxVal) with
+            | Some (cType, family, bits, _) ->
+                let repr : TypeMapper.AbiRepr = { Family = family; Bits = bits; Stratum = TypeMapper.Declared; CType = cType }
+                Ok (negative, constant, magnitude, repr)
+            | None ->
+                if decimal && negative then
                     Error $"value '{text}', whose constant '{constant}' has no standard C type (an unsuffixed decimal constant is int, long or long long, C11 6.4.4.1), so the value wayland-scanner's C gives it is not -{constant}"
-                else Ok (int64 (-magnitude))
-            elif magnitude <= bigint System.Int32.MaxValue || (magnitude >= 4294967296I && magnitude <= int64Max) then
-                Ok (int64 (-magnitude))
-            elif magnitude > 18446744073709551615I then outside
-            else
-                Error $"value '{text}', whose constant '{constant}' C types as unsigned (C11 6.4.4.1), so the negation wayland-scanner emits wraps (C11 6.2.5) instead of giving a negative value"
-        if matches @"\A(0|[1-9][0-9]*)\z" then read true (magnitudeOf 10 constant)
-        elif matches @"\A0[xX][0-9a-fA-F]+\z" then read false (magnitudeOf 16 (constant.Substring 2))
-        elif matches @"\A0[0-7]+\z" then read false (magnitudeOf 8 (constant.Substring 1))
+                else
+                    outside
+        if matches @"\A(0|[1-9][0-9]*)\z" then classify true (magnitudeOf 10 constant)
+        elif matches @"\A0[xX][0-9a-fA-F]+\z" then classify false (magnitudeOf 16 (constant.Substring 2))
+        elif matches @"\A0[0-7]+\z" then classify false (magnitudeOf 8 (constant.Substring 1))
         elif matches @"\A0[0-9]+\z" then
             Error $"value '{text}', which begins with 0 as an octal integer does but has a digit outside 0-7"
         else
             Error $"value '{text}', which is not a decimal, 0x hexadecimal or 0-prefixed octal integer, optionally negated, the forms the Wayland protocol definition gives an entry value in"
+
+    let constantTypeFor (model: Types.PlatformABI) (text: string) : Result<TypeMapper.AbiRepr, string> =
+        parseConstant model text |> Result.map (fun (_, _, _, repr) -> repr)
+
+    let entryValueFor (model: Types.PlatformABI) (text: string) : Result<int64, string> =
+        let int64Max = bigint System.Int64.MaxValue
+        let outside = Error $"value '{text}', outside the signed 64-bit range enum values carry"
+        // The constant's magnitude, negated when C's type for it is signed.
+        match parseConstant model text with
+        | Error err -> Error err
+        | Ok (negative, constant, magnitude, repr) ->
+            if not negative then
+                if magnitude > int64Max then outside else Ok (int64 magnitude)
+            elif repr.Family = TypeMapper.Unsigned then
+                Error $"value '{text}', whose constant '{constant}' C types as unsigned (C11 6.4.4.1), so the negation wayland-scanner emits wraps (C11 6.2.5) instead of giving a negative value"
+            elif magnitude > int64Max then outside
+            else Ok (int64 (-magnitude))
+
+    let entryValue (text: string) : Result<int64, string> =
+        entryValueFor Types.LP64 text
 
     /// The refusal of an entry whose value cannot be read (FS9130), naming the protocol, the
     /// enum (qualified by its interface), the entry and why. Fidelity.Data.XML keeps no line
@@ -210,7 +243,7 @@ module ProtocolParser =
 
     /// Every enum entry of a protocol document has a value `entryValue` reads, or the refusals
     /// of those that do not, in document order.
-    let private requireEntryValues (source: string option) (protocol: string) (root: XmlNode) : Diagnostics.Diagnostic list =
+    let private requireEntryValues (model: Types.PlatformABI) (source: string option) (protocol: string) (root: XmlNode) : Diagnostics.Diagnostic list =
         [ for iface in XmlNode.elementsNamed "interface" root do
             for enum in XmlNode.elementsNamed "enum" iface do
                 for entry in XmlNode.elementsNamed "entry" enum do
@@ -218,7 +251,7 @@ module ProtocolParser =
                     match XmlNode.attr "value" entry with
                     | None -> yield refuse "no value attribute, which wayland.dtd requires (<!ATTLIST entry value CDATA #REQUIRED>)"
                     | Some text ->
-                        match entryValue text with
+                        match entryValueFor model text with
                         | Ok _ -> ()
                         | Error why -> yield refuse why ]
 
@@ -243,7 +276,7 @@ module ProtocolParser =
     /// Parse protocol XML read from `source` (its file, when known) to intermediate
     /// representation. A protocol with an enum entry whose value cannot be read is refused
     /// (FS9130, #160), every such entry named.
-    let parseProtocolXmlFrom (source: string option) (xmlContent: string) : Result<Protocol, Diagnostics.Refusal> =
+    let parseProtocolXmlFromFor (model: Types.PlatformABI) (source: string option) (xmlContent: string) : Result<Protocol, Diagnostics.Refusal> =
         match Xml.parse xmlContent with
         | Error e ->
             Error (Diagnostics.uncoded $"XML parse error: {e}")
@@ -252,7 +285,7 @@ module ProtocolParser =
             match XmlNode.name root with
             | Some "protocol" ->
                 let name = attr "name" "" root
-                match requireEntryValues source name root with
+                match requireEntryValues model source name root with
                 | [] ->
                     Ok {
                         Name = name
@@ -264,9 +297,15 @@ module ProtocolParser =
             | _ ->
                 Error (Diagnostics.uncoded "Root element must be <protocol>")
 
+    let parseProtocolXmlFrom (source: string option) (xmlContent: string) : Result<Protocol, Diagnostics.Refusal> =
+        parseProtocolXmlFromFor Types.LP64 source xmlContent
+
     /// Parse a protocol XML string to intermediate representation.
+    let parseProtocolXmlFor (model: Types.PlatformABI) (xmlContent: string) : Result<Protocol, string> =
+        parseProtocolXmlFromFor model None xmlContent |> Result.mapError _.Text
+
     let parseProtocolXml (xmlContent: string) : Result<Protocol, string> =
-        parseProtocolXmlFrom None xmlContent |> Result.mapError _.Text
+        parseProtocolXmlFor Types.LP64 xmlContent
 
     // =========================================================================
     // Type Declaration Mapping (Protocol IR → CppParser.Declaration list)
@@ -383,7 +422,7 @@ module ProtocolParser =
             CppParser.ProtocolUndeclared $"the protocol arguments referencing enum '{qualified}' declare {spelled}, not one of type=\"uint\" or type=\"int\""
 
     /// Generate enum declarations for an interface; wire-type evidence is read from `interfaces`.
-    let private interfaceEnums (protocolName: string) (interfaces: ProtocolInterface list) (iface: ProtocolInterface) : CppParser.Declaration list =
+    let private interfaceEnums (model: Types.PlatformABI) (protocolName: string) (interfaces: ProtocolInterface list) (iface: ProtocolInterface) : CppParser.Declaration list =
         iface.Enums |> List.map (fun enum ->
             let enumName = $"{iface.Name}_{enum.Name}"
             let values =
@@ -391,7 +430,7 @@ module ProtocolParser =
                     // A parsed protocol's entries all read (`requireEntryValues`); an entry of a
                     // protocol built otherwise is refused the same way, never read as 0.
                     let value =
-                        match entryValue entry.Value with
+                        match entryValueFor model entry.Value with
                         | Ok v -> v
                         | Error why -> Diagnostics.refuse (entryValueRefusal None protocolName iface.Name enum.Name entry.Name why)
                     { CppParser.EnumValue.Name = entry.Name
@@ -409,21 +448,30 @@ module ProtocolParser =
 
     /// Extract type declarations from an interface (typedefs, enums, delegates, listener structs).
     /// These are genuine type definitions — NOT request functions.
-    let interfaceTypeDeclarationsIn (protocol: Protocol) (iface: ProtocolInterface) : CppParser.Declaration list =
+    let interfaceTypeDeclarationsInFor (model: Types.PlatformABI) (protocol: Protocol) (iface: ProtocolInterface) : CppParser.Declaration list =
         let handle = [ interfaceHandleTypedef iface ]
-        let enums = interfaceEnums protocol.Name protocol.Interfaces iface
+        let enums = interfaceEnums model protocol.Name protocol.Interfaces iface
         let delegates = eventDelegates iface
         let listener = listenerStruct iface |> Option.toList
         handle @ enums @ delegates @ listener
 
+    let interfaceTypeDeclarationsIn (protocol: Protocol) (iface: ProtocolInterface) : CppParser.Declaration list =
+        interfaceTypeDeclarationsInFor Types.LP64 protocol iface
+
     /// Type declarations of a lone interface: its enums' wire-type evidence is limited to that
     /// interface's own arguments, which then stand as the whole protocol scope.
+    let interfaceTypeDeclarationsFor (model: Types.PlatformABI) (iface: ProtocolInterface) : CppParser.Declaration list =
+        interfaceTypeDeclarationsInFor model { Name = iface.Name; Interfaces = [ iface ] } iface
+
     let interfaceTypeDeclarations (iface: ProtocolInterface) : CppParser.Declaration list =
-        interfaceTypeDeclarationsIn { Name = iface.Name; Interfaces = [ iface ] } iface
+        interfaceTypeDeclarationsFor Types.LP64 iface
 
     /// Extract all type declarations from a protocol (no request functions).
+    let toTypeDeclarationsFor (model: Types.PlatformABI) (protocol: Protocol) : CppParser.Declaration list =
+        protocol.Interfaces |> List.collect (interfaceTypeDeclarationsInFor model protocol)
+
     let toTypeDeclarations (protocol: Protocol) : CppParser.Declaration list =
-        protocol.Interfaces |> List.collect (interfaceTypeDeclarationsIn protocol)
+        toTypeDeclarationsFor Types.LP64 protocol
 
     // =========================================================================
     // Retired Request Projection Entry Points
@@ -485,10 +533,13 @@ module ProtocolParser =
 
     /// Parse a protocol XML file and return the Protocol IR.
     /// Callers retain the IR or extract type metadata with toTypeDeclarations.
-    let parseFileDiagnosed (xmlPath: string) : Result<Protocol, Diagnostics.Refusal> =
+    let parseFileDiagnosedFor (model: Types.PlatformABI) (xmlPath: string) : Result<Protocol, Diagnostics.Refusal> =
         match (try Ok (System.IO.File.ReadAllText(xmlPath)) with ex -> Error ex.Message) with
         | Error message -> Error (Diagnostics.uncoded $"Failed to read XML file '{xmlPath}': {message}")
-        | Ok content -> parseProtocolXmlFrom (Some (System.IO.Path.GetFullPath xmlPath)) content
+        | Ok content -> parseProtocolXmlFromFor model (Some (System.IO.Path.GetFullPath xmlPath)) content
+
+    let parseFileDiagnosed (xmlPath: string) : Result<Protocol, Diagnostics.Refusal> =
+        parseFileDiagnosedFor Types.LP64 xmlPath
 
     /// `parseFileDiagnosed`, reporting a failure as its text.
     let parseFile (xmlPath: string) : Result<Protocol, string> =

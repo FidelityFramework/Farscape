@@ -48,6 +48,7 @@ module TypeMapper =
         | Fixed of int
         | IntWidth
         | LongWidth
+        | LongLongWidth
         | PointerWidth
         | WcharWidth
 
@@ -61,6 +62,8 @@ module TypeMapper =
         | LP64 -> 64
         | LLP64 | ILP32 | IP16 -> 32
 
+    let longLongWidth (_: PlatformABI) = 64
+
     /// The profile's pointer width in bits.
     let pointerWidth = function
         | LP64 | LLP64 -> 64
@@ -71,6 +74,7 @@ module TypeMapper =
         | Fixed n -> n
         | IntWidth -> intWidth model
         | LongWidth -> longWidth model
+        | LongLongWidth -> longLongWidth model
         | PointerWidth -> pointerWidth model
         | WcharWidth -> (match model with LLP64 -> 16 | _ -> 32)
 
@@ -99,12 +103,12 @@ module TypeMapper =
         "signed long int", Signed, LongWidth, Declared
         "unsigned long", Unsigned, LongWidth, Declared
         "unsigned long int", Unsigned, LongWidth, Declared
-        "long long", Signed, Fixed 64, Declared
-        "long long int", Signed, Fixed 64, Declared
-        "signed long long", Signed, Fixed 64, Declared
-        "signed long long int", Signed, Fixed 64, Declared
-        "unsigned long long", Unsigned, Fixed 64, Declared
-        "unsigned long long int", Unsigned, Fixed 64, Declared
+        "long long", Signed, LongLongWidth, Declared
+        "long long int", Signed, LongLongWidth, Declared
+        "signed long long", Signed, LongLongWidth, Declared
+        "signed long long int", Signed, LongLongWidth, Declared
+        "unsigned long long", Unsigned, LongLongWidth, Declared
+        "unsigned long long int", Unsigned, LongLongWidth, Declared
         "float", Float, Fixed 32, Declared
         "double", Float, Fixed 64, Declared
         "long double", Float, Fixed 80, Inferred

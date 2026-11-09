@@ -1117,7 +1117,7 @@ module BindingGenerator =
             let xmlResults =
                 project.Library.XmlProtocols |> List.map (fun xmlPath ->
                     logVerbose $"Parsing XML protocol: {xmlPath}" verbose
-                    ProtocolParser.parseFileDiagnosed xmlPath)
+                    ProtocolParser.parseFileDiagnosedFor dataModel xmlPath)
 
             let xmlErrors = xmlResults |> List.choose (function Error e -> Some e | _ -> None)
             if not xmlErrors.IsEmpty then
