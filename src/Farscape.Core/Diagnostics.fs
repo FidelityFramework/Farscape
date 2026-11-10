@@ -493,6 +493,18 @@ module Diagnostics =
     [<Literal>]
     let CppContainerOutOfRange = "FS9219" // template container access out of range or invalid container operation contract (#120)
 
+    [<Literal>]
+    let SharedBufferContractInvalid = "FS9220" // shared buffer layout is unmeasured, mismatches the library build, or violates BAREWire / Fidelity.Platform placement alignment and byte-order contracts (#123)
+
+    [<Literal>]
+    let SharedBufferExtentInvalid = "FS9221" // shared buffer region byte extent is smaller than required by the measured StructDescriptor and element count, overflows, or accesses an element out of bounds (#123)
+
+    [<Literal>]
+    let SharedBufferLifetimeInvalid = "FS9222" // shared buffer region lifetime does not cover library retention, unmaps while retained by the library, leaks on exit, or is used after unmap (#123)
+
+    [<Literal>]
+    let SharedBufferConflictingAccess = "FS9223" // shared buffer access violates ReadOnly/ReadWrite exclusivity or mutates concurrently while the library holds an active shared view (#123)
+
     // =========================================================================
     // Structured diagnostics (#184)
     // =========================================================================

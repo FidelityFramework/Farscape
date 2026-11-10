@@ -1990,7 +1990,7 @@ module FidelityCodeGenerator =
         let self = { Name = "self"; Type = handle spec.SafeName }, pointer
         let output name typ = { Name = name; Type = handle typ }, pointer
         let prefix = "farscape_cpp_container_" + spec.SafeName
-        let binding suffix ownership parameters returnType returnRef =
+        let binding suffix ownership (parameters: (FsParam * string) list) returnType returnRef =
             let name = spec.SafeName + suffix
             let symbol = prefix + suffix
             [ LetBinding(name, List.map fst parameters, returnType, NativeZeroed,
@@ -2036,6 +2036,175 @@ module FidelityCodeGenerator =
     let generateCppTemplateContainerModule ctx inventory (spec: CppClassAnalysis.CppTemplateContainerSpec) =
         let declarations = generateCppTemplateContainerDecls ctx inventory spec
         CodeRenderer.render (Module(spec.Namespace, "Opaque C++ template container operations", OpenModule "BAREWire.Descriptors" :: BlankLine :: declarations))
+
+    /// Generate Fidelity.Platform and BAREWire zero-copy shared buffer declarations (#123).
+    let generateSharedBufferDecls (ctx: GenerationContext)
+                                  (spec: CppClassAnalysis.SharedBufferSpec) : FsDecl list =
+        CppClassAnalysis.validateSharedBufferContract ctx.StructLayouts spec
+        let source = spec.Source |> Option.defaultValue (Diagnostics.Located.Unknown "No header location was supplied for the shared buffer contract.")
+        let resolvedFields =
+            spec.Fields |> List.map (fun field ->
+                let resolved = resolveIn ctx field.CType
+                match resolved with
+                | Scalar r | CEnum (_, r) when clefTypeOf resolved = Named field.ClefType && (r.Bits + 7) / 8 = field.ByteWidth ->
+                    field, r, DescriptorGenerator.typeRefSource r, DescriptorGenerator.reprSource r
+                | _ ->
+                    Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.SharedBufferContractInvalid
+                        $"Shared buffer '{spec.SafeName}': field '{field.Name}' C type '{field.CType}' has no admitted {field.ByteWidth}-byte scalar representation as Clef type '{field.ClefType}'." source))
+        let pointer = DescriptorGenerator.typeRefSource (TypeMapper.pointerRepr ctx.DataModel "void *")
+        let intRef = abiReprOf ctx.DataModel "int" (resolveIn ctx "int") |> Option.get |> DescriptorGenerator.typeRefSource
+        let handle name = Generic("CHandle", Named name)
+        let self = { Name = "self"; Type = handle spec.SafeName }, pointer
+        let output name typ = { Name = name; Type = handle typ }, pointer
+        let prefix = "farscape_shared_buffer_" + spec.SafeName
+        let binding suffix ownership (parameters: (FsParam * string) list) returnType returnRef =
+            let name = spec.SafeName + suffix
+            let symbol = prefix + suffix
+            let argArray =
+                match parameters with
+                | [] -> Literal "[||]"
+                | _ ->
+                    let items =
+                        parameters
+                        |> List.map (fun (p, _) -> $"box {ActivePatterns.cleanParamName p.Name}")
+                        |> String.concat "; "
+                    Literal $"[| {items} |]"
+            let body =
+                FunctionCall("FidelityExtern", "invoke",
+                    [ Literal (quoteString spec.Namespace)
+                      Literal (quoteString name)
+                      Identifier (name + "Descriptor")
+                      argArray ])
+            [ ValueBinding(name + "Descriptor", Generic("Expr", Named "FunctionDescriptor"),
+                Quoted(RecordBlock [
+                    "CName", Literal (quoteString symbol)
+                    "Parameters", ArrayBlock (parameters |> List.map (fun (p, repr) -> RecordConstruction [
+                        "Name", Literal (quoteString p.Name); "Type", Literal repr; "PassBy", Identifier "Value" ]))
+                    "ReturnType", Literal returnRef
+                    "CallingConvention", Identifier "CDecl"
+                    "OwnershipTransfer", Identifier ownership ]))
+              BlankLine
+              LetBinding(name, List.map fst parameters, returnType, body,
+                         [ $"FidelityExtern({quoteString spec.LibraryName}, {quoteString symbol})" ])
+              BlankLine ]
+        let spaceName, memoryRegionSource =
+            match spec.MemorySpace with
+            | CppClassAnalysis.SharedMemorySpaceKind.HostShared -> "Fidelity.Platform.HostShared", "MemoryRegionKind.SRAM"
+            | CppClassAnalysis.SharedMemorySpaceKind.DeviceUnified -> "Fidelity.Platform.DeviceUnified", "MemoryRegionKind.DMA"
+        let accessName =
+            match spec.SpaceAccess with
+            | CppClassAnalysis.SharedAccessMode.SharedReadOnly -> "ReadOnly"
+            | CppClassAnalysis.SharedAccessMode.SharedWriteOnly -> "WriteOnly"
+            | CppClassAnalysis.SharedAccessMode.SharedReadWrite -> "ReadWrite"
+            | CppClassAnalysis.SharedAccessMode.SharedExclusiveMutable -> "ExclusiveMutable"
+        let barewireFieldDescriptors =
+            resolvedFields |> List.map (fun (field, r, _, repr) ->
+                let fieldAccess =
+                    match spec.SpaceAccess with
+                    | CppClassAnalysis.SharedAccessMode.SharedReadOnly -> "AccessKind.ReadOnly"
+                    | CppClassAnalysis.SharedAccessMode.SharedWriteOnly -> "AccessKind.WriteOnly"
+                    | CppClassAnalysis.SharedAccessMode.SharedReadWrite
+                    | CppClassAnalysis.SharedAccessMode.SharedExclusiveMutable -> "AccessKind.ReadWrite"
+                let doc = $"offset measured; repr {DescriptorGenerator.stratumName r.Stratum}: {r.CType} under {ctx.DataModel}"
+                RecordConstruction [
+                    "Name", Literal (quoteString field.Name)
+                    "Offset", Literal (string field.ByteOffset)
+                    "Repr", Literal repr
+                    "Count", Literal "1"
+                    "Access", Literal fieldAccess
+                    "BitFields", Literal "[||]"
+                    "Documentation", Literal ($"Some {quoteString doc}") ])
+        let structDoc = $"measured from targeted library {spec.LibraryName} for {spaceName} zero-copy placement"
+        let structDescriptor =
+            RecordBlock [
+                "Name", Literal (quoteString spec.StructName)
+                "Layout", RecordBlock [
+                    "Size", Literal (string spec.MeasuredSize)
+                    "Alignment", Literal (string spec.MeasuredAlignment)
+                    "Fields", ArrayBlock barewireFieldDescriptors ]
+                "MayAlias", Literal "false"
+                "FlexibleArray", Literal "None"
+                "Documentation", Literal ($"Some {quoteString structDoc}") ]
+        let peripheralDescriptor =
+            RecordBlock [
+                "Name", Literal (quoteString spec.SafeName)
+                "Instances", Literal "[||]"
+                "Layout", Identifier "Descriptor.Layout"
+                "MemoryRegion", Literal memoryRegionSource ]
+        let memorySpaceDescriptor =
+            Quoted(RecordBlock [
+                "Space", Literal (quoteString spaceName)
+                "MemoryRegion", Literal memoryRegionSource
+                "Access", Literal (quoteString accessName)
+                "ByteOrder", Literal (quoteString spec.ByteOrder)
+                "ElementSize", Literal (string spec.MeasuredSize)
+                "ElementCount", Literal (string spec.ElementCount)
+                "RegionByteExtent", Literal (string spec.RegionByteExtent)
+                "RegionAlignment", Literal (string spec.RegionAlignment)
+                "RegionLifetimeDepth", Literal (string spec.RegionLifetimeDepth)
+                "LibraryRetentionDepth", Literal (string spec.LibraryRetentionDepth) ])
+        let offsetLiterals =
+            spec.Fields |> List.map (fun field -> LiteralBinding(field.Name + "Offset", string field.ByteOffset))
+        let fieldBindings =
+            resolvedFields |> List.collect (fun (field, _, fieldRepr, _) ->
+                binding ("_clef_read_" + field.Name) "Borrowed"
+                    [ output "outValue" field.ClefType; self; { Name = "index"; Type = Named "int" }, intRef ]
+                    (Named "int") intRef
+                @ binding ("_clef_write_" + field.Name) "Borrowed"
+                    [ self; { Name = "index"; Type = Named "int" }, intRef; { Name = "value"; Type = Named field.ClefType }, fieldRepr ]
+                    (Named "int") intRef)
+        [ OpaqueMarker spec.SafeName
+          SubModule(spec.SafeName,
+              [ LiteralBinding("Size", string spec.MeasuredSize)
+                LiteralBinding("Alignment", string spec.MeasuredAlignment)
+                LiteralBinding("ElementCount", string spec.ElementCount)
+                LiteralBinding("RegionByteExtent", string spec.RegionByteExtent)
+                LiteralBinding("RegionAlignment", string spec.RegionAlignment)
+                LiteralBinding("MemorySpace", quoteString spaceName)
+                LiteralBinding("SpaceAccess", quoteString accessName)
+                LiteralBinding("ByteOrder", quoteString spec.ByteOrder) ]
+              @ offsetLiterals
+              @ [ LiteralBinding("StatusOk", "0")
+                  LiteralBinding("StatusNullHandle", "-1")
+                  LiteralBinding("StatusOutOfRange", "4")
+                  LiteralBinding("StatusLifetimeError", "5")
+                  LiteralBinding("StatusAccessConflict", "6")
+                  ValueBinding("Descriptor", Named "StructDescriptor", structDescriptor)
+                  ValueBinding("PeripheralDescriptor", Named "PeripheralDescriptor", peripheralDescriptor)
+                  ValueBinding("MemorySpaceDescriptor", Generic("Expr", Named "MemorySpaceDescriptor"), memorySpaceDescriptor) ])
+          BlankLine ]
+        @ binding "_unmap" "CalleeOwns" [ self ] (Named "int") intRef
+        @ [ ValueBinding(spec.SafeName + "_mapResourceDescriptor", Generic("Expr", Named "ResourceDescriptor"),
+              Quoted(RecordBlock [
+                  "Resource", FunctionCall("", "OwnedNullableReturn", [ RecordConstruction [
+                      "Binding", Literal (quoteString (spec.Namespace + "." + spec.SafeName + "_unmap"))
+                      "Parameter", Literal "0" ] ])
+                  "Hypothesis", RecordBlock [
+                      "Identity", Literal (quoteString spec.StructName)
+                      "Version", Literal (quoteString "1.0")
+                      "Source", Literal (quoteString (prefix + "_map")) ] ]))
+            BlankLine ]
+        @ binding "_map" "CallerOwns" [] (Generic("option", handle spec.SafeName)) pointer
+        @ binding "_share_to_library" "Borrowed"
+            [ self; { Name = "accessMode"; Type = Named "int" }, intRef; { Name = "elementCount"; Type = Named "int" }, intRef ]
+            (Named "int") intRef
+        @ binding "_unshare_from_library" "Borrowed" [ self ] (Named "int") intRef
+        @ binding "_library_transform_in_place" "Borrowed"
+            [ self; { Name = "index"; Type = Named "int" }, intRef; { Name = "delta"; Type = Named "int" }, intRef ]
+            (Named "int") intRef
+        @ binding "_clef_address_identity" "Borrowed" [ output "outAddress" "int"; self ] (Named "int") intRef
+        @ binding "_library_address_identity" "Borrowed" [ output "outAddress" "int"; self ] (Named "int") intRef
+        @ binding "_copy_count" "Borrowed" [ output "outCopies" "int"; self ] (Named "int") intRef
+        @ binding "_memory_space_kind" "Borrowed" [ output "outSpaceKind" "int"; self ] (Named "int") intRef
+        @ fieldBindings
+
+    let generateSharedBufferModule (ctx: GenerationContext) (spec: CppClassAnalysis.SharedBufferSpec) =
+        let declarations = generateSharedBufferDecls ctx spec
+        CodeRenderer.render (
+            Module(
+                spec.Namespace,
+                "Fidelity.Platform and BAREWire zero-copy shared buffer operations",
+                OpenModule "BAREWire.Hardware" :: OpenModule "BAREWire.Descriptors" :: BlankLine :: declarations))
 
     /// Marshaled class surface. C1/D1 identify the native operations; owned allocation
     /// and deallocation are realized by the companion native storage adapter.

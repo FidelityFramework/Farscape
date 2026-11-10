@@ -1118,6 +1118,515 @@ module CppClassAnalysis =
         ]
 
     // =========================================================================
+    // Fidelity.Platform and BAREWire Zero-Copy Shared Buffers (#123)
+    // =========================================================================
+
+    type StructLayout = CppParser.StructLayoutInfo
+
+    type SharedMemorySpaceKind =
+        | HostShared
+        | DeviceUnified
+
+    type SharedAccessMode =
+        | SharedReadOnly
+        | SharedWriteOnly
+        | SharedReadWrite
+        | SharedExclusiveMutable
+
+    type SharedBufferFieldSpec = {
+        Name: string
+        CType: string
+        ClefType: string
+        ByteOffset: int
+        ByteWidth: int
+        IsVolatile: bool
+    }
+
+    type SharedBufferSpec = {
+        StructName: string
+        SafeName: string
+        Namespace: string
+        LibraryName: string
+        HeaderFile: string
+        MemorySpace: SharedMemorySpaceKind
+        SpaceAccess: SharedAccessMode
+        ByteOrder: string
+        MeasuredSize: int
+        MeasuredAlignment: int
+        ElementCount: int
+        RegionByteExtent: int
+        RegionAlignment: int
+        RegionLifetimeDepth: int
+        LibraryRetentionDepth: int
+        Fields: SharedBufferFieldSpec list
+        LibraryTransformSymbol: string option
+        Source: Diagnostics.Located<Diagnostics.SourceLocation> option
+    }
+
+    type SharedBufferOperation =
+        | MapRegion
+        | ClefRead of elementIndex: int * fieldName: string
+        | ClefWrite of elementIndex: int * fieldName: string
+        | ShareToLibrary of mode: SharedAccessMode * elementCount: int
+        | LibraryMutate of elementIndex: int
+        | SyncFromLibrary of elementIndex: int
+        | UnshareFromLibrary
+        | UnmapRegion
+        | ScopeExit
+
+    let private refuseSharedBuffer (spec: SharedBufferSpec) code reason =
+        let source = spec.Source |> Option.defaultValue (Diagnostics.Located.Unknown "No header location was supplied for the shared buffer contract.")
+        Diagnostics.refuse (Diagnostics.diagnostic code $"Shared buffer '{spec.SafeName}': {reason}" source)
+
+    let private validateSharedBufferSpecShape (spec: SharedBufferSpec) =
+        let identifier (text: string) =
+            not (System.String.IsNullOrWhiteSpace text)
+            && (System.Char.IsLetter text[0] || text[0] = '_')
+            && (text |> Seq.forall (fun c -> System.Char.IsLetterOrDigit c || c = '_'))
+        let isPowerOfTwo (n: int) = n > 0 && (n &&& (n - 1)) = 0
+        let rawTokens = [ "nativeint"; "nativeptr"; "*"; "&"; "Ptr<" ]
+        let topStrings = [ spec.StructName; spec.SafeName; spec.Namespace; spec.LibraryName; spec.HeaderFile; spec.ByteOrder ] @ Option.toList spec.LibraryTransformSymbol
+        if topStrings |> List.exists (fun s -> System.String.IsNullOrWhiteSpace s || rawTokens |> List.exists s.Contains) then
+            refuseSharedBuffer spec Diagnostics.SharedBufferContractInvalid "empty names and raw pointer/address tokens are forbidden in shared buffer contracts."
+        let cleanStruct = spec.StructName.Replace("struct ", "").Trim()
+        if not (cleanStruct.Split([| "::" |], System.StringSplitOptions.None) |> Array.forall identifier)
+           || not (identifier spec.SafeName)
+           || not (spec.Namespace.Split('.') |> Array.forall identifier)
+           || (spec.LibraryTransformSymbol |> Option.exists (identifier >> not)) then
+            refuseSharedBuffer spec Diagnostics.SharedBufferContractInvalid "invalid struct, module, or symbol identifier in shared buffer contract."
+        if spec.Fields.IsEmpty then
+            refuseSharedBuffer spec Diagnostics.SharedBufferContractInvalid "shared buffer descriptor must declare at least one measured field."
+        let fieldNames = spec.Fields |> List.map _.Name
+        if (fieldNames |> List.distinct).Length <> fieldNames.Length then
+            refuseSharedBuffer spec Diagnostics.SharedBufferContractInvalid "shared buffer descriptor contains duplicate field names."
+        for field in spec.Fields do
+            if [ field.Name; field.CType; field.ClefType ] |> List.exists (fun s -> System.String.IsNullOrWhiteSpace s || rawTokens |> List.exists s.Contains) then
+                refuseSharedBuffer spec Diagnostics.SharedBufferContractInvalid $"field '{field.Name}' uses an empty spelling or forbidden raw pointer/address token."
+            if not (identifier field.Name) || not (identifier field.ClefType) then
+                refuseSharedBuffer spec Diagnostics.SharedBufferContractInvalid $"field '{field.Name}' has an invalid identifier or Clef type '{field.ClefType}'."
+            if field.ByteOffset < 0 || field.ByteWidth <= 0 then
+                refuseSharedBuffer spec Diagnostics.SharedBufferContractInvalid $"field '{field.Name}' has invalid offset {field.ByteOffset} or width {field.ByteWidth}."
+        if spec.MeasuredSize <= 0 then
+            refuseSharedBuffer spec Diagnostics.SharedBufferExtentInvalid $"measured struct size {spec.MeasuredSize} must be positive."
+        if not (isPowerOfTwo spec.MeasuredAlignment) || not (isPowerOfTwo spec.RegionAlignment) || spec.RegionAlignment < spec.MeasuredAlignment then
+            refuseSharedBuffer spec Diagnostics.SharedBufferContractInvalid
+                $"Fidelity.Platform placement alignment {spec.RegionAlignment} is incompatible with measured struct alignment {spec.MeasuredAlignment} (both must be powers of two with RegionAlignment >= MeasuredAlignment)."
+        if spec.ByteOrder <> "LittleEndian" then
+            refuseSharedBuffer spec Diagnostics.SharedBufferContractInvalid
+                $"shared buffer byte order '{spec.ByteOrder}' mismatches the targeted library build byte-order contract ('LittleEndian')."
+        for field in spec.Fields do
+            if int64 field.ByteOffset + int64 field.ByteWidth > int64 spec.MeasuredSize then
+                refuseSharedBuffer spec Diagnostics.SharedBufferContractInvalid
+                    $"field '{field.Name}' at offset {field.ByteOffset} (width {field.ByteWidth}) exceeds measured struct size {spec.MeasuredSize}."
+        let sortedFields = spec.Fields |> List.sortBy _.ByteOffset
+        for a, b in List.pairwise sortedFields do
+            if int64 a.ByteOffset + int64 a.ByteWidth > int64 b.ByteOffset then
+                refuseSharedBuffer spec Diagnostics.SharedBufferContractInvalid
+                    $"fields '{a.Name}' and '{b.Name}' overlap in shared buffer layout."
+        if spec.ElementCount <= 0 || spec.RegionByteExtent <= 0 then
+            refuseSharedBuffer spec Diagnostics.SharedBufferExtentInvalid
+                $"shared buffer element count ({spec.ElementCount}) and region byte extent ({spec.RegionByteExtent}) must be positive."
+        let requiredBytes = int64 spec.ElementCount * int64 spec.MeasuredSize
+        if requiredBytes > int64 System.Int32.MaxValue then
+            refuseSharedBuffer spec Diagnostics.SharedBufferExtentInvalid
+                $"shared buffer required byte extent ({spec.ElementCount} * {spec.MeasuredSize}) overflows 32-bit descriptor bounds."
+        if int64 spec.RegionByteExtent < requiredBytes then
+            refuseSharedBuffer spec Diagnostics.SharedBufferExtentInvalid
+                $"shared buffer region byte extent {spec.RegionByteExtent} is smaller than required extent {requiredBytes} ({spec.ElementCount} * {spec.MeasuredSize} bytes)."
+        if spec.RegionLifetimeDepth < 0 || spec.LibraryRetentionDepth < 0 || spec.RegionLifetimeDepth > spec.LibraryRetentionDepth then
+            refuseSharedBuffer spec Diagnostics.SharedBufferLifetimeInvalid
+                $"Fidelity.Platform region lifetime depth {spec.RegionLifetimeDepth} expires before targeted library retention depth {spec.LibraryRetentionDepth}."
+
+    /// Validate a BAREWire and Fidelity.Platform shared-buffer contract against clang's measured struct layouts (#123).
+    let validateSharedBufferContract (measuredStructs: Map<string, StructLayout>) (spec: SharedBufferSpec) =
+        let cleanStruct = spec.StructName.Replace("struct ", "").Trim()
+        let rawTokens = [ "nativeint"; "nativeptr"; "*"; "&"; "Ptr<" ]
+        let topStrings = [ spec.StructName; spec.SafeName; spec.Namespace; spec.LibraryName; spec.HeaderFile; spec.ByteOrder ] @ Option.toList spec.LibraryTransformSymbol
+        if topStrings |> List.exists (fun s -> System.String.IsNullOrWhiteSpace s || rawTokens |> List.exists s.Contains) then
+            refuseSharedBuffer spec Diagnostics.SharedBufferContractInvalid "empty names and raw pointer/address tokens are forbidden in shared buffer contracts."
+        for field in spec.Fields do
+            if [ field.Name; field.CType; field.ClefType ] |> List.exists (fun s -> System.String.IsNullOrWhiteSpace s || rawTokens |> List.exists s.Contains) then
+                refuseSharedBuffer spec Diagnostics.SharedBufferContractInvalid $"field '{field.Name}' uses an empty spelling or forbidden raw pointer/address token."
+        if spec.MeasuredSize <= 0 then
+            refuseSharedBuffer spec Diagnostics.SharedBufferExtentInvalid $"measured struct size {spec.MeasuredSize} must be positive."
+        let measured =
+            match Map.tryFind spec.StructName measuredStructs |> Option.orElseWith (fun () -> Map.tryFind cleanStruct measuredStructs) with
+            | Some m -> m
+            | None ->
+                refuseSharedBuffer spec Diagnostics.SharedBufferContractInvalid
+                    $"struct '{spec.StructName}' has no clang measured layout in the targeted library build."
+        if measured.SizeBits <= 0 || measured.SizeBits % 8 <> 0 || measured.AlignmentBits <= 0 || measured.AlignmentBits % 8 <> 0 then
+            refuseSharedBuffer spec Diagnostics.SharedBufferContractInvalid
+                $"clang measured layout for '{spec.StructName}' is not whole-byte aligned ({measured.SizeBits} bits, alignment {measured.AlignmentBits} bits)."
+        let actualSize = measured.SizeBits / 8
+        let actualAlignment = measured.AlignmentBits / 8
+        if spec.MeasuredSize <> actualSize || spec.MeasuredAlignment <> actualAlignment then
+            refuseSharedBuffer spec Diagnostics.SharedBufferContractInvalid
+                $"descriptor layout ({spec.MeasuredSize} bytes, alignment {spec.MeasuredAlignment}) mismatches clang measured build layout ({actualSize} bytes, alignment {actualAlignment}) for '{spec.StructName}'."
+        if spec.Fields.Length <> measured.FieldOffsetsBits.Length then
+            refuseSharedBuffer spec Diagnostics.SharedBufferContractInvalid
+                $"descriptor declares {spec.Fields.Length} fields for '{spec.StructName}', but clang measured {measured.FieldOffsetsBits.Length} field offsets."
+        for field, offsetBits in List.zip spec.Fields measured.FieldOffsetsBits do
+            if offsetBits < 0 || offsetBits % 8 <> 0 || field.ByteOffset <> offsetBits / 8 then
+                refuseSharedBuffer spec Diagnostics.SharedBufferContractInvalid
+                    $"field '{field.Name}' offset {field.ByteOffset} mismatches clang measured offset {offsetBits / 8} bytes in '{spec.StructName}'."
+        validateSharedBufferSpecShape spec
+
+    /// Verify shared-buffer lifecycle, extent bounds, retention lifetime, and access exclusivity (#123).
+    let verifySharedBufferLifecycle (measuredStructs: Map<string, StructLayout>) (spec: SharedBufferSpec) (ops: SharedBufferOperation list) =
+        validateSharedBufferContract measuredStructs spec
+        let fieldNames = spec.Fields |> List.map _.Name |> Set.ofList
+        let requireField fieldName =
+            if not (Set.contains fieldName fieldNames) then
+                refuseSharedBuffer spec Diagnostics.SharedBufferContractInvalid
+                    $"field '{fieldName}' is not declared in the measured BAREWire descriptor for '{spec.StructName}'."
+        let requireInBounds opName index limitCount =
+            if index < 0 || index >= limitCount || index >= spec.ElementCount then
+                refuseSharedBuffer spec Diagnostics.SharedBufferExtentInvalid
+                    $"{opName} element index {index} is out of bounds for shared buffer of {limitCount} elements."
+            let endByte = int64 (index + 1) * int64 spec.MeasuredSize
+            if endByte > int64 spec.RegionByteExtent then
+                refuseSharedBuffer spec Diagnostics.SharedBufferExtentInvalid
+                    $"{opName} byte span {endByte} exceeds region byte extent {spec.RegionByteExtent}."
+        let requireCleanExit (mapped: bool) (activeShare: (SharedAccessMode * int) option) =
+            if activeShare.IsSome then
+                refuseSharedBuffer spec Diagnostics.SharedBufferLifetimeInvalid
+                    "shared buffer region exits scope while the targeted library still retains an active shared view."
+            if mapped then
+                refuseSharedBuffer spec Diagnostics.SharedBufferLifetimeInvalid
+                    "shared buffer region is leaked at scope exit without UnmapRegion."
+        let rec loop (mapped: bool) (everMapped: bool) (activeShare: (SharedAccessMode * int) option) (remaining: SharedBufferOperation list) =
+            let requireMapped opName =
+                if not mapped then
+                    if everMapped then
+                        refuseSharedBuffer spec Diagnostics.SharedBufferLifetimeInvalid $"{opName} after UnmapRegion is forbidden."
+                    else
+                        refuseSharedBuffer spec Diagnostics.SharedBufferLifetimeInvalid $"{opName} before MapRegion is forbidden."
+            match remaining with
+            | [] ->
+                requireCleanExit mapped activeShare
+            | SharedBufferOperation.MapRegion :: rest ->
+                if mapped || everMapped then
+                    refuseSharedBuffer spec Diagnostics.SharedBufferLifetimeInvalid "shared buffer region cannot be mapped more than once in the same lifecycle."
+                loop true true None rest
+            | SharedBufferOperation.ClefRead (index, fieldName) :: rest ->
+                requireMapped "ClefRead"
+                if spec.SpaceAccess = SharedWriteOnly then
+                    refuseSharedBuffer spec Diagnostics.SharedBufferConflictingAccess "ClefRead is forbidden on a SharedWriteOnly memory space placement."
+                match activeShare with
+                | Some ((SharedReadWrite | SharedExclusiveMutable | SharedWriteOnly), _) ->
+                    refuseSharedBuffer spec Diagnostics.SharedBufferConflictingAccess "ClefRead conflicts with an active mutable library share."
+                | Some (SharedReadOnly, _) | None -> ()
+                requireField fieldName
+                requireInBounds "ClefRead" index spec.ElementCount
+                loop mapped everMapped activeShare rest
+            | SharedBufferOperation.ClefWrite (index, fieldName) :: rest ->
+                requireMapped "ClefWrite"
+                if spec.SpaceAccess = SharedReadOnly then
+                    refuseSharedBuffer spec Diagnostics.SharedBufferConflictingAccess "ClefWrite is forbidden on a SharedReadOnly memory space placement."
+                match activeShare with
+                | Some _ ->
+                    refuseSharedBuffer spec Diagnostics.SharedBufferConflictingAccess "ClefWrite is forbidden while the targeted library holds an active shared view."
+                | None -> ()
+                requireField fieldName
+                requireInBounds "ClefWrite" index spec.ElementCount
+                loop mapped everMapped activeShare rest
+            | SharedBufferOperation.ShareToLibrary (mode, count) :: rest ->
+                requireMapped "ShareToLibrary"
+                if activeShare.IsSome then
+                    refuseSharedBuffer spec Diagnostics.SharedBufferConflictingAccess "ShareToLibrary is forbidden while the targeted library already holds an active shared view."
+                match spec.SpaceAccess, mode with
+                | SharedReadOnly, (SharedWriteOnly | SharedReadWrite | SharedExclusiveMutable) ->
+                    refuseSharedBuffer spec Diagnostics.SharedBufferConflictingAccess "requested mutable library share mode exceeds SharedReadOnly memory space placement."
+                | SharedWriteOnly, (SharedReadOnly | SharedReadWrite | SharedExclusiveMutable) ->
+                    refuseSharedBuffer spec Diagnostics.SharedBufferConflictingAccess "requested library share mode conflicts with SharedWriteOnly memory space placement."
+                | _ -> ()
+                if count <= 0 || count > spec.ElementCount then
+                    refuseSharedBuffer spec Diagnostics.SharedBufferExtentInvalid
+                        $"ShareToLibrary element count {count} is out of bounds for capacity {spec.ElementCount}."
+                let shareBytes = int64 count * int64 spec.MeasuredSize
+                if shareBytes > int64 spec.RegionByteExtent then
+                    refuseSharedBuffer spec Diagnostics.SharedBufferExtentInvalid
+                        $"ShareToLibrary byte extent {shareBytes} exceeds region byte extent {spec.RegionByteExtent}."
+                loop mapped everMapped (Some (mode, count)) rest
+            | SharedBufferOperation.LibraryMutate index :: rest ->
+                requireMapped "LibraryMutate"
+                if spec.SpaceAccess = SharedReadOnly then
+                    refuseSharedBuffer spec Diagnostics.SharedBufferConflictingAccess "LibraryMutate is forbidden on a SharedReadOnly memory space placement."
+                match activeShare with
+                | None ->
+                    refuseSharedBuffer spec Diagnostics.SharedBufferConflictingAccess "LibraryMutate requires an active mutable library share."
+                | Some (SharedReadOnly, _) ->
+                    refuseSharedBuffer spec Diagnostics.SharedBufferConflictingAccess "LibraryMutate is forbidden while the library holds a SharedReadOnly view."
+                | Some ((SharedWriteOnly | SharedReadWrite | SharedExclusiveMutable), sharedCount) ->
+                    requireInBounds "LibraryMutate" index sharedCount
+                    loop mapped everMapped activeShare rest
+            | SharedBufferOperation.SyncFromLibrary index :: rest ->
+                requireMapped "SyncFromLibrary"
+                if spec.SpaceAccess = SharedWriteOnly then
+                    refuseSharedBuffer spec Diagnostics.SharedBufferConflictingAccess "SyncFromLibrary is forbidden on a SharedWriteOnly memory space placement."
+                match activeShare with
+                | Some (SharedExclusiveMutable, _) ->
+                    refuseSharedBuffer spec Diagnostics.SharedBufferConflictingAccess "SyncFromLibrary is forbidden while the library holds a SharedExclusiveMutable view."
+                | Some (_, sharedCount) ->
+                    requireInBounds "SyncFromLibrary" index sharedCount
+                | None ->
+                    requireInBounds "SyncFromLibrary" index spec.ElementCount
+                loop mapped everMapped activeShare rest
+            | SharedBufferOperation.UnshareFromLibrary :: rest ->
+                requireMapped "UnshareFromLibrary"
+                match activeShare with
+                | None ->
+                    refuseSharedBuffer spec Diagnostics.SharedBufferLifetimeInvalid "UnshareFromLibrary called when no library share is active."
+                | Some _ ->
+                    loop mapped everMapped None rest
+            | SharedBufferOperation.UnmapRegion :: rest ->
+                requireMapped "UnmapRegion"
+                if activeShare.IsSome then
+                    refuseSharedBuffer spec Diagnostics.SharedBufferLifetimeInvalid "UnmapRegion is forbidden while the targeted library still retains an active shared view."
+                loop false everMapped None rest
+            | SharedBufferOperation.ScopeExit :: rest ->
+                requireCleanExit mapped activeShare
+                if not rest.IsEmpty then
+                    refuseSharedBuffer spec Diagnostics.SharedBufferLifetimeInvalid "operations follow a terminal ScopeExit."
+        loop false false None ops
+
+    /// Expected exported C symbols for a shared buffer contract (#123).
+    let sharedBufferExportedSymbols (spec: SharedBufferSpec) : string list =
+        let prefix = "farscape_shared_buffer_" + spec.SafeName
+        let core =
+            [ prefix + "_map"
+              prefix + "_unmap"
+              prefix + "_share_to_library"
+              prefix + "_unshare_from_library"
+              prefix + "_library_transform_in_place"
+              prefix + "_clef_address_identity"
+              prefix + "_library_address_identity"
+              prefix + "_copy_count"
+              prefix + "_memory_space_kind" ]
+        let fields =
+            spec.Fields |> List.collect (fun f ->
+                [ prefix + "_clef_read_" + f.Name
+                  prefix + "_clef_write_" + f.Name ])
+        core @ fields @ Option.toList spec.LibraryTransformSymbol
+
+    /// Validate that a compiled target library binary exports every symbol required by a shared-buffer contract (#123).
+    let validateSharedBufferLibraryExports (libraryPath: string) (measuredStructs: Map<string, StructLayout>) (spec: SharedBufferSpec) =
+        validateSharedBufferContract measuredStructs spec
+        let build, _ = inspectLibraryExports libraryPath
+        let resolved = build.LibraryPath
+        let archive =
+            use stream = System.IO.File.OpenRead resolved
+            let magic = Array.zeroCreate<byte> 8
+            stream.ReadExactly magic
+            List.contains (System.Text.Encoding.ASCII.GetString magic) ["!<arch>\n"; "!<thin>\n"]
+        let lines (text: string) = text.Split('\n', System.StringSplitOptions.RemoveEmptyEntries) |> Array.toList
+        let exported =
+            if archive then
+                let output = runSymbolTool "nm" ["--extern-only"; "--defined-only"; "--format=posix"; "--"; resolved] None
+                lines output
+                |> List.choose (fun line ->
+                    let columns = line.Split([|' '; '\t'|], System.StringSplitOptions.RemoveEmptyEntries)
+                    if columns.Length >= 2 then Some columns.[0] else None)
+                |> Set.ofList
+            else
+                let output = runSymbolTool "readelf" ["--dyn-syms"; "--wide"; "--"; resolved] None
+                lines output
+                |> List.choose (fun line ->
+                    let columns = line.Split([|' '; '\t'|], System.StringSplitOptions.RemoveEmptyEntries)
+                    if columns.Length >= 8
+                       && List.contains columns.[4] ["GLOBAL"; "WEAK"; "UNIQUE"]
+                       && List.contains columns.[5] ["DEFAULT"; "PROTECTED"]
+                       && columns.[6] <> "UND" then
+                        Some (columns.[7].Split('@').[0])
+                    else None)
+                |> Set.ofList
+        for sym in sharedBufferExportedSymbols spec do
+            if not (Set.contains sym exported) then
+                refuseSharedBuffer spec Diagnostics.SharedBufferContractInvalid
+                    $"required shared-buffer symbol '{sym}' is not exported by library build '{build.LibraryPath}' (SHA-256 {build.Sha256})."
+
+    /// Render the companion extern "C" C++ zero-copy shim for a BAREWire / Fidelity.Platform shared buffer (#123).
+    let renderSharedBufferZeroCopyShimC (spec: SharedBufferSpec) : string =
+        validateSharedBufferSpecShape spec
+        let prefix = "farscape_shared_buffer_" + spec.SafeName
+        let escapedHeader = spec.HeaderFile.Replace("\\", "\\\\").Replace("\"", "\\\"")
+        let memorySpaceCode =
+            match spec.MemorySpace with
+            | HostShared -> 1
+            | DeviceUnified -> 2
+        let spaceAccessCode =
+            match spec.SpaceAccess with
+            | SharedReadOnly -> 1
+            | SharedWriteOnly -> 2
+            | SharedReadWrite -> 3
+            | SharedExclusiveMutable -> 4
+        let staticAsserts =
+            [ $"static_assert(sizeof(SharedElement) == {spec.MeasuredSize}, \"BAREWire measured sizeof mismatch\");"
+              $"static_assert(alignof(SharedElement) == {spec.MeasuredAlignment}, \"BAREWire measured alignof mismatch\");" ]
+            @ (spec.Fields |> List.collect (fun f ->
+                [ $"static_assert(offsetof(SharedElement, {f.Name}) == {f.ByteOffset}, \"BAREWire measured offsetof({f.Name}) mismatch\");"
+                  $"static_assert(sizeof(static_cast<SharedElement*>(nullptr)->{f.Name}) == {f.ByteWidth}, \"BAREWire measured width({f.Name}) mismatch\");" ]))
+        let fieldAccessors =
+            spec.Fields |> List.collect (fun f ->
+                [ $"extern \"C\" int {prefix}_clef_write_{f.Name}(void* self, int index, {f.CType} value) noexcept {{"
+                  "  if (!self) return StatusNullHandle;"
+                  "  auto* region = static_cast<SharedRegionState*>(self);"
+                  "  if (!region->mapped || !region->elements) return StatusLifetimeError;"
+                  "  if (region->space_access == AccessReadOnly || region->share_mode != AccessNone) return StatusAccessConflict;"
+                  $"  if (index < 0 || index >= {spec.ElementCount}) return StatusOutOfRange;"
+                  $"  region->elements[index].{f.Name} = value;"
+                  "  region->clef_addr = reinterpret_cast<std::uintptr_t>(&region->elements[0]);"
+                  "  return StatusOk;"
+                  "}"
+                  $"extern \"C\" int {prefix}_clef_read_{f.Name}({f.CType}* outValue, void* self, int index) noexcept {{"
+                  "  if (!outValue || !self) return StatusNullHandle;"
+                  "  auto* region = static_cast<SharedRegionState*>(self);"
+                  "  if (!region->mapped || !region->elements) return StatusLifetimeError;"
+                  "  if (region->space_access == AccessWriteOnly || region->share_mode == AccessReadWrite || region->share_mode == AccessExclusiveMutable || region->share_mode == AccessWriteOnly) return StatusAccessConflict;"
+                  $"  if (index < 0 || index >= {spec.ElementCount}) return StatusOutOfRange;"
+                  $"  *outValue = region->elements[index].{f.Name};"
+                  "  region->clef_addr = reinterpret_cast<std::uintptr_t>(&region->elements[0]);"
+                  "  return StatusOk;"
+                  "}" ])
+        let firstField = spec.Fields.Head
+        let transformBody =
+            match spec.LibraryTransformSymbol with
+            | Some sym ->
+                [ $"  return {sym}(&region->elements[0], region->shared_count, index, delta, &region->library_addr, &region->copy_count);" ]
+            | None ->
+                [ $"  region->elements[index].{firstField.Name} = static_cast<{firstField.CType}>(region->elements[index].{firstField.Name} + static_cast<{firstField.CType}>(delta));"
+                  "  region->library_addr = reinterpret_cast<std::uintptr_t>(&region->elements[0]);"
+                  "  return StatusOk;" ]
+        String.concat "\n" (
+            [ $"#include \"{escapedHeader}\""
+              "#include <cstddef>"
+              "#include <cstdint>"
+              "#include <cstring>"
+              "#include <sys/mman.h>"
+              "#include <unistd.h>"
+              "namespace {"
+              $"using SharedElement = {spec.StructName};"
+              "enum { StatusOk = 0, StatusNullHandle = -1, StatusOutOfRange = 4, StatusLifetimeError = 5, StatusAccessConflict = 6 };"
+              "enum { AccessNone = 0, AccessReadOnly = 1, AccessWriteOnly = 2, AccessReadWrite = 3, AccessExclusiveMutable = 4 };"
+              "enum { SpaceHostShared = 1, SpaceDeviceUnified = 2 };" ]
+            @ staticAsserts
+            @ [ "struct SharedRegionState {"
+                "  SharedElement* elements;"
+                "  std::size_t mapped_bytes;"
+                "  bool mapped;"
+                "  int memory_space;"
+                "  int space_access;"
+                "  int share_mode;"
+                "  int shared_count;"
+                "  std::uintptr_t clef_addr;"
+                "  std::uintptr_t library_addr;"
+                "  int copy_count;"
+                "};"
+                "static SharedRegionState g_regions[16];"
+                "static int g_next_region = 0;"
+                "static std::size_t align_page_extent(std::size_t bytes, std::size_t req_align) noexcept {"
+                "  long page = ::sysconf(_SC_PAGESIZE);"
+                "  std::size_t gran = page > 0 ? static_cast<std::size_t>(page) : 4096u;"
+                "  if (req_align > gran) gran = req_align;"
+                "  return ((bytes + gran - 1u) / gran) * gran;"
+                "}"
+                "}"
+                $"extern \"C\" void* {prefix}_map() noexcept {{"
+                "  if (g_next_region >= 16) return nullptr;"
+                $"  std::size_t map_bytes = align_page_extent({spec.RegionByteExtent}u, {spec.RegionAlignment}u);"
+                $"  int init_prot = ({spaceAccessCode} == AccessReadOnly) ? PROT_READ : (PROT_READ | PROT_WRITE);"
+                "  void* mem = ::mmap(nullptr, map_bytes, init_prot, MAP_SHARED | MAP_ANONYMOUS, -1, 0);"
+                "  if (mem == MAP_FAILED || !mem) return nullptr;"
+                $"  if ((reinterpret_cast<std::uintptr_t>(mem) & ({spec.RegionAlignment}u - 1u)) != 0u) {{ ::munmap(mem, map_bytes); return nullptr; }}"
+                "  auto& slot = g_regions[g_next_region++];"
+                "  std::memset(&slot, 0, sizeof(SharedRegionState));"
+                "  slot.elements = static_cast<SharedElement*>(mem);"
+                "  slot.mapped_bytes = map_bytes;"
+                "  slot.mapped = true;"
+                $"  slot.memory_space = {memorySpaceCode};"
+                $"  slot.space_access = {spaceAccessCode};"
+                "  slot.share_mode = AccessNone;"
+                "  slot.shared_count = 0;"
+                "  slot.clef_addr = reinterpret_cast<std::uintptr_t>(&slot.elements[0]);"
+                "  slot.library_addr = 0;"
+                "  slot.copy_count = 0;"
+                "  return &slot;"
+                "}"
+                $"extern \"C\" int {prefix}_unmap(void* self) noexcept {{"
+                "  if (!self) return StatusNullHandle;"
+                "  auto* region = static_cast<SharedRegionState*>(self);"
+                "  if (!region->mapped || !region->elements || region->share_mode != AccessNone) return StatusLifetimeError;"
+                "  ::munmap(region->elements, region->mapped_bytes);"
+                "  region->elements = nullptr;"
+                "  region->mapped = false;"
+                "  return StatusOk;"
+                "}" ]
+            @ fieldAccessors
+            @ [ $"extern \"C\" int {prefix}_share_to_library(void* self, int accessMode, int elementCount) noexcept {{"
+                "  if (!self) return StatusNullHandle;"
+                "  auto* region = static_cast<SharedRegionState*>(self);"
+                "  if (!region->mapped || !region->elements) return StatusLifetimeError;"
+                "  if (region->share_mode != AccessNone) return StatusAccessConflict;"
+                "  if (accessMode < AccessReadOnly || accessMode > AccessExclusiveMutable) return StatusAccessConflict;"
+                "  if (region->space_access == AccessReadOnly && accessMode != AccessReadOnly) return StatusAccessConflict;"
+                "  if (region->space_access == AccessWriteOnly && accessMode != AccessWriteOnly) return StatusAccessConflict;"
+                $"  if (elementCount <= 0 || elementCount > {spec.ElementCount} || static_cast<std::size_t>(elementCount) * sizeof(SharedElement) > {spec.RegionByteExtent}u) return StatusOutOfRange;"
+                "  if (accessMode == AccessReadOnly) { ::mprotect(region->elements, region->mapped_bytes, PROT_READ); }"
+                "  region->share_mode = accessMode;"
+                "  region->shared_count = elementCount;"
+                "  region->library_addr = reinterpret_cast<std::uintptr_t>(&region->elements[0]);"
+                "  return StatusOk;"
+                "}"
+                $"extern \"C\" int {prefix}_unshare_from_library(void* self) noexcept {{"
+                "  if (!self) return StatusNullHandle;"
+                "  auto* region = static_cast<SharedRegionState*>(self);"
+                "  if (!region->mapped || !region->elements || region->share_mode == AccessNone) return StatusLifetimeError;"
+                "  int restore_prot = (region->space_access == AccessReadOnly) ? PROT_READ : (PROT_READ | PROT_WRITE);"
+                "  ::mprotect(region->elements, region->mapped_bytes, restore_prot);"
+                "  region->share_mode = AccessNone;"
+                "  region->shared_count = 0;"
+                "  return StatusOk;"
+                "}"
+                $"extern \"C\" int {prefix}_library_transform_in_place(void* self, int index, int delta) noexcept {{"
+                "  if (!self) return StatusNullHandle;"
+                "  auto* region = static_cast<SharedRegionState*>(self);"
+                "  if (!region->mapped || !region->elements) return StatusLifetimeError;"
+                "  if (region->space_access == AccessReadOnly || (region->share_mode != AccessReadWrite && region->share_mode != AccessExclusiveMutable && region->share_mode != AccessWriteOnly)) return StatusAccessConflict;"
+                $"  if (index < 0 || index >= region->shared_count || index >= {spec.ElementCount}) return StatusOutOfRange;" ]
+            @ transformBody
+            @ [ "}"
+                $"extern \"C\" int {prefix}_clef_address_identity(std::uintptr_t* outAddr, void* self) noexcept {{"
+                "  if (!outAddr || !self) return StatusNullHandle;"
+                "  auto* region = static_cast<SharedRegionState*>(self);"
+                "  if (!region->mapped || !region->elements) return StatusLifetimeError;"
+                "  *outAddr = region->clef_addr;"
+                "  return StatusOk;"
+                "}"
+                $"extern \"C\" int {prefix}_library_address_identity(std::uintptr_t* outAddr, void* self) noexcept {{"
+                "  if (!outAddr || !self) return StatusNullHandle;"
+                "  auto* region = static_cast<SharedRegionState*>(self);"
+                "  if (!region->mapped || !region->elements) return StatusLifetimeError;"
+                "  *outAddr = region->library_addr;"
+                "  return StatusOk;"
+                "}"
+                $"extern \"C\" int {prefix}_copy_count(int* outCopies, void* self) noexcept {{"
+                "  if (!outCopies || !self) return StatusNullHandle;"
+                "  auto* region = static_cast<SharedRegionState*>(self);"
+                "  if (!region->mapped || !region->elements) return StatusLifetimeError;"
+                "  *outCopies = region->copy_count;"
+                "  return StatusOk;"
+                "}"
+                $"extern \"C\" int {prefix}_memory_space_kind(int* outSpaceKind, void* self) noexcept {{"
+                "  if (!outSpaceKind || !self) return StatusNullHandle;"
+                "  auto* region = static_cast<SharedRegionState*>(self);"
+                "  if (!region->mapped || !region->elements) return StatusLifetimeError;"
+                "  *outSpaceKind = region->memory_space;"
+                "  return StatusOk;"
+                "}"
+                "" ])
+
+    // =========================================================================
     // Plugify C++ ABI Facts with Provenance (#119)
     // =========================================================================
 

@@ -1548,3 +1548,824 @@ int main() {
     let result = run runner []
     File.WriteAllText(path "native-result.txt", result)
     Assert.Contains("container-native-ok size=3 values=10,20,30 bounds=4 releases=1", result)
+
+// ─── Fidelity.Platform and BAREWire zero-copy shared buffers (#123) ───
+
+let private sharedTileFields : CppClassAnalysis.SharedBufferFieldSpec list =
+    [ { Name = "sequence"; CType = "uint32_t"; ClefType = "int"; ByteOffset = 0; ByteWidth = 4; IsVolatile = false }
+      { Name = "accumulator"; CType = "int64_t"; ClefType = "int"; ByteOffset = 8; ByteWidth = 8; IsVolatile = false }
+      { Name = "scale"; CType = "int32_t"; ClefType = "int"; ByteOffset = 16; ByteWidth = 4; IsVolatile = false }
+      { Name = "checksum"; CType = "uint32_t"; ClefType = "int"; ByteOffset = 20; ByteWidth = 4; IsVolatile = false } ]
+
+let private sharedTileLayouts : Map<string, CppClassAnalysis.StructLayout> =
+    Map.ofList [
+        "SharedTensorTile", mkLayout "SharedTensorTile" 192 64 [ 0; 64; 128; 160 ]
+    ]
+
+let private sharedTileSpec : CppClassAnalysis.SharedBufferSpec =
+    { StructName = "SharedTensorTile"
+      SafeName = "SharedTensorTileBuffer"
+      Namespace = "Test.SharedBuffers"
+      LibraryName = "sharedtile"
+      HeaderFile = "shared_tile.hpp"
+      MemorySpace = CppClassAnalysis.SharedMemorySpaceKind.HostShared
+      SpaceAccess = CppClassAnalysis.SharedAccessMode.SharedReadWrite
+      ByteOrder = "LittleEndian"
+      MeasuredSize = 24
+      MeasuredAlignment = 8
+      ElementCount = 4
+      RegionByteExtent = 96
+      RegionAlignment = 64
+      RegionLifetimeDepth = 1
+      LibraryRetentionDepth = 2
+      Fields = sharedTileFields
+      LibraryTransformSymbol = Some "shared_tile_library_transform_in_place"
+      Source = Some (Diagnostics.Located.Unknown "shared buffer fixture") }
+
+let private sharedBufferRefusal code action =
+    let error = Assert.Throws<Diagnostics.RefusalException>(System.Action action)
+    let diagnostic = only error.Refusal
+    Assert.Equal(code, diagnostic.Code)
+    Assert.Equal(sharedTileSpec.Source.Value, diagnostic.Source)
+    Assert.False(System.String.IsNullOrWhiteSpace diagnostic.Message)
+
+[<Fact>]
+let sharedBufferContractRefusesUnmeasuredMismatchedLayoutAlignmentAndRawPointers () =
+    CppClassAnalysis.validateSharedBufferContract sharedTileLayouts sharedTileSpec
+    // Unmeasured struct in targeted library build
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        CppClassAnalysis.validateSharedBufferContract Map.empty sharedTileSpec)
+    // Size, alignment, field count, and field offset mismatches against clang measured layout
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        CppClassAnalysis.validateSharedBufferContract sharedTileLayouts { sharedTileSpec with MeasuredSize = 32; RegionByteExtent = 128 })
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        CppClassAnalysis.validateSharedBufferContract sharedTileLayouts { sharedTileSpec with MeasuredAlignment = 4 })
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        CppClassAnalysis.validateSharedBufferContract sharedTileLayouts { sharedTileSpec with Fields = sharedTileFields.Tail })
+    let wrongOffsetFields =
+        sharedTileFields |> List.map (fun f -> if f.Name = "accumulator" then { f with ByteOffset = 4 } else f)
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        CppClassAnalysis.validateSharedBufferContract sharedTileLayouts { sharedTileSpec with Fields = wrongOffsetFields })
+    // Placement alignment smaller than measured alignment or non-power-of-two, or byte-order mismatch
+    for badAlign in [ 0; 3; 4; 12; -8 ] do
+        sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+            CppClassAnalysis.validateSharedBufferContract sharedTileLayouts { sharedTileSpec with RegionAlignment = badAlign })
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        CppClassAnalysis.validateSharedBufferContract sharedTileLayouts { sharedTileSpec with ByteOrder = "BigEndian" })
+    // Raw pointer/address tokens or empty names refused with FS9220
+    for badType in [ ""; "nativeint"; "nativeptr<uint32>"; "uint32_t*"; "int&"; "Ptr<uint32>" ] do
+        let badFields = { sharedTileFields.Head with CType = badType } :: sharedTileFields.Tail
+        sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+            CppClassAnalysis.validateSharedBufferContract sharedTileLayouts { sharedTileSpec with Fields = badFields })
+    let ctx = FidelityCodeGenerator.buildGenerationContext [] Types.LP64 sharedTileLayouts
+    let mismatchedClefType = { sharedTileFields.Head with ClefType = "int64" } :: sharedTileFields.Tail
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        FidelityCodeGenerator.generateSharedBufferDecls ctx { sharedTileSpec with Fields = mismatchedClefType } |> ignore)
+
+[<Fact>]
+let sharedBufferExtentRefusesUnderallocatedOverflowingAndOutOfBoundsAccess () =
+    for badSpec in [
+        { sharedTileSpec with ElementCount = 0 }
+        { sharedTileSpec with ElementCount = -2 }
+        { sharedTileSpec with MeasuredSize = 0 }
+        { sharedTileSpec with ElementCount = System.Int32.MaxValue; RegionByteExtent = System.Int32.MaxValue }
+        { sharedTileSpec with RegionByteExtent = 95 }
+        { sharedTileSpec with RegionByteExtent = 24 } ] do
+        sharedBufferRefusal Diagnostics.SharedBufferExtentInvalid (fun () ->
+            CppClassAnalysis.validateSharedBufferContract sharedTileLayouts badSpec)
+    let verify ops = CppClassAnalysis.verifySharedBufferLifecycle sharedTileLayouts sharedTileSpec ops
+    for badOp in [
+        [ CppClassAnalysis.SharedBufferOperation.MapRegion
+          CppClassAnalysis.SharedBufferOperation.ClefRead (-1, "sequence")
+          CppClassAnalysis.SharedBufferOperation.UnmapRegion ]
+        [ CppClassAnalysis.SharedBufferOperation.MapRegion
+          CppClassAnalysis.SharedBufferOperation.ClefWrite (4, "sequence")
+          CppClassAnalysis.SharedBufferOperation.UnmapRegion ]
+        [ CppClassAnalysis.SharedBufferOperation.MapRegion
+          CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedReadWrite, 0)
+          CppClassAnalysis.SharedBufferOperation.UnshareFromLibrary
+          CppClassAnalysis.SharedBufferOperation.UnmapRegion ]
+        [ CppClassAnalysis.SharedBufferOperation.MapRegion
+          CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedReadWrite, 5)
+          CppClassAnalysis.SharedBufferOperation.UnshareFromLibrary
+          CppClassAnalysis.SharedBufferOperation.UnmapRegion ]
+        [ CppClassAnalysis.SharedBufferOperation.MapRegion
+          CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedReadWrite, 2)
+          CppClassAnalysis.SharedBufferOperation.LibraryMutate 2
+          CppClassAnalysis.SharedBufferOperation.UnshareFromLibrary
+          CppClassAnalysis.SharedBufferOperation.UnmapRegion ]
+        [ CppClassAnalysis.SharedBufferOperation.MapRegion
+          CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedReadWrite, 2)
+          CppClassAnalysis.SharedBufferOperation.SyncFromLibrary 3
+          CppClassAnalysis.SharedBufferOperation.UnshareFromLibrary
+          CppClassAnalysis.SharedBufferOperation.UnmapRegion ] ] do
+        sharedBufferRefusal Diagnostics.SharedBufferExtentInvalid (fun () -> verify badOp)
+
+[<Fact>]
+let sharedBufferLifetimeRefusesShortRetentionPrematureUnmapUseAfterUnmapAndLeaks () =
+    sharedBufferRefusal Diagnostics.SharedBufferLifetimeInvalid (fun () ->
+        CppClassAnalysis.validateSharedBufferContract sharedTileLayouts { sharedTileSpec with RegionLifetimeDepth = 3; LibraryRetentionDepth = 1 })
+    let verify ops = CppClassAnalysis.verifySharedBufferLifecycle sharedTileLayouts sharedTileSpec ops
+    for badLifecycle in [
+        // Use before MapRegion
+        [ CppClassAnalysis.SharedBufferOperation.ClefRead (0, "sequence") ]
+        [ CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedReadOnly, 2) ]
+        [ CppClassAnalysis.SharedBufferOperation.UnmapRegion ]
+        // Unmap while library still retains an active shared view
+        [ CppClassAnalysis.SharedBufferOperation.MapRegion
+          CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedReadWrite, 2)
+          CppClassAnalysis.SharedBufferOperation.UnmapRegion ]
+        // Use after UnmapRegion
+        [ CppClassAnalysis.SharedBufferOperation.MapRegion
+          CppClassAnalysis.SharedBufferOperation.UnmapRegion
+          CppClassAnalysis.SharedBufferOperation.ClefRead (0, "sequence") ]
+        [ CppClassAnalysis.SharedBufferOperation.MapRegion
+          CppClassAnalysis.SharedBufferOperation.UnmapRegion
+          CppClassAnalysis.SharedBufferOperation.ClefWrite (0, "sequence") ]
+        [ CppClassAnalysis.SharedBufferOperation.MapRegion
+          CppClassAnalysis.SharedBufferOperation.UnmapRegion
+          CppClassAnalysis.SharedBufferOperation.UnmapRegion ]
+        // Unshare when no share is active
+        [ CppClassAnalysis.SharedBufferOperation.MapRegion
+          CppClassAnalysis.SharedBufferOperation.UnshareFromLibrary
+          CppClassAnalysis.SharedBufferOperation.UnmapRegion ]
+        // Leaked active share or mapped region at ScopeExit / end of operations
+        [ CppClassAnalysis.SharedBufferOperation.MapRegion ]
+        [ CppClassAnalysis.SharedBufferOperation.MapRegion
+          CppClassAnalysis.SharedBufferOperation.ScopeExit ]
+        [ CppClassAnalysis.SharedBufferOperation.MapRegion
+          CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedReadOnly, 2)
+          CppClassAnalysis.SharedBufferOperation.ScopeExit ]
+        // Operations after terminal ScopeExit
+        [ CppClassAnalysis.SharedBufferOperation.MapRegion
+          CppClassAnalysis.SharedBufferOperation.UnmapRegion
+          CppClassAnalysis.SharedBufferOperation.ScopeExit
+          CppClassAnalysis.SharedBufferOperation.MapRegion ] ] do
+        sharedBufferRefusal Diagnostics.SharedBufferLifetimeInvalid (fun () -> verify badLifecycle)
+
+[<Fact>]
+let sharedBufferAccessRefusesConcurrentClefMutationReadOnlyMutationAndOverlappingShares () =
+    let verify spec ops = CppClassAnalysis.verifySharedBufferLifecycle sharedTileLayouts spec ops
+    // Valid bidirectional lifecycle (Clef -> Library -> Clef + concurrent read-only share)
+    verify sharedTileSpec [
+        CppClassAnalysis.SharedBufferOperation.MapRegion
+        CppClassAnalysis.SharedBufferOperation.ClefWrite (0, "sequence")
+        CppClassAnalysis.SharedBufferOperation.ClefWrite (0, "accumulator")
+        CppClassAnalysis.SharedBufferOperation.ClefRead (0, "sequence")
+        CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedReadWrite, 4)
+        CppClassAnalysis.SharedBufferOperation.LibraryMutate 0
+        CppClassAnalysis.SharedBufferOperation.SyncFromLibrary 0
+        CppClassAnalysis.SharedBufferOperation.UnshareFromLibrary
+        CppClassAnalysis.SharedBufferOperation.ClefRead (0, "accumulator")
+        CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedReadOnly, 4)
+        CppClassAnalysis.SharedBufferOperation.ClefRead (0, "sequence")
+        CppClassAnalysis.SharedBufferOperation.UnshareFromLibrary
+        CppClassAnalysis.SharedBufferOperation.UnmapRegion
+        CppClassAnalysis.SharedBufferOperation.ScopeExit ]
+    // Conflicting accesses refused with FS9223
+    for badOps in [
+        // ClefWrite while library holds an active shared view (even SharedReadOnly)
+        [ CppClassAnalysis.SharedBufferOperation.MapRegion
+          CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedReadOnly, 2)
+          CppClassAnalysis.SharedBufferOperation.ClefWrite (0, "sequence")
+          CppClassAnalysis.SharedBufferOperation.UnshareFromLibrary
+          CppClassAnalysis.SharedBufferOperation.UnmapRegion ]
+        // ClefRead while library holds SharedReadWrite or SharedExclusiveMutable
+        [ CppClassAnalysis.SharedBufferOperation.MapRegion
+          CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedReadWrite, 2)
+          CppClassAnalysis.SharedBufferOperation.ClefRead (0, "sequence")
+          CppClassAnalysis.SharedBufferOperation.UnshareFromLibrary
+          CppClassAnalysis.SharedBufferOperation.UnmapRegion ]
+        [ CppClassAnalysis.SharedBufferOperation.MapRegion
+          CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedExclusiveMutable, 2)
+          CppClassAnalysis.SharedBufferOperation.ClefRead (0, "sequence")
+          CppClassAnalysis.SharedBufferOperation.UnshareFromLibrary
+          CppClassAnalysis.SharedBufferOperation.UnmapRegion ]
+        // LibraryMutate without active share or under SharedReadOnly share
+        [ CppClassAnalysis.SharedBufferOperation.MapRegion
+          CppClassAnalysis.SharedBufferOperation.LibraryMutate 0
+          CppClassAnalysis.SharedBufferOperation.UnmapRegion ]
+        [ CppClassAnalysis.SharedBufferOperation.MapRegion
+          CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedReadOnly, 2)
+          CppClassAnalysis.SharedBufferOperation.LibraryMutate 0
+          CppClassAnalysis.SharedBufferOperation.UnshareFromLibrary
+          CppClassAnalysis.SharedBufferOperation.UnmapRegion ]
+        // Overlapping ShareToLibrary while already shared
+        [ CppClassAnalysis.SharedBufferOperation.MapRegion
+          CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedReadOnly, 2)
+          CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedReadOnly, 2)
+          CppClassAnalysis.SharedBufferOperation.UnshareFromLibrary
+          CppClassAnalysis.SharedBufferOperation.UnmapRegion ] ] do
+        sharedBufferRefusal Diagnostics.SharedBufferConflictingAccess (fun () -> verify sharedTileSpec badOps)
+    // SharedReadOnly placement refuses ClefWrite and mutable ShareToLibrary
+    let readOnlySpec = { sharedTileSpec with SpaceAccess = CppClassAnalysis.SharedAccessMode.SharedReadOnly }
+    sharedBufferRefusal Diagnostics.SharedBufferConflictingAccess (fun () ->
+        verify readOnlySpec [
+            CppClassAnalysis.SharedBufferOperation.MapRegion
+            CppClassAnalysis.SharedBufferOperation.ClefWrite (0, "sequence")
+            CppClassAnalysis.SharedBufferOperation.UnmapRegion ])
+    sharedBufferRefusal Diagnostics.SharedBufferConflictingAccess (fun () ->
+        verify readOnlySpec [
+            CppClassAnalysis.SharedBufferOperation.MapRegion
+            CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedReadWrite, 2)
+            CppClassAnalysis.SharedBufferOperation.UnshareFromLibrary
+            CppClassAnalysis.SharedBufferOperation.UnmapRegion ])
+
+[<Fact>]
+let sharedBufferDeclsAndNativeZeroCopyBidirectionalExecution () =
+    let directory = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "test-results", "scratch", "shared-buffer", System.Guid.NewGuid().ToString("N")))
+    Directory.CreateDirectory directory |> ignore
+    let path file = Path.Combine(directory, file)
+    let run program arguments = runTemplateFixtureTool program arguments
+    let headerPath = path "shared_tile.hpp"
+    File.WriteAllText(headerPath, """
+#pragma once
+#include <cstdint>
+#include <cstddef>
+
+struct SharedTensorTile {
+    std::uint32_t sequence;
+    std::int64_t accumulator;
+    std::int32_t scale;
+    std::uint32_t checksum;
+};
+
+extern "C" int shared_tile_library_transform_in_place(
+    SharedTensorTile* base,
+    int count,
+    int index,
+    int delta,
+    std::uintptr_t* out_library_addr,
+    int* inout_copy_count) noexcept;
+
+extern "C" int shared_tile_library_observed_copies() noexcept;
+extern "C" std::uintptr_t shared_tile_library_last_address() noexcept;
+    """)
+    File.WriteAllText(path "shared_tile.cpp", """
+#include "shared_tile.hpp"
+
+static int g_observed_copies = 0;
+static std::uintptr_t g_last_address = 0;
+
+extern "C" int shared_tile_library_transform_in_place(
+    SharedTensorTile* base,
+    int count,
+    int index,
+    int delta,
+    std::uintptr_t* out_library_addr,
+    int* inout_copy_count) noexcept {
+    if (!base || !out_library_addr || !inout_copy_count) return -1;
+    if (index < 0 || index >= count) return 4;
+    // Mutate the shared buffer directly in place without copying.
+    g_last_address = reinterpret_cast<std::uintptr_t>(base);
+    *out_library_addr = g_last_address;
+    SharedTensorTile& tile = base[index];
+    tile.sequence += static_cast<std::uint32_t>(delta);
+    tile.accumulator += static_cast<std::int64_t>(delta) * static_cast<std::int64_t>(tile.scale);
+    tile.checksum = tile.sequence ^ static_cast<std::uint32_t>(tile.accumulator & 0xFFFFFFFFLL);
+    return 0;
+}
+
+extern "C" int shared_tile_library_observed_copies() noexcept {
+    return g_observed_copies;
+}
+
+extern "C" std::uintptr_t shared_tile_library_last_address() noexcept {
+    return g_last_address;
+}
+    """)
+    // Measure layout from the real targeted library header via clang -fdump-record-layouts-simple
+    let measuredLayouts =
+        match CppParser.extractStructLayouts headerPath [] [] [ "SharedTensorTile" ] false with
+        | Ok layouts -> layouts
+        | Error err -> failwith $"Failed to extract clang layout for SharedTensorTile: {err}"
+    let measuredTile = measuredLayouts["SharedTensorTile"]
+    Assert.Equal(192, measuredTile.SizeBits)
+    Assert.Equal(64, measuredTile.AlignmentBits)
+    Assert.Equal<int list>([ 0; 64; 128; 160 ], measuredTile.FieldOffsetsBits)
+    let hostSpec = { sharedTileSpec with HeaderFile = headerPath }
+    let deviceSpec =
+        { hostSpec with
+            SafeName = "DeviceTensorTileBuffer"
+            Namespace = "Test.DeviceSharedBuffers"
+            MemorySpace = CppClassAnalysis.SharedMemorySpaceKind.DeviceUnified
+            SpaceAccess = CppClassAnalysis.SharedAccessMode.SharedReadWrite }
+    let ctx = FidelityCodeGenerator.buildGenerationContext [] Types.LP64 measuredLayouts
+    let declarations = FidelityCodeGenerator.generateSharedBufferDecls ctx hostSpec
+    Assert.Contains(CodeAST.OpaqueMarker "SharedTensorTileBuffer", declarations)
+    Assert.DoesNotContain(declarations, function CodeAST.RecordType _ -> true | _ -> false)
+    let clefSource = FidelityCodeGenerator.generateSharedBufferModule ctx hostSpec
+    let deviceClefSource = FidelityCodeGenerator.generateSharedBufferModule ctx deviceSpec
+    File.WriteAllText(path "SharedBuffers.clef", clefSource)
+    File.WriteAllText(path "DeviceSharedBuffers.clef", deviceClefSource)
+    for source in [ clefSource; deviceClefSource ] do
+        for forbidden in [ "nativeint"; "nativeptr"; "Ptr<" ] do
+            Assert.DoesNotContain(forbidden, source)
+    for expected in [
+        "open BAREWire.Hardware"
+        "open BAREWire.Descriptors"
+        "Fidelity.Platform.HostShared"
+        "MemoryRegionKind.SRAM"
+        "PeripheralDescriptor"
+        "MemorySpaceDescriptor"
+        "StructDescriptor"
+        "Count = 1"
+        "BitFields = [||]"
+        "sequenceOffset = 0"
+        "accumulatorOffset = 8"
+        "scaleOffset = 16"
+        "checksumOffset = 20"
+        "OwnedNullableReturn"
+        "Test.SharedBuffers.SharedTensorTileBuffer_unmap"
+        "SharedTensorTileBuffer_share_to_library"
+        "SharedTensorTileBuffer_unshare_from_library"
+        "SharedTensorTileBuffer_library_transform_in_place"
+        "SharedTensorTileBuffer_memory_space_kind"
+        "SharedTensorTileBuffer_clef_read_accumulator"
+        "SharedTensorTileBuffer_clef_write_accumulator" ] do
+        Assert.Contains(expected, clefSource)
+    for expected in [
+        "Fidelity.Platform.DeviceUnified"
+        "MemoryRegionKind.DMA"
+        "DeviceTensorTileBuffer_map"
+        "DeviceTensorTileBuffer_memory_space_kind" ] do
+        Assert.Contains(expected, deviceClefSource)
+    let hostShimSource = CppClassAnalysis.renderSharedBufferZeroCopyShimC hostSpec
+    let deviceShimSource = CppClassAnalysis.renderSharedBufferZeroCopyShimC deviceSpec
+    File.WriteAllText(path "shim_host.cpp", hostShimSource)
+    File.WriteAllText(path "shim_device.cpp", deviceShimSource)
+    let library = path "libsharedtile.so"
+    // First compile without shims to verify validateSharedBufferLibraryExports refuses missing FFI exports with FS9220
+    let incompleteLibrary = path "libsharedtile_incomplete.so"
+    run "/usr/bin/clang++" [ "-std=c++17"; "-shared"; "-fPIC"; path "shared_tile.cpp"; "-o"; incompleteLibrary ] |> ignore
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        CppClassAnalysis.validateSharedBufferLibraryExports incompleteLibrary measuredLayouts hostSpec)
+    // Compile targeted library with generated HostShared and DeviceUnified zero-copy shims so libsharedtile.so exports all FidelityExtern symbols
+    run "/usr/bin/clang++" [ "-std=c++17"; "-shared"; "-fPIC"; path "shared_tile.cpp"; path "shim_host.cpp"; path "shim_device.cpp"; "-o"; library ] |> ignore
+    CppClassAnalysis.validateSharedBufferLibraryExports library measuredLayouts hostSpec
+    CppClassAnalysis.validateSharedBufferLibraryExports library measuredLayouts deviceSpec
+
+    // Compile and execute the generated .clef modules against the real BAREWire Descriptors.fs and Validator.fs
+    let barewireRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "..", "BAREWire", "src"))
+    File.WriteAllText(path "BareWireDescriptorsSurface.fs", String.concat "\n" [
+        "namespace BAREWire.Descriptors"
+        "open System"
+        "open System.Reflection"
+        "open System.Runtime.InteropServices"
+        "open Microsoft.FSharp.Reflection"
+        "open Microsoft.FSharp.Quotations"
+        "open Microsoft.FSharp.Quotations.Patterns"
+        "open BAREWire.Hardware"
+        "type Expr<'T> = Microsoft.FSharp.Quotations.Expr<'T>"
+        "module NativeDefault ="
+        "    let zeroed<'T> () : 'T = Unchecked.defaultof<'T>"
+        "type CallingConvention = | CDecl"
+        "type PassBy = | Value"
+        "type OwnershipTransfer = | CallerOwns | CalleeOwns | Borrowed"
+        "type Signedness = | Signed | Unsigned"
+        "type TypeRef = | Integer of Signedness * int | Float of int | Pointer of int | Bool | Void"
+        "type ParameterDescriptor = { Name: string; Type: TypeRef; PassBy: PassBy }"
+        "type FunctionDescriptor = { CName: string; Parameters: ParameterDescriptor array; ReturnType: TypeRef; CallingConvention: CallingConvention; OwnershipTransfer: OwnershipTransfer }"
+        "type ReleaseBinding = { Binding: string; Parameter: int }"
+        "type ResourceKind = | OwnedNullableReturn of ReleaseBinding"
+        "type HypothesisDescriptor = { Identity: string; Version: string; Source: string }"
+        "type ResourceDescriptor = { Resource: ResourceKind; Hypothesis: HypothesisDescriptor }"
+        "type MemorySpaceDescriptor = { Space: string; MemoryRegion: MemoryRegionKind; Access: string; ByteOrder: string; ElementSize: int; ElementCount: int; RegionByteExtent: int; RegionAlignment: int; RegionLifetimeDepth: int; LibraryRetentionDepth: int }"
+        "type CHandle<'T> = | CHandle of nativeint"
+        "[<System.AttributeUsage(System.AttributeTargets.Method ||| System.AttributeTargets.Property, AllowMultiple = false)>]"
+        "type FidelityExternAttribute(library: string, symbol: string) ="
+        "    inherit System.Attribute()"
+        "    member _.Library = library"
+        "    member _.Symbol = symbol"
+        "[<UnmanagedFunctionPointer(System.Runtime.InteropServices.CallingConvention.Cdecl)>] type MapNativeDelegate = delegate of unit -> nativeint"
+        "[<UnmanagedFunctionPointer(System.Runtime.InteropServices.CallingConvention.Cdecl)>] type PtrToIntDelegate = delegate of nativeint -> int"
+        "[<UnmanagedFunctionPointer(System.Runtime.InteropServices.CallingConvention.Cdecl)>] type PtrToVoidDelegate = delegate of nativeint -> unit"
+        "[<UnmanagedFunctionPointer(System.Runtime.InteropServices.CallingConvention.Cdecl)>] type PtrPtrToIntDelegate = delegate of nativeint * nativeint -> int"
+        "[<UnmanagedFunctionPointer(System.Runtime.InteropServices.CallingConvention.Cdecl)>] type PtrPtrIntToIntDelegate = delegate of nativeint * nativeint * int -> int"
+        "[<UnmanagedFunctionPointer(System.Runtime.InteropServices.CallingConvention.Cdecl)>] type PtrIntIntToIntDelegate = delegate of nativeint * int * int -> int"
+        "[<UnmanagedFunctionPointer(System.Runtime.InteropServices.CallingConvention.Cdecl)>] type PtrIntU32ToIntDelegate = delegate of nativeint * int * uint32 -> int"
+        "[<UnmanagedFunctionPointer(System.Runtime.InteropServices.CallingConvention.Cdecl)>] type PtrIntI64ToIntDelegate = delegate of nativeint * int * int64 -> int"
+        "type OutSlot() ="
+        "    let ptr = Marshal.AllocHGlobal(8)"
+        "    do Marshal.WriteInt64(ptr, 0L)"
+        "    member _.Handle : CHandle<int> = CHandle ptr"
+        "    member _.ReadInt32() : int = Marshal.ReadInt32(ptr)"
+        "    member _.ReadUInt32() : uint32 = uint32 (Marshal.ReadInt32(ptr))"
+        "    member _.ReadInt64() : int64 = Marshal.ReadInt64(ptr)"
+        "    member _.ReadUInt64() : uint64 = uint64 (Marshal.ReadInt64(ptr))"
+        "    interface IDisposable with"
+        "        member _.Dispose() = Marshal.FreeHGlobal(ptr)"
+        "module FidelityExtern ="
+        "    let allocOutSlot () = new OutSlot()"
+        "    let rec evalExpr (e: Microsoft.FSharp.Quotations.Expr) : obj ="
+        "        match e with"
+        "        | Patterns.Value(v, _) -> v"
+        "        | Patterns.NewRecord(rcdType, args) -> FSharpValue.MakeRecord(rcdType, args |> List.map evalExpr |> List.toArray)"
+        "        | Patterns.NewArray(elemType, elems) ->"
+        "            let arr = Array.CreateInstance(elemType, elems.Length)"
+        "            elems |> List.iteri (fun i el -> arr.SetValue(evalExpr el, i))"
+        "            box arr"
+        "        | Patterns.NewUnionCase(uc, args) -> FSharpValue.MakeUnion(uc, args |> List.map evalExpr |> List.toArray)"
+        "        | Patterns.Coerce(inner, _) -> evalExpr inner"
+        "        | Patterns.Let(_, _, body) -> evalExpr body"
+        "        | _ -> invalidOp $\"Unsupported quotation node in FidelityExtern descriptor: {e}\""
+        "    let private extractHandlePtr (v: obj) : nativeint ="
+        "        if isNull v then invalidOp \"Null CHandle passed to FidelityExtern\""
+        "        let _, fields = FSharpValue.GetUnionFields(v, v.GetType())"
+        "        fields[0] :?> nativeint"
+        "    let private validateParameterType (moduleName: string) (functionName: string) (pDesc: ParameterDescriptor) (pType: Type) ="
+        "        if pDesc.PassBy <> PassBy.Value then invalidOp $\"Unsupported PassBy on {moduleName}.{functionName}.{pDesc.Name}\""
+        "        match pDesc.Type with"
+        "        | Pointer 64 ->"
+        "            if not (pType.IsGenericType && pType.GetGenericTypeDefinition() = typedefof<CHandle<_>>) then"
+        "                invalidOp $\"Parameter '{pDesc.Name}' of {moduleName}.{functionName} expects CHandle<_> for Pointer 64, got {pType}\""
+        "        | Integer (_, 32) | Integer (_, 64) ->"
+        "            if pType <> typeof<int> then"
+        "                invalidOp $\"Parameter '{pDesc.Name}' of {moduleName}.{functionName} expects int for {pDesc.Type}, got {pType}\""
+        "        | other -> invalidOp $\"Unsupported ParameterDescriptor.Type {other} on {moduleName}.{functionName}\""
+        "    let invoke<'R> (moduleName: string) (functionName: string) (descriptorExpr: Expr<FunctionDescriptor>) (args: obj array) : 'R ="
+        "        let asm = typeof<FidelityExternAttribute>.Assembly"
+        "        let moduleType = asm.GetType(moduleName, false)"
+        "        if isNull moduleType then invalidOp $\"FidelityExtern module '{moduleName}' not found\""
+        "        let methodInfo = moduleType.GetMethod(functionName, BindingFlags.Public ||| BindingFlags.Static)"
+        "        if isNull methodInfo then invalidOp $\"FidelityExtern function '{moduleName}.{functionName}' not found\""
+        "        let attrs = methodInfo.GetCustomAttributes(typeof<FidelityExternAttribute>, false)"
+        "        if attrs.Length <> 1 then invalidOp $\"Missing FidelityExternAttribute on '{moduleName}.{functionName}'\""
+        "        let attr = attrs[0] :?> FidelityExternAttribute"
+        "        if String.IsNullOrWhiteSpace attr.Library || String.IsNullOrWhiteSpace attr.Symbol then"
+        "            invalidOp $\"Invalid empty FidelityExtern library or symbol on '{moduleName}.{functionName}'\""
+        "        let desc = evalExpr descriptorExpr :?> FunctionDescriptor"
+        "        if attr.Symbol <> desc.CName then"
+        "            invalidOp $\"FidelityExtern symbol '{attr.Symbol}' does not match FunctionDescriptor.CName '{desc.CName}' on '{moduleName}.{functionName}'\""
+        "        if desc.CallingConvention <> CallingConvention.CDecl then"
+        "            invalidOp $\"Unsupported calling convention on '{moduleName}.{functionName}'\""
+        "        let paramInfos = methodInfo.GetParameters()"
+        "        if paramInfos.Length <> desc.Parameters.Length || args.Length <> desc.Parameters.Length then"
+        "            invalidOp $\"Parameter count mismatch on '{moduleName}.{functionName}': method={paramInfos.Length} descriptor={desc.Parameters.Length} args={args.Length}\""
+        "        for i = 0 to desc.Parameters.Length - 1 do"
+        "            validateParameterType moduleName functionName desc.Parameters[i] paramInfos[i].ParameterType"
+        "        match desc.ReturnType, desc.OwnershipTransfer with"
+        "        | Pointer 64, CallerOwns ->"
+        "            let retType = methodInfo.ReturnType"
+        "            if not (retType.IsGenericType && retType.GetGenericTypeDefinition() = typedefof<option<_>>) then"
+        "                invalidOp $\"CallerOwns Pointer 64 return on '{moduleName}.{functionName}' must be option<CHandle<_>>\""
+        "            let innerType = retType.GetGenericArguments()[0]"
+        "            if not (innerType.IsGenericType && innerType.GetGenericTypeDefinition() = typedefof<CHandle<_>>) then"
+        "                invalidOp $\"CallerOwns option inner type on '{moduleName}.{functionName}' must be CHandle<_>\""
+        "            let resProp = moduleType.GetProperty(functionName + \"ResourceDescriptor\", BindingFlags.Public ||| BindingFlags.Static)"
+        "            if isNull resProp then invalidOp $\"Missing ResourceDescriptor for CallerOwns '{moduleName}.{functionName}'\""
+        "            let resDesc = evalExpr (resProp.GetValue(null) :?> Microsoft.FSharp.Quotations.Expr) :?> ResourceDescriptor"
+        "            match resDesc.Resource with"
+        "            | OwnedNullableReturn rel ->"
+        "                if rel.Parameter <> 0 || not (rel.Binding.StartsWith(moduleName + \".\", StringComparison.Ordinal)) then"
+        "                    invalidOp $\"Invalid ReleaseBinding '{rel.Binding}' on '{moduleName}.{functionName}'\""
+        "                let relFn = rel.Binding.Substring(moduleName.Length + 1)"
+        "                let relMethod = moduleType.GetMethod(relFn, BindingFlags.Public ||| BindingFlags.Static)"
+        "                let relDescProp = moduleType.GetProperty(relFn + \"Descriptor\", BindingFlags.Public ||| BindingFlags.Static)"
+        "                if isNull relMethod || isNull relDescProp then invalidOp $\"Missing release function '{rel.Binding}'\""
+        "                let relDesc = evalExpr (relDescProp.GetValue(null) :?> Microsoft.FSharp.Quotations.Expr) :?> FunctionDescriptor"
+        "                if relDesc.OwnershipTransfer <> OwnershipTransfer.CalleeOwns || relDesc.Parameters.Length <> 1 || relDesc.Parameters[0].Type <> Pointer 64 then"
+        "                    invalidOp $\"Release function '{rel.Binding}' does not have a valid CalleeOwns Pointer 64 contract\""
+        "        | Integer (Signed, 32), (Borrowed | CalleeOwns) ->"
+        "            if methodInfo.ReturnType <> typeof<int> then"
+        "                invalidOp $\"Return type mismatch on '{moduleName}.{functionName}': expected int, got {methodInfo.ReturnType}\""
+        "        | Void, (Borrowed | CalleeOwns) ->"
+        "            if methodInfo.ReturnType <> typeof<unit> && methodInfo.ReturnType <> typeof<System.Void> then"
+        "                invalidOp $\"Void return type mismatch on '{moduleName}.{functionName}'\""
+        "        | rt, own -> invalidOp $\"Unsupported return/ownership ({rt}, {own}) on '{moduleName}.{functionName}'\""
+        "        let asmDir = System.IO.Path.GetDirectoryName(asm.Location)"
+        "        let candidateSo = System.IO.Path.Combine(asmDir, \"lib\" + attr.Library + \".so\")"
+        "        let libHandle = if System.IO.File.Exists(candidateSo) then NativeLibrary.Load(candidateSo) else NativeLibrary.Load(attr.Library)"
+        "        let fnPtr = NativeLibrary.GetExport(libHandle, attr.Symbol)"
+        "        let paramTypes = desc.Parameters |> Array.map (fun p -> p.Type)"
+        "        match paramTypes, desc.ReturnType with"
+        "        | [||], Pointer 64 ->"
+        "            let d = Marshal.GetDelegateForFunctionPointer<MapNativeDelegate>(fnPtr)"
+        "            let rawPtr = d.Invoke()"
+        "            if rawPtr = 0n then Unchecked.defaultof<'R>"
+        "            else"
+        "                let retType = typeof<'R>"
+        "                let handleType = retType.GetGenericArguments()[0]"
+        "                let handleCase = FSharpType.GetUnionCases(handleType)[0]"
+        "                let handleVal = FSharpValue.MakeUnion(handleCase, [| box rawPtr |])"
+        "                let someCase = FSharpType.GetUnionCases(retType) |> Array.find (fun c -> c.Name = \"Some\")"
+        "                FSharpValue.MakeUnion(someCase, [| handleVal |]) :?> 'R"
+        "        | [| Pointer 64 |], Integer (Signed, 32) ->"
+        "            let d = Marshal.GetDelegateForFunctionPointer<PtrToIntDelegate>(fnPtr)"
+        "            box (d.Invoke(extractHandlePtr args[0])) :?> 'R"
+        "        | [| Pointer 64 |], Void ->"
+        "            let d = Marshal.GetDelegateForFunctionPointer<PtrToVoidDelegate>(fnPtr)"
+        "            d.Invoke(extractHandlePtr args[0])"
+        "            Unchecked.defaultof<'R>"
+        "        | [| Pointer 64; Pointer 64 |], Integer (Signed, 32) ->"
+        "            let d = Marshal.GetDelegateForFunctionPointer<PtrPtrToIntDelegate>(fnPtr)"
+        "            box (d.Invoke(extractHandlePtr args[0], extractHandlePtr args[1])) :?> 'R"
+        "        | [| Pointer 64; Pointer 64; Integer (Signed, 32) |], Integer (Signed, 32) ->"
+        "            let d = Marshal.GetDelegateForFunctionPointer<PtrPtrIntToIntDelegate>(fnPtr)"
+        "            box (d.Invoke(extractHandlePtr args[0], extractHandlePtr args[1], args[2] :?> int)) :?> 'R"
+        "        | [| Pointer 64; Integer (Signed, 32); Integer (Signed, 32) |], Integer (Signed, 32) ->"
+        "            let d = Marshal.GetDelegateForFunctionPointer<PtrIntIntToIntDelegate>(fnPtr)"
+        "            box (d.Invoke(extractHandlePtr args[0], args[1] :?> int, args[2] :?> int)) :?> 'R"
+        "        | [| Pointer 64; Integer (Signed, 32); Integer (Unsigned, 32) |], Integer (Signed, 32) ->"
+        "            let d = Marshal.GetDelegateForFunctionPointer<PtrIntU32ToIntDelegate>(fnPtr)"
+        "            box (d.Invoke(extractHandlePtr args[0], args[1] :?> int, uint32 (args[2] :?> int))) :?> 'R"
+        "        | [| Pointer 64; Integer (Signed, 32); Integer (Signed, 64) |], Integer (Signed, 32) ->"
+        "            let d = Marshal.GetDelegateForFunctionPointer<PtrIntI64ToIntDelegate>(fnPtr)"
+        "            box (d.Invoke(extractHandlePtr args[0], args[1] :?> int, int64 (args[2] :?> int))) :?> 'R"
+        "        | _ -> invalidOp $\"Unsupported ABI signature on '{moduleName}.{functionName}'\"" ])
+    File.WriteAllText(path "SharedBuffers.clef.fs", clefSource)
+    File.WriteAllText(path "DeviceSharedBuffers.clef.fs", deviceClefSource)
+    File.WriteAllText(path "ClefSharedBufferRunner.fs", String.concat "\n" [
+        "module Test.ClefSharedBufferRunner"
+        "open System"
+        "open BAREWire.Hardware"
+        "open BAREWire.Descriptors"
+        "open Test.SharedBuffers"
+        "open Test.DeviceSharedBuffers"
+        "let BadSymbolDescriptor : Expr<FunctionDescriptor> ="
+        "    <@ { CName = \"farscape_shared_buffer_nonexistent_symbol\"; Parameters = [||]; ReturnType = Integer (Signed, 32); CallingConvention = CDecl; OwnershipTransfer = Borrowed } @>"
+        "[<FidelityExtern(\"sharedtile\", \"farscape_shared_buffer_nonexistent_symbol\")>]"
+        "let badSymbolBinding () : int ="
+        "    FidelityExtern.invoke \"Test.ClefSharedBufferRunner\" \"badSymbolBinding\" BadSymbolDescriptor [||]"
+        "let MismatchedCNameDescriptor : Expr<FunctionDescriptor> ="
+        "    <@ { CName = \"farscape_shared_buffer_SharedTensorTileBuffer_unmap\"; Parameters = [||]; ReturnType = Integer (Signed, 32); CallingConvention = CDecl; OwnershipTransfer = Borrowed } @>"
+        "[<FidelityExtern(\"sharedtile\", \"farscape_shared_buffer_SharedTensorTileBuffer_map\")>]"
+        "let mismatchedCNameBinding () : int ="
+        "    FidelityExtern.invoke \"Test.ClefSharedBufferRunner\" \"mismatchedCNameBinding\" MismatchedCNameDescriptor [||]"
+        "let BadLibDescriptor : Expr<FunctionDescriptor> ="
+        "    <@ { CName = \"farscape_shared_buffer_SharedTensorTileBuffer_map\"; Parameters = [||]; ReturnType = Integer (Signed, 32); CallingConvention = CDecl; OwnershipTransfer = Borrowed } @>"
+        "[<FidelityExtern(\"nonexistent_sharedtile_lib\", \"farscape_shared_buffer_SharedTensorTileBuffer_map\")>]"
+        "let badLibraryBinding () : int ="
+        "    FidelityExtern.invoke \"Test.ClefSharedBufferRunner\" \"badLibraryBinding\" BadLibDescriptor [||]"
+        "let BadParamDescriptor : Expr<FunctionDescriptor> ="
+        "    <@ { CName = \"farscape_shared_buffer_SharedTensorTileBuffer_unmap\"; Parameters = [| { Name = \"self\"; Type = Pointer 64; PassBy = Value } |]; ReturnType = Integer (Signed, 32); CallingConvention = CDecl; OwnershipTransfer = CalleeOwns } @>"
+        "[<FidelityExtern(\"sharedtile\", \"farscape_shared_buffer_SharedTensorTileBuffer_unmap\")>]"
+        "let badParamTypeBinding (self: int) : int ="
+        "    FidelityExtern.invoke \"Test.ClefSharedBufferRunner\" \"badParamTypeBinding\" BadParamDescriptor [| box self |]"
+        "let private expectExternFailure (name: string) (action: unit -> unit) ="
+        "    let mutable threw = false"
+        "    try action () with _ -> threw <- true"
+        "    if not threw then failwith $\"Expected FidelityExtern failure for {name}, but call succeeded\""
+        "let runClefVerification (_libraryPath: string) : string ="
+        "    let hostDesc : StructDescriptor = SharedTensorTileBuffer.Descriptor"
+        "    let hostPeriph : PeripheralDescriptor = SharedTensorTileBuffer.PeripheralDescriptor"
+        "    let devDesc : StructDescriptor = DeviceTensorTileBuffer.Descriptor"
+        "    let devPeriph : PeripheralDescriptor = DeviceTensorTileBuffer.PeripheralDescriptor"
+        "    if not (Layout.isPointerFree hostDesc.Layout) || not (Layout.isPointerFree devDesc.Layout) then failwith \"BAREWire layout must be pointer-free\""
+        "    if hostDesc.Layout.Size <> 24 || hostDesc.Layout.Alignment <> 8 || hostDesc.Layout.Fields.Length <> 4 then failwith \"HostShared StructDescriptor layout mismatch\""
+        "    if hostPeriph.MemoryRegion <> MemoryRegionKind.SRAM || devPeriph.MemoryRegion <> MemoryRegionKind.DMA then failwith \"PeripheralDescriptor MemoryRegionKind mismatch\""
+        "    if hostDesc.Layout.Fields[0].Count <> 1 || hostDesc.Layout.Fields[0].BitFields.Length <> 0 then failwith \"FieldDescriptor Count/BitFields mismatch\""
+        "    // Verify negative FidelityExtern metadata controls fail when invoked"
+        "    expectExternFailure \"badSymbolBinding\" (fun () -> badSymbolBinding () |> ignore)"
+        "    expectExternFailure \"mismatchedCNameBinding\" (fun () -> mismatchedCNameBinding () |> ignore)"
+        "    expectExternFailure \"badLibraryBinding\" (fun () -> badLibraryBinding () |> ignore)"
+        "    expectExternFailure \"badParamTypeBinding\" (fun () -> badParamTypeBinding 0 |> ignore)"
+        "    use outSlot = FidelityExtern.allocOutSlot ()"
+        "    let outH = outSlot.Handle"
+        "    // 1. Execute generated HostShared FidelityExtern functions end-to-end"
+        "    let h ="
+        "        match SharedTensorTileBuffer_map () with"
+        "        | Some handle -> handle"
+        "        | None -> failwith \"SharedTensorTileBuffer_map returned None\""
+        "    if SharedTensorTileBuffer_memory_space_kind outH h <> SharedTensorTileBuffer.StatusOk || outSlot.ReadInt32() <> 1 then"
+        "        failwith $\"HostShared space_kind mismatch: {outSlot.ReadInt32()}\""
+        "    if SharedTensorTileBuffer_clef_write_sequence h 0 100 <> 0"
+        "       || SharedTensorTileBuffer_clef_write_accumulator h 0 1000 <> 0"
+        "       || SharedTensorTileBuffer_clef_write_scale h 0 10 <> 0"
+        "       || SharedTensorTileBuffer_clef_write_checksum h 0 0 <> 0 then"
+        "        failwith \"HostShared Clef write via generated FidelityExtern failed\""
+        "    if SharedTensorTileBuffer_clef_write_sequence h -1 1 <> SharedTensorTileBuffer.StatusOutOfRange"
+        "       || SharedTensorTileBuffer_clef_write_sequence h 4 1 <> SharedTensorTileBuffer.StatusOutOfRange then"
+        "        failwith \"HostShared bounds check failed\""
+        "    if SharedTensorTileBuffer_share_to_library h 3 4 <> 0 then"
+        "        failwith \"HostShared share_to_library failed\""
+        "    if SharedTensorTileBuffer_clef_write_sequence h 0 99 <> SharedTensorTileBuffer.StatusAccessConflict then"
+        "        failwith \"HostShared concurrent ClefWrite was not refused\""
+        "    if SharedTensorTileBuffer_unmap h <> SharedTensorTileBuffer.StatusLifetimeError then"
+        "        failwith \"HostShared premature unmap was not refused\""
+        "    if SharedTensorTileBuffer_library_transform_in_place h 0 7 <> 0 then"
+        "        failwith \"HostShared library_transform_in_place failed\""
+        "    if SharedTensorTileBuffer_unshare_from_library h <> 0 then"
+        "        failwith \"HostShared unshare_from_library failed\""
+        "    if SharedTensorTileBuffer_clef_read_sequence outH h 0 <> 0 then failwith \"HostShared read sequence failed\""
+        "    let seq0 = outSlot.ReadUInt32()"
+        "    if SharedTensorTileBuffer_clef_read_accumulator outH h 0 <> 0 then failwith \"HostShared read accumulator failed\""
+        "    let acc0 = outSlot.ReadInt64()"
+        "    if SharedTensorTileBuffer_clef_read_checksum outH h 0 <> 0 then failwith \"HostShared read checksum failed\""
+        "    let chk0 = outSlot.ReadUInt32()"
+        "    if seq0 <> 107u || acc0 <> 1070L || chk0 <> (107u ^^^ 1070u) then"
+        "        failwith $\"HostShared unexpected mutated values: seq0={seq0} acc0={acc0} chk0={chk0}\""
+        "    if SharedTensorTileBuffer_clef_address_identity outH h <> 0 then failwith \"HostShared clef_address_identity failed\""
+        "    let clefAddr = outSlot.ReadUInt64()"
+        "    if SharedTensorTileBuffer_library_address_identity outH h <> 0 then failwith \"HostShared library_address_identity failed\""
+        "    let libAddr = outSlot.ReadUInt64()"
+        "    if SharedTensorTileBuffer_copy_count outH h <> 0 then failwith \"HostShared copy_count failed\""
+        "    let copies = outSlot.ReadInt32()"
+        "    if clefAddr = 0UL || clefAddr <> libAddr || copies <> 0 then"
+        "        failwith $\"HostShared zero-copy identity failed: clefAddr={clefAddr} libAddr={libAddr} copies={copies}\""
+        "    if SharedTensorTileBuffer_unmap h <> 0 || SharedTensorTileBuffer_unmap h <> SharedTensorTileBuffer.StatusLifetimeError then"
+        "        failwith \"HostShared unmap lifecycle check failed\""
+        "    // 2. Execute generated DeviceUnified FidelityExtern functions end-to-end"
+        "    let devH ="
+        "        match DeviceTensorTileBuffer_map () with"
+        "        | Some handle -> handle"
+        "        | None -> failwith \"DeviceTensorTileBuffer_map returned None\""
+        "    if DeviceTensorTileBuffer_memory_space_kind outH devH <> DeviceTensorTileBuffer.StatusOk || outSlot.ReadInt32() <> 2 then"
+        "        failwith $\"DeviceUnified space_kind mismatch: {outSlot.ReadInt32()}\""
+        "    if DeviceTensorTileBuffer_clef_write_sequence devH 0 100 <> 0"
+        "       || DeviceTensorTileBuffer_clef_write_accumulator devH 0 1000 <> 0"
+        "       || DeviceTensorTileBuffer_clef_write_scale devH 0 10 <> 0"
+        "       || DeviceTensorTileBuffer_clef_write_checksum devH 0 0 <> 0 then"
+        "        failwith \"DeviceUnified Clef write via generated FidelityExtern failed\""
+        "    if DeviceTensorTileBuffer_share_to_library devH 3 4 <> 0 then"
+        "        failwith \"DeviceUnified share_to_library failed\""
+        "    if DeviceTensorTileBuffer_clef_write_sequence devH 0 99 <> DeviceTensorTileBuffer.StatusAccessConflict then"
+        "        failwith \"DeviceUnified concurrent ClefWrite was not refused\""
+        "    if DeviceTensorTileBuffer_unmap devH <> DeviceTensorTileBuffer.StatusLifetimeError then"
+        "        failwith \"DeviceUnified premature unmap was not refused\""
+        "    if DeviceTensorTileBuffer_library_transform_in_place devH 0 7 <> 0 then"
+        "        failwith \"DeviceUnified library_transform_in_place failed\""
+        "    if DeviceTensorTileBuffer_unshare_from_library devH <> 0 then"
+        "        failwith \"DeviceUnified unshare_from_library failed\""
+        "    if DeviceTensorTileBuffer_clef_read_sequence outH devH 0 <> 0 then failwith \"DeviceUnified read sequence failed\""
+        "    let devSeq0 = outSlot.ReadUInt32()"
+        "    if DeviceTensorTileBuffer_clef_read_accumulator outH devH 0 <> 0 then failwith \"DeviceUnified read accumulator failed\""
+        "    let devAcc0 = outSlot.ReadInt64()"
+        "    if DeviceTensorTileBuffer_clef_read_checksum outH devH 0 <> 0 then failwith \"DeviceUnified read checksum failed\""
+        "    let devChk0 = outSlot.ReadUInt32()"
+        "    if devSeq0 <> 107u || devAcc0 <> 1070L || devChk0 <> (107u ^^^ 1070u) then"
+        "        failwith $\"DeviceUnified unexpected mutated values: seq0={devSeq0} acc0={devAcc0} chk0={devChk0}\""
+        "    if DeviceTensorTileBuffer_clef_address_identity outH devH <> 0 then failwith \"DeviceUnified clef_address_identity failed\""
+        "    let devClefAddr = outSlot.ReadUInt64()"
+        "    if DeviceTensorTileBuffer_library_address_identity outH devH <> 0 then failwith \"DeviceUnified library_address_identity failed\""
+        "    let devLibAddr = outSlot.ReadUInt64()"
+        "    if DeviceTensorTileBuffer_copy_count outH devH <> 0 then failwith \"DeviceUnified copy_count failed\""
+        "    let devCopies = outSlot.ReadInt32()"
+        "    if devClefAddr = 0UL || devClefAddr <> devLibAddr || devCopies <> 0 then"
+        "        failwith $\"DeviceUnified zero-copy identity failed: clefAddr={devClefAddr} libAddr={devLibAddr} copies={devCopies}\""
+        "    if DeviceTensorTileBuffer_unmap devH <> 0 || DeviceTensorTileBuffer_unmap devH <> DeviceTensorTileBuffer.StatusLifetimeError then"
+        "        failwith \"DeviceUnified unmap lifecycle check failed\""
+        "    \"clef-compiled-ok host=SRAM:1 device=DMA:2 copies=0 same_addr=1\"" ])
+    let runtimeDir = Path.GetDirectoryName(typeof<obj>.Assembly.Location)
+    let fsharpCorePath = typeof<list<_>>.Assembly.Location
+    let fscPath = "/home/hhh/.local/share/mise/installs/dotnet/10.0.401/sdk/10.0.401/FSharp/fsc.dll"
+    let clefDll = path "ClefSharedBuffers.dll"
+    let sysRefs =
+        [ "System.Runtime.dll"
+          "System.Runtime.Numerics.dll"
+          "System.Runtime.InteropServices.dll"
+          "System.Console.dll"
+          "System.Collections.dll" ]
+        |> List.map (fun r -> "-r:" + Path.Combine(runtimeDir, r))
+    let fscArgs =
+        [ fscPath
+          "--nologo"
+          "--target:library"
+          "--targetprofile:netcore"
+          "--out:" + clefDll
+          "-r:" + fsharpCorePath ]
+        @ sysRefs
+        @ [ Path.Combine(barewireRoot, "Hardware", "Descriptors.fs")
+            path "BareWireDescriptorsSurface.fs"
+            path "SharedBuffers.clef.fs"
+            path "DeviceSharedBuffers.clef.fs"
+            path "ClefSharedBufferRunner.fs" ]
+    run "/home/hhh/.local/share/mise/installs/dotnet/10.0.401/dotnet" fscArgs |> ignore
+    let compiledClefAssembly = System.Reflection.Assembly.LoadFrom(clefDll)
+    for modName, prefixName in [ "Test.SharedBuffers", "SharedTensorTileBuffer"; "Test.DeviceSharedBuffers", "DeviceTensorTileBuffer" ] do
+        let modType = compiledClefAssembly.GetType(modName, true)
+        let mapMethod = modType.GetMethod(prefixName + "_map")
+        let unmapMethod = modType.GetMethod(prefixName + "_unmap")
+        let mappedOpt = mapMethod.Invoke(null, [||])
+        Assert.NotNull(mappedOpt)
+        let _, optFields = Microsoft.FSharp.Reflection.FSharpValue.GetUnionFields(mappedOpt, mappedOpt.GetType())
+        let unmapStatus = unmapMethod.Invoke(null, [| optFields[0] |]) :?> int
+        Assert.Equal(0, unmapStatus)
+    let runnerType = compiledClefAssembly.GetType("Test.ClefSharedBufferRunner")
+    let runMethod = runnerType.GetMethod("runClefVerification")
+    let clefExecResult = runMethod.Invoke(null, [| box library |]) :?> string
+    Assert.Equal("clef-compiled-ok host=SRAM:1 device=DMA:2 copies=0 same_addr=1", clefExecResult)
+
+    File.WriteAllText(path "runner.cpp", """
+#include "shared_tile.hpp"
+#include <cstdio>
+#include <cstdint>
+
+extern "C" void* farscape_shared_buffer_SharedTensorTileBuffer_map() noexcept;
+extern "C" int farscape_shared_buffer_SharedTensorTileBuffer_unmap(void*) noexcept;
+extern "C" int farscape_shared_buffer_SharedTensorTileBuffer_clef_write_sequence(void*, int, std::uint32_t) noexcept;
+extern "C" int farscape_shared_buffer_SharedTensorTileBuffer_clef_read_sequence(std::uint32_t*, void*, int) noexcept;
+extern "C" int farscape_shared_buffer_SharedTensorTileBuffer_clef_write_accumulator(void*, int, std::int64_t) noexcept;
+extern "C" int farscape_shared_buffer_SharedTensorTileBuffer_clef_read_accumulator(std::int64_t*, void*, int) noexcept;
+extern "C" int farscape_shared_buffer_SharedTensorTileBuffer_clef_write_scale(void*, int, std::int32_t) noexcept;
+extern "C" int farscape_shared_buffer_SharedTensorTileBuffer_clef_read_scale(std::int32_t*, void*, int) noexcept;
+extern "C" int farscape_shared_buffer_SharedTensorTileBuffer_clef_write_checksum(void*, int, std::uint32_t) noexcept;
+extern "C" int farscape_shared_buffer_SharedTensorTileBuffer_clef_read_checksum(std::uint32_t*, void*, int) noexcept;
+extern "C" int farscape_shared_buffer_SharedTensorTileBuffer_share_to_library(void*, int, int) noexcept;
+extern "C" int farscape_shared_buffer_SharedTensorTileBuffer_unshare_from_library(void*) noexcept;
+extern "C" int farscape_shared_buffer_SharedTensorTileBuffer_library_transform_in_place(void*, int, int) noexcept;
+extern "C" int farscape_shared_buffer_SharedTensorTileBuffer_clef_address_identity(std::uintptr_t*, void*) noexcept;
+extern "C" int farscape_shared_buffer_SharedTensorTileBuffer_library_address_identity(std::uintptr_t*, void*) noexcept;
+extern "C" int farscape_shared_buffer_SharedTensorTileBuffer_copy_count(int*, void*) noexcept;
+extern "C" int farscape_shared_buffer_SharedTensorTileBuffer_memory_space_kind(int*, void*) noexcept;
+
+extern "C" void* farscape_shared_buffer_DeviceTensorTileBuffer_map() noexcept;
+extern "C" int farscape_shared_buffer_DeviceTensorTileBuffer_unmap(void*) noexcept;
+extern "C" int farscape_shared_buffer_DeviceTensorTileBuffer_memory_space_kind(int*, void*) noexcept;
+
+#define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "check failed at %d: %s\n", __LINE__, #x); return 1; } } while (false)
+
+int main() {
+    void* h = farscape_shared_buffer_SharedTensorTileBuffer_map();
+    CHECK(h != nullptr);
+    int space_kind = 0;
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_memory_space_kind(&space_kind, h) == 0 && space_kind == 1);
+
+    void* dev_h = farscape_shared_buffer_DeviceTensorTileBuffer_map();
+    CHECK(dev_h != nullptr);
+    int dev_space_kind = 0;
+    CHECK(farscape_shared_buffer_DeviceTensorTileBuffer_memory_space_kind(&dev_space_kind, dev_h) == 0 && dev_space_kind == 2);
+    CHECK(farscape_shared_buffer_DeviceTensorTileBuffer_unmap(dev_h) == 0);
+
+    // 1. Clef writes initial values into tile 0 and tile 1 in the HostShared region.
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_clef_write_sequence(h, 0, 100u) == 0);
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_clef_write_accumulator(h, 0, 1000LL) == 0);
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_clef_write_scale(h, 0, 10) == 0);
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_clef_write_checksum(h, 0, 0u) == 0);
+
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_clef_write_sequence(h, 1, 200u) == 0);
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_clef_write_accumulator(h, 1, 5000LL) == 0);
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_clef_write_scale(h, 1, 25) == 0);
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_clef_write_checksum(h, 1, 0u) == 0);
+
+    // Out-of-bounds element index is refused with StatusOutOfRange (4).
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_clef_write_sequence(h, -1, 1u) == 4);
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_clef_write_sequence(h, 4, 1u) == 4);
+
+    // Library mutation before sharing is refused with StatusAccessConflict (6).
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_library_transform_in_place(h, 0, 5) == 6);
+
+    // 2. Share buffer to targeted library in ReadWrite mode (3) for 4 elements.
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_share_to_library(h, 3, 5) == 4);
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_share_to_library(h, 3, 4) == 0);
+
+    // While shared ReadWrite, Clef read/write is refused with StatusAccessConflict (6),
+    // and unmapping while retained by the library is refused with StatusLifetimeError (5).
+    std::uint32_t seq = 0;
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_clef_write_sequence(h, 0, 999u) == 6);
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_clef_read_sequence(&seq, h, 0) == 6);
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_unmap(h) == 5);
+
+    // 3. Targeted library mutates tile 0 and tile 1 in place without copying.
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_library_transform_in_place(h, 0, 7) == 0);
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_library_transform_in_place(h, 1, 4) == 0);
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_library_transform_in_place(h, 4, 1) == 4);
+
+    // 4. Unshare from library so Clef regains access to the same memory region.
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_unshare_from_library(h) == 0);
+
+    // 5. Clef reads library-mutated fields directly without copying.
+    std::int64_t acc0 = 0, acc1 = 0;
+    std::uint32_t seq0 = 0, seq1 = 0, chk0 = 0, chk1 = 0;
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_clef_read_sequence(&seq0, h, 0) == 0 && seq0 == 107u);
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_clef_read_accumulator(&acc0, h, 0) == 0 && acc0 == 1070LL);
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_clef_read_checksum(&chk0, h, 0) == 0 && chk0 == (107u ^ 1070u));
+
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_clef_read_sequence(&seq1, h, 1) == 0 && seq1 == 204u);
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_clef_read_accumulator(&acc1, h, 1) == 0 && acc1 == 5100LL);
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_clef_read_checksum(&chk1, h, 1) == 0 && chk1 == (204u ^ 5100u));
+
+    // 6. Share ReadOnly (1): Clef read is permitted, but Clef write and library mutate are refused (6).
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_share_to_library(h, 1, 4) == 0);
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_clef_read_sequence(&seq0, h, 0) == 0 && seq0 == 107u);
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_clef_write_sequence(h, 0, 1u) == 6);
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_library_transform_in_place(h, 0, 1) == 6);
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_unshare_from_library(h) == 0);
+
+    // 7. Verify zero copies and identical address identity between Clef and targeted library.
+    std::uintptr_t clef_addr = 0, lib_addr = 0;
+    int copies = -1;
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_clef_address_identity(&clef_addr, h) == 0);
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_library_address_identity(&lib_addr, h) == 0);
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_copy_count(&copies, h) == 0);
+    CHECK(clef_addr != 0 && clef_addr == lib_addr && clef_addr == shared_tile_library_last_address());
+    CHECK((clef_addr % 64u) == 0u);
+    CHECK(copies == 0 && shared_tile_library_observed_copies() == 0);
+
+    // 8. Unmap region and verify use-after-unmap is refused with StatusLifetimeError (5).
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_unmap(h) == 0);
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_unmap(h) == 5);
+    CHECK(farscape_shared_buffer_SharedTensorTileBuffer_clef_read_sequence(&seq0, h, 0) == 5);
+
+    std::printf("shared-buffer-native-ok size=%zu align=%zu seq0=%u acc0=%lld seq1=%u acc1=%lld copies=%d same_addr=%d\n",
+        sizeof(SharedTensorTile), alignof(SharedTensorTile),
+        seq0, static_cast<long long>(acc0), seq1, static_cast<long long>(acc1),
+        copies, clef_addr == lib_addr ? 1 : 0);
+    return 0;
+}
+    """)
+    let runner = path "runner"
+    run "/usr/bin/clang++" [ "-std=c++17"; path "runner.cpp"; "-L" + directory; "-lsharedtile"; "-Wl,-rpath,$ORIGIN"; "-o"; runner ] |> ignore
+    let result = run runner []
+    File.WriteAllText(path "native-result.txt", result + "\n" + clefExecResult)
+    Assert.Contains("shared-buffer-native-ok size=24 align=8 seq0=107 acc0=1070 seq1=204 acc1=5100 copies=0 same_addr=1", result)
