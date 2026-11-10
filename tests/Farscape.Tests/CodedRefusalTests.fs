@@ -2369,3 +2369,542 @@ int main() {
     let result = run runner []
     File.WriteAllText(path "native-result.txt", result + "\n" + clefExecResult)
     Assert.Contains("shared-buffer-native-ok size=24 align=8 seq0=107 acc0=1070 seq1=204 acc1=5100 copies=0 same_addr=1", result)
+
+// #115: real installed declarations must retain their actual exception and layout facts.
+let private installedXrtSurface =
+    lazy (CppClassAnalysis.loadXrtCppSurface "/usr/include/xrt" "/usr/lib/libxrt_coreutil.so" true)
+
+[<Fact>]
+let ``XRT surface selection retains measured layouts exported symbols and throwing refusals`` () =
+    let declarations, contracts = installedXrtSurface.Value
+    Assert.Contains(declarations, function
+        | CppParser.Declaration.Struct s -> s.Name = "axlf" && not (CppParser.isDefinedRecord s)
+        | _ -> false)
+    let classes = CppClassAnalysis.buildClassMap declarations
+    let ctx = { FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty with CppClasses = contracts }
+    let _, symbols = CppClassAnalysis.inspectLibraryExports "/usr/lib/libxrt_coreutil.so"
+    let exported = symbols |> List.map fst |> Set.ofList
+    let code = FidelityCodeGenerator.generateModule ctx Set.empty declarations "Xrt" "xrt_coreutil" "XRT C++ bindings" []
+    Assert.DoesNotContain("nativeint", code)
+    Assert.DoesNotContain("nativeptr", code)
+    for name in ["uuid"; "xclbin"; "device"; "hw_context"; "kernel"; "bo"; "run"] do
+        let cls = classes["xrt::" + name]
+        let safeName = "xrt_" + name
+        Assert.Equal(16, CppClassAnalysis.estimateClassSize cls)
+        Assert.Equal((if name = "uuid" then 8 else 64), cls.Measured.Value.AlignmentBits)
+        Assert.Equal(Some 16, contracts["xrt::" + name].SizeOverride)
+        Assert.Contains("type " + safeName, code)
+        Assert.Contains("module " + safeName + " =", code)
+        Assert.Contains("let " + safeName + "_dtor (self: CHandle<" + safeName + ">) : unit", code)
+        Assert.Contains("Binding = \"Xrt." + safeName + "_dtor\"", code)
+        for decl in cls.Constructors @ cls.Methods do
+            match decl with
+            | CppParser.Declaration.Function f ->
+                Assert.False(CppClassAnalysis.hasNoExcept f)
+                let symbol = f.MangledName.Value
+                if not (symbol.StartsWith("farscape_cpp_")) then Assert.Contains(symbol, exported)
+                Assert.Contains("FidelityExtern(\"xrt_coreutil\", \"" + symbol + "\")", code)
+            | _ -> failwith "only selected callable declarations expected"
+        let unadornedContracts = contracts.Add("xrt::" + name, { contracts["xrt::" + name] with KindOverride = None }).Add(name, { contracts[name] with KindOverride = None })
+        let unadornedCtx = { ctx with CppClasses = unadornedContracts }
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            FidelityCodeGenerator.generateModule unadornedCtx Set.empty [CppParser.Declaration.Class cls] "Test.Xrt" "xrt_coreutil" "XRT" [] |> ignore)
+        Assert.Equal((if name = "uuid" then "FS9212" else "FS9211"), (only error.Refusal).Code)
+        Assert.Contains("may throw across the native boundary", (only error.Refusal).Message)
+    for stdName, stdSize in ["std_string_view", 16; "std_string", 32; "std_chrono_milliseconds", 8] do
+        Assert.Contains("type " + stdName, code)
+        Assert.Contains("module " + stdName + " =", code)
+        Assert.Contains("let Size = " + string stdSize, code)
+        Assert.Contains("CHandle<" + stdName + ">", code)
+    Assert.Contains("let xrt_device_register_xclbin (retStorage: CHandle<xrt_uuid>) (self: CHandle<xrt_device>) (xclbin: CHandle<xrt_xclbin>) : unit", code)
+    Assert.Contains("FidelityExtern(\"xrt_coreutil\", \"_ZN3xrt6device15register_xclbinERKNS_6xclbinE\")", code)
+    Assert.Contains("FidelityExtern(\"xrt_coreutil\", \"farscape_cpp_xrt_xclbin_dtor\")", code)
+    Assert.Contains("FidelityExtern(\"xrt_coreutil\", \"farscape_cpp_xrt_uuid_dtor\")", code)
+    Assert.Equal(CppClassAnalysis.SretReturn, CppClassAnalysis.classifyReturnConvention classes["xrt::uuid"])
+    let register =
+        classes["xrt::device"].Methods |> List.pick (function CppParser.Declaration.Function f -> Some f | _ -> None)
+    Assert.Equal(CppClassAnalysis.SretReturn, (CppClassAnalysis.analyzeMethodReturn classes register).ReturnConvention)
+    let forward = { mkClassEmpty "uuid" with QualifiedName = Some "xrt::uuid" }
+    let retained = CppClassAnalysis.buildClassMap (declarations @ [CppParser.Declaration.Class forward])
+    Assert.Equal<CppParser.ClassDecl>(classes["xrt::uuid"], retained["uuid"])
+    Assert.Equal<CppParser.ClassDecl>(classes["xrt::uuid"], retained["xrt::uuid"])
+    for name in ["uuid_t"; "xuid_t"] do
+        Assert.Equal(16, CppClassAnalysis.estimateClassSize (mkClassValue "Uuid" [mkField "value" name]))
+    for name, size in ["std::string_view", 16; "std_string_view", 16; "std::string", 32; "std_string", 32; "std::chrono::milliseconds", 8; "std_chrono_milliseconds", 8] do
+        Assert.True(contracts[name].Bind)
+        Assert.Equal(Some size, contracts[name].SizeOverride)
+    let uncontractedDeclarations, uncontractedSpecs = CppClassAnalysis.loadXrtCppSurface "/usr/include/xrt" "/usr/lib/libxrt_coreutil.so" false
+    let uncontractedClasses = CppClassAnalysis.buildClassMap uncontractedDeclarations
+    for name in ["xrt::xclbin"; "xrt::kernel"; "xrt::run"] do
+        let contracts = uncontractedSpecs.Add(name, { uncontractedSpecs[name] with KindOverride = Some "shim" })
+        let ctx = { FidelityCodeGenerator.buildGenerationContext uncontractedDeclarations Types.LP64 Map.empty with CppClasses = contracts }
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            FidelityCodeGenerator.generateModule ctx Set.empty [CppParser.Declaration.Class uncontractedClasses[name]] "Test.Xrt" "xrt_coreutil" "XRT" [] |> ignore)
+        Assert.Equal("FS9206", (only error.Refusal).Code)
+    // The exact installed classes admit lifecycle checking through the existing catching
+    // shim contract, without changing any parsed noexcept attribute.
+    for name in ["xrt::device"; "xrt::xclbin"] do
+        let cls = classes[name]
+        let spec = { contracts[name] with KindOverride = Some "shim" }
+        let construct = CppClassAnalysis.CppObjectOperation.Construct "object"
+        let release = CppClassAnalysis.CppObjectOperation.Release "object"
+        CppClassAnalysis.verifyCppObjectLifecycle spec cls [construct; release; CppClassAnalysis.CppObjectOperation.ScopeExit]
+        for operation, code in [CppClassAnalysis.CppObjectOperation.MethodCall ("object", "unused"), "FS9217"; release, "FS9218"] do
+            let error = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+                CppClassAnalysis.verifyCppObjectLifecycle spec cls [construct; release; operation])
+            Assert.Equal(code, (only error.Refusal).Code)
+
+[<Fact>]
+let ``stdlib reference contracts emit opaque storage and refuse absent disabled wrong size and by value contracts`` () =
+    let options = { CppParser.defaultOptions "/not-a-global-enum-probe.h" with CppMode = true }
+    Assert.Empty(CppParser.measureResultAliases options [CppParser.Declaration.Function (mkFunc "Nested::result" "alias" [])] [])
+    let spec, baseClass = cppObjectContract ()
+    let callable = baseClass.Methods |> List.pick (function CppParser.Declaration.Function f -> Some f | _ -> None)
+    let enum =
+        { mkEnum "mode" [mkEnumVal "Shared" 1L] None with
+            UnderlyingType = Some "unsigned int"
+            Representation = CppParser.ClangMeasured { Bits = 32; IsSigned = false } }
+    let parameters =
+        [ "view", "const std::string_view &"; "text", "const std::string &"
+          "timeout", "const std::chrono::milliseconds &"; "other", "const demo::Widget &"; "mode", "demo::mode" ]
+    let cls =
+        { baseClass with Methods = [CppParser.Declaration.Function { callable with Parameters = parameters }] }
+    let declarations = [CppParser.Declaration.Enum enum; CppParser.Declaration.Class cls]
+    let generate contracts cls =
+        let ctx = { FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty with CppClasses = contracts }
+        FidelityCodeGenerator.generateModule ctx Set.empty [CppParser.Declaration.Class cls] "Test" "test" "Test" []
+    let contracts = CppClassAnalysis.defaultXrtStdlibContracts.Add("Widget", spec)
+    let code = generate contracts cls
+    Assert.DoesNotContain("nativeint", code)
+    Assert.DoesNotContain("nativeptr", code)
+    for name, size in ["std_string_view", 16; "std_string", 32; "std_chrono_milliseconds", 8] do
+        Assert.Contains("CHandle<" + name + ">", code)
+        Assert.Contains("module " + name + " =", code)
+        Assert.Contains("let Size = " + string size, code)
+    Assert.Contains("other: CHandle<Widget>", code)
+    Assert.Contains("mode: mode", code)
+    let stringContract = contracts["std::string"]
+    for contracts, cls in [
+        Map.ofList ["Widget", spec], cls
+        contracts.Add("std::string", { stringContract with Bind = false }), cls
+        contracts.Add("std::string", { stringContract with SizeOverride = Some 16 }), cls
+        contracts, { cls with Methods = [CppParser.Declaration.Function { callable with Parameters = ["text", "std::string"] }] }
+        contracts, { cls with Methods = [CppParser.Declaration.Function { callable with Parameters = ["values", "const std::vector<int> &"] }] } ] do
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> generate contracts cls |> ignore)
+        Assert.Equal("FS9206", (only error.Refusal).Code)
+        Assert.Contains("no admitted marshaled contract", (only error.Refusal).Message)
+    // Safe-name lookup and an unspecified size are both admitted by the contract.
+    let safeOnly = contracts.Remove("std::string").Add("std_string", { stringContract with Name = "std_string"; SizeOverride = None })
+    Assert.Contains("CHandle<std_string>", generate safeOnly cls)
+
+[<Fact>]
+let ``inline companion storage constructors destructors and aliases execute with exact native lifetimes`` () =
+    let directory = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".scratch", "round13-inline", System.Guid.NewGuid().ToString("N")))
+    Directory.CreateDirectory directory |> ignore
+    let path name = Path.Combine(directory, name)
+    let run executable arguments =
+        let info = System.Diagnostics.ProcessStartInfo(executable)
+        info.WorkingDirectory <- directory
+        info.RedirectStandardOutput <- true
+        info.RedirectStandardError <- true
+        for argument in arguments do info.ArgumentList.Add argument
+        use proc = System.Diagnostics.Process.Start info
+        let output = proc.StandardOutput.ReadToEndAsync()
+        let errors = proc.StandardError.ReadToEndAsync()
+        proc.WaitForExit()
+        Assert.True(proc.ExitCode = 0, executable + ": " + errors.Result + output.Result)
+        output.Result
+    try
+        let header = path "inline.hpp"
+        File.WriteAllText(header, """
+#pragma once
+namespace fixture {
+class Inline {
+public:
+  static int live;
+  static int constructed;
+  static int destroyed;
+  int value;
+  explicit Inline(int n) noexcept : value(n) { ++live; ++constructed; }
+  ~Inline() noexcept { --live; ++destroyed; }
+};
+}
+        """)
+        let parsed = CppParser.parseHeaderFull { CppParser.defaultOptions header with CppMode = true; IncludeMacros = false } |> Result.defaultWith failwith
+        let cls = (CppClassAnalysis.buildClassMap parsed.Declarations)["fixture::Inline"]
+        let ctors = cls.Constructors |> List.map (function
+            | CppParser.Declaration.Function f -> CppParser.Declaration.Function { f with MangledName = Some "farscape_cpp_fixture_Inline_ctor" }
+            | other -> other)
+        let cls = { cls with Constructors = ctors; DestructorMangledName = Some "farscape_cpp_fixture_Inline_dtor" }
+        let spec : PilotTypes.CppClassSpec = { Name = "fixture::Inline"; Namespace = "Test"; Bind = true; KindOverride = None; SizeOverride = Some 8 }
+        let shim = CppClassAnalysis.renderCppObjectStorageShimC header (Map.ofList ["fixture::Inline", cls]) spec cls
+        Assert.Contains("::new (storage) fixture::Inline(arg0)", shim)
+        Assert.Contains("static_cast<fixture::Inline*>(self)->~Inline()", shim)
+        File.WriteAllText(path "shim.cpp", shim)
+        File.WriteAllText(path "main.cpp", """
+#include "inline.hpp"
+#include <cassert>
+#include <cstdint>
+#include <cstdio>
+int fixture::Inline::live = 0;
+int fixture::Inline::constructed = 0;
+int fixture::Inline::destroyed = 0;
+extern "C" void* farscape_cpp_fixture_Inline_ctor(int) noexcept;
+extern "C" void farscape_cpp_fixture_Inline_dtor(void*) noexcept;
+extern "C" void* fixture_Inline_ctor(int) noexcept;
+extern "C" void fixture_Inline_dtor(void*) noexcept;
+int main() {
+  void* a = farscape_cpp_fixture_Inline_ctor(17);
+  void* b = fixture_Inline_ctor(29);
+  assert(a && b && a != b);
+  assert(reinterpret_cast<std::uintptr_t>(a) % 8 == 0);
+  assert(reinterpret_cast<std::uintptr_t>(b) % 8 == 0);
+  assert(static_cast<fixture::Inline*>(a)->value == 17);
+  assert(static_cast<fixture::Inline*>(b)->value == 29);
+  assert(fixture::Inline::live == 2);
+  farscape_cpp_fixture_Inline_dtor(a);
+  fixture_Inline_dtor(b);
+  fixture_Inline_dtor(nullptr);
+  assert(fixture::Inline::constructed == 2);
+  assert(fixture::Inline::destroyed == 2);
+  assert(fixture::Inline::live == 0);
+  std::puts("inline-companion-ok constructed=2 destroyed=2 live=0");
+}
+        """)
+        run "/usr/bin/clang++" ["-std=c++17"; path "shim.cpp"; path "main.cpp"; "-o"; path "runner"] |> ignore
+        Assert.Contains("inline-companion-ok constructed=2 destroyed=2 live=0", run (path "runner") [])
+    finally
+        Directory.Delete(directory, true)
+
+[<Fact>]
+let ``generated XRT C++ marshaled storage adapters compile and execute C1 sret register_xclbin kernel bo run and D1 destruction natively`` () =
+    let declarations, contracts = installedXrtSurface.Value
+    let classes = CppClassAnalysis.buildClassMap declarations
+    let directory = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".scratch", "xrt-cpp-round13", System.Guid.NewGuid().ToString("N")))
+    Directory.CreateDirectory directory |> ignore
+    let path name = Path.Combine(directory, name)
+    let run executable arguments =
+        let info = System.Diagnostics.ProcessStartInfo(executable)
+        info.WorkingDirectory <- directory
+        info.RedirectStandardOutput <- true
+        info.RedirectStandardError <- true
+        for argument in arguments do info.ArgumentList.Add argument
+        use proc = System.Diagnostics.Process.Start info
+        let output = proc.StandardOutput.ReadToEndAsync()
+        let errors = proc.StandardError.ReadToEndAsync()
+        proc.WaitForExit()
+        Assert.True(proc.ExitCode = 0, executable + ": " + errors.Result + output.Result)
+        output.Result
+    try
+        let shims =
+            [ "uuid"; "xclbin"; "device"; "hw_context"; "kernel"; "bo"; "run" ]
+            |> List.map (fun shortName ->
+                let qname = "xrt::" + shortName
+                CppClassAnalysis.renderCppObjectStorageShimC "/usr/include/xrt/xrt_kernel.h" classes contracts[qname] classes[qname])
+            |> String.concat "\n\n"
+        File.WriteAllText(path "xrt_shims.cpp", shims)
+        File.WriteAllText(path "mock_xrt.cpp", """
+#include <cstdint>
+#include <cstddef>
+#include <cstring>
+#include <string>
+#include <string_view>
+#include <chrono>
+#include "/usr/include/xrt/xrt_kernel.h"
+
+static int g_live_objects = 0;
+static int g_total_constructed = 0;
+static int g_total_destroyed = 0;
+static std::int32_t g_bo_buffers[4][16];
+static int g_next_bo = 0;
+static int g_bound_bo_a = -1;
+static int g_bound_bo_b = -1;
+static int g_bound_bo_c = -1;
+static std::uint32_t g_scalar_count = 0;
+
+extern "C" int mock_xrt_live_objects() noexcept { return g_live_objects; }
+extern "C" int mock_xrt_total_constructed() noexcept { return g_total_constructed; }
+extern "C" int mock_xrt_total_destroyed() noexcept { return g_total_destroyed; }
+
+struct MockHandle {
+    std::uint64_t tag;
+    std::uint64_t payload;
+};
+
+extern "C" {
+void m_device_c1(void* self, unsigned int dindex) asm("_ZN3xrt6deviceC1Ej");
+void m_device_c1(void* self, unsigned int dindex) {
+    auto* h = static_cast<MockHandle*>(self);
+    h->tag = 0xDE00ULL;
+    h->payload = dindex;
+    ++g_live_objects; ++g_total_constructed;
+}
+
+void m_device_d1(void* self) asm("_ZN3xrt6deviceD1Ev");
+void m_device_d1(void* self) {
+    auto* h = static_cast<MockHandle*>(self);
+    h->tag = 0;
+    --g_live_objects; ++g_total_destroyed;
+}
+
+xrt::uuid m_device_reg_xclbin(void* self, const xrt::xclbin& xclbin) asm("_ZN3xrt6device15register_xclbinERKNS_6xclbinE");
+xrt::uuid m_device_reg_xclbin(void* self, const xrt::xclbin& xclbin) {
+    auto* dev = static_cast<const MockHandle*>(self);
+    auto* xb = reinterpret_cast<const MockHandle*>(&xclbin);
+    xuid_t raw = {0};
+    raw[0] = static_cast<unsigned char>((dev->payload + 1u) & 0xFFu);
+    raw[1] = static_cast<unsigned char>(xb->tag & 0xFFu);
+    raw[15] = 0x5Au;
+    return xrt::uuid(raw);
+}
+
+void m_xclbin_c1_axlf(void* self, const axlf* top) asm("_ZN3xrt6xclbinC1EPK4axlf");
+void m_xclbin_c1_axlf(void* self, const axlf* top) {
+    auto* h = static_cast<MockHandle*>(self);
+    h->tag = top ? 1ULL : 0ULL;
+    h->payload = 0ULL;
+    ++g_live_objects; ++g_total_constructed;
+}
+
+void m_xclbin_c1_sv(void* self, const std::string_view& sv) asm("_ZN3xrt6xclbinC1ERKSt17basic_string_viewIcSt11char_traitsIcEE");
+void m_xclbin_c1_sv(void* self, const std::string_view& sv) {
+    auto* h = static_cast<MockHandle*>(self);
+    h->tag = sv.size();
+    h->payload = 0ULL;
+    ++g_live_objects; ++g_total_constructed;
+}
+
+void m_xclbin_c1_str(void* self, const std::string& s) asm("_ZN3xrt6xclbinC1ERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE");
+void m_xclbin_c1_str(void* self, const std::string& s) {
+    auto* h = static_cast<MockHandle*>(self);
+    h->tag = s.size();
+    h->payload = 0ULL;
+    ++g_live_objects; ++g_total_constructed;
+}
+
+void m_hw_ctx_c1(void* self, const xrt::device& dev, const xrt::uuid& id, xrt::hw_context::access_mode mode) asm("_ZN3xrt10hw_contextC1ERKNS_6deviceERKNS_4uuidENS0_11access_modeE");
+void m_hw_ctx_c1(void* self, const xrt::device& dev, const xrt::uuid& id, xrt::hw_context::access_mode mode) {
+    auto* h = static_cast<MockHandle*>(self);
+    const auto* raw_uuid = id.get();
+    h->tag = raw_uuid[15];
+    h->payload = static_cast<std::uint64_t>(mode) + raw_uuid[1];
+    (void)dev;
+    ++g_live_objects; ++g_total_constructed;
+}
+
+void m_hw_ctx_d1(void* self) asm("_ZN3xrt10hw_contextD1Ev");
+void m_hw_ctx_d1(void* self) {
+    static_cast<MockHandle*>(self)->tag = 0;
+    --g_live_objects; ++g_total_destroyed;
+}
+
+void m_kernel_c1(void* self, const xrt::hw_context& ctx, const std::string& name) asm("_ZN3xrt6kernelC1ERKNS_10hw_contextERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE");
+void m_kernel_c1(void* self, const xrt::hw_context& ctx, const std::string& name) {
+    auto* h = static_cast<MockHandle*>(self);
+    h->tag = reinterpret_cast<const MockHandle*>(&ctx)->tag;
+    h->payload = name.size();
+    ++g_live_objects; ++g_total_constructed;
+}
+
+void m_kernel_d1(void* self) asm("_ZN3xrt6kernelD1Ev");
+void m_kernel_d1(void* self) {
+    static_cast<MockHandle*>(self)->tag = 0;
+    --g_live_objects; ++g_total_destroyed;
+}
+
+int m_kernel_group_id(const void* self, int argno) asm("_ZNK3xrt6kernel8group_idEi");
+int m_kernel_group_id(const void* self, int argno) {
+    (void)self;
+    return 100 + argno;
+}
+
+void m_bo_c1(void* self, const xrt::device& dev, std::size_t sz, xrt::bo::flags flags, xrt::memory_group grp) asm("_ZN3xrt2boC1ERKNS_6deviceEmNS0_5flagsEj");
+void m_bo_c1(void* self, const xrt::device& dev, std::size_t sz, xrt::bo::flags flags, xrt::memory_group grp) {
+    (void)dev; (void)flags; (void)grp;
+    auto* h = static_cast<MockHandle*>(self);
+    int idx = g_next_bo++;
+    h->tag = static_cast<std::uint64_t>(idx);
+    h->payload = sz;
+    std::memset(g_bo_buffers[idx], 0, sizeof(g_bo_buffers[idx]));
+    ++g_live_objects; ++g_total_constructed;
+}
+
+void m_bo_d1(void* self) asm("_ZN3xrt2boD1Ev");
+void m_bo_d1(void* self) {
+    static_cast<MockHandle*>(self)->tag = 0xFFFFULL;
+    --g_live_objects; ++g_total_destroyed;
+}
+
+void* m_bo_map(void* self) asm("_ZN3xrt2bo3mapEv");
+void* m_bo_map(void* self) {
+    auto* h = static_cast<MockHandle*>(self);
+    return g_bo_buffers[h->tag];
+}
+
+void m_bo_sync(void* self, xclBOSyncDirection dir, std::size_t sz, std::size_t offset) asm("_ZN3xrt2bo4syncE18xclBOSyncDirectionmm");
+void m_bo_sync(void* self, xclBOSyncDirection dir, std::size_t sz, std::size_t offset) {
+    (void)self; (void)dir; (void)sz; (void)offset;
+}
+
+std::size_t m_bo_size(const void* self) asm("_ZNK3xrt2bo4sizeEv");
+std::size_t m_bo_size(const void* self) {
+    return static_cast<const MockHandle*>(self)->payload;
+}
+
+void m_run_c1(void* self, const xrt::kernel& krnl) asm("_ZN3xrt3runC1ERKNS_6kernelE");
+void m_run_c1(void* self, const xrt::kernel& krnl) {
+    auto* h = static_cast<MockHandle*>(self);
+    h->tag = reinterpret_cast<const MockHandle*>(&krnl)->tag;
+    h->payload = 0;
+    ++g_live_objects; ++g_total_constructed;
+}
+
+void m_run_d1(void* self) asm("_ZN3xrt3runD1Ev");
+void m_run_d1(void* self) {
+    static_cast<MockHandle*>(self)->tag = 0;
+    --g_live_objects; ++g_total_destroyed;
+}
+
+void m_run_set_arg_ptr(void* self, int index, const void* val, std::size_t bytes) asm("_ZN3xrt3run16set_arg_at_indexEiPKvm");
+void m_run_set_arg_ptr(void* self, int index, const void* val, std::size_t bytes) {
+    (void)self;
+    if (index == 3 && val && bytes == sizeof(std::uint32_t)) {
+        std::memcpy(&g_scalar_count, val, sizeof(std::uint32_t));
+    }
+}
+
+void m_run_set_arg_bo(void* self, int index, const xrt::bo& bo) asm("_ZN3xrt3run16set_arg_at_indexEiRKNS_2boE");
+void m_run_set_arg_bo(void* self, int index, const xrt::bo& bo) {
+    (void)self;
+    int bo_idx = static_cast<int>(reinterpret_cast<const MockHandle*>(&bo)->tag);
+    if (index == 0) g_bound_bo_a = bo_idx;
+    else if (index == 1) g_bound_bo_b = bo_idx;
+    else if (index == 2) g_bound_bo_c = bo_idx;
+}
+
+void m_run_start(void* self) asm("_ZN3xrt3run5startEv");
+void m_run_start(void* self) {
+    (void)self;
+    for (std::uint32_t i = 0; i < g_scalar_count; ++i) {
+        g_bo_buffers[g_bound_bo_c][i] = g_bo_buffers[g_bound_bo_a][i] * g_bo_buffers[g_bound_bo_b][i];
+    }
+}
+
+ert_cmd_state m_run_wait(const void* self, const std::chrono::milliseconds& timeout) asm("_ZNK3xrt3run4waitERKNSt6chrono8durationIlSt5ratioILl1ELl1000EEEE");
+ert_cmd_state m_run_wait(const void* self, const std::chrono::milliseconds& timeout) {
+    (void)self;
+    return timeout.count() > 0 ? ERT_CMD_STATE_COMPLETED : ERT_CMD_STATE_ERROR;
+}
+}
+        """)
+        File.WriteAllText(path "runner.cpp", """
+#include <cassert>
+#include <cstdint>
+#include <cstdio>
+#include <string>
+#include <string_view>
+#include <chrono>
+#include "/usr/include/xrt/xrt_kernel.h"
+
+extern "C" {
+void* farscape_cpp_xrt_uuid_ctor() noexcept;
+void farscape_cpp_xrt_uuid_dtor(void*) noexcept;
+void* xrt_xclbin_ctor_2(const std::string&) noexcept;
+void farscape_cpp_xrt_xclbin_dtor(void*) noexcept;
+void* xrt_device_ctor(unsigned int) noexcept;
+void xrt_device_dtor(void*) noexcept;
+void xrt_device_register_xclbin(void* retStorage, void* self, const xrt::xclbin& arg0) noexcept;
+void* xrt_hw_context_ctor(const xrt::device&, const xrt::uuid&, xrt::hw_context::access_mode) noexcept;
+void xrt_hw_context_dtor(void*) noexcept;
+void* xrt_kernel_ctor(const xrt::hw_context&, const std::string&) noexcept;
+void xrt_kernel_dtor(void*) noexcept;
+int xrt_kernel_group_id(void*, int) noexcept;
+void* xrt_bo_ctor(const xrt::device&, std::size_t, xrt::bo::flags, xrt::memory_group) noexcept;
+void xrt_bo_dtor(void*) noexcept;
+void* xrt_bo_map(void*) noexcept;
+void xrt_bo_sync(void*, xclBOSyncDirection, std::size_t, std::size_t) noexcept;
+std::size_t xrt_bo_size(void*) noexcept;
+void* xrt_run_ctor(const xrt::kernel&) noexcept;
+void xrt_run_dtor(void*) noexcept;
+void xrt_run_set_arg_at_index_0(void*, int, const void*, std::size_t) noexcept;
+void xrt_run_set_arg_at_index_1(void*, int, const xrt::bo&) noexcept;
+void xrt_run_start(void*) noexcept;
+ert_cmd_state xrt_run_wait(void*, const std::chrono::milliseconds&) noexcept;
+
+int mock_xrt_live_objects() noexcept;
+int mock_xrt_total_constructed() noexcept;
+int mock_xrt_total_destroyed() noexcept;
+}
+
+int main() {
+    void* dev = xrt_device_ctor(0u);
+    std::string xclbin_path = "mul.xclbin";
+    void* xclbin = xrt_xclbin_ctor_2(xclbin_path);
+    void* uuid = farscape_cpp_xrt_uuid_ctor();
+    assert(dev && xclbin && uuid);
+
+    // SretReturn: caller passes uuid storage first, device second, xclbin third
+    xrt_device_register_xclbin(uuid, dev, *static_cast<const xrt::xclbin*>(xclbin));
+    const unsigned char* raw_uuid = static_cast<const xrt::uuid*>(uuid)->get();
+    unsigned int u0 = raw_uuid[0], u1 = raw_uuid[1], u15 = raw_uuid[15];
+    assert(u0 == 1u && u1 == xclbin_path.size() && u15 == 0x5Au);
+
+    void* hw_ctx = xrt_hw_context_ctor(*static_cast<const xrt::device*>(dev), *static_cast<const xrt::uuid*>(uuid), xrt::hw_context::access_mode::shared);
+    std::string krnl_name = "ewise_mul";
+    void* krnl = xrt_kernel_ctor(*static_cast<const xrt::hw_context*>(hw_ctx), krnl_name);
+    assert(hw_ctx && krnl);
+    assert(xrt_kernel_group_id(krnl, 0) == 100);
+    assert(xrt_kernel_group_id(krnl, 2) == 102);
+
+    void* bo_a = xrt_bo_ctor(*static_cast<const xrt::device*>(dev), 16, xrt::bo::flags::host_only, 100u);
+    void* bo_b = xrt_bo_ctor(*static_cast<const xrt::device*>(dev), 16, xrt::bo::flags::host_only, 101u);
+    void* bo_c = xrt_bo_ctor(*static_cast<const xrt::device*>(dev), 16, xrt::bo::flags::host_only, 102u);
+    assert(bo_a && bo_b && bo_c);
+    assert(xrt_bo_size(bo_a) == 16 && xrt_bo_size(bo_b) == 16 && xrt_bo_size(bo_c) == 16);
+
+    auto* ptr_a = static_cast<std::int32_t*>(xrt_bo_map(bo_a));
+    auto* ptr_b = static_cast<std::int32_t*>(xrt_bo_map(bo_b));
+    auto* ptr_c = static_cast<std::int32_t*>(xrt_bo_map(bo_c));
+    for (int i = 0; i < 4; ++i) {
+        ptr_a[i] = i + 2;
+        ptr_b[i] = (i + 1) * 10;
+    }
+    xrt_bo_sync(bo_a, XCL_BO_SYNC_BO_TO_DEVICE, 16, 0);
+    xrt_bo_sync(bo_b, XCL_BO_SYNC_BO_TO_DEVICE, 16, 0);
+
+    void* run = xrt_run_ctor(*static_cast<const xrt::kernel*>(krnl));
+    assert(run);
+    xrt_run_set_arg_at_index_1(run, 0, *static_cast<const xrt::bo*>(bo_a));
+    xrt_run_set_arg_at_index_1(run, 1, *static_cast<const xrt::bo*>(bo_b));
+    xrt_run_set_arg_at_index_1(run, 2, *static_cast<const xrt::bo*>(bo_c));
+    std::uint32_t count = 4u;
+    xrt_run_set_arg_at_index_0(run, 3, &count, sizeof(count));
+    xrt_run_start(run);
+    std::chrono::milliseconds timeout(1000);
+    assert(xrt_run_wait(run, timeout) == ERT_CMD_STATE_COMPLETED);
+    xrt_bo_sync(bo_c, XCL_BO_SYNC_BO_FROM_DEVICE, 16, 0);
+    assert(ptr_c[0] == 20 && ptr_c[1] == 60 && ptr_c[2] == 120 && ptr_c[3] == 200);
+
+    xrt_run_dtor(run);
+    xrt_bo_dtor(bo_c);
+    xrt_bo_dtor(bo_b);
+    xrt_bo_dtor(bo_a);
+    xrt_kernel_dtor(krnl);
+    xrt_hw_context_dtor(hw_ctx);
+    farscape_cpp_xrt_xclbin_dtor(xclbin);
+    farscape_cpp_xrt_uuid_dtor(uuid);
+    xrt_device_dtor(dev);
+
+    assert(mock_xrt_total_constructed() == 8);
+    assert(mock_xrt_total_destroyed() == 7);
+    assert(mock_xrt_live_objects() == 1);
+    std::printf("xrt-marshaled-native-ok sret_uuid=%u,%u,0x%x out=%d,%d,%d,%d\n",
+        u0, u1, u15, ptr_c[0], ptr_c[1], ptr_c[2], ptr_c[3]);
+    return 0;
+}
+        """)
+        run "/usr/bin/clang++" [ "-std=c++17"; "-I/usr/include/xrt"; path "xrt_shims.cpp"; path "mock_xrt.cpp"; path "runner.cpp"; "-luuid"; "-o"; path "runner" ] |> ignore
+        let result = run (path "runner") []
+        Assert.Contains("xrt-marshaled-native-ok sret_uuid=1,10,0x5a out=20,60,120,200", result)
+    finally
+        Directory.Delete(directory, true)

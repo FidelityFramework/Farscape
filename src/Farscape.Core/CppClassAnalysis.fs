@@ -56,6 +56,7 @@ module CppClassAnalysis =
                 | "size_t" | "ptrdiff_t" | "double" | "intptr_t" | "uintptr_t" -> 8
                 | "char" | "unsigned char" | "int8_t" | "uint8_t" | "bool" -> 1
                 | "short" | "unsigned short" | "int16_t" | "uint16_t" -> 2
+                | "uuid_t" | "xuid_t" -> 16
                 | _ when f.IsArray ->
                     match f.ArraySize with
                     | Some n -> n  // conservative: 1 byte per element
@@ -178,6 +179,13 @@ module CppClassAnalysis =
         | Some ("shim" | "native_shim") -> true
         | _ -> false
 
+    /// Whether a class specification opts into the companion C1/D1 storage adapter (#115)
+    /// which wraps C1/D1/method asm calls in an extern "C" noexcept boundary.
+    let usesStorageAdapter (spec: PilotTypes.CppClassSpec) : bool =
+        match spec.KindOverride with
+        | Some ("pimpl" | "value") -> true
+        | _ -> false
+
     /// Whether a C++ constructor or method carries a `noexcept` attribute.
     let hasNoExcept (f: CppParser.FunctionDecl) : bool =
         f.Attributes |> List.exists (fun a -> a.Kind = "NoExceptAttr")
@@ -215,10 +223,15 @@ module CppClassAnalysis =
                 let pimplBase (name: string) = name.Contains("detail::pimpl") || name.Contains("shared_ptr") || name.Contains("unique_ptr")
                 if not (cls.BaseClasses |> List.forall pimplBase) then
                     refuse code "non-pimpl base class hierarchy is unsupported."
-            let hasC1 (f: CppParser.FunctionDecl) = f.MangledName |> Option.exists (fun s -> s.StartsWith("_Z") && s.Contains("C1"))
+            let hasC1 (f: CppParser.FunctionDecl) =
+                f.MangledName |> Option.exists (fun s ->
+                    (s.StartsWith("_Z") && s.Contains("C1")) ||
+                    (s.StartsWith("farscape_cpp_") && s.Contains("_ctor")))
             if ctors.IsEmpty || not (ctors |> List.forall hasC1) then
                 refuse code "requires complete-object C1 constructor symbols."
-            if not (cls.DestructorMangledName |> Option.exists (fun s -> s.StartsWith("_Z") && s.Contains("D1"))) then
+            if not (cls.DestructorMangledName |> Option.exists (fun s ->
+                (s.StartsWith("_Z") && s.Contains("D1")) ||
+                (s.StartsWith("farscape_cpp_") && s.EndsWith("_dtor")))) then
                 refuse code "requires a complete-object D1 destructor symbol."
             if shape = OpaqueClass && cls.Measured.IsNone && spec.SizeOverride.IsNone then
                 refuse Diagnostics.CppOpaqueClassUnadmitted "opaque storage requires a measured or overridden size."
@@ -226,7 +239,7 @@ module CppClassAnalysis =
             | Some size when size <= 0 -> refuse code "storage size must be positive."
             | _ -> ()
             for f in ctors @ methods do
-                if not (hasNoExcept f) then
+                if not (hasNoExcept f) && not (usesStorageAdapter spec) then
                     refuse code $"'{f.Name}' may throw across the native boundary."
                 if f.MangledName |> Option.forall System.String.IsNullOrWhiteSpace then
                     refuse code $"'{f.Name}' has no mangled symbol."
@@ -372,20 +385,45 @@ module CppClassAnalysis =
     /// Build a lookup map from class name to ClassDecl for return type analysis.
     /// Handles nested namespace names: "xrt::uuid" maps from both "uuid" and "xrt::uuid".
     let buildClassMap (decls: CppParser.Declaration list) : Map<string, CppParser.ClassDecl> =
-        let mutable map = Map.empty
+        let mutable map : Map<string, CppParser.ClassDecl> = Map.empty
+        let register key (c: CppParser.ClassDecl) =
+            let empty = c.Fields.IsEmpty && c.Methods.IsEmpty && c.Constructors.IsEmpty && c.BaseClasses.IsEmpty && not c.IsAbstract
+            if not (empty && map.ContainsKey key) then map <- map.Add(key, c)
         let rec collect = function
             | CppParser.Declaration.Class c ->
-                map <- Map.add c.Name c map
+                register c.Name c
+                c.QualifiedName |> Option.iter (fun q -> register q c)
             | CppParser.Declaration.Namespace ns ->
                 for d in ns.Declarations do
+                    collect d
                     match d with
                     | CppParser.Declaration.Class c ->
-                        map <- Map.add c.Name c map
-                        map <- Map.add (ns.Name + "::" + c.Name) c map
+                        register (ns.Name + "::" + c.Name) c
                     | _ -> ()
             | _ -> ()
         decls |> List.iter collect
         map
+
+    /// Explicit storage contracts for reference parameters; no stdlib object is passed by value.
+    let tryResolveStdlibParameterType (cType: string) : (string * string * int * int) option =
+        if cType.Contains("basic_string_view") || cType.Contains("string_view") then
+            Some ("std::string_view", "std_string_view", 16, 8)
+        elif cType.Contains("basic_string") || cType.Contains("std::string") then
+            Some ("std::string", "std_string", 32, 8)
+        elif cType.Contains("chrono::milliseconds") || (cType.Contains("chrono::duration") && cType.Contains("1000")) then
+            Some ("std::chrono::milliseconds", "std_chrono_milliseconds", 8, 8)
+        else None
+
+    let defaultXrtStdlibContracts : Map<string, PilotTypes.CppClassSpec> =
+        [ "std::string_view", "std_string_view", 16
+          "std::string", "std_string", 32
+          "std::chrono::milliseconds", "std_chrono_milliseconds", 8 ]
+        |> List.collect (fun (qualified, safe, size) ->
+            [ qualified; safe ] |> List.map (fun name ->
+                let spec : PilotTypes.CppClassSpec =
+                    { Name = name; Namespace = "Xrt"; Bind = true; KindOverride = None; SizeOverride = Some size }
+                name, spec))
+        |> Map.ofList
 
     /// Native owned-storage adapter for the admitted C1/D1 operations. Its C entry points
     /// use generated Clef binding names; asm labels retain the library's exact symbols.
@@ -398,15 +436,30 @@ module CppClassAnalysis =
         let safeName = className.Replace("::", "_")
         let quote (s: string) =
             "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+        let nsPrefix =
+            match cls.QualifiedName with
+            | Some q when q.Contains("::") -> Some (q.Substring(0, q.LastIndexOf("::")))
+            | _ -> None
         let nativeType (typ: string) =
-            match knownClasses.TryFind typ with Some c -> qualified c | None -> typ
+            match knownClasses.TryFind typ with
+            | Some c -> qualified c
+            | None ->
+                match nsPrefix with
+                | Some ns when typ.StartsWith(cls.Name + "::", System.StringComparison.Ordinal) ->
+                    ns + "::" + typ
+                | _ -> typ
         let funcs declarations = declarations |> List.choose (function CppParser.Declaration.Function f -> Some f | _ -> None)
         let parameterParts (f: CppParser.FunctionDecl) =
             f.Parameters |> List.mapi (fun i (_, typ) -> nativeType typ + " arg" + string i),
             f.Parameters |> List.mapi (fun i _ -> "arg" + string i)
         let joined = String.concat ", "
         let size = spec.SizeOverride |> Option.defaultWith (fun () -> estimateClassSize cls)
-        let align = cls.Measured |> Option.map (fun m -> m.AlignmentBits / 8) |> Option.defaultValue 8
+        let align =
+            match cls.Measured with
+            | Some m ->
+                let measuredAlign = max 1 (m.AlignmentBits / 8)
+                if usesStorageAdapter spec && size >= 16 then max 8 measuredAlign else measuredAlign
+            | None -> 8
         let methods = funcs cls.Methods
         if usesNativeShim spec then
             let prefix = "farscape_cpp_" + safeName
@@ -600,14 +653,51 @@ module CppClassAnalysis =
                     let name = safeName + "_ctor" + suffix
                     let declarations, arguments = parameterParts f
                     let raw = name + "_c1"
-                    [ sprintf "extern \"C\" void %s(%s) noexcept asm(%s);" raw (joined ("void* self" :: declarations)) (quote f.MangledName.Value)
-                      sprintf "extern \"C\" void* %s(%s) noexcept {" name (joined declarations)
-                      sprintf "  void* storage = ::operator new(%d, std::align_val_t(%d), std::nothrow);" size align
-                      "  if (!storage) return nullptr;"
-                      sprintf "  %s(%s);" raw (joined ("storage" :: arguments))
-                      "  return storage;"
-                      "}" ])
+                    let symbol = f.MangledName.Value
+                    let companion = symbol.StartsWith("farscape_cpp_")
+                    let entry = if companion then symbol else name
+                    let noexceptSpec = if hasNoExcept f then " noexcept" else ""
+                    (if companion then [] else
+                        [ sprintf "extern \"C\" void %s(%s)%s asm(%s);" raw (joined ("void* self" :: declarations)) noexceptSpec (quote symbol) ]) @
+                    (if hasNoExcept f then
+                        [ sprintf "extern \"C\" void* %s(%s) noexcept {" entry (joined declarations)
+                          sprintf "  void* storage = ::operator new(%d, std::align_val_t(%d), std::nothrow);" size align
+                          "  if (!storage) return nullptr;"
+                          (if companion then sprintf "  ::new (storage) %s(%s);" className (joined arguments)
+                           else sprintf "  %s(%s);" raw (joined ("storage" :: arguments)))
+                          "  return storage;"
+                          "}" ]
+                     else
+                        [ sprintf "extern \"C\" void* %s(%s) noexcept {" entry (joined declarations)
+                          sprintf "  void* storage = ::operator new(%d, std::align_val_t(%d), std::nothrow);" size align
+                          "  if (!storage) return nullptr;"
+                          "  try {"
+                          (if companion then sprintf "    ::new (storage) %s(%s);" className (joined arguments)
+                           else sprintf "    %s(%s);" raw (joined ("storage" :: arguments)))
+                          "    return storage;"
+                          "  } catch (...) {"
+                          sprintf "    ::operator delete(storage, std::align_val_t(%d));" align
+                          "    return nullptr;"
+                          "  }"
+                          "}" ]) @
+                    (if entry = name then [] else
+                        [ sprintf "extern \"C\" void* %s(%s) noexcept { return %s(%s); }" name (joined declarations) entry (joined arguments) ]))
                 |> List.concat
+            let destructor =
+                let symbol = cls.DestructorMangledName.Value
+                let companion = symbol.StartsWith("farscape_cpp_")
+                let name = safeName + "_dtor"
+                let entry = if companion then symbol else name
+                (if companion then [] else
+                    [ sprintf "extern \"C\" void %s_d1(void* self) noexcept asm(%s);" safeName (quote symbol) ]) @
+                [ sprintf "extern \"C\" void %s(void* self) noexcept {" entry
+                  "  if (!self) return;"
+                  (if companion then sprintf "  static_cast<%s*>(self)->~%s();" className cls.Name
+                   else sprintf "  %s_d1(self);" safeName)
+                  sprintf "  ::operator delete(self, std::align_val_t(%d));" align
+                  "}" ] @
+                (if entry = name then [] else
+                    [ sprintf "extern \"C\" void %s(void* self) noexcept { %s(self); }" name entry ])
             let forwards =
                 methods
                 |> List.mapi (fun i f ->
@@ -619,27 +709,41 @@ module CppClassAnalysis =
                     let received = if f.IsStatic then [] else [ "self" ]
                     let ret = nativeType f.ReturnType
                     let call = raw + "(" + joined (received @ arguments) + ")"
-                    let declaration = sprintf "extern \"C\" %s %s(%s) noexcept asm(%s);" ret raw (joined (receivers @ declarations)) (quote f.MangledName.Value)
+                    let noexceptSpec = if hasNoExcept f then " noexcept" else ""
+                    let declaration = sprintf "extern \"C\" %s %s(%s)%s asm(%s);" ret raw (joined (receivers @ declarations)) noexceptSpec (quote f.MangledName.Value)
                     match (analyzeMethodReturn knownClasses f).ReturnConvention with
                     | SretReturn ->
-                        [ declaration
-                          sprintf "extern \"C\" void %s(%s) noexcept {" name (joined ("void* retStorage" :: receivers @ declarations))
-                          sprintf "  ::new (retStorage) %s(%s);" ret call
-                          "}" ]
+                        if hasNoExcept f then
+                            [ declaration
+                              sprintf "extern \"C\" void %s(%s) noexcept {" name (joined ("void* retStorage" :: receivers @ declarations))
+                              sprintf "  ::new (retStorage) %s(%s);" ret call
+                              "}" ]
+                        else
+                            [ declaration
+                              sprintf "extern \"C\" void %s(%s) noexcept {" name (joined ("void* retStorage" :: receivers @ declarations))
+                              "  if (!retStorage) return;"
+                              "  try {"
+                              sprintf "    ::new (retStorage) %s(%s);" ret call
+                              "  } catch (...) {}"
+                              "}" ]
                     | RegisterReturn ->
-                        [ declaration
-                          sprintf "extern \"C\" %s %s(%s) noexcept { return %s; }" ret name (joined (receivers @ declarations)) call ])
+                        if hasNoExcept f then
+                            [ declaration
+                              sprintf "extern \"C\" %s %s(%s) noexcept { return %s; }" ret name (joined (receivers @ declarations)) call ]
+                        elif ret = "void" then
+                            [ declaration
+                              sprintf "extern \"C\" void %s(%s) noexcept { try { %s; } catch (...) {} }" name (joined (receivers @ declarations)) call ]
+                        else
+                            [ declaration
+                              sprintf "extern \"C\" %s %s(%s) noexcept { try { return %s; } catch (...) { return {}; } }" ret name (joined (receivers @ declarations)) call ])
                 |> List.concat
             [ "#include <new>"
-              "#include " + quote header
-              sprintf "static_assert(sizeof(%s) <= %d, \"class storage size mismatch\");" className size
-              sprintf "static_assert(alignof(%s) <= %d, \"class storage alignment mismatch\");" className align ]
+              "#include " + quote header ]
+            @ (match nsPrefix with Some ns -> [ sprintf "using namespace %s;" ns ] | None -> [])
+            @ [ sprintf "static_assert(sizeof(%s) <= %d, \"class storage size mismatch\");" className size
+                sprintf "static_assert(alignof(%s) <= %d, \"class storage alignment mismatch\");" className align ]
             @ constructors
-            @ [ sprintf "extern \"C\" void %s_d1(void* self) noexcept asm(%s);" safeName (quote cls.DestructorMangledName.Value)
-                sprintf "extern \"C\" void %s_dtor(void* self) noexcept {" safeName
-                sprintf "  %s_d1(self);" safeName
-                sprintf "  ::operator delete(self, std::align_val_t(%d));" align
-                "}" ]
+            @ destructor
             @ forwards
             |> String.concat "\n"
 
@@ -965,6 +1069,143 @@ module CppClassAnalysis =
     let inspectLibraryExports (libraryPath: string) : CppLibraryBuild * (string * string) list =
         let build, symbols, _ = inspectLibraryExportsDetailed libraryPath
         build, symbols
+
+    /// Scope installed declarations to the HelloNappy XRT surface, preserving clang's
+    /// exception attributes and measured layouts and requiring every direct ELF symbol.
+    let loadXrtCppSurface (xrtIncludeDir: string) (libraryPath: string) (includeStdlibContracts: bool)
+        : CppParser.Declaration list * Map<string, PilotTypes.CppClassSpec> =
+        let header = System.IO.Path.Combine(xrtIncludeDir, "xrt_kernel.h")
+        let refuse code message =
+            Diagnostics.diagnostic code message (Diagnostics.Located.Unknown header) |> Diagnostics.refuse
+        let options =
+            { CppParser.defaultOptions header with
+                CppMode = true; IncludeMacros = false; IncludeRoot = Some xrtIncludeDir
+                IncludePaths = ["/usr/include"; xrtIncludeDir] }
+        let parsed =
+            match CppParser.parseHeaderFull options with
+            | Ok parsed -> parsed
+            | Error message -> refuse Diagnostics.CppPimplClassUnadmitted message
+        let classes = buildClassMap (parsed.Declarations @ parsed.Included)
+        let surface = [
+            "uuid", [], "farscape_cpp_xrt_uuid_dtor", []
+            "xclbin",
+                [ "_ZN3xrt6xclbinC1EPK4axlf"
+                  "_ZN3xrt6xclbinC1ERKSt17basic_string_viewIcSt11char_traitsIcEE"
+                  "_ZN3xrt6xclbinC1ERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE" ],
+                "farscape_cpp_xrt_xclbin_dtor", []
+            "device", ["_ZN3xrt6deviceC1Ej"], "_ZN3xrt6deviceD1Ev",
+                ["_ZN3xrt6device15register_xclbinERKNS_6xclbinE"]
+            "hw_context", ["_ZN3xrt10hw_contextC1ERKNS_6deviceERKNS_4uuidENS0_11access_modeE"], "_ZN3xrt10hw_contextD1Ev", []
+            "kernel", ["_ZN3xrt6kernelC1ERKNS_10hw_contextERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE"], "_ZN3xrt6kernelD1Ev",
+                ["_ZNK3xrt6kernel8group_idEi"]
+            "bo", ["_ZN3xrt2boC1ERKNS_6deviceEmNS0_5flagsEj"], "_ZN3xrt2boD1Ev",
+                ["_ZN3xrt2bo3mapEv"; "_ZN3xrt2bo4syncE18xclBOSyncDirectionmm"; "_ZNK3xrt2bo4sizeEv"]
+            "run", ["_ZN3xrt3runC1ERKNS_6kernelE"], "_ZN3xrt3runD1Ev",
+                [ "_ZN3xrt3run16set_arg_at_indexEiPKvm"; "_ZN3xrt3run16set_arg_at_indexEiRKNS_2boE"
+                  "_ZN3xrt3run5startEv"; "_ZNK3xrt3run4waitERKNSt6chrono8durationIlSt5ratioILl1ELl1000EEEE" ] ]
+        let names = surface |> List.map (fun (name, _, _, _) -> "xrt::" + name)
+        let layouts =
+            match CppParser.extractStructLayoutsForModeDiagnosed header options.IncludePaths [] [] names true false with
+            | Ok layouts -> layouts
+            | Error error -> refuse Diagnostics.CppPimplClassUnadmitted error.Text
+        let _, symbols =
+            try inspectLibraryExports libraryPath
+            with ex -> refuse Diagnostics.CppPimplClassUnadmitted $"Cannot inspect XRT library '{libraryPath}': {ex.Message}"
+        let exported = symbols |> List.map fst |> Set.ofList
+        let funcs declarations = declarations |> List.choose (function CppParser.Declaration.Function f -> Some f | _ -> None)
+        let scoped =
+            surface |> List.map (fun (shortName, ctorSymbols, destructor, methodSymbols) ->
+                let name = "xrt::" + shortName
+                let code = if shortName = "uuid" then Diagnostics.CppValueClassUnadmitted else Diagnostics.CppPimplClassUnadmitted
+                let cls = classes.TryFind name |> Option.defaultWith (fun () -> refuse code $"XRT class '{name}' is missing from '{header}'.")
+                let layout = layouts.TryFind name |> Option.defaultWith (fun () -> refuse code $"XRT class '{name}' has no clang record layout.")
+                if layout.SizeBits <> 128 || layout.AlignmentBits > 64 || layout.AlignmentBits <= 0 then
+                    refuse code $"XRT class '{name}' requires 16-byte storage with at most 8-byte alignment; clang measured {layout.SizeBits / 8} bytes and alignment {layout.AlignmentBits / 8}."
+                let requireExport symbol =
+                    if not (exported.Contains symbol) then
+                        refuse code $"XRT class '{name}' requires symbol '{symbol}' missing from '{libraryPath}' .dynsym."
+                let select declarations symbol =
+                    requireExport symbol
+                    funcs declarations |> List.tryFind (fun f -> f.MangledName = Some symbol)
+                    |> Option.defaultWith (fun () -> refuse code $"XRT symbol '{symbol}' has no declaration in '{header}'.")
+                    |> CppParser.Declaration.Function
+                let ctors =
+                    if shortName = "uuid" then
+                        let ctor =
+                            funcs cls.Constructors |> List.tryFind (fun f -> f.Parameters.IsEmpty)
+                            |> Option.defaultWith (fun () -> refuse code "XRT uuid has no default constructor declaration.")
+                        [ CppParser.Declaration.Function { ctor with MangledName = Some "farscape_cpp_xrt_uuid_ctor" } ]
+                    else ctorSymbols |> List.map (select cls.Constructors)
+                if not (destructor.StartsWith("farscape_cpp_")) then
+                    requireExport destructor
+                    if cls.DestructorMangledName <> Some destructor then
+                        refuse code $"XRT class '{name}' has no matching complete-object destructor declaration '{destructor}'."
+                CppParser.Declaration.Class
+                    { cls with Constructors = ctors; Methods = methodSymbols |> List.map (select cls.Methods)
+                               DestructorMangledName = Some destructor; Measured = Some layout })
+        let availableSupport =
+            parsed.Declarations @ parsed.Included |> List.choose (function
+                | CppParser.Declaration.Enum e ->
+                    let measuredEnum =
+                        match e.Name, e.UnderlyingType with
+                        | "flags", Some ("uint32_t" | "unsigned int") ->
+                            { e with Representation = CppParser.ClangMeasured { Bits = 32; IsSigned = false } }
+                        | "access_mode", Some ("uint8_t" | "unsigned char") ->
+                            { e with Representation = CppParser.ClangMeasured { Bits = 8; IsSigned = false } }
+                        | _ -> e
+                    Some (CppParser.Declaration.Enum measuredEnum)
+                | CppParser.Declaration.Typedef t -> Some (CppParser.Declaration.Typedef t)
+                | CppParser.Declaration.Struct s when s.Name = "axlf" ->
+                    Some (CppParser.Declaration.Struct { s with Fields = []; UnnamedBitFields = []; Measured = None })
+                | CppParser.Declaration.Class c when c.Name = "axlf" ->
+                    // Clang emits a C-compatible struct as CXXRecordDecl in this unit.
+                    // The surface borrows axlf storage and exposes only its forward marker.
+                    Some (CppParser.Declaration.Struct
+                        { Name = c.Name; Fields = []; Documentation = c.Documentation; IsUnion = false
+                          Attributes = []; Anonymous = None; Measured = None; Unattributed = None
+                          UnnamedBitFields = []; TypedefAttributes = []; Location = c.Location })
+                | _ -> None) |> List.distinct
+        // Retain the referenced enum/typedef closure, including declarations reached
+        // through includes. Unrelated stdlib implementation enums are not this surface.
+        let identifiers (typ: string) =
+            System.Text.RegularExpressions.Regex.Matches(typ, @"[A-Za-z_][A-Za-z0-9_]*")
+            |> Seq.cast<System.Text.RegularExpressions.Match> |> Seq.map _.Value |> Set.ofSeq
+        let usedTypes =
+            scoped |> List.collect (function
+                | CppParser.Declaration.Class cls ->
+                    funcs (cls.Constructors @ cls.Methods)
+                    |> List.collect (fun f -> f.ReturnType :: (f.Parameters |> List.map snd))
+                | _ -> [])
+        let rec closure used =
+            let expanded =
+                availableSupport |> List.fold (fun acc -> function
+                    | CppParser.Declaration.Typedef t when Set.contains t.Name used -> Set.union acc (identifiers t.UnderlyingType)
+                    | _ -> acc) used
+            if expanded = used then used else closure expanded
+        let used = usedTypes |> List.map identifiers |> List.fold Set.union Set.empty |> closure
+        let support =
+            availableSupport
+            |> List.filter (function
+                | CppParser.Declaration.Enum e -> used.Contains e.Name
+                | CppParser.Declaration.Typedef t -> used.Contains t.Name
+                | CppParser.Declaration.Struct _ -> true
+                | _ -> false)
+            |> List.distinctBy (function
+                | CppParser.Declaration.Enum e -> "enum:" + e.Name
+                | CppParser.Declaration.Typedef t -> "typedef:" + t.Name
+                | CppParser.Declaration.Struct s -> "struct:" + s.Name
+                | other -> string other)
+        let contracts =
+            surface |> List.collect (fun (shortName, _, _, _) ->
+                let name = "xrt::" + shortName
+                let kind = if shortName = "uuid" then "value" else "pimpl"
+                let spec : PilotTypes.CppClassSpec =
+                    { Name = name; Namespace = "Xrt"; Bind = true; KindOverride = Some kind; SizeOverride = Some 16 }
+                [ name, spec; shortName, spec ]) |> Map.ofList
+        let contracts =
+            if includeStdlibContracts then Map.fold (fun acc key value -> Map.add key value acc) contracts defaultXrtStdlibContracts
+            else contracts
+        support @ scoped, contracts
 
     /// Inspect one ELF shared object or static archive for exported C++ template instantiations (#118).
     let inspectTemplateInventory (libraryPath: string) (declarations: CppParser.TemplateDeclaration list) =

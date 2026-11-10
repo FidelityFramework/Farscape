@@ -1033,6 +1033,8 @@ module CppParser =
         let value (element: JsonValue) =
             match getInt64 element "value", getString element "value" with
             | Some v, _ -> Some v
+            | None, Some "false" -> Some 0L
+            | None, Some "true" -> Some 1L
             | None, Some text when text <> "" ->
                 let name = getStringOr node "name" "<unnamed>"
                 Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.EnumValueRange $"enumerator '{name}' has value {text}, outside the signed 64-bit range the enum representation carries; a wider enumerator representation contract is required." enumLocation.Location)
@@ -1254,7 +1256,7 @@ module CppParser =
                         results.Add(Enum { enumDecl with Name = name })
                     | None -> ()
 
-                | "TypedefDecl" ->
+                | "TypedefDecl" | "TypeAliasDecl" ->
                     match processTypedefDecl node with
                     | Some typedef -> results.Add(Typedef typedef)
                     | None -> ()
@@ -1291,6 +1293,18 @@ module CppParser =
                                     | None -> () ]
                             | _ -> []
 
+                        let nestedEnums =
+                            innerNodes
+                            |> Seq.choose (fun inner ->
+                                if getStringOr inner "kind" "" = "EnumDecl" then getString inner "name" else None)
+                            |> Set.ofSeq
+                        let qualifyNestedEnum (typ: string) =
+                            if nestedEnums.Contains(typ.Trim()) then name + "::" + typ.Trim() else typ
+                        let qualifyFunction (f: FunctionDecl) =
+                            { f with
+                                ReturnType = qualifyNestedEnum f.ReturnType
+                                Parameters = f.Parameters |> List.map (fun (pName, pType) -> pName, qualifyNestedEnum pType) }
+
                         let methods =
                             innerNodes
                             |> Seq.filter (fun inner ->
@@ -1303,7 +1317,7 @@ module CppParser =
                                 not (getBool inner "isImplicit") &&
                                 not isOperator)
                             |> Seq.choose (processFunction childScope)
-                            |> Seq.map Function
+                            |> Seq.map (qualifyFunction >> Function)
                             |> List.ofSeq
 
                         // Capture constructors (CXXConstructorDecl) as FunctionDecl.
@@ -1314,7 +1328,7 @@ module CppParser =
                                 getStringOr inner "kind" "" = "CXXConstructorDecl" &&
                                 not (getBool inner "isImplicit"))
                             |> Seq.choose (processFunction childScope)
-                            |> Seq.map Function
+                            |> Seq.map (qualifyFunction >> Function)
                             |> List.ofSeq
 
                         let declaredFields =
@@ -1424,7 +1438,7 @@ module CppParser =
                                     named
                             if name <> "" then included.Add(Enum { enumDecl with Name = name })
                         | None -> ()
-                    | "TypedefDecl" ->
+                    | "TypedefDecl" | "TypeAliasDecl" ->
                         match processTypedefDecl node with
                         | Some typedef -> included.Add(Typedef typedef)
                         | None -> ()
@@ -2785,6 +2799,8 @@ module CppParser =
     /// evaluate keeps the reason, and a use of it is refused (FS9117).
     let measureResultAliases (options: HeaderParserOptions) (declarations: Declaration list) (included: Declaration list)
         : ClangTypeAlias list =
+        if options.CppMode then []
+        else
         let declared =
             (declarations @ included) |> List.choose (function
                 | Typedef t -> Some t.Name

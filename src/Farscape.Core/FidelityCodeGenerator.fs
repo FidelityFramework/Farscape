@@ -2218,7 +2218,37 @@ module FidelityCodeGenerator =
                 $"C++ class '{c.Name}': {reason}" c.Location.Location |> Diagnostics.refuse
         let pointer = DescriptorGenerator.typeRefSource (TypeMapper.pointerRepr ctx.DataModel "void *")
         let handle name = Generic("CHandle", Named name)
-        let scalarOrPointer (cType: string) =
+        let mutable stdlibHandles = Map.empty<string, int * int>
+        let rec scalarOrPointer (cType: string) =
+            let stdlibRefusal () =
+                Diagnostics.diagnostic Diagnostics.RetentionInvalid
+                    $"C++ class '{c.Name}': standard-library parameter type '{cType}' has no admitted marshaled contract."
+                    c.Location.Location |> Diagnostics.refuse
+            let isPointer = cType.Contains("&") || cType.Contains("*")
+            let cleanPointee = cType.Replace("const ", "").Replace("volatile ", "").Replace("class ", "").Replace("struct ", "").Replace("&", "").Replace("*", "").Trim()
+            let shortName (name: string) = name.Split("::") |> Array.last
+            let orShort name map = Map.tryFind name map |> Option.orElseWith (fun () -> Map.tryFind (shortName name) map)
+            match CppClassAnalysis.tryResolveStdlibParameterType cType with
+            | Some (stdKey, safeStdName, stdSize, stdAlign) ->
+                match ctx.CppClasses.TryFind stdKey |> Option.orElseWith (fun () -> ctx.CppClasses.TryFind safeStdName) with
+                | Some contract when contract.Bind && (contract.SizeOverride.IsNone || contract.SizeOverride = Some stdSize) && isPointer ->
+                    stdlibHandles <- stdlibHandles.Add(safeStdName, (stdSize, stdAlign))
+                    handle safeStdName, pointer
+                | _ -> stdlibRefusal ()
+            | None when cType.Contains("std::") -> stdlibRefusal ()
+            | None when isPointer && (orShort cleanPointee ctx.KnownClasses).IsSome ->
+                handle (safe (orShort cleanPointee ctx.KnownClasses).Value), pointer
+            | None ->
+            let cleanEnum = cType.Replace("const ", "").Replace("volatile ", "").Replace("enum ", "").Trim()
+            match (if cType.Contains("::") && not isPointer then orShort cleanEnum ctx.Enums else None) with
+            | Some e ->
+                match e.Representation, e.UnderlyingType with
+                | CppParser.ClangMeasured _, _ ->
+                    let declaredScalar ut = match resolveIn ctx ut with Scalar repr -> Some repr | _ -> None
+                    Named e.Name, DescriptorGenerator.typeRefSource (enumRepr ctx.DataModel declaredScalar e)
+                | _, Some ut -> scalarOrPointer ut
+                | _ -> refuse $"type '{cType}' has no measured enum representation."
+            | None ->
             // C++ references are pointer arguments at this boundary.
             let resolved = resolveIn ctx (cType.Replace("&", "*"))
             match resolved with
@@ -2251,7 +2281,12 @@ module FidelityCodeGenerator =
               descriptor name symbol ownership parameters returnRef
               BlankLine ]
         let size = spec.SizeOverride |> Option.defaultWith (fun () -> CppClassAnalysis.estimateClassSize c)
-        let align = c.Measured |> Option.map (fun m -> m.AlignmentBits / 8) |> Option.defaultValue 8
+        let align =
+            match c.Measured with
+            | Some m ->
+                let measuredAlign = max 1 (m.AlignmentBits / 8)
+                if CppClassAnalysis.usesStorageAdapter spec && size >= 16 then max 8 measuredAlign else measuredAlign
+            | None -> 8
         let shimmed = CppClassAnalysis.usesNativeShim spec
         let shimPrefix = "farscape_cpp_" + safeName
         let _, intRepr = scalarOrPointer "int"
@@ -2378,6 +2413,8 @@ module FidelityCodeGenerator =
              else [])
         [ OpaqueMarker safeName
           SubModule(safeName, moduleConstants) ]
+        @ (stdlibHandles |> Map.toList |> List.collect (fun (name, (size, align)) ->
+            [ OpaqueMarker name; SubModule(name, [LiteralBinding("Size", string size); LiteralBinding("Alignment", string align)]) ]))
         @ dtors @ errorDecls @ ctors @ upcastDecls @ methodDecls
 
     // =========================================================================
