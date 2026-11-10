@@ -39,7 +39,7 @@ module CppClassAnalysis =
     /// vtable pointer, or base class storage. For binding generation, the
     /// precise size comes from the pilot.toml [cpp.class] size override
     /// or from clang's -fdump-record-layouts-simple output.
-    let private estimateClassSize (cls: CppParser.ClassDecl) : int =
+    let estimateClassSize (cls: CppParser.ClassDecl) : int =
         match cls.Measured with
         // Clang's measurement of the class in its declaring unit (#182): an unnamed bit-field
         // or a typedef's attribute moves bytes the visible field types cannot place.
@@ -161,6 +161,99 @@ module CppClassAnalysis =
     // Method Return Type Analysis
     // =========================================================================
 
+    /// The refusal code belonging to the class's detected shape. A pilot override cannot
+    /// turn an abstract, inherited or otherwise unsupported native shape into another ABI.
+    let marshaledClassShapeCode (cls: CppParser.ClassDecl) =
+        match classifyClass cls with
+        | PODClass _ -> Diagnostics.CppClassAbiUnadmitted
+        | PimplClass _ -> Diagnostics.CppPimplClassUnadmitted
+        | ValueClass _ -> Diagnostics.CppValueClassUnadmitted
+        | InterfaceClass -> Diagnostics.CppInterfaceClassUnadmitted
+        | OpaqueClass -> Diagnostics.CppOpaqueClassUnadmitted
+
+    /// Validate the native shape before generating any class declaration. This is a call
+    /// contract check; it grants neither storage allocation nor compiler lifetime evidence.
+    let validateMarshaledClass (spec: PilotTypes.CppClassSpec) (cls: CppParser.ClassDecl) =
+        let refuse code reason =
+            Diagnostics.diagnostic code $"C++ class '{cls.Name}': {reason}" cls.Location.Location
+            |> Diagnostics.refuse
+        let shape = classifyClass cls
+        let code = marshaledClassShapeCode cls
+        let methods = cls.Methods |> List.choose (function CppParser.Declaration.Function f -> Some f | _ -> None)
+        let ctors = cls.Constructors |> List.choose (function CppParser.Declaration.Function f -> Some f | _ -> None)
+        if not spec.Bind then refuse code "has no explicitly admitted marshaled binding."
+        if spec.Name <> cls.Name && Some spec.Name <> cls.QualifiedName then
+            refuse code $"admission for '{spec.Name}' does not select this class."
+        if cls.IsAbstract || methods |> List.exists _.IsVirtual then
+            refuse Diagnostics.CppInterfaceClassUnadmitted "abstract or virtual dispatch requires a native adapter."
+        if not cls.BaseClasses.IsEmpty then
+            let pimplBase (name: string) = name.Contains("detail::pimpl") || name.Contains("shared_ptr") || name.Contains("unique_ptr")
+            if not (cls.BaseClasses |> List.forall pimplBase) then
+                refuse code "non-pimpl base class hierarchy is unsupported."
+        let hasC1 (f: CppParser.FunctionDecl) = f.MangledName |> Option.exists (fun s -> s.StartsWith("_Z") && s.Contains("C1"))
+        if ctors.IsEmpty || not (ctors |> List.forall hasC1) then
+            refuse code "requires complete-object C1 constructor symbols."
+        if not (cls.DestructorMangledName |> Option.exists (fun s -> s.StartsWith("_Z") && s.Contains("D1"))) then
+            refuse code "requires a complete-object D1 destructor symbol."
+        if shape = OpaqueClass && cls.Measured.IsNone && spec.SizeOverride.IsNone then
+            refuse Diagnostics.CppOpaqueClassUnadmitted "opaque storage requires a measured or overridden size."
+        match spec.SizeOverride with
+        | Some size when size <= 0 -> refuse code "storage size must be positive."
+        | _ -> ()
+        for f in ctors @ methods do
+            if not (f.Attributes |> List.exists (fun a -> a.Kind = "NoExceptAttr")) then
+                refuse code $"'{f.Name}' may throw across the native boundary."
+            if f.MangledName |> Option.forall System.String.IsNullOrWhiteSpace then
+                refuse code $"'{f.Name}' has no mangled symbol."
+
+    /// A single path of operations on handle identities. Aliases must retain the same
+    /// identity; callers must verify every admitted path, including early exits.
+    [<RequireQualifiedAccess>]
+    type CppObjectOperation =
+        | Construct of handle: string
+        | MethodCall of handle: string * symbol: string
+        | Release of handle: string
+        | ScopeExit
+
+    /// Check a declared operation path against the same class contract generation uses.
+    /// ScopeExit requires explicit cleanup; this verifier never invents a destructor call
+    /// or substitutes for the compiler's ownership proof over a Clef program.
+    let verifyCppObjectLifecycle (spec: PilotTypes.CppClassSpec) (cls: CppParser.ClassDecl)
+                                 (operations: CppObjectOperation list) : unit =
+        validateMarshaledClass spec cls
+        let refuse code reason =
+            Diagnostics.diagnostic code $"C++ class '{cls.Name}': {reason}" cls.Location.Location
+            |> Diagnostics.refuse
+        let shapeCode = marshaledClassShapeCode cls
+        let symbols = cls.Methods |> List.choose (function CppParser.Declaration.Function f -> f.MangledName | _ -> None) |> Set.ofList
+        let requireLive states handle =
+            match Map.tryFind handle states with
+            | Some true -> ()
+            | Some false -> refuse Diagnostics.CppObjectUseAfterRelease $"handle '{handle}' is used after its D1 release."
+            | None -> refuse shapeCode $"handle '{handle}' has no successful construction."
+        let requireClean states =
+            match states |> Map.toList |> List.tryFind snd with
+            | Some (handle, _) -> refuse shapeCode $"handle '{handle}' has no D1 release on this exit."
+            | None -> ()
+        let rec verify states = function
+            | [] -> requireClean states
+            | CppObjectOperation.Construct handle :: rest ->
+                if Map.containsKey handle states then refuse shapeCode $"handle identity '{handle}' is constructed more than once."
+                verify (Map.add handle true states) rest
+            | CppObjectOperation.MethodCall (handle, symbol) :: rest ->
+                requireLive states handle
+                if not (symbols.Contains symbol) then refuse shapeCode $"method symbol '{symbol}' is outside the admitted class contract."
+                verify states rest
+            | CppObjectOperation.Release handle :: rest ->
+                match Map.tryFind handle states with
+                | Some false -> refuse Diagnostics.CppObjectDoubleRelease $"handle '{handle}' receives its D1 release more than once."
+                | _ -> requireLive states handle
+                verify (Map.add handle false states) rest
+            | CppObjectOperation.ScopeExit :: rest ->
+                requireClean states
+                if not rest.IsEmpty then refuse shapeCode "operations follow a terminal scope exit."
+        verify Map.empty operations
+
     /// Result of analyzing a method's return type for ABI convention.
     type MethodReturnInfo = {
         /// Method name
@@ -186,7 +279,12 @@ module CppClassAnalysis =
                 .Replace("const ", "").Replace("const", "")
                 .Replace("&", "").Replace("*", "")
                 .Trim()
-        match Map.tryFind baseName knownClasses with
+        // A pointer or reference returns the address, even when its pointee has a
+        // non-trivial destructor. It is not a by-value object and never needs sret.
+        let returnedClass =
+            if retType.Contains("*") || retType.Contains("&") then None
+            else Map.tryFind baseName knownClasses
+        match returnedClass with
         | Some cls ->
             let rc = classifyReturnConvention cls
             { MethodName = method.Name
@@ -229,6 +327,77 @@ module CppClassAnalysis =
             | _ -> ()
         decls |> List.iter collect
         map
+
+    /// Native owned-storage adapter for the admitted C1/D1 operations. Its C entry points
+    /// use generated Clef binding names; asm labels retain the library's exact symbols.
+    /// Compile with the declaring header and link against the inspected C++ library.
+    let renderCppObjectStorageShimC (header: string) (knownClasses: Map<string, CppParser.ClassDecl>)
+                                    (spec: PilotTypes.CppClassSpec) (cls: CppParser.ClassDecl) =
+        validateMarshaledClass spec cls
+        let qualified (c: CppParser.ClassDecl) = c.QualifiedName |> Option.defaultValue c.Name
+        let className = qualified cls
+        let safeName = className.Replace("::", "_")
+        let quote (s: string) =
+            "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+        let nativeType (typ: string) =
+            match knownClasses.TryFind typ with Some c -> qualified c | None -> typ
+        let funcs declarations = declarations |> List.choose (function CppParser.Declaration.Function f -> Some f | _ -> None)
+        let parameterParts (f: CppParser.FunctionDecl) =
+            f.Parameters |> List.mapi (fun i (_, typ) -> nativeType typ + " arg" + string i),
+            f.Parameters |> List.mapi (fun i _ -> "arg" + string i)
+        let joined = String.concat ", "
+        let size = spec.SizeOverride |> Option.defaultWith (fun () -> estimateClassSize cls)
+        let align = cls.Measured |> Option.map (fun m -> m.AlignmentBits / 8) |> Option.defaultValue 8
+        let constructors =
+            funcs cls.Constructors
+            |> List.mapi (fun i f ->
+                let suffix = if i = 0 then "" else "_" + string i
+                let name = safeName + "_ctor" + suffix
+                let declarations, arguments = parameterParts f
+                let raw = name + "_c1"
+                [ sprintf "extern \"C\" void %s(%s) noexcept asm(%s);" raw (joined ("void* self" :: declarations)) (quote f.MangledName.Value)
+                  sprintf "extern \"C\" void* %s(%s) noexcept {" name (joined declarations)
+                  sprintf "  void* storage = ::operator new(%d, std::align_val_t(%d), std::nothrow);" size align
+                  "  if (!storage) return nullptr;"
+                  sprintf "  %s(%s);" raw (joined ("storage" :: arguments))
+                  "  return storage;"
+                  "}" ])
+            |> List.concat
+        let methods = funcs cls.Methods
+        let forwards =
+            methods
+            |> List.mapi (fun i f ->
+                let suffix = if (methods |> List.filter (fun other -> other.Name = f.Name)).Length > 1 then "_" + string i else ""
+                let name = safeName + "_" + f.Name + suffix
+                let raw = name + "_method"
+                let declarations, arguments = parameterParts f
+                let receivers = if f.IsStatic then [] else [ "void* self" ]
+                let received = if f.IsStatic then [] else [ "self" ]
+                let ret = nativeType f.ReturnType
+                let call = raw + "(" + joined (received @ arguments) + ")"
+                let declaration = sprintf "extern \"C\" %s %s(%s) noexcept asm(%s);" ret raw (joined (receivers @ declarations)) (quote f.MangledName.Value)
+                match (analyzeMethodReturn knownClasses f).ReturnConvention with
+                | SretReturn ->
+                    [ declaration
+                      sprintf "extern \"C\" void %s(%s) noexcept {" name (joined ("void* retStorage" :: receivers @ declarations))
+                      sprintf "  ::new (retStorage) %s(%s);" ret call
+                      "}" ]
+                | RegisterReturn ->
+                    [ declaration
+                      sprintf "extern \"C\" %s %s(%s) noexcept { return %s; }" ret name (joined (receivers @ declarations)) call ])
+            |> List.concat
+        [ "#include <new>"
+          "#include " + quote header
+          sprintf "static_assert(sizeof(%s) <= %d, \"class storage size mismatch\");" className size
+          sprintf "static_assert(alignof(%s) <= %d, \"class storage alignment mismatch\");" className align ]
+        @ constructors
+        @ [ sprintf "extern \"C\" void %s_d1(void* self) noexcept asm(%s);" safeName (quote cls.DestructorMangledName.Value)
+            sprintf "extern \"C\" void %s_dtor(void* self) noexcept {" safeName
+            sprintf "  %s_d1(self);" safeName
+            sprintf "  ::operator delete(self, std::align_val_t(%d));" align
+            "}" ]
+        @ forwards
+        |> String.concat "\n"
 
     /// Identity of the exact artifact whose exported symbols were inspected (#118).
     type CppLibraryBuild = {

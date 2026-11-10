@@ -243,13 +243,13 @@ module MethodReturnAnalysisTests =
         Assert.Equal(None, info.SretTypeName)
 
     [<Fact>]
-    let ``analyzeMethodReturn strips const and reference qualifiers`` () =
+    let ``analyzeMethodReturn returns a const reference in registers`` () =
         let cls = mkClassValue "uuid" [mkField "data" "uint8_t"]
         let knownClasses = Map.ofList ["uuid", cls]
         let method = mkFunc "get_uuid" "const uuid&" []
         let info = analyzeMethodReturn knownClasses method
-        Assert.Equal(SretReturn, info.ReturnConvention)
-        Assert.Equal(Some "uuid", info.SretTypeName)
+        Assert.Equal(RegisterReturn, info.ReturnConvention)
+        Assert.Equal(None, info.SretTypeName)
 
     [<Fact>]
     let ``analyzeMethodReturn treats pointer return as RegisterReturn`` () =
@@ -258,10 +258,8 @@ module MethodReturnAnalysisTests =
         // Pointer to a class, not value return
         let method = mkFunc "get_device" "Device*" []
         let info = analyzeMethodReturn knownClasses method
-        // After stripping *, base name is "Device" which is known
-        // But Device has user dtor so it would be SretReturn for by-value
-        // The function actually does the lookup and classifies even for pointers
-        Assert.Equal(info.MethodName, "get_device")
+        Assert.Equal(RegisterReturn, info.ReturnConvention)
+        Assert.Equal(None, info.SretTypeName)
 
 // =========================================================================
 // buildClassMap

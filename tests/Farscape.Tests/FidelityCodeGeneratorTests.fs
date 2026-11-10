@@ -457,6 +457,7 @@ let ``TOML nonnull annotations override nullable default`` () =
           StructLayouts = Map.empty
           NonnullAnnotations = nonnull
           KnownClasses = Map.empty
+          CppClasses = Map.empty
           NativePointerSurface = false; Bindings = Map.empty; Anchors = Map.empty; ValueStructs = Set.empty; FlexibleArrays = Map.empty; PhantomMarkers = Set.empty
           TypedefInfos = Map.empty; ByValueTypedefs = []; Macros = Map.empty }
     let result = FidelityCodeGenerator.generateModule ctx Set.empty decls "Test" "lib" "test" []
@@ -482,6 +483,7 @@ let ``TOML nonnull_returns prevents Option on return type`` () =
           StructLayouts = Map.empty
           NonnullAnnotations = nonnull
           KnownClasses = Map.empty
+          CppClasses = Map.empty
           NativePointerSurface = false; Bindings = Map.empty; Anchors = Map.empty; ValueStructs = Set.empty; FlexibleArrays = Map.empty; PhantomMarkers = Set.empty
           TypedefInfos = Map.empty; ByValueTypedefs = []; Macros = Map.empty }
     let result = FidelityCodeGenerator.generateModule ctx Set.empty decls "Test" "lib" "test" []

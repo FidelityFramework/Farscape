@@ -538,6 +538,8 @@ module FidelityCodeGenerator =
         NonnullAnnotations: NonnullAnnotations option
         /// C++ class lookup map for sret return type analysis (empty for C-only libraries)
         KnownClasses: Map<string, CppParser.ClassDecl>
+        /// Explicitly selected [[cpp.class]] entries, indexed by qualified and short name.
+        CppClasses: Map<string, CppClassSpec>
         /// Retired source profile, retained only so legacy configurations receive a precise error.
         NativePointerSurface: bool
         Bindings: Map<string, BindingProjection>
@@ -1967,6 +1969,113 @@ module FidelityCodeGenerator =
             { Structs = ctx.Structs; Layouts = layouts; Model = ctx.DataModel; Shape = shape; FlexibleArrays = ctx.FlexibleArrays }
             s
 
+    /// Marshaled class surface. C1/D1 identify the native operations; owned allocation
+    /// and deallocation are realized by the companion native storage adapter.
+    let private generateCppClassDecls (ctx: GenerationContext) namespace' libraryName
+                                      (spec: CppClassSpec) (c: CppParser.ClassDecl) =
+        CppClassAnalysis.validateMarshaledClass spec c
+        let safe (cls: CppParser.ClassDecl) = (cls.QualifiedName |> Option.defaultValue cls.Name).Replace("::", "_")
+        let safeName = safe c
+        let refuse reason =
+            Diagnostics.diagnostic (CppClassAnalysis.marshaledClassShapeCode c)
+                $"C++ class '{c.Name}': {reason}" c.Location.Location |> Diagnostics.refuse
+        let pointer = DescriptorGenerator.typeRefSource (TypeMapper.pointerRepr ctx.DataModel "void *")
+        let handle name = Generic("CHandle", Named name)
+        let scalarOrPointer (cType: string) =
+            // C++ references are pointer arguments at this boundary.
+            let resolved = resolveIn ctx (cType.Replace("&", "*"))
+            match resolved with
+            | Scalar _ | CEnum _ | DataPointer _ | OpaqueHandle _ | FunctionPointer _ ->
+                let ty = clefTypeOf resolved
+                let ty =
+                    match resolved with
+                    | DataPointer (Named n) ->
+                        match ctx.KnownClasses.TryFind n with Some cls -> handle (safe cls) | None -> ty
+                    | _ -> ty
+                match abiReprOf ctx.DataModel cType resolved with
+                | Some repr -> ty, DescriptorGenerator.typeRefSource repr
+                | None -> refuse $"type '{cType}' has no marshaled representation."
+            | _ -> refuse $"type '{cType}' has no marshaled representation."
+        let parameters (f: CppParser.FunctionDecl) =
+            List.zip (parameterNames f.Parameters) f.Parameters
+            |> List.map (fun (name, (_, typ)) -> let ty, repr = scalarOrPointer typ in { Name = name; Type = ty }, repr)
+        let descriptor name symbol ownership (parameters: (FsParam * string) list) returnRef =
+            ValueBinding(name + "Descriptor", Generic("Expr", Named "FunctionDescriptor"),
+                Quoted(RecordBlock [
+                    "CName", Literal (quoteString symbol)
+                    "Parameters", ArrayBlock (parameters |> List.map (fun (p, repr) -> RecordConstruction [
+                        "Name", Literal (quoteString p.Name); "Type", Literal repr; "PassBy", Identifier "Value" ]))
+                    "ReturnType", Literal returnRef
+                    "CallingConvention", Identifier "CDecl"
+                    "OwnershipTransfer", Identifier ownership ]))
+        let binding name symbol ownership parameters returnType returnRef =
+            [ LetBinding(name, parameters |> List.map fst, returnType, NativeZeroed,
+                         [ $"FidelityExtern({quoteString libraryName}, {quoteString symbol})" ])
+              descriptor name symbol ownership parameters returnRef
+              BlankLine ]
+        let size = spec.SizeOverride |> Option.defaultWith (fun () -> CppClassAnalysis.estimateClassSize c)
+        let align = c.Measured |> Option.map (fun m -> m.AlignmentBits / 8) |> Option.defaultValue 8
+        let self = { Name = "self"; Type = handle safeName }, pointer
+        let dtorName = safeName + "_dtor"
+        let dtors = binding dtorName c.DestructorMangledName.Value "CalleeOwns" [ self ] (Named "unit") "Void"
+        let constructors = c.Constructors |> List.choose (function CppParser.Declaration.Function f -> Some f | _ -> None)
+        let ctors = constructors |> List.mapi (fun index f ->
+            let name = safeName + "_ctor" + (if index = 0 then "" else "_" + string index)
+            let symbol = f.MangledName.Value
+            binding name symbol "CallerOwns" (parameters f) (Generic("option", handle safeName)) pointer @
+            [ ValueBinding(name + "ResourceDescriptor", Generic("Expr", Named "ResourceDescriptor"),
+                Quoted(RecordBlock [
+                    "Resource", FunctionCall("", "OwnedNullableReturn", [ RecordConstruction [
+                        "Binding", Literal (quoteString (namespace' + "." + dtorName))
+                        "Parameter", Literal "0" ] ])
+                    "Hypothesis", RecordBlock [
+                        "Identity", Literal (quoteString (c.QualifiedName |> Option.defaultValue c.Name))
+                        "Version", Literal (quoteString "1.0")
+                        "Source", Literal (quoteString symbol) ] ])) ]) |> List.concat
+        let methods = c.Methods |> List.choose (function CppParser.Declaration.Function f -> Some f | _ -> None)
+        let methodDecls = methods |> List.mapi (fun index f ->
+            let overloads = methods |> List.filter (fun other -> other.Name = f.Name)
+            let suffix = if overloads.Length > 1 then "_" + string index else ""
+            let name = safeName + "_" + cleanParamName f.Name + suffix
+            let info = CppClassAnalysis.analyzeMethodReturn ctx.KnownClasses f
+            let args = parameters f
+            let receivers = if f.IsStatic then [] else [ self ]
+            match info.ReturnConvention, info.SretTypeName with
+            | CppClassAnalysis.SretReturn, Some retName ->
+                let retClass = ctx.KnownClasses[retName]
+                let marker = safe retClass
+                OpaqueMarker marker :: binding name f.MangledName.Value "Borrowed"
+                    (({ Name = "retStorage"; Type = handle marker }, pointer) :: receivers @ args) (Named "unit") "Void"
+            | _ ->
+                let resultName = f.ReturnType.Replace("const ", "").Trim()
+                let resultClass = if f.ReturnType.Contains("*") || f.ReturnType.Contains("&") then None else ctx.KnownClasses.TryFind resultName
+                let valueRecord (record: CppParser.StructDecl) =
+                    if record.Measured.IsNone then refuse $"by-value result '{f.ReturnType}' requires measured size and alignment."
+                    if record.Fields |> List.exists (fun field -> field.IsArray || field.IsBitfield) then
+                        refuse $"by-value result '{f.ReturnType}' has unsupported fields."
+                    for field in record.Fields do scalarOrPointer field.Type |> ignore
+                    generateStructDecl { ctx with ValueStructs = ctx.ValueStructs.Add record.Name } record,
+                    Named record.Name, "Named " + quoteString record.Name
+                let extra, retType, returnRef =
+                    match resultClass with
+                    | Some cls ->
+                        let marker = safe cls
+                        let record : CppParser.StructDecl =
+                            { Name = marker + "Value"; Fields = cls.Fields; Documentation = cls.Documentation
+                              IsUnion = false; Attributes = []; Anonymous = None; Measured = cls.Measured
+                              Unattributed = None; UnnamedBitFields = cls.UnnamedBitFields
+                              TypedefAttributes = cls.TypedefAttributes; Location = cls.Location }
+                        let decls, typ, repr = valueRecord record
+                        OpaqueMarker marker :: decls, typ, repr
+                    | None ->
+                        match ctx.Structs.TryFind resultName with
+                        | Some record -> valueRecord record
+                        | None -> let typ, repr = scalarOrPointer f.ReturnType in [], typ, repr
+                extra @ binding name f.MangledName.Value "Borrowed" (receivers @ args) retType returnRef) |> List.concat
+        [ OpaqueMarker safeName
+          SubModule(safeName, [ LiteralBinding("Size", string size); LiteralBinding("Alignment", string align) ]) ]
+        @ dtors @ ctors @ methodDecls
+
     // =========================================================================
     // Catamorphism-Based Generation
     // =========================================================================
@@ -1984,7 +2093,7 @@ module FidelityCodeGenerator =
     /// This is the SINGLE traversal of declarations for code generation.
     /// All context (typedef map, ABI model, opaque handles, struct layouts, C++ class map) is captured in the closure.
     let private generationAlgebra
-        (ctx: GenerationContext) (libraryName: string)
+        (ctx: GenerationContext) (namespace': string) (libraryName: string)
         : DeclarationAlgebra.DeclarationAlgebra<DeclGroup> = {
         OnEnum = fun e -> if e.Name <> "" then GEnum (generateEnumDecl e) else GNone
         OnStruct = fun s ->
@@ -2046,19 +2155,25 @@ module FidelityCodeGenerator =
                 | Some (field, a) ->
                     Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.TypedefAttributeUnmeasured $"C++ record '{c.Name}' field '{field}' has a type reaching typedef '{a.Typedef}', which carries attribute '{a.Attribute.Kind}', and clang has no measurement of '{c.Name}' in its declaring unit; natural alignment of the declared field types never stands in for the typedef's attribute." c.Location.Location)
                 | None -> ()
-            let code, detail =
-                match CppClassAnalysis.classifyClass c with
-                | CppClassAnalysis.PODClass sizeBytes ->
-                    Diagnostics.CppClassAbiUnadmitted, $"C++ POD class '{c.Name}' ({sizeBytes} bytes)"
-                | CppClassAnalysis.PimplClass (implType, sizeBytes) ->
-                    Diagnostics.CppPimplClassUnadmitted, $"C++ pimpl class '{c.Name}' (handle '{implType}', {sizeBytes} bytes)"
-                | CppClassAnalysis.ValueClass (sizeBytes, _) ->
-                    Diagnostics.CppValueClassUnadmitted, $"C++ value class '{c.Name}' ({sizeBytes} bytes)"
-                | CppClassAnalysis.InterfaceClass ->
-                    Diagnostics.CppInterfaceClassUnadmitted, $"C++ abstract interface class '{c.Name}'"
-                | CppClassAnalysis.OpaqueClass ->
-                    Diagnostics.CppOpaqueClassUnadmitted, $"C++ opaque class '{c.Name}'"
-            Diagnostics.refuse (Diagnostics.diagnostic code $"{detail} requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source." c.Location.Location)
+            let admitted =
+                c.QualifiedName |> Option.bind (fun name -> Map.tryFind name ctx.CppClasses)
+                |> Option.orElseWith (fun () -> Map.tryFind c.Name ctx.CppClasses)
+            match admitted with
+            | Some spec -> GStruct (generateCppClassDecls ctx namespace' libraryName spec c)
+            | None ->
+                let code, detail =
+                    match CppClassAnalysis.classifyClass c with
+                    | CppClassAnalysis.PODClass sizeBytes ->
+                        Diagnostics.CppClassAbiUnadmitted, $"C++ POD class '{c.Name}' ({sizeBytes} bytes)"
+                    | CppClassAnalysis.PimplClass (implType, sizeBytes) ->
+                        Diagnostics.CppPimplClassUnadmitted, $"C++ pimpl class '{c.Name}' (handle '{implType}', {sizeBytes} bytes)"
+                    | CppClassAnalysis.ValueClass (sizeBytes, _) ->
+                        Diagnostics.CppValueClassUnadmitted, $"C++ value class '{c.Name}' ({sizeBytes} bytes)"
+                    | CppClassAnalysis.InterfaceClass ->
+                        Diagnostics.CppInterfaceClassUnadmitted, $"C++ abstract interface class '{c.Name}'"
+                    | CppClassAnalysis.OpaqueClass ->
+                        Diagnostics.CppOpaqueClassUnadmitted, $"C++ opaque class '{c.Name}'"
+                Diagnostics.refuse (Diagnostics.diagnostic code $"{detail} requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source." c.Location.Location)
         OnDelegate = fun _ -> GNone // A delegate is spelled FnPtr<'F> where it is used; no type of its own
     }
 
@@ -2100,6 +2215,7 @@ module FidelityCodeGenerator =
           FlexibleArrays = Map.empty
           PhantomMarkers = Set.empty
           KnownClasses = CppClassAnalysis.buildClassMap declarations
+          CppClasses = Map.empty
           TypedefInfos = typedefInfosOf declarations
           ByValueTypedefs = []
           // First definition wins, as the merge keeps the first declaration of a name; a
@@ -2152,10 +2268,12 @@ module FidelityCodeGenerator =
             |> List.map OpaqueMarker
 
         let groups =
-            DeclarationAlgebra.cataDeclarations (generationAlgebra ctx libraryName) declarations
+            DeclarationAlgebra.cataDeclarations (generationAlgebra ctx namespace' libraryName) declarations
 
         let enums = groups |> List.collect (function GEnum d -> d | _ -> [])
-        let structs = groups |> List.collect (function GStruct d -> d | _ -> [])
+        let structs =
+            let declarations = groups |> List.collect (function GStruct d -> d | _ -> [])
+            if ctx.CppClasses.IsEmpty then declarations else List.distinct declarations
         let functionDeclarations =
             groups
             |> List.choose (function GFunc f -> Some f | _ -> None)
@@ -2183,7 +2301,7 @@ module FidelityCodeGenerator =
 
         let vocabularyOpens =
             [ if not structs.IsEmpty then "BAREWire.Hardware"
-              if not functions.IsEmpty then "BAREWire.Descriptors" ]
+              if not functions.IsEmpty || not ctx.CppClasses.IsEmpty then "BAREWire.Descriptors" ]
         let openDecls =
             match (openModules @ vocabularyOpens) |> List.distinct with
             | [] -> []

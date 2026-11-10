@@ -117,6 +117,263 @@ let ``each C++ class shape without an admitted ABI contract is refused with its 
     | Diagnostics.Located.Known { Path = path; Position = Diagnostics.Located.Known _ } -> Assert.Equal(header, path)
     | other -> failwithf "the C++ class's clang location is missing: %A" other
 
+// ─── Marshaled C++ object lifecycle (#115) ───
+
+let private cppObjectContract () =
+    let noexcept = [ mkAttr "NoExceptAttr" [] None ]
+    let ctor = { mkFuncWithAttrs "Widget" "void" [ "value", "int" ] noexcept with MangledName = Some "_ZN6WidgetC1Ei" }
+    let method' = { mkFuncWithAttrs "read" "int" [] noexcept with MangledName = Some "_ZN6Widget4readEv" }
+    let cls =
+        { mkClassValue "Widget" [ mkField "value" "int" ] with
+            Constructors = [ CppParser.Declaration.Function ctor ]
+            Methods = [ CppParser.Declaration.Function method' ]
+            DestructorMangledName = Some "_ZN6WidgetD1Ev"
+            Measured = Some (mkLayout "Widget" 32 32 [ 0 ]) }
+    let spec : PilotTypes.CppClassSpec =
+        { Name = "Widget"; Namespace = "Test"; Bind = true; KindOverride = None; SizeOverride = None }
+    spec, cls
+
+[<Fact>]
+let ``marshaled C++ object use after D1 release is refused with FS9217`` () =
+    let spec, cls = cppObjectContract ()
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+        CppClassAnalysis.verifyCppObjectLifecycle spec cls [
+            CppClassAnalysis.CppObjectOperation.Construct "object"
+            CppClassAnalysis.CppObjectOperation.Release "object"
+            CppClassAnalysis.CppObjectOperation.MethodCall ("object", "_ZN6Widget4readEv") ])
+    let d = only error.Refusal
+    Assert.Equal("FS9217", d.Code)
+    Assert.Equal(Diagnostics.CppObjectUseAfterRelease, d.Code)
+    Assert.Equal("C++ class 'Widget': handle 'object' is used after its D1 release.", d.Message)
+
+[<Fact>]
+let ``marshaled C++ object double D1 release is refused with FS9218`` () =
+    let spec, cls = cppObjectContract ()
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+        CppClassAnalysis.verifyCppObjectLifecycle spec cls [
+            CppClassAnalysis.CppObjectOperation.Construct "object"
+            CppClassAnalysis.CppObjectOperation.Release "object"
+            CppClassAnalysis.CppObjectOperation.Release "object" ])
+    let d = only error.Refusal
+    Assert.Equal("FS9218", d.Code)
+    Assert.Equal(Diagnostics.CppObjectDoubleRelease, d.Code)
+    Assert.Equal("C++ class 'Widget': handle 'object' receives its D1 release more than once.", d.Message)
+
+[<Fact>]
+let ``marshaled C++ object paths require cleanup of every live identity at every exit`` () =
+    let spec, cls = cppObjectContract ()
+    let verify = CppClassAnalysis.verifyCppObjectLifecycle spec cls
+    let construct = CppClassAnalysis.CppObjectOperation.Construct
+    let release = CppClassAnalysis.CppObjectOperation.Release
+    let exit = CppClassAnalysis.CppObjectOperation.ScopeExit
+    verify [ exit ] // Nullable construction produced no object.
+    verify [ construct "a"; construct "b"; release "a"
+             CppClassAnalysis.CppObjectOperation.MethodCall ("b", "_ZN6Widget4readEv")
+             release "b"; exit ]
+    for path in [ [ construct "a"; exit ]; [ construct "a" ]; [ construct "a"; construct "b"; release "a"; exit ] ] do
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> verify path)
+        Assert.Equal(Diagnostics.CppValueClassUnadmitted, (only error.Refusal).Code)
+
+[<Fact>]
+let ``admission cannot override unsupported C++ shapes or throwing methods`` () =
+    let spec, cls = cppObjectContract ()
+    let method' = cls.Methods |> List.pick (function CppParser.Declaration.Function f -> Some f | _ -> None)
+    let cases = [
+        { cls with IsAbstract = true }, Diagnostics.CppInterfaceClassUnadmitted
+        { cls with Methods = [ CppParser.Declaration.Function { method' with IsVirtual = true } ] }, Diagnostics.CppInterfaceClassUnadmitted
+        mkClassEmpty "Widget", Diagnostics.CppOpaqueClassUnadmitted
+        { cls with BaseClasses = [ "Other" ] }, Diagnostics.CppValueClassUnadmitted
+        { cls with DestructorMangledName = Some "_ZN6WidgetD2Ev" }, Diagnostics.CppValueClassUnadmitted
+        { cls with Constructors = [] }, Diagnostics.CppValueClassUnadmitted
+        { cls with Methods = [ CppParser.Declaration.Function { method' with Attributes = [] } ] }, Diagnostics.CppValueClassUnadmitted
+        { cls with HasUserDestructor = false; HasUserCopyConstructor = false; Methods = [ CppParser.Declaration.Function { method' with Attributes = [] } ] }, Diagnostics.CppClassAbiUnadmitted
+        { mkClassPimpl "Widget" "impl" with
+            Constructors = cls.Constructors
+            DestructorMangledName = cls.DestructorMangledName
+            Methods = [ CppParser.Declaration.Function { method' with Attributes = [] } ] }, Diagnostics.CppPimplClassUnadmitted ]
+    for shape, code in cases do
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            CppClassAnalysis.verifyCppObjectLifecycle { spec with KindOverride = Some "pod" } shape [])
+        Assert.Equal(code, (only error.Refusal).Code)
+        let decls = [ CppParser.Declaration.Class shape ]
+        let ctx =
+            { FidelityCodeGenerator.buildGenerationContext decls Types.LP64 Map.empty with
+                CppClasses = Map.ofList [ spec.Name, spec ] }
+        let generation = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            FidelityCodeGenerator.generateModule ctx Set.empty decls "Test" "test" "test" [] |> ignore)
+        Assert.Equal(code, (only generation.Refusal).Code)
+
+[<Fact>]
+let ``nontrivial class pointers return in registers and by-value objects use sret`` () =
+    let _, cls = cppObjectContract ()
+    let classes = Map.ofList [ cls.Name, cls ]
+    for result in [ "Widget *"; "const Widget *"; "Widget &" ] do
+        let info = CppClassAnalysis.analyzeMethodReturn classes (mkFunc "get" result [])
+        Assert.Equal(CppClassAnalysis.RegisterReturn, info.ReturnConvention)
+        Assert.Equal(None, info.SretTypeName)
+    let info = CppClassAnalysis.analyzeMethodReturn classes (mkFunc "get" "Widget" [])
+    Assert.Equal(CppClassAnalysis.SretReturn, info.ReturnConvention)
+    Assert.Equal(Some "Widget", info.SretTypeName)
+
+[<Fact>]
+let ``admitted C++ constructors and methods refuse unrepresentable parameters before emission`` () =
+    let spec, cls = cppObjectContract ()
+    let invalidParameter = function
+        | CppParser.Declaration.Function f -> CppParser.Declaration.Function { f with Parameters = [ "value", "unsupported_template<int>" ] }
+        | declaration -> declaration
+    for shape in [ { cls with Constructors = cls.Constructors |> List.map invalidParameter }
+                   { cls with Methods = cls.Methods |> List.map invalidParameter } ] do
+        let declarations = [ CppParser.Declaration.Class shape ]
+        let ctx =
+            { FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty with
+                CppClasses = Map.ofList [ spec.Name, spec ] }
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            FidelityCodeGenerator.generateModule ctx Set.empty declarations "Test" "test" "test" [] |> ignore)
+        Assert.Equal(Diagnostics.CppValueClassUnadmitted, (only error.Refusal).Code)
+
+[<Fact>]
+let ``admitted C++ constructor overloads own the same qualified release binding`` () =
+    let spec, cls = cppObjectContract ()
+    let ctor = cls.Constructors |> List.pick (function CppParser.Declaration.Function f -> Some f | _ -> None)
+    let shape = { cls with Constructors = cls.Constructors @ [ CppParser.Declaration.Function { ctor with Parameters = []; MangledName = Some "_ZN6WidgetC1Ev" } ] }
+    let declarations = [ CppParser.Declaration.Class shape ]
+    let ctx =
+        { FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty with
+            CppClasses = Map.ofList [ spec.Name, spec ] }
+    let code = FidelityCodeGenerator.generateModule ctx Set.empty declarations "Test" "test" "test" []
+    Assert.Contains("let Widget_ctor_1", code)
+    Assert.Contains("let Widget_ctor_1ResourceDescriptor", code)
+    Assert.Equal(2, code.Split("Binding = \"Test.Widget_dtor\"").Length - 1)
+    Assert.DoesNotContain("nativeint", code)
+    Assert.DoesNotContain("nativeptr", code)
+
+[<Fact>]
+let ``admitted C++ class emits marshaled bindings and its storage adapter runs native C1 methods and D1`` () =
+    let directory = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "artifacts", "pilot-fixture-tests", System.Guid.NewGuid().ToString("N")))
+    Directory.CreateDirectory directory |> ignore
+    let run executable arguments =
+        let info = System.Diagnostics.ProcessStartInfo(executable)
+        info.WorkingDirectory <- directory
+        info.RedirectStandardOutput <- true
+        info.RedirectStandardError <- true
+        for argument in arguments do info.ArgumentList.Add argument
+        use proc = System.Diagnostics.Process.Start info
+        let stdout = proc.StandardOutput.ReadToEndAsync()
+        let stderr = proc.StandardError.ReadToEndAsync()
+        proc.WaitForExit()
+        Assert.True(proc.ExitCode = 0, executable + ": " + stderr.Result + stdout.Result)
+        stdout.Result
+    try
+        let header = Path.Combine(directory, "counter.hpp")
+        let headerSource =
+            String.concat "\n" [
+                "#pragma once"
+                "namespace demo {"
+                "class Pair { public: int first; int second; };"
+                "class Result { public: int value; explicit Result(int v) noexcept; ~Result() noexcept; };"
+                "class Counter {"
+                "  int value;"
+                "public:"
+                "  explicit Counter(int v) noexcept;"
+                "  ~Counter() noexcept;"
+                "  int add(int amount) noexcept;"
+                "  Pair pair() noexcept;"
+                "  Result result() noexcept;"
+                "};"
+                "}"
+                "extern \"C\" int counter_destructions() noexcept;"
+                "extern \"C\" int result_destructions() noexcept;"
+            ]
+        File.WriteAllText(header, headerSource)
+        let implementation = Path.Combine(directory, "counter.cpp")
+        let implSource =
+            String.concat "\n" [
+                "#include \"counter.hpp\""
+                "static int counter_releases = 0, result_releases = 0;"
+                "demo::Counter::Counter(int v) noexcept : value(v) {}"
+                "demo::Counter::~Counter() noexcept { ++counter_releases; }"
+                "int demo::Counter::add(int amount) noexcept { return value += amount; }"
+                "demo::Pair demo::Counter::pair() noexcept { return {value, value + 1}; }"
+                "demo::Result demo::Counter::result() noexcept { return demo::Result(value + 2); }"
+                "demo::Result::Result(int v) noexcept : value(v) {}"
+                "demo::Result::~Result() noexcept { ++result_releases; }"
+                "extern \"C\" int counter_destructions() noexcept { return counter_releases; }"
+                "extern \"C\" int result_destructions() noexcept { return result_releases; }"
+            ]
+        File.WriteAllText(implementation, implSource)
+        let parsed =
+            CppParser.parseHeader { CppParser.defaultOptions header with CppMode = true; IncludeMacros = false }
+            |> Result.defaultWith failwith
+        let classes = parsed |> List.choose (function CppParser.Declaration.Class c -> Some c | _ -> None)
+        let measured =
+            CppParser.extractStructLayoutsForModeDiagnosed header [] [] [] [ "demo::Counter"; "demo::Pair"; "demo::Result" ] true false
+            |> Result.defaultWith (fun refusal -> failwith refusal.Text)
+        let classes = classes |> List.map (fun c ->
+            let key = c.QualifiedName |> Option.defaultValue c.Name
+            { c with Measured = measured.TryFind key })
+        let counter = classes |> List.find (fun c -> c.Name = "Counter")
+        Assert.True(counter.Measured.IsSome, "clang must measure the actual class layout")
+        let spec : PilotTypes.CppClassSpec =
+            { Name = "demo::Counter"; Namespace = "Test.Cpp"; Bind = true; SizeOverride = None; KindOverride = None }
+        let ctx =
+            { FidelityCodeGenerator.buildGenerationContext (classes |> List.map CppParser.Declaration.Class) Types.LP64 Map.empty with
+                CppClasses = Map.ofList [ spec.Name, spec; "Counter", spec ] }
+        let code = FidelityCodeGenerator.generateModule ctx Set.empty [ CppParser.Declaration.Class counter ] "Test.Cpp" "counter" "C++ fixture" []
+        Assert.DoesNotContain("nativeint", code)
+        Assert.DoesNotContain("nativeptr", code)
+        for expected in [ "type demo_Counter"; "module demo_Counter ="; "let Size = 4"; "let Alignment = 4"
+                          "let demo_Counter_ctor (v: int) : option<CHandle<demo_Counter>>"
+                          "let demo_Counter_ctorResourceDescriptor : Expr<ResourceDescriptor>"
+                          "OwnedNullableReturn"; "Binding = \"Test.Cpp.demo_Counter_dtor\""; "Parameter = 0"
+                          "OwnershipTransfer = CallerOwns"; "OwnershipTransfer = CalleeOwns"
+                          "let demo_Counter_dtor (self: CHandle<demo_Counter>) : unit"
+                          "let demo_Counter_pair (self: CHandle<demo_Counter>) : demo_PairValue"
+                          "let demo_Counter_result (retStorage: CHandle<demo_Result>) (self: CHandle<demo_Counter>) : unit"
+                          "type demo_Result"; "type demo_PairValue"; "let demo_Counter_pairDescriptor" ] do
+            Assert.Contains(expected, code)
+        let constructors = counter.Constructors |> List.choose (function CppParser.Declaration.Function f -> Some f | _ -> None)
+        Assert.NotEmpty constructors
+        for f in constructors do
+            Assert.Contains("C1", f.MangledName.Value)
+            Assert.Contains("FidelityExtern(\"counter\", \"" + f.MangledName.Value + "\")", code)
+        Assert.Contains("D1", counter.DestructorMangledName.Value)
+        Assert.Contains(counter.DestructorMangledName.Value, code)
+        for f in counter.Methods |> List.choose (function CppParser.Declaration.Function f -> Some f | _ -> None) do
+            Assert.Contains(f.MangledName.Value, code)
+        File.WriteAllText(Path.Combine(directory, "shim.cpp"), CppClassAnalysis.renderCppObjectStorageShimC header ctx.KnownClasses spec counter)
+        let runnerSource =
+            String.concat "\n" [
+                "#include \"counter.hpp\""
+                "#include <cstdio>"
+                "extern \"C\" void* demo_Counter_ctor(int) noexcept;"
+                "extern \"C\" int demo_Counter_add(void*, int) noexcept;"
+                "extern \"C\" demo::Pair demo_Counter_pair(void*) noexcept;"
+                "extern \"C\" void demo_Counter_result(void*, void*) noexcept;"
+                "extern \"C\" void demo_Counter_dtor(void*) noexcept;"
+                "int main() {"
+                "  void* object = demo_Counter_ctor(40);"
+                "  if (!object) return 1;"
+                "  int value = demo_Counter_add(object, 2);"
+                "  demo::Pair pair = demo_Counter_pair(object);"
+                "  alignas(demo::Result) unsigned char storage[sizeof(demo::Result)];"
+                "  demo_Counter_result(storage, object);"
+                "  auto* result = reinterpret_cast<demo::Result*>(storage);"
+                "  int returned = result->value;"
+                "  result->~Result();"
+                "  demo_Counter_dtor(object);"
+                "  std::printf(\"%d %d %d %d %d %d\\n\", value, pair.first, pair.second, returned,"
+                "              counter_destructions(), result_destructions());"
+                "  return value == 42 && pair.first == 42 && pair.second == 43 && returned == 44"
+                "      && counter_destructions() == 1 && result_destructions() == 1 ? 0 : 2;"
+                "}"
+            ]
+        File.WriteAllText(Path.Combine(directory, "runner.cpp"), runnerSource)
+        run "/usr/bin/clang++" [ "-std=c++17"; "-shared"; "-fPIC"; "counter.cpp"; "-o"; "libcounter.so" ] |> ignore
+        run "/usr/bin/clang++" [ "-std=c++17"; "-Wno-return-type-c-linkage"; "shim.cpp"; "runner.cpp"; "-L."; "-lcounter"; "-Wl,-rpath,$ORIGIN"; "-o"; "runner" ] |> ignore
+        Assert.Equal("42 42 43 44 1 1", (run (Path.Combine(directory, "runner")) []).Trim())
+    finally
+        Directory.Delete(directory, true)
+
 // ─── Pilot TOML shape (FS9197 to FS9202, and the codes generation gives the same reasons) ───
 
 let private pilotHead = [ "[library]"; "name = \"fixture\""; "headers = [\"x.h\"]"; "[output]"; "mode = \"fidelity\""; "directory = \"out\"" ]

@@ -120,6 +120,10 @@ namespace Farscape.Core
 /// | FS9212 | a C++ value class has no admitted object storage, ownership and method ABI contract |
 /// | FS9213 | a C++ abstract interface class has no admitted object storage, ownership and method ABI contract |
 /// | FS9214 | a C++ opaque class has no admitted object storage, ownership and method ABI contract |
+/// | FS9215 | a requested C++ template instantiation is not exported by the library build      |
+/// | FS9216 | a C++ ABI fact lacks provenance or conflicts with the library build or AST      |
+/// | FS9217 | a marshaled C++ object is used after its D1 release                            |
+/// | FS9218 | a marshaled C++ object receives its D1 release more than once                   |
 ///
 /// Allocation continues past FS9199 as FS92xx: the codes are sequential, four digits after FS.
 /// Each refusal reason has exactly one code and each code one reason.
@@ -479,6 +483,12 @@ module Diagnostics =
 
     [<Literal>]
     let CppAbiFactInvalidOrConflicting = "FS9216" // C++ ABI fact from Plugify is missing, lacks provenance, or conflicts with the inspected library build or clang AST (#119)
+
+    [<Literal>]
+    let CppObjectUseAfterRelease = "FS9217" // marshaled C++ object used after its D1 release (#115)
+
+    [<Literal>]
+    let CppObjectDoubleRelease = "FS9218" // marshaled C++ object's D1 release called more than once (#115)
 
     // =========================================================================
     // Structured diagnostics (#184)

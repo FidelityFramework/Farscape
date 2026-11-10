@@ -1324,6 +1324,11 @@ module BindingGenerator =
                         | _ -> [])
                         |> Set.ofList
                     { baseCtx with
+                        CppClasses =
+                            project.CppConfig |> Option.map _.Classes |> Option.defaultValue []
+                            |> List.filter _.Bind
+                            |> List.collect (fun spec -> [ spec.Name, spec; (spec.Name.Split("::") |> Array.last), spec ])
+                            |> Map.ofList
                         DeclarationUnits = unitTypedefMaps
                         TypeNameUnits = typeNameUnits included (List.zip project.Library.Headers headerDeclLists)
                         PhantomMarkers = if project.Options |> Option.exists (fun o -> o.CHeaderMode && not o.NativePointerSurface) then phantomMarkers else Set.empty
