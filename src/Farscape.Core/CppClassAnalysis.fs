@@ -991,6 +991,132 @@ module CppClassAnalysis =
             Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.CppTemplateInstantiationMissing
                 $"C++ template instantiation '{name}' is not exported by library build '{library}' (SHA-256 {inventory.Build.Sha256}).{note}" source)
 
+    /// An admitted std::vector instantiation; its representation remains native (#120).
+    type CppTemplateContainerSpec = {
+        TemplateName: string
+        ElementType: string
+        ElementClefType: string
+        SafeName: string
+        Namespace: string
+        LibraryName: string
+        FactorySymbol: string option
+        Source: Diagnostics.Located<Diagnostics.SourceLocation> option
+    }
+
+    [<RequireQualifiedAccess>]
+    type CppContainerOperation =
+        | Acquire of handle: string * count: int
+        | Size of handle: string
+        | Get of handle: string * index: int
+        | Iterate of handle: string * startIndex: int * count: int
+        | Release of handle: string
+        | ScopeExit
+
+    let private refuseContainer (spec: CppTemplateContainerSpec) code reason =
+        let source = spec.Source |> Option.defaultValue (Diagnostics.Located.Unknown "No header location was supplied for the container contract.")
+        Diagnostics.refuse (Diagnostics.diagnostic code $"C++ container '{spec.SafeName}': {reason}" source)
+
+    /// This adapter admits vector's default allocator only. It never invents a binary export.
+    let validateTemplateContainerContract (inventory: CppTemplateInventory) (spec: CppTemplateContainerSpec) =
+        let refuse reason = refuseContainer spec Diagnostics.CppContainerOutOfRange reason
+        let identifier (text: string) =
+            not (System.String.IsNullOrWhiteSpace text)
+            && (System.Char.IsLetter text[0] || text[0] = '_')
+            && (text |> Seq.forall (fun c -> System.Char.IsLetterOrDigit c || c = '_'))
+        let rawFields = [ "_M_start"; "_M_finish"; "_M_end_of_storage"; "nativeint"; "nativeptr" ]
+        let spellings = [ spec.TemplateName; spec.ElementType; spec.ElementClefType; spec.SafeName; spec.Namespace; spec.LibraryName ] @ Option.toList spec.FactorySymbol
+        if spellings |> List.exists (fun text -> System.String.IsNullOrWhiteSpace text || rawFields |> List.exists text.Contains) then
+            refuse "empty types and raw pointer/address fields are outside the opaque container contract."
+        if not (spec.ElementType.Split([| "::" |], System.StringSplitOptions.None) |> Array.forall (fun part -> part.Split(' ') |> Array.forall identifier))
+           || not (identifier spec.ElementClefType) || not (identifier spec.SafeName)
+           || not (spec.Namespace.Split('.') |> Array.forall identifier)
+           || (spec.FactorySymbol |> Option.exists (identifier >> not)) then
+            refuse "invalid element type or binding identifier in the container operation contract."
+        requireInstantiation inventory spec.TemplateName [ spec.ElementType; $"std::allocator<{spec.ElementType}>" ] spec.Source |> ignore
+        if normalize spec.TemplateName <> "std::vector" || spec.ElementType = "bool" || spec.ElementType = "void" then
+            refuse "only std::vector<T> with a bound value element and the default allocator is admitted."
+
+    /// Validate one declared path; compiler-owned liveness proof remains a separate obligation.
+    let verifyCppContainerLifecycle inventory spec (operations: CppContainerOperation list) =
+        validateTemplateContainerContract inventory spec
+        let refuse reason = refuseContainer spec Diagnostics.CppContainerOutOfRange reason
+        let requireLive states handle =
+            match Map.tryFind handle states with
+            | Some (Some count) -> count
+            | Some None -> refuseContainer spec Diagnostics.CppObjectUseAfterRelease $"handle '{handle}' is used after release."
+            | None -> refuse $"handle '{handle}' has no successful acquisition."
+        let requireClean states =
+            match states |> Map.toList |> List.tryFind (snd >> Option.isSome) with
+            | Some (handle, _) -> refuse $"handle '{handle}' has no release on this exit."
+            | None -> ()
+        let rec verify states = function
+            | [] -> requireClean states
+            | CppContainerOperation.Acquire (handle, count) :: rest ->
+                if System.String.IsNullOrWhiteSpace handle || count < 0 || Map.containsKey handle states then
+                    refuse $"invalid acquisition of handle '{handle}' with count {count}."
+                verify (Map.add handle (Some count) states) rest
+            | CppContainerOperation.Size handle :: rest ->
+                requireLive states handle |> ignore
+                verify states rest
+            | CppContainerOperation.Get (handle, index) :: rest ->
+                let size = requireLive states handle
+                if index < 0 || index >= size then refuse $"index {index} is outside handle '{handle}' of size {size}."
+                verify states rest
+            | CppContainerOperation.Iterate (handle, startIndex, count) :: rest ->
+                let size = requireLive states handle
+                // Subtraction avoids overflowing startIndex + count.
+                if startIndex < 0 || count < 0 || startIndex > size || count > size - startIndex then
+                    refuse $"iteration ({startIndex}, {count}) is outside handle '{handle}' of size {size}."
+                verify states rest
+            | CppContainerOperation.Release handle :: rest ->
+                match Map.tryFind handle states with
+                | Some None -> refuseContainer spec Diagnostics.CppObjectDoubleRelease $"handle '{handle}' is released more than once."
+                | _ -> requireLive states handle |> ignore
+                verify (Map.add handle None states) rest
+            | CppContainerOperation.ScopeExit :: rest ->
+                requireClean states
+                if not rest.IsEmpty then refuse "operations follow a terminal scope exit."
+        verify Map.empty operations
+
+    /// Companion native operations for exactly the inventory-bound vector instantiation.
+    let renderCppTemplateContainerShimC (header: string) inventory (spec: CppTemplateContainerSpec) : string =
+        validateTemplateContainerContract inventory spec
+        let prefix = "farscape_cpp_container_" + spec.SafeName
+        let container = $"{spec.TemplateName}<{spec.ElementType}, std::allocator<{spec.ElementType}>>"
+        let escapedHeader = header.Replace("\\", "\\\\").Replace("\"", "\\\"")
+        String.concat "\n" [
+            $"#include \"{escapedHeader}\""
+            "#include <vector>"
+            "#include <exception>"
+            "#include <new>"
+            "#include <climits>"
+            "#include <cstddef>"
+            $"namespace {{ using Container = {container};"
+            "enum { StatusOk = 0, StatusNullHandle = -1, StatusStdException = 1, StatusUnknownException = 2, StatusAllocationFailed = 3, StatusOutOfRange = 4 }; }"
+            match spec.FactorySymbol with
+            | Some factory ->
+                $"extern \"C\" void* {prefix}_acquire() noexcept {{ try {{ return {factory}(); }} catch (...) {{ return nullptr; }} }}"
+            | None -> ()
+            $"extern \"C\" void {prefix}_release(void* self) noexcept {{ try {{ delete static_cast<Container*>(self); }} catch (...) {{ }} }}"
+            $"extern \"C\" int {prefix}_size(int* outSize, void* self) noexcept {{"
+            "  if (!outSize || !self) return StatusNullHandle;"
+            "  try { auto* vec = static_cast<Container*>(self); if (vec->size() > static_cast<std::size_t>(INT_MAX)) return StatusOutOfRange; *outSize = static_cast<int>(vec->size()); return StatusOk; }"
+            "  catch (const std::bad_alloc&) { return StatusAllocationFailed; } catch (const std::exception&) { return StatusStdException; } catch (...) { return StatusUnknownException; } }"
+            $"extern \"C\" int {prefix}_get({spec.ElementType}* outElem, void* self, int index) noexcept {{"
+            "  if (!outElem || !self) return StatusNullHandle;"
+            "  auto* vec = static_cast<Container*>(self);"
+            "  if (index < 0 || static_cast<std::size_t>(index) >= vec->size()) return StatusOutOfRange;"
+            "  try { *outElem = (*vec)[static_cast<std::size_t>(index)]; return StatusOk; }"
+            "  catch (const std::bad_alloc&) { return StatusAllocationFailed; } catch (const std::exception&) { return StatusStdException; } catch (...) { return StatusUnknownException; } }"
+            $"extern \"C\" int {prefix}_iter_next({spec.ElementType}* outElem, int* inoutIndex, void* self) noexcept {{"
+            "  if (!outElem || !inoutIndex || !self) return StatusNullHandle;"
+            "  auto* vec = static_cast<Container*>(self);"
+            "  if (*inoutIndex < 0 || *inoutIndex == INT_MAX || static_cast<std::size_t>(*inoutIndex) >= vec->size()) return StatusOutOfRange;"
+            "  try { *outElem = (*vec)[static_cast<std::size_t>(*inoutIndex)]; ++*inoutIndex; return StatusOk; }"
+            "  catch (const std::bad_alloc&) { return StatusAllocationFailed; } catch (const std::exception&) { return StatusStdException; } catch (...) { return StatusUnknownException; } }"
+            ""
+        ]
+
     // =========================================================================
     // Plugify C++ ABI Facts with Provenance (#119)
     // =========================================================================

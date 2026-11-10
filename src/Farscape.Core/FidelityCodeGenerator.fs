@@ -1969,6 +1969,74 @@ module FidelityCodeGenerator =
             { Structs = ctx.Structs; Layouts = layouts; Model = ctx.DataModel; Shape = shape; FlexibleArrays = ctx.FlexibleArrays }
             s
 
+    /// Generate opaque container operations and their ABI/ownership declarations (#120).
+    let generateCppTemplateContainerDecls (ctx: GenerationContext)
+                                         (inventory: CppClassAnalysis.CppTemplateInventory)
+                                         (spec: CppClassAnalysis.CppTemplateContainerSpec) : FsDecl list =
+        CppClassAnalysis.validateTemplateContainerContract inventory spec
+        let element = resolveIn ctx spec.ElementType
+        let admittedElement =
+            match element with
+            | Scalar _ | CEnum _ -> clefTypeOf element = Named spec.ElementClefType
+            | Unresolved name when ctx.ValueStructs.Contains name -> name = spec.ElementClefType
+            | _ -> false
+        if not admittedElement then
+            let source = spec.Source |> Option.defaultValue (Diagnostics.Located.Unknown "No header location was supplied for the container element.")
+            Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.CppContainerOutOfRange
+                $"C++ container '{spec.SafeName}': element '{spec.ElementType}' has no admitted value binding as '{spec.ElementClefType}'." source)
+        let pointer = DescriptorGenerator.typeRefSource (TypeMapper.pointerRepr ctx.DataModel "void *")
+        let intRef = abiReprOf ctx.DataModel "int" (resolveIn ctx "int") |> Option.get |> DescriptorGenerator.typeRefSource
+        let handle name = Generic("CHandle", Named name)
+        let self = { Name = "self"; Type = handle spec.SafeName }, pointer
+        let output name typ = { Name = name; Type = handle typ }, pointer
+        let prefix = "farscape_cpp_container_" + spec.SafeName
+        let binding suffix ownership parameters returnType returnRef =
+            let name = spec.SafeName + suffix
+            let symbol = prefix + suffix
+            [ LetBinding(name, List.map fst parameters, returnType, NativeZeroed,
+                         [ $"FidelityExtern({quoteString spec.LibraryName}, {quoteString symbol})" ])
+              ValueBinding(name + "Descriptor", Generic("Expr", Named "FunctionDescriptor"),
+                Quoted(RecordBlock [
+                    "CName", Literal (quoteString symbol)
+                    "Parameters", ArrayBlock (parameters |> List.map (fun (p, repr) -> RecordConstruction [
+                        "Name", Literal (quoteString p.Name); "Type", Literal repr; "PassBy", Identifier "Value" ]))
+                    "ReturnType", Literal returnRef
+                    "CallingConvention", Identifier "CDecl"
+                    "OwnershipTransfer", Identifier ownership ]))
+              BlankLine ]
+        let acquisition =
+            match spec.FactorySymbol with
+            | None -> []
+            | Some _ ->
+                binding "_acquire" "CallerOwns" [] (Generic("option", handle spec.SafeName)) pointer @
+                [ ValueBinding(spec.SafeName + "_acquireResourceDescriptor", Generic("Expr", Named "ResourceDescriptor"),
+                    Quoted(RecordBlock [
+                        "Resource", FunctionCall("", "OwnedNullableReturn", [ RecordConstruction [
+                            "Binding", Literal (quoteString (spec.Namespace + "." + spec.SafeName + "_release"))
+                            "Parameter", Literal "0" ] ])
+                        "Hypothesis", RecordBlock [
+                            "Identity", Literal (quoteString (spec.TemplateName + "<" + spec.ElementType + ">"))
+                            "Version", Literal (quoteString "1.0")
+                            "Source", Literal (quoteString (prefix + "_acquire")) ] ]))
+                  BlankLine ]
+        [ OpaqueMarker spec.SafeName
+          SubModule(spec.SafeName, [
+              LiteralBinding("StatusOk", "0")
+              LiteralBinding("StatusNullHandle", "-1")
+              LiteralBinding("StatusStdException", "1")
+              LiteralBinding("StatusUnknownException", "2")
+              LiteralBinding("StatusAllocationFailed", "3")
+              LiteralBinding("StatusOutOfRange", "4") ])
+          BlankLine ] @
+        binding "_release" "CalleeOwns" [ self ] (Named "unit") "Void" @ acquisition @
+        binding "_size" "Borrowed" [ output "outSize" "int"; self ] (Named "int") intRef @
+        binding "_get" "Borrowed" [ output "outElem" spec.ElementClefType; self; { Name = "index"; Type = Named "int" }, intRef ] (Named "int") intRef @
+        binding "_iter_next" "Borrowed" [ output "outElem" spec.ElementClefType; output "inoutIndex" "int"; self ] (Named "int") intRef
+
+    let generateCppTemplateContainerModule ctx inventory (spec: CppClassAnalysis.CppTemplateContainerSpec) =
+        let declarations = generateCppTemplateContainerDecls ctx inventory spec
+        CodeRenderer.render (Module(spec.Namespace, "Opaque C++ template container operations", OpenModule "BAREWire.Descriptors" :: BlankLine :: declarations))
+
     /// Marshaled class surface. C1/D1 identify the native operations; owned allocation
     /// and deallocation are realized by the companion native storage adapter.
     let private generateCppClassDecls (ctx: GenerationContext) namespace' libraryName

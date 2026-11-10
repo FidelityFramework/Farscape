@@ -1323,3 +1323,228 @@ let plugifyAbiFactsRefuseConflictingBuildProvenanceAndConflictingOrMissingFactsW
         let dMissingTemplateFact = Assert.Single(errMissingTemplateFact.Refusal.Diagnostics)
         Assert.Equal(Diagnostics.CppAbiFactInvalidOrConflicting, dMissingTemplateFact.Code)
         Assert.Equal("Plugify ABI fact bundle is incomplete: missing template ABI fact for requested instantiation 'xrt::module_elf::patch_it_impl<xrt::bo>'.", dMissingTemplateFact.Message))
+
+// ─── Template containers remain opaque and operation-bound (#120) ───
+
+let private vectorSpec : CppClassAnalysis.CppTemplateContainerSpec =
+    { TemplateName = "std::vector"; ElementType = "int"; ElementClefType = "int"
+      SafeName = "IntVector"; Namespace = "Test.Containers"; LibraryName = "vecfixture"
+      FactorySymbol = Some "make_vector"; Source = Some (Diagnostics.Located.Unknown "container fixture") }
+
+let private vectorInventory =
+    CppClassAnalysis.inventoryOfSymbols syntheticBuild [] [
+        "_Zvector_size", "std::vector<int, std::allocator<int> >::size() const" ]
+
+let private containerRefusal code action =
+    let error = Assert.Throws<Diagnostics.RefusalException>(System.Action action)
+    let diagnostic = only error.Refusal
+    Assert.Equal(code, diagnostic.Code)
+    Assert.Equal(vectorSpec.Source.Value, diagnostic.Source)
+    Assert.False(System.String.IsNullOrWhiteSpace diagnostic.Message)
+
+[<Fact>]
+let containerInstantiationMustBeExportedForEveryConsumer () =
+    let missing = { vectorSpec with ElementType = "double"; ElementClefType = "float" }
+    let ctx = FidelityCodeGenerator.buildGenerationContext [] Types.LP64 Map.empty
+    for action in [
+        (fun () -> CppClassAnalysis.validateTemplateContainerContract vectorInventory missing)
+        (fun () -> CppClassAnalysis.verifyCppContainerLifecycle vectorInventory missing [])
+        (fun () -> CppClassAnalysis.renderCppTemplateContainerShimC "vector.hpp" vectorInventory missing |> ignore)
+        (fun () -> FidelityCodeGenerator.generateCppTemplateContainerDecls ctx vectorInventory missing |> ignore) ] do
+        containerRefusal Diagnostics.CppTemplateInstantiationMissing action
+    CppClassAnalysis.validateTemplateContainerContract vectorInventory vectorSpec
+
+[<Fact>]
+let containerContractRefusesRawAddressesAndInvalidTypes () =
+    for invalid in [ ""; " "; "nativeint"; "nativeptr<int>"; "_M_start"; "_M_finish"; "_M_end_of_storage"; "int*"; "int&"; "int;" ] do
+        containerRefusal Diagnostics.CppContainerOutOfRange (fun () ->
+            CppClassAnalysis.validateTemplateContainerContract vectorInventory { vectorSpec with ElementType = invalid })
+    let boolInventory = CppClassAnalysis.inventoryOfSymbols syntheticBuild [] [
+        "_Zboolvector", "std::vector<bool, std::allocator<bool> >::size() const" ]
+    containerRefusal Diagnostics.CppContainerOutOfRange (fun () ->
+        CppClassAnalysis.validateTemplateContainerContract boolInventory { vectorSpec with ElementType = "bool"; ElementClefType = "bool" })
+    for invalid in [ "nativeint"; "nativeptr"; "_M_start"; "int*"; "" ] do
+        containerRefusal Diagnostics.CppContainerOutOfRange (fun () ->
+            CppClassAnalysis.validateTemplateContainerContract vectorInventory { vectorSpec with ElementClefType = invalid })
+
+[<Fact>]
+let containerLifecycleAcceptsBalancedHandlesAndEmptyRanges () =
+    let verify = CppClassAnalysis.verifyCppContainerLifecycle vectorInventory vectorSpec
+    let acquire = CppClassAnalysis.CppContainerOperation.Acquire
+    let release = CppClassAnalysis.CppContainerOperation.Release
+    verify [ acquire ("a", 3); acquire ("b", 0)
+             CppClassAnalysis.CppContainerOperation.Size "a"
+             CppClassAnalysis.CppContainerOperation.Get ("a", 0)
+             CppClassAnalysis.CppContainerOperation.Get ("a", 2)
+             CppClassAnalysis.CppContainerOperation.Iterate ("a", 0, 3)
+             CppClassAnalysis.CppContainerOperation.Iterate ("a", 3, 0)
+             CppClassAnalysis.CppContainerOperation.Iterate ("b", 0, 0)
+             release "b"; release "a"; CppClassAnalysis.CppContainerOperation.ScopeExit ]
+    verify []
+    verify [ acquire ("a", 1); release "a" ]
+
+[<Fact>]
+let containerBoundsRefuseNegativeEndAndOverflowingRanges () =
+    let verify operations = CppClassAnalysis.verifyCppContainerLifecycle vectorInventory vectorSpec operations
+    for access in [
+        CppClassAnalysis.CppContainerOperation.Get ("a", -1)
+        CppClassAnalysis.CppContainerOperation.Get ("a", 3)
+        CppClassAnalysis.CppContainerOperation.Get ("a", 99)
+        CppClassAnalysis.CppContainerOperation.Iterate ("a", -1, 1)
+        CppClassAnalysis.CppContainerOperation.Iterate ("a", 0, -1)
+        CppClassAnalysis.CppContainerOperation.Iterate ("a", 2, 2)
+        CppClassAnalysis.CppContainerOperation.Iterate ("a", 4, 0)
+        CppClassAnalysis.CppContainerOperation.Iterate ("a", 1, System.Int32.MaxValue) ] do
+        containerRefusal Diagnostics.CppContainerOutOfRange (fun () -> verify [
+            CppClassAnalysis.CppContainerOperation.Acquire ("a", 3); access
+            CppClassAnalysis.CppContainerOperation.Release "a" ])
+    containerRefusal Diagnostics.CppContainerOutOfRange (fun () -> verify [
+        CppClassAnalysis.CppContainerOperation.Acquire ("a", 0)
+        CppClassAnalysis.CppContainerOperation.Get ("a", 0) ])
+
+[<Fact>]
+let containerLifecycleRefusesUseAfterReleaseAndDoubleRelease () =
+    let verify = CppClassAnalysis.verifyCppContainerLifecycle vectorInventory vectorSpec
+    let released = [ CppClassAnalysis.CppContainerOperation.Acquire ("a", 3); CppClassAnalysis.CppContainerOperation.Release "a" ]
+    for access in [ CppClassAnalysis.CppContainerOperation.Size "a"
+                    CppClassAnalysis.CppContainerOperation.Get ("a", 0)
+                    CppClassAnalysis.CppContainerOperation.Iterate ("a", 0, 1) ] do
+        containerRefusal Diagnostics.CppObjectUseAfterRelease (fun () -> verify (released @ [access]))
+    containerRefusal Diagnostics.CppObjectDoubleRelease (fun () -> verify (released @ [ CppClassAnalysis.CppContainerOperation.Release "a" ]))
+
+[<Fact>]
+let containerLifecycleRefusesLeaksUnknownHandlesAndInvalidAcquisition () =
+    let verify = CppClassAnalysis.verifyCppContainerLifecycle vectorInventory vectorSpec
+    let acquire = CppClassAnalysis.CppContainerOperation.Acquire
+    for path in [ [acquire ("a", 1)]; [acquire ("a", 1); CppClassAnalysis.CppContainerOperation.ScopeExit]
+                  [acquire ("a", -1); CppClassAnalysis.CppContainerOperation.Release "a"]
+                  [acquire ("", 1); CppClassAnalysis.CppContainerOperation.Release ""]
+                  [acquire ("a", 1); acquire ("a", 1); CppClassAnalysis.CppContainerOperation.Release "a"]
+                  [CppClassAnalysis.CppContainerOperation.Size "unknown"]
+                  [CppClassAnalysis.CppContainerOperation.Release "unknown"]
+                  [CppClassAnalysis.CppContainerOperation.ScopeExit; acquire ("a", 1)] ] do
+        containerRefusal Diagnostics.CppContainerOutOfRange (fun () -> verify path)
+
+[<Fact>]
+let containerDeclsDescribeOpaqueOwnershipAndOperationAbi () =
+    let ctx = FidelityCodeGenerator.buildGenerationContext [] Types.LP64 Map.empty
+    let declarations = FidelityCodeGenerator.generateCppTemplateContainerDecls ctx vectorInventory vectorSpec
+    Assert.Contains(CodeAST.OpaqueMarker "IntVector", declarations)
+    Assert.DoesNotContain(declarations, function CodeAST.RecordType _ -> true | _ -> false)
+    let source = FidelityCodeGenerator.generateCppTemplateContainerModule ctx vectorInventory vectorSpec
+    for forbidden in [ "nativeint"; "nativeptr"; "_M_start"; "_M_finish"; "_M_end_of_storage" ] do
+        Assert.DoesNotContain(forbidden, source)
+    for expected in [ "OwnedNullableReturn"; "Test.Containers.IntVector_release"; "CalleeOwns"; "CallerOwns"; "Borrowed"
+                      "StatusOutOfRange = 4"; "IntVector_size"; "IntVector_get"; "IntVector_iter_next"
+                      "option<CHandle<IntVector>>"; "outElem: CHandle<int>"; "inoutIndex: CHandle<int>" ] do
+        Assert.Contains(expected, source)
+    for elementType in [ "float"; "UnknownElement" ] do
+        containerRefusal Diagnostics.CppContainerOutOfRange (fun () ->
+            FidelityCodeGenerator.generateCppTemplateContainerDecls ctx vectorInventory { vectorSpec with ElementClefType = elementType } |> ignore)
+    let bindings = declarations |> List.choose (function
+        | CodeAST.LetBinding(name, parameters, returnType, _, attributes) -> Some (name, parameters, returnType, attributes)
+        | _ -> None)
+    Assert.Equal(5, bindings.Length)
+    let handle name = CodeAST.Generic("CHandle", CodeAST.Named name)
+    for suffix, parameterTypes, returnType in [
+        "release", [handle "IntVector"], CodeAST.Named "unit"
+        "acquire", [], CodeAST.Generic("option", handle "IntVector")
+        "size", [handle "int"; handle "IntVector"], CodeAST.Named "int"
+        "get", [handle "int"; handle "IntVector"; CodeAST.Named "int"], CodeAST.Named "int"
+        "iter_next", [handle "int"; handle "int"; handle "IntVector"], CodeAST.Named "int" ] do
+        let _, parameters, actualReturn, attributes = bindings |> List.find (fun (name, _, _, _) -> name = "IntVector_" + suffix)
+        Assert.Equal<CodeAST.FsType list>(parameterTypes, parameters |> List.map _.Type)
+        Assert.Equal(returnType, actualReturn)
+        Assert.Contains($"FidelityExtern(\"vecfixture\", \"farscape_cpp_container_IntVector_{suffix}\")", attributes)
+    let noFactory = { vectorSpec with FactorySymbol = None }
+    Assert.DoesNotContain("_acquire", FidelityCodeGenerator.generateCppTemplateContainerModule ctx vectorInventory noFactory)
+    Assert.DoesNotContain("_acquire", CppClassAnalysis.renderCppTemplateContainerShimC "vector.hpp" vectorInventory noFactory)
+
+[<Fact>]
+let containerNativeLibraryInventoryShimAndExecution () =
+    let directory = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "test-results", "scratch", "cpp-container", System.Guid.NewGuid().ToString("N")))
+    Directory.CreateDirectory directory |> ignore
+    let path file = Path.Combine(directory, file)
+    let run program arguments = runTemplateFixtureTool program arguments
+    File.WriteAllText(path "vecfixture.hpp", """
+#pragma once
+#include <vector>
+extern template class std::vector<int>;
+extern "C" std::vector<int>* make_vector();
+extern "C" int vector_releases() noexcept;
+extern "C" int vector_buffer_releases() noexcept;
+extern "C" void vector_factory_mode(int) noexcept;
+    """)
+    File.WriteAllText(path "vecfixture.cpp", """
+#include "vecfixture.hpp"
+#include <cstdlib>
+#include <new>
+#include <stdexcept>
+template class std::vector<int>;
+static void* owned = nullptr;
+static void* buffer = nullptr;
+static int releases = 0, buffer_releases = 0, factory_mode = 0;
+// Observe deletion of the exact library-owned vector, including its buffer lifetime.
+void operator delete(void* p) noexcept { if (p && p == buffer) { ++buffer_releases; buffer = nullptr; } if (p && p == owned) { ++releases; owned = nullptr; } std::free(p); }
+extern "C" std::vector<int>* make_vector() {
+  if (factory_mode==1) throw std::bad_alloc();
+  if (factory_mode==2) throw std::runtime_error("factory");
+  if (factory_mode==3) throw 42;
+  if (factory_mode==4) return nullptr;
+  auto* v = new std::vector<int>{10,20,30}; owned = v; buffer = v->data(); return v;
+}
+extern "C" void vector_factory_mode(int mode) noexcept { factory_mode = mode; }
+extern "C" int vector_releases() noexcept { return releases; }
+extern "C" int vector_buffer_releases() noexcept { return buffer_releases; }
+    """)
+    let library = path "libvecfixture.so"
+    run "/usr/bin/clang++" [ "-std=c++17"; "-shared"; "-fPIC"; path "vecfixture.cpp"; "-o"; library ] |> ignore
+    let inventory = CppClassAnalysis.inspectTemplateInventory library []
+    let matched, build = CppClassAnalysis.requireInstantiation inventory "std::vector" ["int"; "std::allocator<int>"] None
+    Assert.Equal("std::vector<int,std::allocator<int>>", matched.InstantiationName)
+    Assert.Equal(library, build.LibraryPath)
+    Assert.NotEmpty(matched.MangledSymbols)
+    containerRefusal Diagnostics.CppTemplateInstantiationMissing (fun () ->
+        CppClassAnalysis.validateTemplateContainerContract inventory { vectorSpec with ElementType = "double"; ElementClefType = "float" })
+    let ctx = FidelityCodeGenerator.buildGenerationContext [] Types.LP64 Map.empty
+    File.WriteAllText(path "Containers.clef", FidelityCodeGenerator.generateCppTemplateContainerModule ctx inventory vectorSpec)
+    File.WriteAllText(path "shim.cpp", CppClassAnalysis.renderCppTemplateContainerShimC (path "vecfixture.hpp") inventory vectorSpec)
+    File.WriteAllText(path "runner.cpp", """
+#include "vecfixture.hpp"
+#include <cstdio>
+extern "C" void* farscape_cpp_container_IntVector_acquire() noexcept;
+extern "C" void farscape_cpp_container_IntVector_release(void*) noexcept;
+extern "C" int farscape_cpp_container_IntVector_size(int*,void*) noexcept;
+extern "C" int farscape_cpp_container_IntVector_get(int*,void*,int) noexcept;
+extern "C" int farscape_cpp_container_IntVector_iter_next(int*,int*,void*) noexcept;
+#define CHECK(x) do { if (!(x)) { std::fprintf(stderr,"check failed at %d: %s\n",__LINE__,#x); return 1; } } while (false)
+int main() {
+  for (int mode : {1,2,3,4}) { vector_factory_mode(mode); CHECK(!farscape_cpp_container_IntVector_acquire()); }
+  vector_factory_mode(0);
+  auto* h = farscape_cpp_container_IntVector_acquire(); CHECK(h);
+  int size=-99, value=-99, index=0;
+  CHECK(farscape_cpp_container_IntVector_size(&size,h)==0 && size==3);
+  CHECK(farscape_cpp_container_IntVector_size(nullptr,h)==-1);
+  CHECK(farscape_cpp_container_IntVector_size(&size,nullptr)==-1 && size==3);
+  for (int i=0;i<3;++i) CHECK(farscape_cpp_container_IntVector_get(&value,h,i)==0 && value==(i+1)*10);
+  for (int i : {-1,3,99}) { value=-99; CHECK(farscape_cpp_container_IntVector_get(&value,h,i)==4 && value==-99); }
+  CHECK(farscape_cpp_container_IntVector_get(nullptr,h,0)==-1);
+  CHECK(farscape_cpp_container_IntVector_get(&value,nullptr,0)==-1);
+  for (int i=0;i<3;++i) CHECK(farscape_cpp_container_IntVector_iter_next(&value,&index,h)==0 && value==(i+1)*10 && index==i+1);
+  value=-99; CHECK(farscape_cpp_container_IntVector_iter_next(&value,&index,h)==4 && value==-99 && index==3);
+  index=-1; CHECK(farscape_cpp_container_IntVector_iter_next(&value,&index,h)==4 && index==-1);
+  CHECK(farscape_cpp_container_IntVector_iter_next(nullptr,&index,h)==-1);
+  CHECK(farscape_cpp_container_IntVector_iter_next(&value,nullptr,h)==-1);
+  CHECK(farscape_cpp_container_IntVector_iter_next(&value,&index,nullptr)==-1);
+  CHECK(vector_releases()==0);
+  farscape_cpp_container_IntVector_release(h);
+  CHECK(vector_releases()==1 && vector_buffer_releases()==1);
+  farscape_cpp_container_IntVector_release(nullptr); CHECK(vector_releases()==1 && vector_buffer_releases()==1);
+  std::puts("container-native-ok size=3 values=10,20,30 bounds=4 releases=1");
+}
+    """)
+    let runner = path "runner"
+    run "/usr/bin/clang++" [ "-std=c++17"; path "shim.cpp"; path "runner.cpp"; "-L" + directory; "-lvecfixture"; "-Wl,-rpath,$ORIGIN"; "-o"; runner ] |> ignore
+    let result = run runner []
+    File.WriteAllText(path "native-result.txt", result)
+    Assert.Contains("container-native-ok size=3 values=10,20,30 bounds=4 releases=1", result)

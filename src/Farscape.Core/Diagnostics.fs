@@ -490,6 +490,9 @@ module Diagnostics =
     [<Literal>]
     let CppObjectDoubleRelease = "FS9218" // marshaled C++ object's D1 release called more than once (#115)
 
+    [<Literal>]
+    let CppContainerOutOfRange = "FS9219" // template container access out of range or invalid container operation contract (#120)
+
     // =========================================================================
     // Structured diagnostics (#184)
     // =========================================================================
