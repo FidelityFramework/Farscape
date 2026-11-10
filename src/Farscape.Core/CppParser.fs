@@ -2940,9 +2940,53 @@ module CppParser =
     // Public API
     // =========================================================================
 
+    /// A header template declaration is evidence of a recipe, never of an exported ABI.
+    type TemplateDeclaration = {
+        TemplateName: string
+        Kind: string
+        Location: Diagnostics.Located<Diagnostics.SourceLocation>
+    }
+
+    let private templateDeclarations (header: string) (root: JsonValue) =
+        let files = System.Collections.Generic.Dictionary<string, (byte[] * int[]) option>()
+        let mutable currentFile = None
+        let rec walk scope node = [
+            match getObject node "loc" |> Option.bind (fun loc -> getString loc "file") with
+            | Some path -> currentFile <- Some (Path.GetFullPath path)
+            | None -> ()
+            let kind = getStringOr node "kind" ""
+            let name = getStringOr node "name" ""
+            let named = name <> "" && not (getBool node "isImplicit")
+            let template =
+                List.contains kind ["ClassTemplateDecl"; "FunctionTemplateDecl"; "ClassTemplateSpecializationDecl"]
+            if template && named && currentFile = Some (Path.GetFullPath header) then
+                yield {
+                    TemplateName = String.concat "::" (scope @ [name])
+                    Kind = kind
+                    Location = (nodeProvenance files currentFile node).Location
+                }
+            // Function bodies, anonymous scopes and specialization bodies cannot supply
+            // an unambiguous qualified primary-template name.
+            if kind = "TranslationUnitDecl" || kind = "LinkageSpecDecl" then
+                for child in getArray node "inner" do yield! walk scope child
+            elif named && List.contains kind ["NamespaceDecl"; "CXXRecordDecl"; "RecordDecl"; "ClassTemplateDecl"] then
+                let nested = scope @ [name]
+                for child in getArray node "inner" do
+                    if template && getStringOr child "name" "" = name && getStringOr child "kind" "" = "CXXRecordDecl" then
+                        for memberNode in getArray child "inner" do yield! walk nested memberNode
+                    else
+                        yield! walk nested child
+        ]
+        walk [] root |> List.distinctBy (fun declaration -> declaration.TemplateName, declaration.Kind)
+
+    /// Read template recipes from clang JSON without treating them as binary instantiations.
+    let templateDeclarationsOfAst (header: string) (astJson: string) =
+        templateDeclarations header (JsonValue.Parse astJson)
+
     /// Result of parsing containing both AST declarations and macros
     type ParseResult = {
         Declarations: Declaration list
+        Templates: TemplateDeclaration list
         Macros: MacroDecl list
         /// Typedefs and enums (enums measured in this unit) the header's own parse reaches
         /// through includes outside the library boundary; facts for resolving this unit's
@@ -3031,6 +3075,7 @@ module CppParser =
 
                     Ok {
                         Declarations = declarations
+                        Templates = templateDeclarations options.HeaderFile root
                         Macros = macros
                         Included = included
                         Aliases = measureResultAliases options declarations included

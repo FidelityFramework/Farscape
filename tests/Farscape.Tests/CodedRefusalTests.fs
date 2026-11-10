@@ -298,3 +298,217 @@ let ``an abi_critical_structs entry naming another record kind is refused at the
     match d.Source with
     | Diagnostics.Located.Known { Path = path } -> Assert.Equal(header, path)
     | other -> failwithf "the record's location is missing: %A" other
+
+// #118: an AST template recipe never authorizes an absent binary instantiation.
+let private xrtLibrary = "/usr/lib/libxrt_coreutil.so"
+let private patchTemplate = "xrt::module_elf::patch_it_impl"
+let private holderTemplate = "xrt::queue::event::event_holder"
+let private patchSymbol = "_ZN3xrt10module_elf13patch_it_implINS_2boEEEbT_RKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEEmmN8xrt_core7patcher8buf_typeEjb"
+let private holderSymbols = [
+    "_ZN3xrt5queue5event12event_holderIvED1Ev"
+    "_ZN3xrt5queue5event12event_holderIvED2Ev"
+]
+let private xrtInventory = lazy (CppClassAnalysis.inspectTemplateInventory xrtLibrary [])
+
+[<Fact>]
+let xrtInventoryAndPositiveResolution () =
+    let inventory = xrtInventory.Value
+    Assert.Equal(xrtLibrary, inventory.Build.LibraryPath)
+    Assert.Equal("/usr/lib/libxrt_coreutil.so.2.21.75", inventory.Build.ResolvedPath)
+    Assert.Matches("^[0-9a-f]{64}$", inventory.Build.Sha256)
+    Assert.Equal(ClangToolchain.sha256 inventory.Build.ResolvedPath, inventory.Build.Sha256)
+    Assert.Equal(Some "libxrt_coreutil.so.2", inventory.Build.Soname)
+    for name, arguments, expected in [
+        patchTemplate, ["xrt::bo"], [patchSymbol]
+        holderTemplate, ["void"], holderSymbols
+    ] do
+        let matched, build = CppClassAnalysis.requireInstantiation inventory name arguments None
+        Assert.Equal(inventory.Build, build)
+        Assert.Equal(name, matched.TemplateName)
+        Assert.Equal<string list>(arguments, matched.TemplateArguments)
+        for symbol in expected do Assert.Contains(symbol, matched.MangledSymbols)
+        Assert.Equal<string list>(List.sort matched.MangledSymbols, matched.MangledSymbols)
+        Assert.Equal(matched.MangledSymbols.Length, matched.DemangledSymbols.Length)
+        Assert.False(matched.AstDeclared)
+
+[<Fact>]
+let missingXrtInstantiationHasExactCodedRefusal () =
+    let inventory = xrtInventory.Value
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+        CppClassAnalysis.requireInstantiation inventory patchTemplate ["int"] None |> ignore)
+    let d = Assert.Single(error.Refusal.Diagnostics)
+    Assert.Equal("FS9215", d.Code)
+    Assert.Equal(Diagnostics.CppTemplateInstantiationMissing, d.Code)
+    Assert.Equal(
+        $"C++ template instantiation 'xrt::module_elf::patch_it_impl<int>' is not exported by library build '/usr/lib/libxrt_coreutil.so (libxrt_coreutil.so.2)' (SHA-256 {inventory.Build.Sha256}).",
+        d.Message)
+
+let private withTemplateHeader action =
+    let directory = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "artifacts", "pilot-fixture-tests", System.Guid.NewGuid().ToString("N")))
+    Directory.CreateDirectory directory |> ignore
+    try
+        let header = Path.Combine(directory, "templates.hpp")
+        File.WriteAllText(header, "namespace xrt {\nclass bo;\nclass module_elf {\npublic:\n  template<class T> bool patch_it_impl(T value);\n};\nnamespace queue { namespace event {\ntemplate<class T> struct event_holder {};\ntemplate<> struct event_holder<void> {};\n}}\ntemplate<class T> int unexported(T);\n}\n")
+        action directory header
+    finally
+        Directory.Delete(directory, true)
+
+[<Fact>]
+let clangRecipesAnnotateExportsAndRefuseAbsentInstantiationAtHeaderLocation () =
+    withTemplateHeader (fun _ header ->
+        let options = { CppParser.defaultOptions header with CppMode = true; IncludeMacros = false }
+        let parsed = CppParser.parseHeaderFull options |> Result.defaultWith failwith
+        for kind in ["ClassTemplateDecl"; "FunctionTemplateDecl"; "ClassTemplateSpecializationDecl"] do
+            Assert.Contains(parsed.Templates, fun declaration -> declaration.Kind = kind)
+        let inventory = CppClassAnalysis.inspectTemplateInventory xrtLibrary parsed.Templates
+        let matched, _ = CppClassAnalysis.requireInstantiation inventory patchTemplate ["xrt::bo"] None
+        Assert.True(matched.AstDeclared)
+        let holder, _ = CppClassAnalysis.requireInstantiation inventory holderTemplate ["void"] None
+        Assert.True(holder.AstDeclared)
+        let declaration = parsed.Templates |> List.find (fun declaration -> declaration.TemplateName = patchTemplate)
+        let location = declaration.Location
+        match location with
+        | Diagnostics.Located.Known source ->
+            Assert.Equal(header, source.Path)
+            Assert.Equal(Diagnostics.Located.Known ({ Line = 5; Column = 26 }: Diagnostics.SourcePosition), source.Position)
+        | Diagnostics.Located.Unknown reason -> failwith reason
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            CppClassAnalysis.requireInstantiation inventory patchTemplate ["int"] (Some location) |> ignore)
+        let d = Assert.Single(error.Refusal.Diagnostics)
+        Assert.Equal(Diagnostics.CppTemplateInstantiationMissing, d.Code)
+        Assert.Equal(location, d.Source)
+        Assert.Equal(
+            $"C++ template instantiation 'xrt::module_elf::patch_it_impl<int>' is not exported by library build '/usr/lib/libxrt_coreutil.so (libxrt_coreutil.so.2)' (SHA-256 {inventory.Build.Sha256}). The template is declared in the header AST, but this instantiation is not exported by the binary.",
+            d.Message)
+        let inferred = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            CppClassAnalysis.requireInstantiation inventory patchTemplate ["int"] None |> ignore)
+        Assert.Equal(location, (Assert.Single inferred.Refusal.Diagnostics).Source))
+
+let private syntheticBuild : CppClassAnalysis.CppLibraryBuild =
+    { LibraryPath = "fixture.a"; ResolvedPath = "/fixture.a"; Sha256 = String.replicate 64 "a"; Soname = None }
+
+[<Fact>]
+let nestedArgumentsAndConstructorDestructorRttiGrouping () =
+    let signature = "demo::box<std::pair<int, long>, void (*)(int, int)>::"
+    let symbols = [
+        "_Zfixture2", signature + "~box()"
+        "_Zfixture1", signature + "box()"
+        "_Zfixture3", "vtable for demo::box<std::pair<int, long>, void (*)(int, int)>"
+        "_Zfixture4", "typeinfo for demo::box<std::pair<int, long>, void (*)(int, int)>"
+    ]
+    let inventory = CppClassAnalysis.inventoryOfSymbols syntheticBuild [] (symbols @ symbols)
+    let matched = Assert.Single inventory.Instantiations
+    Assert.Equal("demo::box", matched.TemplateName)
+    Assert.Equal<string list>(["std::pair<int,long>"; "void (*)(int,int)"], matched.TemplateArguments)
+    Assert.Equal<string list>(["_Zfixture1"; "_Zfixture2"; "_Zfixture3"; "_Zfixture4"], matched.MangledSymbols)
+    Assert.Equal<string list>(symbols |> List.sortBy fst |> List.map snd, matched.DemangledSymbols)
+
+[<Fact>]
+let parameterAndReturnTemplatesAreNotExports () =
+    let inventory = CppClassAnalysis.inventoryOfSymbols syntheticBuild [] [
+        "_Zplain", "std::vector<int> demo::plain(std::vector<long>)"
+        "_Ztemplated", "std::vector<int> demo::work<void>(std::vector<long>)"
+        "c_name", "demo::fake<int>()"
+    ]
+    let matched = Assert.Single inventory.Instantiations
+    Assert.Equal("demo::work<void>", matched.InstantiationName)
+    for name, args in ["std::vector", ["int"]; "std::vector", ["long"]; "demo::fake", ["int"]] do
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            CppClassAnalysis.requireInstantiation inventory name args None |> ignore)
+        Assert.Equal("FS9215", (Assert.Single error.Refusal.Diagnostics).Code)
+
+[<Fact>]
+let exportOrderingAndSpacingDoNotChangeResolution () =
+    let exports = [
+        "_Zb", "bool demo::work<std::pair<int, long> >(int)"
+        "_Za", "bool demo::work<std::pair<int, long> >(long)"
+    ]
+    let a = CppClassAnalysis.inventoryOfSymbols syntheticBuild [] exports
+    let b = CppClassAnalysis.inventoryOfSymbols syntheticBuild [] (List.rev exports)
+    Assert.Equal(a, b)
+    let matched, provenance = CppClassAnalysis.requireInstantiation a "demo::work" ["std::pair< int , long >"] None
+    Assert.Equal(syntheticBuild, provenance)
+    Assert.Equal<string list>(["_Za"; "_Zb"], matched.MangledSymbols)
+
+let private runTemplateFixtureTool program arguments =
+    use child = new System.Diagnostics.Process(StartInfo = ProcessLaunch.startInfo program arguments)
+    Assert.True(child.Start())
+    let output = child.StandardOutput.ReadToEndAsync()
+    let errors = child.StandardError.ReadToEndAsync()
+    child.WaitForExit()
+    let output, errors = output.Result, errors.Result
+    Assert.True(child.ExitCode = 0, errors)
+    output
+
+[<Fact>]
+let sharedAndArchiveInventoriesExcludeUndefinedAndSharedHiddenSymbols () =
+    withTemplateHeader (fun directory _ ->
+        let source = Path.Combine(directory, "exports.cpp")
+        File.WriteAllText(source, "\nnamespace demo {\ntemplate<class T> int present(T) { return sizeof(T); }\ntemplate int present<int>(int);\ntemplate<class T> __attribute__((visibility(\"hidden\"))) int hidden(T) { return sizeof(T); }\ntemplate int hidden<int>(int);\ntemplate<class T> int absent(T);\nint call() { return absent<long>(1); }\n}\n")
+        let objectFile = Path.Combine(directory, "exports.o")
+        let shared = Path.Combine(directory, "exports.so")
+        let archive = Path.Combine(directory, "exports.a")
+        runTemplateFixtureTool "/usr/bin/clang" ["-x"; "c++"; "-fPIC"; "-c"; source; "-o"; objectFile] |> ignore
+        runTemplateFixtureTool "/usr/bin/clang" ["-shared"; objectFile; "-Wl,-soname,fixture.so.1"; "-o"; shared] |> ignore
+        runTemplateFixtureTool "ar" ["rcs"; archive; objectFile] |> ignore
+        let inventory = CppClassAnalysis.inspectTemplateInventory shared []
+        let matched = Assert.Single inventory.Instantiations
+        Assert.Equal("demo::present<int>", matched.InstantiationName)
+        Assert.Equal(Some "fixture.so.1", inventory.Build.Soname)
+        let nm = runTemplateFixtureTool "nm" ["-D"; "--defined-only"; "--format=posix"; shared]
+        let exported =
+            nm.Split('\n') |> Array.filter (fun line -> line.StartsWith("_Z") && line.Contains("present"))
+            |> Array.map (fun line -> line.Split(' ').[0]) |> Array.sort |> Array.toList
+        Assert.Equal<string list>(exported, matched.MangledSymbols)
+        let staticInventory = CppClassAnalysis.inspectTemplateInventory archive []
+        Assert.Equal(None, staticInventory.Build.Soname)
+        Assert.Contains(staticInventory.Instantiations, fun entry -> entry.InstantiationName = "demo::present<int>")
+        Assert.DoesNotContain(staticInventory.Instantiations, fun entry -> entry.InstantiationName = "demo::absent<long>")
+        let missing = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            CppClassAnalysis.requireInstantiation staticInventory "demo::absent" ["long"] None |> ignore)
+        Assert.Equal("FS9215", (Assert.Single missing.Refusal.Diagnostics).Code))
+
+[<Fact>]
+let realXrtTemplateSymbolSetsMatchIndependentNmObservation () =
+    let nm = runTemplateFixtureTool "nm" ["-D"; "--defined-only"; "--format=posix"; xrtLibrary]
+    let symbols =
+        nm.Split('\n')
+        |> Array.filter (fun line ->
+            line.StartsWith("_Z") &&
+            System.Text.RegularExpressions.Regex.IsMatch(line, "^_Z(NK?3xrt5queue5event12event_holderIvE|T[VIS]N3xrt5queue5event12event_holderIvE|N3xrt10module_elf13patch_it_implINS_2boEE)"))
+        |> Array.map (fun line -> line.Split(' ').[0])
+        |> Array.sort |> Array.toList
+    let inventory = xrtInventory.Value
+    let actual =
+        inventory.Instantiations
+        |> List.filter (fun entry ->
+            entry.InstantiationName = patchTemplate + "<xrt::bo>" || entry.InstantiationName = holderTemplate + "<void>")
+        |> List.collect _.MangledSymbols |> List.sort
+    Assert.NotEmpty(symbols)
+    Assert.Equal<string list>(symbols, actual)
+
+[<Fact>]
+let removingExportCannotBeRepairedByAnAstRecipe () =
+    withTemplateHeader (fun _ header ->
+        let parsed = CppParser.parseHeaderFull { CppParser.defaultOptions header with CppMode = true; IncludeMacros = false }
+                     |> Result.defaultWith failwith
+        let inventory = CppClassAnalysis.inventoryOfSymbols syntheticBuild parsed.Templates []
+        Assert.Empty(inventory.Instantiations)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            CppClassAnalysis.requireInstantiation inventory patchTemplate ["xrt::bo"] None |> ignore)
+        let d = Assert.Single error.Refusal.Diagnostics
+        Assert.Equal("FS9215", d.Code)
+        Assert.Contains("declared in the header AST", d.Message))
+
+[<Fact>]
+let templateOperatorsAndConversionTargetsKeepTheirOwningIdentity () =
+    let inventory = CppClassAnalysis.inventoryOfSymbols syntheticBuild [] [
+        "_Zcall", "bool demo::box<int>::operator()<long>(long)"
+        "_Zshift", "bool demo::operator<< <int>(int)"
+        "_Zconvert", "demo::box<int>::operator std::vector<long>() const"
+    ]
+    Assert.Contains(inventory.Instantiations, fun entry -> entry.InstantiationName = "demo::box<int>::operator()<long>")
+    Assert.Contains(inventory.Instantiations, fun entry -> entry.InstantiationName = "demo::operator<<<int>")
+    Assert.DoesNotContain(inventory.Instantiations, fun entry -> entry.TemplateName = "std::vector")
+    let owner = inventory.Instantiations |> List.find (fun entry -> entry.InstantiationName = "demo::box<int>")
+    Assert.Equal<string list>(["_Zcall"; "_Zconvert"], owner.MangledSymbols)

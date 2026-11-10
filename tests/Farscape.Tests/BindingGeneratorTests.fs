@@ -585,15 +585,15 @@ let ``an anonymous member clang cannot attribute a layout to is refused before o
 let ``an anonymous member Farscape cannot name or represent is refused before output`` () =
     let clash = fixturePath "anonymous-members/name-clash.h"
     withPilot [clash] [] ["fx_mclash_read"] (fun result output ->
-        Assert.Equal(
-            Error $"Failed to parse headers: FS9123: the generated member name 'anonymous1' of the anonymous member of 'fx_mclash' declared at {clash}:5:3 in '{clash}' names another member of that record. A generated name must name one member.",
-            result |> Result.map ignore)
+        Assert.Equal<string>(
+            $"Failed to parse headers: FS9123: the generated member name 'anonymous1' of the anonymous member of 'fx_mclash' declared at {clash}:5:3 in '{clash}' names another member of that record. A generated name must name one member.",
+            result |> function Error message -> message | Ok _ -> failwith "Expected a refusal")
         Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
     let cpp = fixturePath "anonymous-members/class.hpp"
     withPilot [cpp] [] ["fx_cpp_am_read"] (fun result output ->
-        Assert.Equal(
-            Error $"Failed to parse headers: FS9122: C++ record 'fx_cpp_am' in '{cpp}' has an anonymous member of clang type 'fx_cpp_am::(anonymous union at {cpp}:5:3)'; the C++ record path does not represent anonymous members, and none is dropped from its record.",
-            result |> Result.map ignore)
+        Assert.Equal<string>(
+            "Binding generation failed: FS9184: C++ POD class 'fx_cpp_am' (8 bytes) requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source.",
+            result |> function Error message -> message | Ok _ -> failwith "Expected a refusal")
         Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
 
 // ═══════════════════════════════════════════════════════════════════

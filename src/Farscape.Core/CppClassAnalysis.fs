@@ -229,3 +229,219 @@ module CppClassAnalysis =
             | _ -> ()
         decls |> List.iter collect
         map
+
+    /// Identity of the exact artifact whose exported symbols were inspected (#118).
+    type CppLibraryBuild = {
+        LibraryPath: string
+        ResolvedPath: string
+        Sha256: string
+        Soname: string option
+    }
+
+    type CppTemplateInstantiation = {
+        TemplateName: string
+        TemplateArguments: string list
+        InstantiationName: string
+        /// Parallel lists, ordered by mangled symbol; signatures remain paired.
+        MangledSymbols: string list
+        DemangledSymbols: string list
+        AstDeclared: bool
+    }
+
+    type CppTemplateInventory = {
+        Build: CppLibraryBuild
+        Instantiations: CppTemplateInstantiation list
+        Declarations: CppParser.TemplateDeclaration list
+    }
+
+    /// Normalize spelling only, never aliases or semantically different C++ types.
+    let private normalize (text: string) =
+        System.Text.RegularExpressions.Regex.Replace(text.Trim(), @"\s+", " ")
+        |> fun text -> System.Text.RegularExpressions.Regex.Replace(text, @"\s*([<>,])\s*", "$1")
+
+    let instantiationName templateName arguments =
+        normalize templateName + "<" + (arguments |> List.map normalize |> String.concat ",") + ">"
+
+    /// Split only at the outer argument-list level, including function/array arguments.
+    let private splitArguments (text: string) =
+        let mutable angles, parentheses, brackets = 0, 0, 0
+        let mutable start = 0
+        [
+            for i in 0 .. text.Length - 1 do
+                match text.[i] with
+                | '<' -> angles <- angles + 1
+                | '>' -> angles <- angles - 1
+                | '(' -> parentheses <- parentheses + 1
+                | ')' -> parentheses <- parentheses - 1
+                | '[' -> brackets <- brackets + 1
+                | ']' -> brackets <- brackets - 1
+                | ',' when angles = 0 && parentheses = 0 && brackets = 0 ->
+                    yield normalize text.[start .. i - 1]
+                    start <- i + 1
+                | _ -> ()
+            if start < text.Length then yield normalize text.[start ..]
+        ]
+
+    /// Only templates in the symbol's own qualified name count. Return types and parameter
+    /// types mentioning a template do not export that template's operations.
+    let private symbolInstantiations (signature: string) =
+        let prefixes = [
+            "non-virtual thunk to "; "virtual thunk to "; "covariant return thunk to "
+            "vtable for "; "VTT for "; "typeinfo for "; "typeinfo name for "; "guard variable for "
+        ]
+        let signature =
+            prefixes |> List.fold (fun (text: string) prefix ->
+                if text.StartsWith(prefix, System.StringComparison.Ordinal) then text.Substring prefix.Length else text) signature
+        let mutable depth, nameStart, finish = 0, 0, signature.Length
+        let mutable operatorStart = -1
+        let operatorAngle (text: string) index operatorIndex =
+            operatorIndex >= 0 &&
+            (text.Substring(operatorIndex + 8, index - operatorIndex - 8)
+             |> Seq.forall (fun c -> "<>=!+-*/%^&|~".Contains c))
+        let mutable i = 0
+        while i < finish do
+            if depth = 0 && signature.Substring(i).StartsWith("operator", System.StringComparison.Ordinal) then
+                operatorStart <- i
+            match signature.[i] with
+            | '<' when not (operatorAngle signature i operatorStart) -> depth <- depth + 1
+            | '>' when depth > 0 -> depth <- depth - 1
+            | '(' when depth = 0 && operatorStart >= 0 && i = operatorStart + 8
+                       && i + 1 < signature.Length && signature.[i + 1] = ')' -> i <- i + 1
+            | '(' when depth = 0 -> finish <- i
+            | c when System.Char.IsWhiteSpace c && depth = 0 && operatorStart < 0 -> nameStart <- i + 1
+            | _ -> ()
+            i <- i + 1
+        let name = signature.Substring(nameStart, finish - nameStart)
+        let mutable opening = -1
+        operatorStart <- -1
+        depth <- 0
+        [
+            for i in 0 .. name.Length - 1 do
+                if depth = 0 && name.Substring(i).StartsWith("operator", System.StringComparison.Ordinal) then
+                    operatorStart <- i
+                match name.[i] with
+                | '<' when not (operatorAngle name i operatorStart)
+                           && not (operatorStart >= 0 && name.[operatorStart + 8] = ' ') ->
+                    if depth = 0 then opening <- i
+                    depth <- depth + 1
+                | '>' when depth > 0 ->
+                    depth <- depth - 1
+                    if depth = 0 then
+                        let templateName = normalize name.[0 .. opening - 1]
+                        let arguments = splitArguments name.[opening + 1 .. i - 1]
+                        yield templateName, arguments
+                | _ -> ()
+        ]
+
+    /// Pure symbol-to-inventory join. AST recipes annotate exports; they never add exports.
+    let inventoryOfSymbols (build: CppLibraryBuild) (declarations: CppParser.TemplateDeclaration list)
+                           (symbols: (string * string) list) : CppTemplateInventory =
+        let declared = declarations |> List.map _.TemplateName |> Set.ofList
+        let instantiations =
+            symbols
+            |> List.filter (fun (mangled, demangled) -> mangled.StartsWith("_Z", System.StringComparison.Ordinal) && demangled <> mangled)
+            |> List.collect (fun (mangled, demangled) ->
+                symbolInstantiations demangled |> List.map (fun identity -> identity, (mangled, demangled)))
+            |> List.groupBy fst
+            |> List.map (fun ((name, arguments), entries) ->
+                let pairs = entries |> List.map snd |> List.distinct |> List.sortBy fst
+                {
+                    TemplateName = name
+                    TemplateArguments = arguments
+                    InstantiationName = instantiationName name arguments
+                    MangledSymbols = pairs |> List.map fst
+                    DemangledSymbols = pairs |> List.map snd
+                    AstDeclared = Set.contains name declared
+                })
+            |> List.sortBy _.InstantiationName
+        { Build = build; Instantiations = instantiations; Declarations = declarations }
+
+    let private runSymbolTool program arguments (input: string option) =
+        let info = ProcessLaunch.startInfo program arguments
+        info.Environment.["LC_ALL"] <- "C"
+        info.RedirectStandardInput <- input.IsSome
+        use child = new System.Diagnostics.Process(StartInfo = info)
+        if not (child.Start()) then invalidOp $"Could not start {program}."
+        let output = child.StandardOutput.ReadToEndAsync()
+        let errors = child.StandardError.ReadToEndAsync()
+        match input with
+        | Some text ->
+            child.StandardInput.Write text
+            child.StandardInput.Close()
+        | None -> ()
+        child.WaitForExit()
+        let output = output.GetAwaiter().GetResult()
+        let errors = errors.GetAwaiter().GetResult()
+        if child.ExitCode <> 0 then invalidOp $"{program} failed ({child.ExitCode}): {errors.Trim()}"
+        output
+
+    /// Inspect one ELF shared object or static archive. Tool failures are loud, with no
+    /// replacement tool, header-only instantiation, or synthesized wrapper.
+    let inspectTemplateInventory (libraryPath: string) (declarations: CppParser.TemplateDeclaration list) =
+        let file = System.IO.FileInfo(System.IO.Path.GetFullPath libraryPath)
+        let resolved =
+            match file.ResolveLinkTarget true with
+            | null -> file.FullName
+            | target -> target.FullName
+        let hash = ClangToolchain.sha256 resolved
+        let archive =
+            use stream = System.IO.File.OpenRead resolved
+            let magic = Array.zeroCreate<byte> 8
+            stream.ReadExactly magic
+            List.contains (System.Text.Encoding.ASCII.GetString magic) ["!<arch>\n"; "!<thin>\n"]
+        let lines (text: string) = text.Split('\n', System.StringSplitOptions.RemoveEmptyEntries) |> Array.toList
+        let soname, symbols =
+            if archive then
+                let output = runSymbolTool "nm" ["--extern-only"; "--defined-only"; "--format=posix"; "--"; resolved] None
+                None,
+                (lines output |> List.choose (fun line ->
+                    let columns = line.Split([|' '; '\t'|], System.StringSplitOptions.RemoveEmptyEntries)
+                    if columns.Length >= 2 && columns.[0].StartsWith("_Z") then Some columns.[0] else None))
+            else
+                let dynamic = runSymbolTool "readelf" ["-d"; "--wide"; "--"; resolved] None
+                let soname =
+                    lines dynamic |> List.tryPick (fun line ->
+                        if line.Contains("(SONAME)") then
+                            let opening, closing = line.IndexOf('['), line.LastIndexOf(']')
+                            if opening >= 0 && closing > opening then Some (line.Substring(opening + 1, closing - opening - 1)) else None
+                        else None)
+                let output = runSymbolTool "readelf" ["--dyn-syms"; "--wide"; "--"; resolved] None
+                soname,
+                (lines output |> List.choose (fun line ->
+                    let columns = line.Split([|' '; '\t'|], System.StringSplitOptions.RemoveEmptyEntries)
+                    if columns.Length >= 8
+                       && List.contains columns.[4] ["GLOBAL"; "WEAK"; "UNIQUE"]
+                       && List.contains columns.[5] ["DEFAULT"; "PROTECTED"]
+                       && columns.[6] <> "UND"
+                       && columns.[7].StartsWith("_Z") then
+                        Some (columns.[7].Split('@').[0])
+                    else None))
+        let symbols = symbols |> List.distinct |> List.sort
+        let demangled =
+            if symbols.IsEmpty then []
+            else runSymbolTool "c++filt" ["--no-strip-underscore"] (Some (String.concat "\n" symbols + "\n")) |> lines
+        if symbols.Length <> demangled.Length then invalidOp "c++filt did not return one signature per exported symbol."
+        if ClangToolchain.sha256 resolved <> hash then invalidOp $"Library artifact changed while inspecting '{libraryPath}'."
+        inventoryOfSymbols
+            { LibraryPath = libraryPath; ResolvedPath = resolved; Sha256 = hash; Soname = soname }
+            declarations (List.zip symbols demangled)
+
+    /// Resolve only an exported instantiation and return its exact build provenance.
+    let requireInstantiation (inventory: CppTemplateInventory) templateName arguments source =
+        let name = instantiationName templateName arguments
+        match inventory.Instantiations |> List.tryFind (fun candidate -> candidate.InstantiationName = name) with
+        | Some matched -> matched, inventory.Build
+        | None ->
+            let declaration = inventory.Declarations |> List.tryFind (fun declaration -> declaration.TemplateName = normalize templateName)
+            let library =
+                inventory.Build.LibraryPath
+                + (inventory.Build.Soname |> Option.map (fun soname -> $" ({soname})") |> Option.defaultValue "")
+            let note =
+                if declaration.IsSome then " The template is declared in the header AST, but this instantiation is not exported by the binary."
+                else ""
+            let source =
+                source
+                |> Option.orElseWith (fun () -> declaration |> Option.map _.Location)
+                |> Option.defaultValue (Diagnostics.Located.Unknown "No header source location was supplied for the requested template instantiation.")
+            Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.CppTemplateInstantiationMissing
+                $"C++ template instantiation '{name}' is not exported by library build '{library}' (SHA-256 {inventory.Build.Sha256}).{note}" source)

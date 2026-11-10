@@ -474,6 +474,9 @@ module Diagnostics =
     [<Literal>]
     let CppOpaqueClassUnadmitted = "FS9214" // C++ opaque class without an admitted storage, ownership and method ABI contract (#116)
 
+    [<Literal>]
+    let CppTemplateInstantiationMissing = "FS9215" // requested C++ template instantiation is not exported by the inspected library build (#118)
+
     // =========================================================================
     // Structured diagnostics (#184)
     // =========================================================================

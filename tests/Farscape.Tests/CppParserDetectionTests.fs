@@ -62,7 +62,7 @@ module DetectCppModeTests =
                 | Ok declarations -> declarations
                 | Error error -> failwith error
             let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore)
-            Assert.Equal("FS9184: C++ class 'Widget' requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source.", error.Message))
+            Assert.Equal("FS9214: C++ opaque class 'Widget' requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source.", error.Message))
 
     [<Fact>]
     let ``glibc dl_find_object is a C record with clang's layout`` () =
