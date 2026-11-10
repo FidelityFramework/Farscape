@@ -477,6 +477,9 @@ module Diagnostics =
     [<Literal>]
     let CppTemplateInstantiationMissing = "FS9215" // requested C++ template instantiation is not exported by the inspected library build (#118)
 
+    [<Literal>]
+    let CppAbiFactInvalidOrConflicting = "FS9216" // C++ ABI fact from Plugify is missing, lacks provenance, or conflicts with the inspected library build or clang AST (#119)
+
     // =========================================================================
     // Structured diagnostics (#184)
     // =========================================================================

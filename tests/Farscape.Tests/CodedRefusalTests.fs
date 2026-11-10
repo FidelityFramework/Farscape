@@ -512,3 +512,330 @@ let templateOperatorsAndConversionTargetsKeepTheirOwningIdentity () =
     Assert.DoesNotContain(inventory.Instantiations, fun entry -> entry.TemplateName = "std::vector")
     let owner = inventory.Instantiations |> List.find (fun entry -> entry.InstantiationName = "demo::box<int>")
     Assert.Equal<string list>(["_Zcall"; "_Zconvert"], owner.MangledSymbols)
+
+// ─── Plugify C++ ABI facts with provenance and FS9216 refusal (#119) ───
+
+let private plugifyTool : CppClassAnalysis.CppAbiFactToolProvenance = {
+    ToolName = "plugify"
+    ToolVersion = "0.21.0"
+    ManifestSource = "xrt-coreutil.pplugin.json"
+}
+
+let private withXrtAbiHeader action =
+    let directory = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "artifacts", "pilot-fixture-tests", System.Guid.NewGuid().ToString("N")))
+    Directory.CreateDirectory directory |> ignore
+    try
+        let header = Path.Combine(directory, "xrt_abi_facts.hpp")
+        File.WriteAllText(
+            header,
+            "namespace xrt {\n" +
+            "class bo {\n" +
+            "  void* m_handle;\n" +
+            "public:\n" +
+            "  bo(void* h);\n" +
+            "  ~bo();\n" +
+            "  unsigned long size() const noexcept;\n" +
+            "};\n" +
+            "namespace device {\n" +
+            "class error {\n" +
+            "public:\n" +
+            "  virtual ~error();\n" +
+            "};\n" +
+            "}\n" +
+            "class module_elf {\n" +
+            "public:\n" +
+            "  template<class T> bool patch_it_impl(T value);\n" +
+            "};\n" +
+            "namespace queue { namespace event {\n" +
+            "template<class T> struct event_holder { virtual ~event_holder(); };\n" +
+            "template<> struct event_holder<void> { virtual ~event_holder(); };\n" +
+            "}}\n" +
+            "}\n")
+        action header
+    finally
+        Directory.Delete(directory, true)
+
+[<Fact>]
+let plugifyAbiFactsForRealXrtClassesAndTemplateInstantiationCarryProvenanceAndNeverDischargeProof () =
+    withXrtAbiHeader (fun header ->
+        let parsed =
+            CppParser.parseHeaderFull { CppParser.defaultOptions header with CppMode = true; IncludeMacros = false }
+            |> Result.defaultWith failwith
+        let manifestJson =
+            """{"generator":{"name":"plugify","version":"0.21.0"},"classes":["xrt::bo","xrt::device::error","xrt::queue::event::event_holder<void>"],"templates":[{"template":"xrt::module_elf::patch_it_impl","arguments":["xrt::bo"]},{"template":"xrt::queue::event::event_holder","arguments":["void"]}]}"""
+        let bundle =
+            CppClassAnalysis.generatePlugifyAbiFactsFromManifestJson
+                xrtLibrary
+                "xrt-coreutil.pplugin.json"
+                manifestJson
+                (Some parsed)
+        let validated = CppClassAnalysis.validatePlugifyAbiFacts bundle xrtLibrary (Some parsed)
+        Assert.Equal(bundle, validated)
+        Assert.False(validated.DischargesProofObligations)
+        Assert.Equal(CppClassAnalysis.CallMechanicsOnly_PsgDischargesProof, validated.ProofAuthority)
+        Assert.All(validated.Facts, fun fact ->
+            Assert.False(fact.DischargesProofObligations)
+            Assert.Equal(validated.Provenance, fact.Provenance))
+        Assert.Equal("plugify", validated.Provenance.Tool.ToolName)
+        Assert.Equal("0.21.0", validated.Provenance.Tool.ToolVersion)
+        Assert.StartsWith("xrt-coreutil.pplugin.json#sha256=", validated.Provenance.Tool.ManifestSource)
+        Assert.Equal(xrtLibrary, validated.Provenance.Build.LibraryPath)
+        Assert.Equal("/usr/lib/libxrt_coreutil.so.2.21.75", validated.Provenance.Build.ResolvedPath)
+        Assert.Equal(Some "libxrt_coreutil.so.2", validated.Provenance.Build.Soname)
+        Assert.Equal(ClangToolchain.sha256 validated.Provenance.Build.ResolvedPath, validated.Provenance.Build.Sha256)
+
+        let boRaii =
+            validated.Facts |> List.pick (fun f ->
+                match f.Fact with
+                | CppClassAnalysis.RaiiFact r when r.ClassName = "xrt::bo" -> Some r
+                | _ -> None)
+        Assert.Equal("_ZN3xrt2boD1Ev", boRaii.DestructorSymbol)
+        Assert.Contains("_ZN3xrt2boC1ERKNS_6deviceEmNS0_5flagsEj", boRaii.ConstructorSymbols)
+        Assert.Equal(Some 8, boRaii.StorageSizeBytes)
+
+        let errorVtable =
+            validated.Facts |> List.pick (fun f ->
+                match f.Fact with
+                | CppClassAnalysis.VirtualTableFact vt when vt.ClassName = "xrt::device::error" -> Some vt
+                | _ -> None)
+        Assert.Equal(Some "_ZTVN3xrt6device5errorE", errorVtable.VtableSymbol)
+        Assert.Equal(Some "_ZTIN3xrt6device5errorE", errorVtable.TypeinfoSymbol)
+        Assert.Equal<(int * string * string) list>(
+            [
+                (0, "xrt::device::error::~error", "_ZN3xrt6device5errorD1Ev")
+                (1, "xrt::device::error::~error", "_ZN3xrt6device5errorD0Ev")
+                (2, "xrt::device::error::what", "_ZNK3xrt6device5error4whatEv")
+            ],
+            errorVtable.VirtualMethods)
+
+        let holderVtable =
+            validated.Facts |> List.pick (fun f ->
+                match f.Fact with
+                | CppClassAnalysis.VirtualTableFact vt when vt.ClassName = "xrt::queue::event::event_holder<void>" -> Some vt
+                | _ -> None)
+        Assert.Equal(Some "_ZTVN3xrt5queue5event12event_holderIvEE", holderVtable.VtableSymbol)
+        Assert.Equal(Some "_ZTIN3xrt5queue5event12event_holderIvEE", holderVtable.TypeinfoSymbol)
+        Assert.Equal<(int * string * string) list>(
+            [
+                (0, "xrt::queue::event::event_holder<void>::~event_holder", "_ZN3xrt5queue5event12event_holderIvED1Ev")
+                (1, "xrt::queue::event::event_holder<void>::~event_holder", "_ZN3xrt5queue5event12event_holderIvED0Ev")
+                (2, "xrt::queue::event::event_holder<void>::wait", "_ZNK3xrt5queue5event12event_holderIvE4waitEv")
+            ],
+            holderVtable.VirtualMethods)
+
+        let patchFact =
+            validated.Facts |> List.pick (fun f ->
+                match f.Fact with
+                | CppClassAnalysis.TemplateInstanceFact ti when ti.InstantiationName = "xrt::module_elf::patch_it_impl<xrt::bo>" -> Some ti
+                | _ -> None)
+        Assert.Equal<string list>([patchSymbol], patchFact.MangledSymbols)
+
+        let sizeBoundary =
+            validated.Facts |> List.pick (fun f ->
+                match f.Fact with
+                | CppClassAnalysis.ExceptionBoundaryFact eb when eb.MangledSymbol = "_ZNK3xrt2bo4sizeEv" -> Some eb
+                | _ -> None)
+        Assert.Equal("xrt::bo::size", sizeBoundary.CallableName)
+        Assert.True(sizeBoundary.IsNoExcept))
+
+[<Fact>]
+let plugifyAbiFactsRefuseMissingOrNonPlugifyToolProvenanceWithFS9216 () =
+    for badTool, expectedMessage in [
+        { plugifyTool with ToolName = "manual" }, "C++ ABI fact provenance tool must be 'plugify', got 'manual'."
+        { plugifyTool with ToolVersion = "" }, "C++ ABI fact provenance from Plugify is missing a tool version."
+        { plugifyTool with ManifestSource = "   " }, "C++ ABI fact provenance from Plugify is missing a manifest source."
+    ] do
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            CppClassAnalysis.generatePlugifyAbiFactsFromSymbols syntheticBuild [] badTool None ["xrt::bo"] [] |> ignore)
+        let d = Assert.Single(error.Refusal.Diagnostics)
+        Assert.Equal(Diagnostics.CppAbiFactInvalidOrConflicting, d.Code)
+        Assert.Equal("FS9216", d.Code)
+        Assert.Equal(expectedMessage, d.Message)
+
+[<Fact>]
+let plugifyAbiFactsRefuseConflictingBuildProvenanceAndConflictingOrMissingFactsWithFS9216 () =
+    withXrtAbiHeader (fun header ->
+        let parsed =
+            CppParser.parseHeaderFull { CppParser.defaultOptions header with CppMode = true; IncludeMacros = false }
+            |> Result.defaultWith failwith
+        let bundle =
+            CppClassAnalysis.generatePlugifyAbiFacts
+                xrtLibrary
+                plugifyTool
+                (Some parsed)
+                ["xrt::bo"; "xrt::device::error"]
+                [patchTemplate, ["xrt::bo"]]
+
+        // 1. Conflicting SHA-256 build provenance is refused with FS9216.
+        let tamperedBuild = { bundle.Provenance.Build with Sha256 = String.replicate 64 "0" }
+        let tamperedProvenance = { bundle.Provenance with Build = tamperedBuild }
+        let tamperedBundle = {
+            bundle with
+                Provenance = tamperedProvenance
+                Facts = bundle.Facts |> List.map (fun f -> { f with Provenance = tamperedProvenance })
+        }
+        let errSha = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            CppClassAnalysis.validatePlugifyAbiFacts tamperedBundle xrtLibrary (Some parsed) |> ignore)
+        let dSha = Assert.Single(errSha.Refusal.Diagnostics)
+        Assert.Equal(Diagnostics.CppAbiFactInvalidOrConflicting, dSha.Code)
+        Assert.Contains($"claimed SHA-256 {tamperedBuild.Sha256}, actual SHA-256 {bundle.Provenance.Build.Sha256}", dSha.Message)
+
+        // 2. Conflicting noexcept boundary against clang AST is refused with FS9216.
+        let flippedNoExcept = {
+            bundle with
+                Facts =
+                    bundle.Facts
+                    |> List.map (fun f ->
+                        match f.Fact with
+                        | CppClassAnalysis.ExceptionBoundaryFact eb when eb.MangledSymbol = "_ZNK3xrt2bo4sizeEv" ->
+                            { f with Fact = CppClassAnalysis.ExceptionBoundaryFact { eb with IsNoExcept = false } }
+                        | _ -> f)
+        }
+        let errNoExcept = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            CppClassAnalysis.validatePlugifyAbiFacts flippedNoExcept xrtLibrary (Some parsed) |> ignore)
+        let dNoExcept = Assert.Single(errNoExcept.Refusal.Diagnostics)
+        Assert.Equal(Diagnostics.CppAbiFactInvalidOrConflicting, dNoExcept.Code)
+        Assert.Equal("Plugify exception boundary ABI fact for 'xrt::bo::size' (_ZNK3xrt2bo4sizeEv) claims noexcept=false, which conflicts with clang AST noexcept=true.", dNoExcept.Message)
+
+        // 3. Missing exported destructor symbol on RaiiFact is refused with FS9216.
+        let badRaii = {
+            bundle with
+                Facts =
+                    bundle.Facts
+                    |> List.map (fun f ->
+                        match f.Fact with
+                        | CppClassAnalysis.RaiiFact r when r.ClassName = "xrt::bo" ->
+                            { f with Fact = CppClassAnalysis.RaiiFact { r with DestructorSymbol = "_ZN3xrt2bo_missingD1Ev" } }
+                        | _ -> f)
+        }
+        let errRaii = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            CppClassAnalysis.validatePlugifyAbiFacts badRaii xrtLibrary (Some parsed) |> ignore)
+        let dRaii = Assert.Single(errRaii.Refusal.Diagnostics)
+        Assert.Equal(Diagnostics.CppAbiFactInvalidOrConflicting, dRaii.Code)
+        Assert.Contains("is not an exported complete-object destructor (D1)", dRaii.Message)
+
+        // 4. Missing vtable symbol on VirtualTableFact is refused with FS9216.
+        let badVtable = {
+            bundle with
+                Facts =
+                    bundle.Facts
+                    |> List.map (fun f ->
+                        match f.Fact with
+                        | CppClassAnalysis.VirtualTableFact vt when vt.ClassName = "xrt::device::error" ->
+                            { f with Fact = CppClassAnalysis.VirtualTableFact { vt with VtableSymbol = Some "_ZTVN3xrt6device5error_missingE" } }
+                        | _ -> f)
+        }
+        let errVtable = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            CppClassAnalysis.validatePlugifyAbiFacts badVtable xrtLibrary (Some parsed) |> ignore)
+        let dVtable = Assert.Single(errVtable.Refusal.Diagnostics)
+        Assert.Equal(Diagnostics.CppAbiFactInvalidOrConflicting, dVtable.Code)
+        Assert.Contains("claims vtable symbol '_ZTVN3xrt6device5error_missingE', which is not exported", dVtable.Message)
+
+        // 5. Requesting an absent template instantiation or undeclared AST class in Plugify generation is refused with FS9216.
+        let errMissingTemplate = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            CppClassAnalysis.generatePlugifyAbiFacts xrtLibrary plugifyTool (Some parsed) [] [patchTemplate, ["int"]] |> ignore)
+        let dMissingTemplate = Assert.Single(errMissingTemplate.Refusal.Diagnostics)
+        Assert.Equal(Diagnostics.CppAbiFactInvalidOrConflicting, dMissingTemplate.Code)
+        Assert.Contains("Plugify template ABI fact for 'xrt::module_elf::patch_it_impl<int>' is missing from library build", dMissingTemplate.Message)
+
+        let errUndeclaredClass = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            CppClassAnalysis.generatePlugifyAbiFacts xrtLibrary plugifyTool (Some parsed) ["xrt::undeclared_widget"] [] |> ignore)
+        let dUndeclaredClass = Assert.Single(errUndeclaredClass.Refusal.Diagnostics)
+        Assert.Equal(Diagnostics.CppAbiFactInvalidOrConflicting, dUndeclaredClass.Code)
+        Assert.Equal("C++ class 'xrt::undeclared_widget' is not declared in the parsed header AST.", dUndeclaredClass.Message)
+
+        // 6. Dropping a required VirtualTableFact or RaiiFact or ExceptionBoundaryFact from a non-empty bundle is refused with FS9216.
+        let missingVtableFactBundle = {
+            bundle with
+                Facts =
+                    bundle.Facts
+                    |> List.filter (fun f ->
+                        match f.Fact with
+                        | CppClassAnalysis.VirtualTableFact vt when vt.ClassName = "xrt::device::error" -> false
+                        | _ -> true)
+        }
+        let errMissingVtableFact = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            CppClassAnalysis.validatePlugifyAbiFacts missingVtableFactBundle xrtLibrary (Some parsed) |> ignore)
+        let dMissingVtableFact = Assert.Single(errMissingVtableFact.Refusal.Diagnostics)
+        Assert.Equal(Diagnostics.CppAbiFactInvalidOrConflicting, dMissingVtableFact.Code)
+        Assert.Equal("Plugify ABI fact bundle is incomplete: missing virtual table ABI fact for polymorphic C++ class 'xrt::device::error'.", dMissingVtableFact.Message)
+
+        let missingBoundaryFactBundle = {
+            bundle with
+                Facts =
+                    bundle.Facts
+                    |> List.filter (fun f ->
+                        match f.Fact with
+                        | CppClassAnalysis.ExceptionBoundaryFact eb when eb.MangledSymbol = "_ZN3xrt2boD1Ev" -> false
+                        | _ -> true)
+        }
+        let errMissingBoundaryFact = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            CppClassAnalysis.validatePlugifyAbiFacts missingBoundaryFactBundle xrtLibrary (Some parsed) |> ignore)
+        let dMissingBoundaryFact = Assert.Single(errMissingBoundaryFact.Refusal.Diagnostics)
+        Assert.Equal(Diagnostics.CppAbiFactInvalidOrConflicting, dMissingBoundaryFact.Code)
+        Assert.Equal("Plugify ABI fact bundle is incomplete: missing exception boundary ABI fact for symbol '_ZN3xrt2boD1Ev'.", dMissingBoundaryFact.Message)
+
+        // 7. Reordering or dropping a binary vtable slot on VirtualTableFact is refused with FS9216.
+        let swappedSlotsBundle = {
+            bundle with
+                Facts =
+                    bundle.Facts
+                    |> List.map (fun f ->
+                        match f.Fact with
+                        | CppClassAnalysis.VirtualTableFact vt when vt.ClassName = "xrt::device::error" ->
+                            { f with Fact = CppClassAnalysis.VirtualTableFact { vt with VirtualMethods = [ (0, "xrt::device::error::~error", "_ZN3xrt6device5errorD0Ev") ] } }
+                        | _ -> f)
+        }
+        let errSwappedSlots = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            CppClassAnalysis.validatePlugifyAbiFacts swappedSlotsBundle xrtLibrary (Some parsed) |> ignore)
+        let dSwappedSlots = Assert.Single(errSwappedSlots.Refusal.Diagnostics)
+        Assert.Equal(Diagnostics.CppAbiFactInvalidOrConflicting, dSwappedSlots.Code)
+        Assert.Contains("conflict with binary vtable '_ZTVN3xrt6device5errorE' layout", dSwappedSlots.Message)
+
+        // 8. Omitting VtableSymbol (None) on VirtualTableFact to bypass binary vtable verification is refused with FS9216.
+        let omittedVtableSymBundle = {
+            bundle with
+                Facts =
+                    bundle.Facts
+                    |> List.map (fun f ->
+                        match f.Fact with
+                        | CppClassAnalysis.VirtualTableFact vt when vt.ClassName = "xrt::device::error" ->
+                            { f with Fact = CppClassAnalysis.VirtualTableFact { vt with VtableSymbol = None } }
+                        | _ -> f)
+        }
+        let errOmittedVtableSym = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            CppClassAnalysis.validatePlugifyAbiFacts omittedVtableSymBundle xrtLibrary (Some parsed) |> ignore)
+        let dOmittedVtableSym = Assert.Single(errOmittedVtableSym.Refusal.Diagnostics)
+        Assert.Equal(Diagnostics.CppAbiFactInvalidOrConflicting, dOmittedVtableSym.Code)
+        Assert.Equal("Plugify virtual table ABI fact for C++ class 'xrt::device::error' is missing required exported vtable symbol.", dOmittedVtableSym.Message)
+
+        // 9. Removing all facts for a requested class ('xrt::bo') or removing a requested TemplateInstanceFact is refused with FS9216.
+        let missingClassBundle = {
+            bundle with
+                Facts =
+                    bundle.Facts
+                    |> List.filter (fun f ->
+                        match f.Fact with
+                        | CppClassAnalysis.RaiiFact r when r.ClassName = "xrt::bo" -> false
+                        | _ -> true)
+        }
+        let errMissingClass = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            CppClassAnalysis.validatePlugifyAbiFacts missingClassBundle xrtLibrary (Some parsed) |> ignore)
+        let dMissingClass = Assert.Single(errMissingClass.Refusal.Diagnostics)
+        Assert.Equal(Diagnostics.CppAbiFactInvalidOrConflicting, dMissingClass.Code)
+        Assert.Equal("Plugify ABI fact bundle is incomplete: missing RAII ABI fact for C++ class 'xrt::bo'.", dMissingClass.Message)
+
+        let missingTemplateFactBundle = {
+            bundle with
+                Facts =
+                    bundle.Facts
+                    |> List.filter (fun f ->
+                        match f.Fact with
+                        | CppClassAnalysis.TemplateInstanceFact _ -> false
+                        | _ -> true)
+        }
+        let errMissingTemplateFact = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            CppClassAnalysis.validatePlugifyAbiFacts missingTemplateFactBundle xrtLibrary (Some parsed) |> ignore)
+        let dMissingTemplateFact = Assert.Single(errMissingTemplateFact.Refusal.Diagnostics)
+        Assert.Equal(Diagnostics.CppAbiFactInvalidOrConflicting, dMissingTemplateFact.Code)
+        Assert.Equal("Plugify ABI fact bundle is incomplete: missing template ABI fact for requested instantiation 'xrt::module_elf::patch_it_impl<xrt::bo>'.", dMissingTemplateFact.Message))

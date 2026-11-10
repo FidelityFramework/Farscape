@@ -282,9 +282,13 @@ module CppClassAnalysis =
             if start < text.Length then yield normalize text.[start ..]
         ]
 
-    /// Only templates in the symbol's own qualified name count. Return types and parameter
-    /// types mentioning a template do not export that template's operations.
-    let private symbolInstantiations (signature: string) =
+    let private operatorAngle (text: string) index operatorIndex =
+        operatorIndex >= 0 &&
+        (text.Substring(operatorIndex + 8, index - operatorIndex - 8)
+         |> Seq.forall (fun c -> "<>=!+-*/%^&|~".Contains c))
+
+    /// Extract the symbol's own qualified name (excluding return type and parameter list).
+    let private callableQualifiedName (signature: string) =
         let prefixes = [
             "non-virtual thunk to "; "virtual thunk to "; "covariant return thunk to "
             "vtable for "; "VTT for "; "typeinfo for "; "typeinfo name for "; "guard variable for "
@@ -294,10 +298,6 @@ module CppClassAnalysis =
                 if text.StartsWith(prefix, System.StringComparison.Ordinal) then text.Substring prefix.Length else text) signature
         let mutable depth, nameStart, finish = 0, 0, signature.Length
         let mutable operatorStart = -1
-        let operatorAngle (text: string) index operatorIndex =
-            operatorIndex >= 0 &&
-            (text.Substring(operatorIndex + 8, index - operatorIndex - 8)
-             |> Seq.forall (fun c -> "<>=!+-*/%^&|~".Contains c))
         let mutable i = 0
         while i < finish do
             if depth = 0 && signature.Substring(i).StartsWith("operator", System.StringComparison.Ordinal) then
@@ -311,10 +311,15 @@ module CppClassAnalysis =
             | c when System.Char.IsWhiteSpace c && depth = 0 && operatorStart < 0 -> nameStart <- i + 1
             | _ -> ()
             i <- i + 1
-        let name = signature.Substring(nameStart, finish - nameStart)
+        signature.Substring(nameStart, finish - nameStart)
+
+    /// Only templates in the symbol's own qualified name count. Return types and parameter
+    /// types mentioning a template do not export that template's operations.
+    let private symbolInstantiations (signature: string) =
+        let name = callableQualifiedName signature
         let mutable opening = -1
-        operatorStart <- -1
-        depth <- 0
+        let mutable operatorStart = -1
+        let mutable depth = 0
         [
             for i in 0 .. name.Length - 1 do
                 if depth = 0 && name.Substring(i).StartsWith("operator", System.StringComparison.Ordinal) then
@@ -375,56 +380,183 @@ module CppClassAnalysis =
         if child.ExitCode <> 0 then invalidOp $"{program} failed ({child.ExitCode}): {errors.Trim()}"
         output
 
-    /// Inspect one ELF shared object or static archive. Tool failures are loud, with no
-    /// replacement tool, header-only instantiation, or synthesized wrapper.
-    let inspectTemplateInventory (libraryPath: string) (declarations: CppParser.TemplateDeclaration list) =
+    type CppSymbolMetadata = {
+        Mangled: string
+        Demangled: string
+        Address: uint64
+        SizeBytes: int
+    }
+
+    let private readBinaryVtableWords (resolvedPath: string) (vtableAddr: uint64) (vtableSize: int) : uint64 list =
+        if vtableAddr = 0UL || vtableSize < 24 then []
+        else
+            let startHex = sprintf "0x%x" vtableAddr
+            let stopHex = sprintf "0x%x" (vtableAddr + uint64 vtableSize)
+            let dump = runSymbolTool "objdump" ["-s"; $"--start-address={startHex}"; $"--stop-address={stopHex}"; "--"; resolvedPath] None
+            let bytes = ResizeArray<byte>()
+            for rawLine in dump.Split('\n', System.StringSplitOptions.RemoveEmptyEntries) do
+                if rawLine.StartsWith(" ", System.StringComparison.Ordinal) then
+                    let trimmed = rawLine.TrimStart()
+                    let firstSpace = trimmed.IndexOf(' ')
+                    if firstSpace > 0 then
+                        let hexAddr = trimmed.Substring(0, firstSpace)
+                        let mutable parsedAddr = 0UL
+                        if System.UInt64.TryParse(hexAddr, System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, &parsedAddr) then
+                            let afterAddr = trimmed.Substring(firstSpace + 1)
+                            let asciiGap = afterAddr.IndexOf("  ", System.StringComparison.Ordinal)
+                            let hexPart = if asciiGap >= 0 then afterAddr.Substring(0, asciiGap) else afterAddr
+                            for group in hexPart.Split(' ', System.StringSplitOptions.RemoveEmptyEntries) do
+                                let mutable idx = 0
+                                while idx + 1 < group.Length do
+                                    let mutable b = 0uy
+                                    if System.Byte.TryParse(group.Substring(idx, 2), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, &b) then
+                                        bytes.Add b
+                                    idx <- idx + 2
+            let raw = bytes.ToArray()
+            [
+                let mutable offset = 0
+                while offset + 8 <= raw.Length do
+                    yield System.BitConverter.ToUInt64(raw, offset)
+                    offset <- offset + 8
+            ]
+
+    let private exportDetailCache =
+        System.Collections.Concurrent.ConcurrentDictionary<string * string, string option * (string * string) list * Map<string, (int * string * string) list>>()
+
+    /// Inspect one ELF shared object or static archive and return its build provenance,
+    /// paired (mangled, demangled) exported C++ symbols, per-symbol metadata, and binary vtable slots.
+    let private inspectLibraryExportsDetailed (libraryPath: string) : CppLibraryBuild * (string * string) list * Map<string, (int * string * string) list> =
         let file = System.IO.FileInfo(System.IO.Path.GetFullPath libraryPath)
         let resolved =
             match file.ResolveLinkTarget true with
             | null -> file.FullName
             | target -> target.FullName
         let hash = ClangToolchain.sha256 resolved
-        let archive =
-            use stream = System.IO.File.OpenRead resolved
-            let magic = Array.zeroCreate<byte> 8
-            stream.ReadExactly magic
-            List.contains (System.Text.Encoding.ASCII.GetString magic) ["!<arch>\n"; "!<thin>\n"]
-        let lines (text: string) = text.Split('\n', System.StringSplitOptions.RemoveEmptyEntries) |> Array.toList
-        let soname, symbols =
-            if archive then
-                let output = runSymbolTool "nm" ["--extern-only"; "--defined-only"; "--format=posix"; "--"; resolved] None
-                None,
-                (lines output |> List.choose (fun line ->
-                    let columns = line.Split([|' '; '\t'|], System.StringSplitOptions.RemoveEmptyEntries)
-                    if columns.Length >= 2 && columns.[0].StartsWith("_Z") then Some columns.[0] else None))
-            else
-                let dynamic = runSymbolTool "readelf" ["-d"; "--wide"; "--"; resolved] None
-                let soname =
-                    lines dynamic |> List.tryPick (fun line ->
-                        if line.Contains("(SONAME)") then
-                            let opening, closing = line.IndexOf('['), line.LastIndexOf(']')
-                            if opening >= 0 && closing > opening then Some (line.Substring(opening + 1, closing - opening - 1)) else None
-                        else None)
-                let output = runSymbolTool "readelf" ["--dyn-syms"; "--wide"; "--"; resolved] None
-                soname,
-                (lines output |> List.choose (fun line ->
-                    let columns = line.Split([|' '; '\t'|], System.StringSplitOptions.RemoveEmptyEntries)
-                    if columns.Length >= 8
-                       && List.contains columns.[4] ["GLOBAL"; "WEAK"; "UNIQUE"]
-                       && List.contains columns.[5] ["DEFAULT"; "PROTECTED"]
-                       && columns.[6] <> "UND"
-                       && columns.[7].StartsWith("_Z") then
-                        Some (columns.[7].Split('@').[0])
-                    else None))
-        let symbols = symbols |> List.distinct |> List.sort
-        let demangled =
-            if symbols.IsEmpty then []
-            else runSymbolTool "c++filt" ["--no-strip-underscore"] (Some (String.concat "\n" symbols + "\n")) |> lines
-        if symbols.Length <> demangled.Length then invalidOp "c++filt did not return one signature per exported symbol."
-        if ClangToolchain.sha256 resolved <> hash then invalidOp $"Library artifact changed while inspecting '{libraryPath}'."
-        inventoryOfSymbols
-            { LibraryPath = libraryPath; ResolvedPath = resolved; Sha256 = hash; Soname = soname }
-            declarations (List.zip symbols demangled)
+        let soname, paired, vtableSlots =
+            exportDetailCache.GetOrAdd((resolved, hash), fun _ ->
+                let archive =
+                    use stream = System.IO.File.OpenRead resolved
+                    let magic = Array.zeroCreate<byte> 8
+                    stream.ReadExactly magic
+                    List.contains (System.Text.Encoding.ASCII.GetString magic) ["!<arch>\n"; "!<thin>\n"]
+                let lines (text: string) = text.Split('\n', System.StringSplitOptions.RemoveEmptyEntries) |> Array.toList
+                let soname, rawEntries =
+                    if archive then
+                        let output = runSymbolTool "nm" ["--extern-only"; "--defined-only"; "--format=posix"; "--"; resolved] None
+                        None,
+                        (lines output |> List.choose (fun line ->
+                            let columns = line.Split([|' '; '\t'|], System.StringSplitOptions.RemoveEmptyEntries)
+                            if columns.Length >= 2 && columns.[0].StartsWith("_Z") then
+                                let mutable addr = 0UL
+                                let mutable sz = 0
+                                if columns.Length >= 3 then System.UInt64.TryParse(columns.[2], System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, &addr) |> ignore
+                                if columns.Length >= 4 then System.Int32.TryParse(columns.[3], System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, &sz) |> ignore
+                                Some (columns.[0], addr, sz)
+                            else None))
+                    else
+                        let dynamic = runSymbolTool "readelf" ["-d"; "--wide"; "--"; resolved] None
+                        let soname =
+                            lines dynamic |> List.tryPick (fun line ->
+                                if line.Contains("(SONAME)") then
+                                    let opening, closing = line.IndexOf('['), line.LastIndexOf(']')
+                                    if opening >= 0 && closing > opening then Some (line.Substring(opening + 1, closing - opening - 1)) else None
+                                else None)
+                        let output = runSymbolTool "readelf" ["--dyn-syms"; "--wide"; "--"; resolved] None
+                        soname,
+                        (lines output |> List.choose (fun line ->
+                            let columns = line.Split([|' '; '\t'|], System.StringSplitOptions.RemoveEmptyEntries)
+                            if columns.Length >= 8
+                               && List.contains columns.[4] ["GLOBAL"; "WEAK"; "UNIQUE"]
+                               && List.contains columns.[5] ["DEFAULT"; "PROTECTED"]
+                               && columns.[6] <> "UND"
+                               && columns.[7].StartsWith("_Z") then
+                                let mutable addr = 0UL
+                                System.UInt64.TryParse(columns.[1], System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, &addr) |> ignore
+                                let sizeText = columns.[2]
+                                let mutable sz = 0
+                                if sizeText.StartsWith("0x", System.StringComparison.OrdinalIgnoreCase) then
+                                    System.Int32.TryParse(sizeText.Substring 2, System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, &sz) |> ignore
+                                else
+                                    System.Int32.TryParse(sizeText, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, &sz) |> ignore
+                                Some (columns.[7].Split('@').[0], addr, sz)
+                            else None))
+                let byMangled =
+                    rawEntries
+                    |> List.groupBy (fun (m, _, _) -> m)
+                    |> List.map (fun (m, entries) ->
+                        let _, addr, sz = entries.Head
+                        m, (addr, sz))
+                    |> Map.ofList
+                let symbols = byMangled |> Map.keys |> Seq.toList |> List.sort
+                let demangled =
+                    if symbols.IsEmpty then []
+                    else runSymbolTool "c++filt" ["--no-strip-underscore"] (Some (String.concat "\n" symbols + "\n")) |> lines
+                if symbols.Length <> demangled.Length then invalidOp "c++filt did not return one signature per exported symbol."
+                let paired = List.zip symbols demangled
+                let demangledMap = Map.ofList paired
+                let byAddr =
+                    paired
+                    |> List.choose (fun (m, _) ->
+                        match Map.tryFind m byMangled with
+                        | Some (addr, _) when addr > 0UL -> Some (addr, m)
+                        | _ -> None)
+                    |> List.groupBy fst
+                    |> List.map (fun (addr, items) ->
+                        let candidates =
+                            items |> List.map snd |> List.sortBy (fun m ->
+                                if m.EndsWith("D1Ev", System.StringComparison.Ordinal) then 0
+                                elif m.EndsWith("D0Ev", System.StringComparison.Ordinal) then 1
+                                elif m.EndsWith("D2Ev", System.StringComparison.Ordinal) then 2
+                                elif m.Contains("C1") then 3
+                                elif m.Contains("C2") then 4
+                                else 5)
+                        addr, candidates.Head)
+                    |> Map.ofList
+                let vtableSlots =
+                    if archive then Map.empty
+                    else
+                        paired
+                        |> List.choose (fun (m, _) ->
+                            if m.StartsWith("_ZTV", System.StringComparison.Ordinal) then
+                                match Map.tryFind m byMangled with
+                                | Some (addr, sz) when addr > 0UL && sz >= 24 ->
+                                    let words = readBinaryVtableWords resolved addr sz
+                                    if words.Length >= 3 then
+                                        let slots =
+                                            words
+                                            |> List.skip 2
+                                            |> List.mapi (fun slotIndex targetAddr ->
+                                                match Map.tryFind targetAddr byAddr with
+                                                | Some targetSym ->
+                                                    let qname =
+                                                        Map.tryFind targetSym demangledMap
+                                                        |> Option.map (callableQualifiedName >> normalize)
+                                                        |> Option.defaultValue targetSym
+                                                    Some (slotIndex, qname, targetSym)
+                                                | None -> None)
+                                            |> List.choose id
+                                        if not slots.IsEmpty then Some (m, slots) else None
+                                    else None
+                                | _ -> None
+                            else None)
+                        |> Map.ofList
+                if ClangToolchain.sha256 resolved <> hash then invalidOp $"Library artifact changed while inspecting '{libraryPath}'."
+                soname, paired, vtableSlots)
+        { LibraryPath = libraryPath; ResolvedPath = resolved; Sha256 = hash; Soname = soname },
+        paired,
+        vtableSlots
+
+    /// Inspect one ELF shared object or static archive and return its build provenance and
+    /// paired (mangled, demangled) exported C++ symbols. Tool failures are loud, with no
+    /// replacement tool, header-only instantiation, or synthesized wrapper.
+    let inspectLibraryExports (libraryPath: string) : CppLibraryBuild * (string * string) list =
+        let build, symbols, _ = inspectLibraryExportsDetailed libraryPath
+        build, symbols
+
+    /// Inspect one ELF shared object or static archive for exported C++ template instantiations (#118).
+    let inspectTemplateInventory (libraryPath: string) (declarations: CppParser.TemplateDeclaration list) =
+        let build, symbols = inspectLibraryExports libraryPath
+        inventoryOfSymbols build declarations symbols
 
     /// Resolve only an exported instantiation and return its exact build provenance.
     let requireInstantiation (inventory: CppTemplateInventory) templateName arguments source =
@@ -445,3 +577,659 @@ module CppClassAnalysis =
                 |> Option.defaultValue (Diagnostics.Located.Unknown "No header source location was supplied for the requested template instantiation.")
             Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.CppTemplateInstantiationMissing
                 $"C++ template instantiation '{name}' is not exported by library build '{library}' (SHA-256 {inventory.Build.Sha256}).{note}" source)
+
+    // =========================================================================
+    // Plugify C++ ABI Facts with Provenance (#119)
+    // =========================================================================
+
+    /// Tool identity for Plugify C++ ABI fact extraction (#119).
+    type CppAbiFactToolProvenance = {
+        ToolName: string
+        ToolVersion: string
+        ManifestSource: string
+    }
+
+    /// Complete tool and library-build provenance carried by every recorded C++ ABI fact (#119).
+    type CppAbiFactProvenance = {
+        Tool: CppAbiFactToolProvenance
+        Build: CppLibraryBuild
+    }
+
+    /// ABI facts state call mechanics only; liveness, extent, and ownership obligations are
+    /// always discharged on the PSG (#119).
+    type ProofAuthority =
+        | CallMechanicsOnly_PsgDischargesProof
+        member _.DischargesProofObligations = false
+
+    type VirtualTableAbiFact = {
+        ClassName: string
+        VtableSymbol: string option
+        TypeinfoSymbol: string option
+        /// (slotIndex, methodName, mangledSymbol)
+        VirtualMethods: (int * string * string) list
+    }
+
+    type TemplateInstanceAbiFact = {
+        InstantiationName: string
+        TemplateName: string
+        TemplateArguments: string list
+        MangledSymbols: string list
+    }
+
+    type RaiiAbiFact = {
+        ClassName: string
+        ConstructorSymbols: string list
+        DestructorSymbol: string
+        StorageSizeBytes: int option
+        StorageAlignBytes: int option
+    }
+
+    type ExceptionBoundaryAbiFact = {
+        CallableName: string
+        MangledSymbol: string
+        IsNoExcept: bool
+    }
+
+    type CppAbiFactKind =
+        | VirtualTableFact of VirtualTableAbiFact
+        | TemplateInstanceFact of TemplateInstanceAbiFact
+        | RaiiFact of RaiiAbiFact
+        | ExceptionBoundaryFact of ExceptionBoundaryAbiFact
+
+    type CppRecordedAbiFact = {
+        Fact: CppAbiFactKind
+        Provenance: CppAbiFactProvenance
+        ProofAuthority: ProofAuthority
+        Source: Diagnostics.Located<Diagnostics.SourceLocation>
+    } with
+        member this.DischargesProofObligations = this.ProofAuthority.DischargesProofObligations
+
+    type CppAbiFactBundle = {
+        Provenance: CppAbiFactProvenance
+        ProofAuthority: ProofAuthority
+        RequestedClasses: string list
+        RequestedTemplates: (string * string list) list
+        Facts: CppRecordedAbiFact list
+    } with
+        member this.DischargesProofObligations =
+            this.ProofAuthority.DischargesProofObligations
+            || (this.Facts |> List.exists _.DischargesProofObligations)
+
+    /// Parsed Plugify (.pplugin) manifest specification (#119).
+    type PlugifyManifest = {
+        Tool: CppAbiFactToolProvenance
+        ManifestSha256: string
+        Classes: string list
+        Templates: (string * string list) list
+    }
+
+    let private refuseAbiFact message source =
+        Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.CppAbiFactInvalidOrConflicting message source)
+
+    let private unknownAbiSource reason =
+        Diagnostics.Located.Unknown reason
+
+    let private sha256Text (content: string) =
+        let bytes = System.Text.Encoding.UTF8.GetBytes content
+        System.Security.Cryptography.SHA256.HashData bytes |> System.Convert.ToHexString |> fun h -> h.ToLowerInvariant()
+
+    let private validateToolProvenance (tool: CppAbiFactToolProvenance) source =
+        if not (System.String.Equals(tool.ToolName.Trim(), "plugify", System.StringComparison.OrdinalIgnoreCase)) then
+            refuseAbiFact $"C++ ABI fact provenance tool must be 'plugify', got '{tool.ToolName}'." source
+        if System.String.IsNullOrWhiteSpace tool.ToolVersion then
+            refuseAbiFact "C++ ABI fact provenance from Plugify is missing a tool version." source
+        if System.String.IsNullOrWhiteSpace tool.ManifestSource then
+            refuseAbiFact "C++ ABI fact provenance from Plugify is missing a manifest source." source
+
+    /// Parse a Plugify (.pplugin) JSON manifest and establish its SHA-256 provenance (#119).
+    let parsePlugifyManifestJson (manifestSource: string) (manifestJson: string) : PlugifyManifest =
+        let source = unknownAbiSource $"Plugify manifest '{manifestSource}'"
+        if System.String.IsNullOrWhiteSpace manifestSource then
+            refuseAbiFact "C++ ABI fact provenance from Plugify is missing a manifest source." source
+        if System.String.IsNullOrWhiteSpace manifestJson then
+            refuseAbiFact $"Plugify manifest '{manifestSource}' is empty." source
+        let root =
+            try FSharp.Data.JsonValue.Parse manifestJson
+            with ex -> refuseAbiFact $"Plugify manifest '{manifestSource}' is not valid JSON: {ex.Message}" source
+        let prop (node: FSharp.Data.JsonValue) (name: string) =
+            match node with
+            | FSharp.Data.JsonValue.Record props -> props |> Array.tryPick (fun (k, v) -> if k = name then Some v else None)
+            | _ -> None
+        let strProp (node: FSharp.Data.JsonValue) (name: string) =
+            match prop node name with
+            | Some (FSharp.Data.JsonValue.String s) -> s
+            | _ -> ""
+        let generator =
+            match prop root "generator" with
+            | Some g -> g
+            | None -> refuseAbiFact $"Plugify manifest '{manifestSource}' is missing required 'generator' provenance object." source
+        let toolName = strProp generator "name"
+        let toolVersion = strProp generator "version"
+        let digest = sha256Text manifestJson
+        match prop root "manifestSha256" with
+        | Some (FSharp.Data.JsonValue.String claimedDigest) when claimedDigest.Trim().ToLowerInvariant() <> digest ->
+            refuseAbiFact $"Plugify manifest '{manifestSource}' digest mismatch (claimed {claimedDigest}, actual {digest})." source
+        | _ -> ()
+        let tool = { ToolName = toolName; ToolVersion = toolVersion; ManifestSource = $"{manifestSource}#sha256={digest}" }
+        validateToolProvenance tool source
+        let classes =
+            match prop root "classes" with
+            | Some (FSharp.Data.JsonValue.Array arr) ->
+                [ for item in arr do
+                    match item with
+                    | FSharp.Data.JsonValue.String c when not (System.String.IsNullOrWhiteSpace c) -> yield normalize c
+                    | _ -> refuseAbiFact $"Plugify manifest '{manifestSource}' contains a malformed entry in 'classes'." source ]
+            | Some _ -> refuseAbiFact $"Plugify manifest '{manifestSource}' field 'classes' must be a JSON array." source
+            | None -> []
+        let templates =
+            match prop root "templates" with
+            | Some (FSharp.Data.JsonValue.Array arr) ->
+                [ for item in arr do
+                    let tName = strProp item "template"
+                    let tArgs =
+                        match prop item "arguments" with
+                        | Some (FSharp.Data.JsonValue.Array argArr) ->
+                            [ for a in argArr do
+                                match a with
+                                | FSharp.Data.JsonValue.String s when not (System.String.IsNullOrWhiteSpace s) -> yield normalize s
+                                | _ -> refuseAbiFact $"Plugify manifest '{manifestSource}' contains a malformed template argument." source ]
+                        | _ -> []
+                    if System.String.IsNullOrWhiteSpace tName || tArgs.IsEmpty then
+                        refuseAbiFact $"Plugify manifest '{manifestSource}' contains a template entry missing 'template' or 'arguments'." source
+                    yield normalize tName, tArgs ]
+            | Some _ -> refuseAbiFact $"Plugify manifest '{manifestSource}' field 'templates' must be a JSON array." source
+            | None -> []
+        if classes.IsEmpty && templates.IsEmpty then
+            refuseAbiFact $"Plugify manifest '{manifestSource}' declares no C++ classes or template instantiations." source
+        { Tool = tool; ManifestSha256 = digest; Classes = classes; Templates = templates }
+
+    let private classLeafName (normClass: string) =
+        let withoutTemplate =
+            match normClass.IndexOf('<') with
+            | idx when idx > 0 -> normClass.Substring(0, idx)
+            | _ -> normClass
+        match withoutTemplate.LastIndexOf("::", System.StringComparison.Ordinal) with
+        | idx when idx >= 0 -> withoutTemplate.Substring(idx + 2)
+        | _ -> withoutTemplate
+
+    let private collectAstContext (parsed: CppParser.ParseResult option) =
+        match parsed with
+        | None -> Map.empty, Map.empty, Map.empty, []
+        | Some result ->
+            let mutable classes = Map.empty<string, CppParser.ClassDecl>
+            let mutable orderedClassNames = ResizeArray<string>()
+            let mutable funcsByMangled = Map.empty<string, CppParser.FunctionDecl>
+            let recordFunc (f: CppParser.FunctionDecl) =
+                match f.MangledName with
+                | Some m when m <> "" -> funcsByMangled <- Map.add m f funcsByMangled
+                | _ -> ()
+            let rec walk scope (decl: CppParser.Declaration) =
+                match decl with
+                | CppParser.Declaration.Function f -> recordFunc f
+                | CppParser.Declaration.Class c ->
+                    let qname =
+                        c.QualifiedName
+                        |> Option.defaultWith (fun () -> String.concat "::" (scope @ [c.Name]))
+                        |> normalize
+                    classes <- classes |> Map.add (normalize c.Name) c |> Map.add qname c
+                    if not (orderedClassNames.Contains qname) then orderedClassNames.Add qname
+                    for m in c.Methods do walk (scope @ [c.Name]) m
+                    for ctor in c.Constructors do walk (scope @ [c.Name]) ctor
+                | CppParser.Declaration.Namespace ns ->
+                    for d in ns.Declarations do walk (scope @ [ns.Name]) d
+                | _ -> ()
+            for d in result.Declarations do walk [] d
+            let templates =
+                result.Templates
+                |> List.fold (fun acc t -> Map.add (normalize t.TemplateName) t acc) Map.empty
+            classes, templates, funcsByMangled, List.ofSeq orderedClassNames
+
+    let private isFunctionNoExcept (func: CppParser.FunctionDecl) =
+        func.Attributes |> List.exists (fun a -> a.Kind = "NoExceptAttr")
+
+    let private generatePlugifyAbiFactsCore
+        (build: CppLibraryBuild)
+        (symbols: (string * string) list)
+        (binaryVtableSlots: Map<string, (int * string * string) list>)
+        (tool: CppAbiFactToolProvenance)
+        (parsed: CppParser.ParseResult option)
+        (classNames: string list)
+        (templateRequests: (string * string list) list)
+        : CppAbiFactBundle =
+        let defaultSource = unknownAbiSource "No header source location was supplied for the Plugify ABI fact bundle."
+        validateToolProvenance tool defaultSource
+        if classNames.IsEmpty && templateRequests.IsEmpty then
+            refuseAbiFact "Plugify ABI fact generation requires at least one C++ class or template instantiation target." defaultSource
+        let provenance : CppAbiFactProvenance = { Tool = tool; Build = build }
+        let astClasses, astTemplates, astFuncsByMangled, _ = collectAstContext parsed
+        let inventory = inventoryOfSymbols build (parsed |> Option.map _.Templates |> Option.defaultValue []) symbols
+        let recorded = ResizeArray<CppRecordedAbiFact>()
+        let emittedBoundaries = System.Collections.Generic.HashSet<string>()
+        let addFact fact source =
+            recorded.Add {
+                Fact = fact
+                Provenance = provenance
+                ProofAuthority = CallMechanicsOnly_PsgDischargesProof
+                Source = source
+            }
+        let addBoundary callableName mangled isNoExcept source =
+            if emittedBoundaries.Add mangled then
+                addFact (ExceptionBoundaryFact { CallableName = callableName; MangledSymbol = mangled; IsNoExcept = isNoExcept }) source
+
+        for rawClass in classNames do
+            let normClass = normalize rawClass
+            let leaf = classLeafName normClass
+            let templateBase =
+                match normClass.IndexOf('<') with
+                | idx when idx > 0 -> Some (normClass.Substring(0, idx))
+                | _ -> None
+            let astCls =
+                Map.tryFind normClass astClasses
+                |> Option.orElseWith (fun () -> Map.tryFind leaf astClasses)
+            let astTemplate = templateBase |> Option.bind (fun b -> Map.tryFind b astTemplates)
+            if parsed.IsSome && astCls.IsNone && astTemplate.IsNone then
+                refuseAbiFact $"C++ class '{normClass}' is not declared in the parsed header AST." defaultSource
+            let source =
+                astCls |> Option.map _.Location.Location
+                |> Option.orElseWith (fun () -> astTemplate |> Option.map _.Location)
+                |> Option.defaultWith (fun () -> unknownAbiSource $"No header source location was supplied for C++ class '{normClass}'.")
+
+            let ctorTarget = normClass + "::" + leaf
+            let dtorTarget = normClass + "::~" + leaf
+            let vtableTarget = "vtable for " + normClass
+            let typeinfoTarget = "typeinfo for " + normClass
+
+            let ctorSymbols =
+                symbols
+                |> List.choose (fun (mangled, demangled) ->
+                    if normalize (callableQualifiedName demangled) = ctorTarget && mangled.Contains("C1") then Some mangled else None)
+                |> List.distinct
+                |> List.sort
+
+            let dtorSymbolsD1 =
+                symbols
+                |> List.choose (fun (mangled, demangled) ->
+                    if normalize (callableQualifiedName demangled) = dtorTarget && mangled.EndsWith("D1Ev", System.StringComparison.Ordinal) then Some mangled else None)
+                |> List.distinct
+                |> List.sort
+
+            let dtorSymbolsD0 =
+                symbols
+                |> List.choose (fun (mangled, demangled) ->
+                    if normalize (callableQualifiedName demangled) = dtorTarget && mangled.EndsWith("D0Ev", System.StringComparison.Ordinal) then Some mangled else None)
+                |> List.distinct
+                |> List.sort
+
+            let vtableSymbol =
+                symbols
+                |> List.tryPick (fun (mangled, demangled) ->
+                    if normalize demangled = vtableTarget && mangled.StartsWith("_ZTV", System.StringComparison.Ordinal) then Some mangled else None)
+
+            let typeinfoSymbol =
+                symbols
+                |> List.tryPick (fun (mangled, demangled) ->
+                    if normalize demangled = typeinfoTarget && mangled.StartsWith("_ZTI", System.StringComparison.Ordinal) then Some mangled else None)
+
+            let directMethods =
+                symbols
+                |> List.choose (fun (mangled, demangled) ->
+                    if mangled.StartsWith("_ZN", System.StringComparison.Ordinal) || mangled.StartsWith("_ZNK", System.StringComparison.Ordinal) then
+                        let qname = normalize (callableQualifiedName demangled)
+                        let prefix = normClass + "::"
+                        if qname.StartsWith(prefix, System.StringComparison.Ordinal) then
+                            let memberName = qname.Substring prefix.Length
+                            if not (memberName.Contains("::")) && memberName <> leaf && memberName <> ("~" + leaf) then
+                                Some (memberName, qname, mangled)
+                            else None
+                        else None
+                    else None)
+                |> List.distinctBy (fun (_, _, m) -> m)
+                |> List.sortBy (fun (_, _, m) -> m)
+
+            if dtorSymbolsD1.IsEmpty then
+                refuseAbiFact $"Plugify RAII ABI fact for C++ class '{normClass}' requires an exported complete-object destructor (D1) in library build '{build.LibraryPath}' (SHA-256 {build.Sha256})." source
+            let dtorSymbol = dtorSymbolsD1.Head
+            match astCls |> Option.bind _.DestructorMangledName with
+            | Some astDtor when astDtor <> dtorSymbol ->
+                refuseAbiFact $"Plugify RAII ABI fact destructor '{dtorSymbol}' for C++ class '{normClass}' conflicts with clang AST destructor '{astDtor}'." source
+            | _ -> ()
+
+            let storageSizeBytes, storageAlignBytes =
+                match astCls with
+                | Some cls ->
+                    match cls.Measured with
+                    | Some layout -> Some (layout.SizeBits / 8), Some (layout.AlignmentBits / 8)
+                    | None ->
+                        let sz = estimateClassSize cls
+                        (if sz > 0 then Some sz else None), None
+                | None -> None, None
+
+            addFact
+                (RaiiFact {
+                    ClassName = normClass
+                    ConstructorSymbols = ctorSymbols
+                    DestructorSymbol = dtorSymbol
+                    StorageSizeBytes = storageSizeBytes
+                    StorageAlignBytes = storageAlignBytes
+                })
+                source
+
+            let astVirtualMethods =
+                match astCls with
+                | Some cls ->
+                    cls.Methods
+                    |> List.choose (function
+                        | CppParser.Declaration.Function f when f.IsVirtual -> Some f
+                        | _ -> None)
+                | None -> []
+
+            let isPolymorphic =
+                vtableSymbol.IsSome || not dtorSymbolsD0.IsEmpty
+                || (astCls |> Option.exists (fun c -> c.IsAbstract || not astVirtualMethods.IsEmpty))
+
+            if isPolymorphic then
+                let exportedByMethodName =
+                    directMethods |> List.groupBy (fun (mName, _, _) -> mName) |> Map.ofList
+                for f in astVirtualMethods do
+                    let hasExport =
+                        match f.MangledName with
+                        | Some m -> symbols |> List.exists (fun (s, _) -> s = m)
+                        | None -> Map.containsKey f.Name exportedByMethodName
+                    if not hasExport then
+                        refuseAbiFact $"Plugify virtual table ABI fact for C++ class '{normClass}' is missing exported symbol for virtual method '{f.Name}' in library build '{build.LibraryPath}' (SHA-256 {build.Sha256})." source
+                let vtableSym =
+                    match vtableSymbol with
+                    | Some sym -> sym
+                    | None ->
+                        refuseAbiFact $"Plugify virtual table ABI fact for polymorphic C++ class '{normClass}' requires an exported vtable symbol (_ZTV*) in library build '{build.LibraryPath}' (SHA-256 {build.Sha256})." source
+                let virtualMethods =
+                    match Map.tryFind vtableSym binaryVtableSlots with
+                    | Some slotsFromBinary when not slotsFromBinary.IsEmpty -> slotsFromBinary
+                    | _ ->
+                        refuseAbiFact $"Plugify virtual table ABI fact for polymorphic C++ class '{normClass}' could not extract binary vtable layout for '{vtableSym}' in '{build.LibraryPath}'." source
+                addFact
+                    (VirtualTableFact {
+                        ClassName = normClass
+                        VtableSymbol = Some vtableSym
+                        TypeinfoSymbol = typeinfoSymbol
+                        VirtualMethods = virtualMethods
+                    })
+                    source
+                for _, qname, m in virtualMethods do
+                    let isDtor = qname.Contains("::~")
+                    let noExcept = isDtor || (Map.tryFind m astFuncsByMangled |> Option.exists isFunctionNoExcept)
+                    addBoundary qname m noExcept source
+
+            for m in ctorSymbols do
+                let noExcept = Map.tryFind m astFuncsByMangled |> Option.exists isFunctionNoExcept
+                addBoundary ctorTarget m noExcept source
+            addBoundary dtorTarget dtorSymbol true source
+            for _, qname, m in directMethods do
+                let noExcept = Map.tryFind m astFuncsByMangled |> Option.exists isFunctionNoExcept
+                addBoundary qname m noExcept source
+
+        for templateName, templateArgs in templateRequests do
+            let normTemplate = normalize templateName
+            let instName = instantiationName normTemplate templateArgs
+            let templateSource =
+                Map.tryFind normTemplate astTemplates
+                |> Option.map _.Location
+                |> Option.defaultWith (fun () -> unknownAbiSource $"No header source location was supplied for C++ template '{normTemplate}'.")
+            match inventory.Instantiations |> List.tryFind (fun candidate -> candidate.InstantiationName = instName) with
+            | None ->
+                refuseAbiFact $"Plugify template ABI fact for '{instName}' is missing from library build '{build.LibraryPath}' (SHA-256 {build.Sha256})." templateSource
+            | Some matched ->
+                if parsed.IsSome && not matched.AstDeclared then
+                    refuseAbiFact $"Plugify template ABI fact for '{instName}' is not declared as a template in the parsed header AST." templateSource
+                addFact
+                    (TemplateInstanceFact {
+                        InstantiationName = matched.InstantiationName
+                        TemplateName = matched.TemplateName
+                        TemplateArguments = matched.TemplateArguments
+                        MangledSymbols = matched.MangledSymbols
+                    })
+                    templateSource
+                for mangled, demangled in List.zip matched.MangledSymbols matched.DemangledSymbols do
+                    if mangled.StartsWith("_ZN", System.StringComparison.Ordinal) || mangled.StartsWith("_ZNK", System.StringComparison.Ordinal) then
+                        let qname = normalize (callableQualifiedName demangled)
+                        let isDtor = qname.Contains("::~")
+                        let noExcept = isDtor || (Map.tryFind mangled astFuncsByMangled |> Option.exists isFunctionNoExcept)
+                        addBoundary qname mangled noExcept templateSource
+
+        {
+            Provenance = provenance
+            ProofAuthority = CallMechanicsOnly_PsgDischargesProof
+            RequestedClasses = classNames |> List.map normalize |> List.distinct
+            RequestedTemplates = templateRequests |> List.map (fun (t, args) -> normalize t, args |> List.map normalize) |> List.distinct
+            Facts = List.ofSeq recorded
+        }
+
+    /// Generate Plugify C++ ABI facts with tool and build provenance from inspected symbol pairs (#119).
+    let generatePlugifyAbiFactsFromSymbols
+        (build: CppLibraryBuild)
+        (symbols: (string * string) list)
+        (tool: CppAbiFactToolProvenance)
+        (parsed: CppParser.ParseResult option)
+        (classNames: string list)
+        (templateRequests: (string * string list) list)
+        : CppAbiFactBundle =
+        generatePlugifyAbiFactsCore build symbols Map.empty tool parsed classNames templateRequests
+
+    /// Generate Plugify C++ ABI facts with tool and build provenance from a library binary (#119).
+    let generatePlugifyAbiFacts
+        (libraryPath: string)
+        (tool: CppAbiFactToolProvenance)
+        (parsed: CppParser.ParseResult option)
+        (classNames: string list)
+        (templateRequests: (string * string list) list)
+        : CppAbiFactBundle =
+        let build, symbols, binaryVtableSlots = inspectLibraryExportsDetailed libraryPath
+        generatePlugifyAbiFactsCore build symbols binaryVtableSlots tool parsed classNames templateRequests
+
+    /// Generate Plugify C++ ABI facts by consuming a Plugify (.pplugin) JSON manifest and cross-verifying the binary and AST (#119).
+    let generatePlugifyAbiFactsFromManifestJson
+        (libraryPath: string)
+        (manifestSource: string)
+        (manifestJson: string)
+        (parsed: CppParser.ParseResult option)
+        : CppAbiFactBundle =
+        let manifest = parsePlugifyManifestJson manifestSource manifestJson
+        generatePlugifyAbiFacts libraryPath manifest.Tool parsed manifest.Classes manifest.Templates
+
+    let private validatePlugifyAbiFactsCore
+        (bundle: CppAbiFactBundle)
+        (actualBuild: CppLibraryBuild)
+        (symbols: (string * string) list)
+        (binaryVtableSlots: Map<string, (int * string * string) list>)
+        (parsed: CppParser.ParseResult option)
+        : CppAbiFactBundle =
+        let bundleSource =
+            bundle.Facts |> List.tryHead |> Option.map _.Source
+            |> Option.defaultWith (fun () -> unknownAbiSource "No header source location was supplied for the Plugify ABI fact bundle.")
+        validateToolProvenance bundle.Provenance.Tool bundleSource
+        let claimedBuild = bundle.Provenance.Build
+        if claimedBuild.ResolvedPath <> actualBuild.ResolvedPath
+           || claimedBuild.Sha256 <> actualBuild.Sha256
+           || claimedBuild.Soname <> actualBuild.Soname then
+            let claimedSoname = claimedBuild.Soname |> Option.defaultValue "<none>"
+            let actualSoname = actualBuild.Soname |> Option.defaultValue "<none>"
+            refuseAbiFact
+                $"C++ ABI fact build provenance for '{claimedBuild.LibraryPath}' conflicts with inspected binary '{actualBuild.ResolvedPath}' (claimed SHA-256 {claimedBuild.Sha256}, actual SHA-256 {actualBuild.Sha256}; claimed SONAME '{claimedSoname}', actual SONAME '{actualSoname}')."
+                bundleSource
+        if bundle.RequestedClasses.IsEmpty && bundle.RequestedTemplates.IsEmpty then
+            refuseAbiFact "Plugify ABI fact bundle declares no requested C++ classes or template instantiations." bundleSource
+        if bundle.Facts.IsEmpty then
+            refuseAbiFact "Plugify ABI fact bundle contains no recorded facts." bundleSource
+
+        let exportedSet = symbols |> List.map fst |> Set.ofList
+        let astClasses, astTemplates, astFuncsByMangled, _ = collectAstContext parsed
+        let inventory = inventoryOfSymbols actualBuild (parsed |> Option.map _.Templates |> Option.defaultValue []) symbols
+
+        let mutable raiiClasses = Set.empty<string>
+        let mutable vtableClasses = Set.empty<string>
+        let mutable templateInstances = Set.empty<string>
+        let mutable boundarySymbols = Set.empty<string>
+        let mutable requiredBoundarySymbols = Set.empty<string>
+
+        for recorded in bundle.Facts do
+            validateToolProvenance recorded.Provenance.Tool recorded.Source
+            if recorded.Provenance <> bundle.Provenance then
+                refuseAbiFact "Recorded C++ ABI fact provenance conflicts with its enclosing Plugify bundle provenance." recorded.Source
+            match recorded.Fact with
+            | RaiiFact raii ->
+                let normClass = normalize raii.ClassName
+                raiiClasses <- Set.add normClass raiiClasses
+                let leaf = classLeafName normClass
+                let templateBase =
+                    match normClass.IndexOf('<') with
+                    | idx when idx > 0 -> Some (normClass.Substring(0, idx))
+                    | _ -> None
+                let astCls = Map.tryFind normClass astClasses |> Option.orElseWith (fun () -> Map.tryFind leaf astClasses)
+                let astTemplate = templateBase |> Option.bind (fun b -> Map.tryFind b astTemplates)
+                if parsed.IsSome && astCls.IsNone && astTemplate.IsNone then
+                    refuseAbiFact $"Plugify RAII ABI fact names C++ class '{normClass}', which is not declared in the parsed header AST." recorded.Source
+                if System.String.IsNullOrWhiteSpace raii.DestructorSymbol
+                   || not (raii.DestructorSymbol.EndsWith("D1Ev", System.StringComparison.Ordinal))
+                   || not (Set.contains raii.DestructorSymbol exportedSet) then
+                    refuseAbiFact $"Plugify RAII ABI fact for C++ class '{normClass}' claims destructor symbol '{raii.DestructorSymbol}', which is not an exported complete-object destructor (D1) in '{actualBuild.LibraryPath}'." recorded.Source
+                requiredBoundarySymbols <- Set.add raii.DestructorSymbol requiredBoundarySymbols
+                for ctorSym in raii.ConstructorSymbols do
+                    if not (ctorSym.Contains("C1")) || not (Set.contains ctorSym exportedSet) then
+                        refuseAbiFact $"Plugify RAII ABI fact for C++ class '{normClass}' claims constructor symbol '{ctorSym}', which is not an exported complete-object constructor (C1) in '{actualBuild.LibraryPath}'." recorded.Source
+                    requiredBoundarySymbols <- Set.add ctorSym requiredBoundarySymbols
+                match astCls |> Option.bind _.DestructorMangledName with
+                | Some astDtor when astDtor <> raii.DestructorSymbol ->
+                    refuseAbiFact $"Plugify RAII ABI fact destructor '{raii.DestructorSymbol}' for C++ class '{normClass}' conflicts with clang AST destructor '{astDtor}'." recorded.Source
+                | _ -> ()
+                match astCls |> Option.bind _.Measured with
+                | Some layout ->
+                    let expectedSize = layout.SizeBits / 8
+                    let expectedAlign = layout.AlignmentBits / 8
+                    if (raii.StorageSizeBytes.IsSome && raii.StorageSizeBytes <> Some expectedSize)
+                       || (raii.StorageAlignBytes.IsSome && raii.StorageAlignBytes <> Some expectedAlign) then
+                        refuseAbiFact $"Plugify RAII ABI fact storage layout for C++ class '{normClass}' conflicts with clang's measured layout ({expectedSize} bytes, align {expectedAlign} bytes)." recorded.Source
+                | None -> ()
+
+            | VirtualTableFact vt ->
+                let normClass = normalize vt.ClassName
+                vtableClasses <- Set.add normClass vtableClasses
+                let leaf = classLeafName normClass
+                let templateBase =
+                    match normClass.IndexOf('<') with
+                    | idx when idx > 0 -> Some (normClass.Substring(0, idx))
+                    | _ -> None
+                let astCls = Map.tryFind normClass astClasses |> Option.orElseWith (fun () -> Map.tryFind leaf astClasses)
+                let astTemplate = templateBase |> Option.bind (fun b -> Map.tryFind b astTemplates)
+                if parsed.IsSome && astCls.IsNone && astTemplate.IsNone then
+                    refuseAbiFact $"Plugify virtual table ABI fact names C++ class '{normClass}', which is not declared in the parsed header AST." recorded.Source
+                let expectedVtableTarget = "vtable for " + normClass
+                let expectedVtableSymbol =
+                    symbols
+                    |> List.tryPick (fun (mangled, demangled) ->
+                        if normalize demangled = expectedVtableTarget && mangled.StartsWith("_ZTV", System.StringComparison.Ordinal) then Some mangled else None)
+                match vt.VtableSymbol with
+                | None ->
+                    refuseAbiFact $"Plugify virtual table ABI fact for C++ class '{normClass}' is missing required exported vtable symbol." recorded.Source
+                | Some sym when not (sym.StartsWith("_ZTV", System.StringComparison.Ordinal)) || not (Set.contains sym exportedSet) ->
+                    refuseAbiFact $"Plugify virtual table ABI fact for C++ class '{normClass}' claims vtable symbol '{sym}', which is not exported by '{actualBuild.LibraryPath}'." recorded.Source
+                | Some sym when expectedVtableSymbol.IsSome && expectedVtableSymbol <> Some sym ->
+                    refuseAbiFact $"Plugify virtual table ABI fact for C++ class '{normClass}' claims vtable symbol '{sym}', which does not match exported vtable symbol '{expectedVtableSymbol.Value}'." recorded.Source
+                | Some sym ->
+                    match Map.tryFind sym binaryVtableSlots with
+                    | Some actualSlots when not actualSlots.IsEmpty ->
+                        if vt.VirtualMethods <> actualSlots then
+                            refuseAbiFact $"Plugify virtual table ABI fact for C++ class '{normClass}' virtual slots {vt.VirtualMethods} conflict with binary vtable '{sym}' layout {actualSlots}." recorded.Source
+                    | _ ->
+                        refuseAbiFact $"Plugify virtual table ABI fact for C++ class '{normClass}' could not verify binary vtable layout for '{sym}' in '{actualBuild.LibraryPath}'." recorded.Source
+                match vt.TypeinfoSymbol with
+                | Some sym when not (sym.StartsWith("_ZTI", System.StringComparison.Ordinal)) || not (Set.contains sym exportedSet) ->
+                    refuseAbiFact $"Plugify virtual table ABI fact for C++ class '{normClass}' claims typeinfo symbol '{sym}', which is not exported by '{actualBuild.LibraryPath}'." recorded.Source
+                | _ -> ()
+                let slots = vt.VirtualMethods |> List.map (fun (slot, _, _) -> slot)
+                if slots <> [0 .. vt.VirtualMethods.Length - 1] then
+                    refuseAbiFact $"Plugify virtual table ABI fact for C++ class '{normClass}' has non-sequential virtual slot indices: {slots}." recorded.Source
+                for _, methodName, sym in vt.VirtualMethods do
+                    if not (Set.contains sym exportedSet) then
+                        refuseAbiFact $"Plugify virtual table ABI fact for C++ class '{normClass}' claims virtual method '{methodName}' symbol '{sym}', which is not exported by '{actualBuild.LibraryPath}'." recorded.Source
+                    requiredBoundarySymbols <- Set.add sym requiredBoundarySymbols
+
+            | TemplateInstanceFact ti ->
+                let expectedInstName = instantiationName ti.TemplateName ti.TemplateArguments
+                if normalize ti.InstantiationName <> expectedInstName || ti.MangledSymbols.IsEmpty then
+                    refuseAbiFact $"Plugify template ABI fact '{ti.InstantiationName}' is malformed or lists no mangled symbols." recorded.Source
+                templateInstances <- Set.add expectedInstName templateInstances
+                match inventory.Instantiations |> List.tryFind (fun candidate -> candidate.InstantiationName = expectedInstName) with
+                | None ->
+                    refuseAbiFact $"Plugify template ABI fact for '{expectedInstName}' is not exported by library build '{actualBuild.LibraryPath}' (SHA-256 {actualBuild.Sha256})." recorded.Source
+                | Some matched ->
+                    if parsed.IsSome && not matched.AstDeclared then
+                        refuseAbiFact $"Plugify template ABI fact for '{expectedInstName}' is not declared as a template in the parsed header AST." recorded.Source
+                    if (ti.MangledSymbols |> List.sort) <> matched.MangledSymbols then
+                        refuseAbiFact $"Plugify template ABI fact symbols for '{expectedInstName}' conflict with the exported symbols in '{actualBuild.LibraryPath}'." recorded.Source
+                    for sym in matched.MangledSymbols do
+                        if sym.StartsWith("_ZN", System.StringComparison.Ordinal) || sym.StartsWith("_ZNK", System.StringComparison.Ordinal) then
+                            requiredBoundarySymbols <- Set.add sym requiredBoundarySymbols
+
+            | ExceptionBoundaryFact eb ->
+                if System.String.IsNullOrWhiteSpace eb.MangledSymbol || not (Set.contains eb.MangledSymbol exportedSet) then
+                    refuseAbiFact $"Plugify exception boundary ABI fact for '{eb.CallableName}' claims symbol '{eb.MangledSymbol}', which is not exported by '{actualBuild.LibraryPath}'." recorded.Source
+                boundarySymbols <- Set.add eb.MangledSymbol boundarySymbols
+                match Map.tryFind eb.MangledSymbol astFuncsByMangled with
+                | Some astFunc ->
+                    let astNoExcept = isFunctionNoExcept astFunc
+                    if eb.IsNoExcept <> astNoExcept then
+                        let claimedText = if eb.IsNoExcept then "true" else "false"
+                        let astText = if astNoExcept then "true" else "false"
+                        refuseAbiFact $"Plugify exception boundary ABI fact for '{eb.CallableName}' ({eb.MangledSymbol}) claims noexcept={claimedText}, which conflicts with clang AST noexcept={astText}." recorded.Source
+                | None ->
+                    if eb.CallableName.Contains("::~") && not eb.IsNoExcept then
+                        refuseAbiFact $"Plugify exception boundary ABI fact for destructor '{eb.CallableName}' ({eb.MangledSymbol}) claims noexcept=false, conflicting with C++ destructor noexcept semantics." recorded.Source
+
+        let requestedClassSet = bundle.RequestedClasses |> List.map normalize |> Set.ofList
+        let allRequiredClasses = Set.union requestedClassSet (Set.union raiiClasses vtableClasses)
+        for normClass in allRequiredClasses do
+            if not (Set.contains normClass raiiClasses) then
+                refuseAbiFact $"Plugify ABI fact bundle is incomplete: missing RAII ABI fact for C++ class '{normClass}'." bundleSource
+            let vtableTarget = "vtable for " + normClass
+            let dtorTarget = normClass + "::~" + classLeafName normClass
+            let hasBinaryPolymorphism =
+                symbols |> List.exists (fun (m, d) ->
+                    let nd = normalize d
+                    (nd = vtableTarget && m.StartsWith("_ZTV", System.StringComparison.Ordinal))
+                    || (normalize (callableQualifiedName d) = dtorTarget && m.EndsWith("D0Ev", System.StringComparison.Ordinal)))
+            let hasAstPolymorphism =
+                Map.tryFind normClass astClasses
+                |> Option.exists (fun c ->
+                    c.IsAbstract
+                    || (c.Methods |> List.exists (function CppParser.Declaration.Function f -> f.IsVirtual | _ -> false)))
+            if (hasBinaryPolymorphism || hasAstPolymorphism) && not (Set.contains normClass vtableClasses) then
+                refuseAbiFact $"Plugify ABI fact bundle is incomplete: missing virtual table ABI fact for polymorphic C++ class '{normClass}'." bundleSource
+
+        for reqTemplate, reqArgs in bundle.RequestedTemplates do
+            let reqInstName = instantiationName reqTemplate reqArgs
+            if not (Set.contains reqInstName templateInstances) then
+                refuseAbiFact $"Plugify ABI fact bundle is incomplete: missing template ABI fact for requested instantiation '{reqInstName}'." bundleSource
+
+        for reqSym in requiredBoundarySymbols do
+            if not (Set.contains reqSym boundarySymbols) then
+                refuseAbiFact $"Plugify ABI fact bundle is incomplete: missing exception boundary ABI fact for symbol '{reqSym}'." bundleSource
+
+        bundle
+
+    /// Validate a Plugify C++ ABI fact bundle against an inspected library build and optional clang AST (#119).
+    let validatePlugifyAbiFactsAgainstSymbols
+        (bundle: CppAbiFactBundle)
+        (actualBuild: CppLibraryBuild)
+        (symbols: (string * string) list)
+        (parsed: CppParser.ParseResult option)
+        : CppAbiFactBundle =
+        validatePlugifyAbiFactsCore bundle actualBuild symbols Map.empty parsed
+
+    /// Validate a Plugify C++ ABI fact bundle against a library binary on disk and optional clang AST (#119).
+    let validatePlugifyAbiFacts
+        (bundle: CppAbiFactBundle)
+        (libraryPath: string)
+        (parsed: CppParser.ParseResult option)
+        : CppAbiFactBundle =
+        let actualBuild, symbols, binaryVtableSlots = inspectLibraryExportsDetailed libraryPath
+        validatePlugifyAbiFactsCore bundle actualBuild symbols binaryVtableSlots parsed

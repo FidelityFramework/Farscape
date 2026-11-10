@@ -731,10 +731,16 @@ module CppParser =
                 |> List.ofSeq
                 |> nameParametersByPosition name location
 
-            let returnType = extractReturnType (getQualType node)
+            let qualType = getQualType node
+            let returnType = extractReturnType qualType
+            let isVirtual = getBool node "virtual" || getBool node "pure"
             let isStatic = getStringOr node "storageClass" "" = "static"
             let isInline = getBool node "inline"
-            let attributes = extractAttributes node
+            let baseAttributes = extractAttributes node
+            let attributes =
+                if qualType.Contains("noexcept") && not (baseAttributes |> List.exists (fun a -> a.Kind = "NoExceptAttr")) then
+                    baseAttributes @ [{ Kind = "NoExceptAttr"; Args = []; StringArg = None }]
+                else baseAttributes
             let documentation = extractDocumentation node
             let mangledName = getString node "mangledName"
 
@@ -743,7 +749,7 @@ module CppParser =
                 ReturnType = returnType
                 Parameters = parameters
                 Documentation = documentation
-                IsVirtual = false
+                IsVirtual = isVirtual
                 IsStatic = isStatic
                 IsInline = isInline
                 Attributes = attributes
