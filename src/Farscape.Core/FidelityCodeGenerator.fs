@@ -2015,37 +2015,88 @@ module FidelityCodeGenerator =
               BlankLine ]
         let size = spec.SizeOverride |> Option.defaultWith (fun () -> CppClassAnalysis.estimateClassSize c)
         let align = c.Measured |> Option.map (fun m -> m.AlignmentBits / 8) |> Option.defaultValue 8
+        let shimmed = CppClassAnalysis.usesNativeShim spec
+        let shimPrefix = "farscape_cpp_" + safeName
+        let _, intRepr = scalarOrPointer "int"
         let self = { Name = "self"; Type = handle safeName }, pointer
         let dtorName = safeName + "_dtor"
-        let dtors = binding dtorName c.DestructorMangledName.Value "CalleeOwns" [ self ] (Named "unit") "Void"
+        let dtorSymbol = if shimmed then shimPrefix + "_dtor" else c.DestructorMangledName.Value
+        let dtors = binding dtorName dtorSymbol "CalleeOwns" [ self ] (Named "unit") "Void"
+        let errorDecls =
+            if not shimmed then []
+            else
+                let errMarker = safeName + "_Error"
+                let errParam = { Name = "err"; Type = handle errMarker }, pointer
+                let errDtorName = safeName + "_error_dtor"
+                let takeErrName = safeName + "_take_error"
+                let takeErrSymbol = shimPrefix + "_take_error"
+                OpaqueMarker errMarker ::
+                binding errDtorName (shimPrefix + "_error_dtor") "CalleeOwns" [ errParam ] (Named "unit") "Void" @
+                binding takeErrName takeErrSymbol "CallerOwns" [] (Generic("option", handle errMarker)) pointer @
+                [ ValueBinding(takeErrName + "ResourceDescriptor", Generic("Expr", Named "ResourceDescriptor"),
+                    Quoted(RecordBlock [
+                        "Resource", FunctionCall("", "OwnedNullableReturn", [ RecordConstruction [
+                            "Binding", Literal (quoteString (namespace' + "." + errDtorName))
+                            "Parameter", Literal "0" ] ])
+                        "Hypothesis", RecordBlock [
+                            "Identity", Literal (quoteString ((c.QualifiedName |> Option.defaultValue c.Name) + "::error"))
+                            "Version", Literal (quoteString "1.0")
+                            "Source", Literal (quoteString takeErrSymbol) ] ]))
+                  BlankLine ] @
+                binding (safeName + "_error_code") (shimPrefix + "_error_code") "Borrowed" [ errParam ] (Named "int") intRepr @
+                binding (safeName + "_error_len") (shimPrefix + "_error_len") "Borrowed" [ errParam ] (Named "int") intRepr @
+                binding (safeName + "_error_byte") (shimPrefix + "_error_byte") "Borrowed"
+                    [ errParam; { Name = "index"; Type = Named "int" }, intRepr ] (Named "int") intRepr
         let constructors = c.Constructors |> List.choose (function CppParser.Declaration.Function f -> Some f | _ -> None)
-        let ctors = constructors |> List.mapi (fun index f ->
-            let name = safeName + "_ctor" + (if index = 0 then "" else "_" + string index)
-            let symbol = f.MangledName.Value
-            binding name symbol "CallerOwns" (parameters f) (Generic("option", handle safeName)) pointer @
-            [ ValueBinding(name + "ResourceDescriptor", Generic("Expr", Named "ResourceDescriptor"),
-                Quoted(RecordBlock [
-                    "Resource", FunctionCall("", "OwnedNullableReturn", [ RecordConstruction [
-                        "Binding", Literal (quoteString (namespace' + "." + dtorName))
-                        "Parameter", Literal "0" ] ])
-                    "Hypothesis", RecordBlock [
-                        "Identity", Literal (quoteString (c.QualifiedName |> Option.defaultValue c.Name))
-                        "Version", Literal (quoteString "1.0")
-                        "Source", Literal (quoteString symbol) ] ])) ]) |> List.concat
+        let ctors =
+            if shimmed && c.IsAbstract then []
+            else
+                constructors |> List.mapi (fun index f ->
+                    let suffix = if index = 0 then "" else "_" + string index
+                    let name = safeName + "_ctor" + suffix
+                    let symbol = if shimmed then shimPrefix + "_ctor" + suffix else f.MangledName.Value
+                    binding name symbol "CallerOwns" (parameters f) (Generic("option", handle safeName)) pointer @
+                    [ ValueBinding(name + "ResourceDescriptor", Generic("Expr", Named "ResourceDescriptor"),
+                        Quoted(RecordBlock [
+                            "Resource", FunctionCall("", "OwnedNullableReturn", [ RecordConstruction [
+                                "Binding", Literal (quoteString (namespace' + "." + dtorName))
+                                "Parameter", Literal "0" ] ])
+                            "Hypothesis", RecordBlock [
+                                "Identity", Literal (quoteString (c.QualifiedName |> Option.defaultValue c.Name))
+                                "Version", Literal (quoteString "1.0")
+                                "Source", Literal (quoteString symbol) ] ])) ]) |> List.concat
+        let upcastDecls =
+            if not shimmed then []
+            else
+                c.BaseClasses
+                |> List.choose (fun baseName ->
+                    let cleanBase = baseName.Replace("class ", "").Replace("struct ", "").Trim()
+                    ctx.KnownClasses.TryFind cleanBase)
+                |> List.collect (fun baseCls ->
+                    let baseSafe = safe baseCls
+                    let upcastName = safeName + "_as_" + baseSafe
+                    let upcastSymbol = shimPrefix + "_as_" + baseSafe
+                    binding upcastName upcastSymbol "Borrowed" [ self ] (Generic("option", handle baseSafe)) pointer)
         let methods = c.Methods |> List.choose (function CppParser.Declaration.Function f -> Some f | _ -> None)
         let methodDecls = methods |> List.mapi (fun index f ->
             let overloads = methods |> List.filter (fun other -> other.Name = f.Name)
             let suffix = if overloads.Length > 1 then "_" + string index else ""
             let name = safeName + "_" + cleanParamName f.Name + suffix
+            let symbol = if shimmed then shimPrefix + "_" + f.Name + suffix else f.MangledName.Value
             let info = CppClassAnalysis.analyzeMethodReturn ctx.KnownClasses f
             let args = parameters f
             let receivers = if f.IsStatic then [] else [ self ]
+            let isThrowing = shimmed && not (CppClassAnalysis.hasNoExcept f)
             match info.ReturnConvention, info.SretTypeName with
             | CppClassAnalysis.SretReturn, Some retName ->
                 let retClass = ctx.KnownClasses[retName]
                 let marker = safe retClass
-                OpaqueMarker marker :: binding name f.MangledName.Value "Borrowed"
-                    (({ Name = "retStorage"; Type = handle marker }, pointer) :: receivers @ args) (Named "unit") "Void"
+                if isThrowing then
+                    OpaqueMarker marker :: binding name symbol "Borrowed"
+                        (({ Name = "outResult"; Type = handle marker }, pointer) :: receivers @ args) (Named "int") intRepr
+                else
+                    OpaqueMarker marker :: binding name symbol "Borrowed"
+                        (({ Name = "retStorage"; Type = handle marker }, pointer) :: receivers @ args) (Named "unit") "Void"
             | _ ->
                 let resultName = f.ReturnType.Replace("const ", "").Trim()
                 let resultClass = if f.ReturnType.Contains("*") || f.ReturnType.Contains("&") then None else ctx.KnownClasses.TryFind resultName
@@ -2071,10 +2122,26 @@ module FidelityCodeGenerator =
                         match ctx.Structs.TryFind resultName with
                         | Some record -> valueRecord record
                         | None -> let typ, repr = scalarOrPointer f.ReturnType in [], typ, repr
-                extra @ binding name f.MangledName.Value "Borrowed" (receivers @ args) retType returnRef) |> List.concat
+                if isThrowing then
+                    if f.ReturnType.Trim() = "void" then
+                        extra @ binding name symbol "Borrowed" (receivers @ args) (Named "int") intRepr
+                    else
+                        let outParam = { Name = "outResult"; Type = Generic("CHandle", retType) }, pointer
+                        extra @ binding name symbol "Borrowed" (outParam :: receivers @ args) (Named "int") intRepr
+                else
+                    extra @ binding name symbol "Borrowed" (receivers @ args) retType returnRef) |> List.concat
+        let moduleConstants =
+            [ LiteralBinding("Size", string size); LiteralBinding("Alignment", string align) ] @
+            (if shimmed then
+                [ LiteralBinding("StatusOk", "0")
+                  LiteralBinding("StatusNullHandle", "-1")
+                  LiteralBinding("StatusStdException", "1")
+                  LiteralBinding("StatusUnknownException", "2")
+                  LiteralBinding("StatusAllocationFailed", "3") ]
+             else [])
         [ OpaqueMarker safeName
-          SubModule(safeName, [ LiteralBinding("Size", string size); LiteralBinding("Alignment", string align) ]) ]
-        @ dtors @ ctors @ methodDecls
+          SubModule(safeName, moduleConstants) ]
+        @ dtors @ errorDecls @ ctors @ upcastDecls @ methodDecls
 
     // =========================================================================
     // Catamorphism-Based Generation

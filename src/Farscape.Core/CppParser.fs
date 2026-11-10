@@ -1295,7 +1295,13 @@ module CppParser =
                             innerNodes
                             |> Seq.filter (fun inner ->
                                 let k = getStringOr inner "kind" ""
-                                k = "CXXMethodDecl" || k = "FunctionDecl")
+                                let n = getStringOr inner "name" ""
+                                let isOperator =
+                                    n.StartsWith("operator") &&
+                                    (n.Length = 8 || not (System.Char.IsLetterOrDigit n[8] || n[8] = '_'))
+                                (k = "CXXMethodDecl" || k = "FunctionDecl") &&
+                                not (getBool inner "isImplicit") &&
+                                not isOperator)
                             |> Seq.choose (processFunction childScope)
                             |> Seq.map Function
                             |> List.ofSeq
@@ -1305,7 +1311,8 @@ module CppParser =
                         let constructors =
                             innerNodes
                             |> Seq.filter (fun inner ->
-                                getStringOr inner "kind" "" = "CXXConstructorDecl")
+                                getStringOr inner "kind" "" = "CXXConstructorDecl" &&
+                                not (getBool inner "isImplicit"))
                             |> Seq.choose (processFunction childScope)
                             |> Seq.map Function
                             |> List.ofSeq

@@ -171,6 +171,17 @@ module CppClassAnalysis =
         | InterfaceClass -> Diagnostics.CppInterfaceClassUnadmitted
         | OpaqueClass -> Diagnostics.CppOpaqueClassUnadmitted
 
+    /// Whether a class specification opts into the generated native C++ shim (#117)
+    /// for virtual dispatch, inheritance casts, and exception boundary catching.
+    let usesNativeShim (spec: PilotTypes.CppClassSpec) : bool =
+        match spec.KindOverride with
+        | Some ("shim" | "native_shim") -> true
+        | _ -> false
+
+    /// Whether a C++ constructor or method carries a `noexcept` attribute.
+    let hasNoExcept (f: CppParser.FunctionDecl) : bool =
+        f.Attributes |> List.exists (fun a -> a.Kind = "NoExceptAttr")
+
     /// Validate the native shape before generating any class declaration. This is a call
     /// contract check; it grants neither storage allocation nor compiler lifetime evidence.
     let validateMarshaledClass (spec: PilotTypes.CppClassSpec) (cls: CppParser.ClassDecl) =
@@ -184,27 +195,41 @@ module CppClassAnalysis =
         if not spec.Bind then refuse code "has no explicitly admitted marshaled binding."
         if spec.Name <> cls.Name && Some spec.Name <> cls.QualifiedName then
             refuse code $"admission for '{spec.Name}' does not select this class."
-        if cls.IsAbstract || methods |> List.exists _.IsVirtual then
-            refuse Diagnostics.CppInterfaceClassUnadmitted "abstract or virtual dispatch requires a native adapter."
-        if not cls.BaseClasses.IsEmpty then
-            let pimplBase (name: string) = name.Contains("detail::pimpl") || name.Contains("shared_ptr") || name.Contains("unique_ptr")
-            if not (cls.BaseClasses |> List.forall pimplBase) then
-                refuse code "non-pimpl base class hierarchy is unsupported."
-        let hasC1 (f: CppParser.FunctionDecl) = f.MangledName |> Option.exists (fun s -> s.StartsWith("_Z") && s.Contains("C1"))
-        if ctors.IsEmpty || not (ctors |> List.forall hasC1) then
-            refuse code "requires complete-object C1 constructor symbols."
-        if not (cls.DestructorMangledName |> Option.exists (fun s -> s.StartsWith("_Z") && s.Contains("D1"))) then
-            refuse code "requires a complete-object D1 destructor symbol."
-        if shape = OpaqueClass && cls.Measured.IsNone && spec.SizeOverride.IsNone then
-            refuse Diagnostics.CppOpaqueClassUnadmitted "opaque storage requires a measured or overridden size."
-        match spec.SizeOverride with
-        | Some size when size <= 0 -> refuse code "storage size must be positive."
-        | _ -> ()
-        for f in ctors @ methods do
-            if not (f.Attributes |> List.exists (fun a -> a.Kind = "NoExceptAttr")) then
-                refuse code $"'{f.Name}' may throw across the native boundary."
-            if f.MangledName |> Option.forall System.String.IsNullOrWhiteSpace then
-                refuse code $"'{f.Name}' has no mangled symbol."
+        if usesNativeShim spec then
+            if shape = OpaqueClass && not cls.IsAbstract && cls.Measured.IsNone && spec.SizeOverride.IsNone then
+                refuse Diagnostics.CppOpaqueClassUnadmitted "opaque storage requires a measured or overridden size."
+            match spec.SizeOverride with
+            | Some size when size <= 0 -> refuse code "storage size must be positive."
+            | _ -> ()
+            if not cls.IsAbstract && ctors.IsEmpty then
+                refuse code "concrete shimmed class requires at least one constructor."
+            if cls.DestructorMangledName |> Option.forall System.String.IsNullOrWhiteSpace then
+                refuse code "shimmed class requires a destructor symbol."
+            for f in ctors @ methods do
+                if f.MangledName |> Option.forall System.String.IsNullOrWhiteSpace then
+                    refuse code $"'{f.Name}' has no mangled symbol."
+        else
+            if cls.IsAbstract || methods |> List.exists _.IsVirtual then
+                refuse Diagnostics.CppInterfaceClassUnadmitted "abstract or virtual dispatch requires a native adapter."
+            if not cls.BaseClasses.IsEmpty then
+                let pimplBase (name: string) = name.Contains("detail::pimpl") || name.Contains("shared_ptr") || name.Contains("unique_ptr")
+                if not (cls.BaseClasses |> List.forall pimplBase) then
+                    refuse code "non-pimpl base class hierarchy is unsupported."
+            let hasC1 (f: CppParser.FunctionDecl) = f.MangledName |> Option.exists (fun s -> s.StartsWith("_Z") && s.Contains("C1"))
+            if ctors.IsEmpty || not (ctors |> List.forall hasC1) then
+                refuse code "requires complete-object C1 constructor symbols."
+            if not (cls.DestructorMangledName |> Option.exists (fun s -> s.StartsWith("_Z") && s.Contains("D1"))) then
+                refuse code "requires a complete-object D1 destructor symbol."
+            if shape = OpaqueClass && cls.Measured.IsNone && spec.SizeOverride.IsNone then
+                refuse Diagnostics.CppOpaqueClassUnadmitted "opaque storage requires a measured or overridden size."
+            match spec.SizeOverride with
+            | Some size when size <= 0 -> refuse code "storage size must be positive."
+            | _ -> ()
+            for f in ctors @ methods do
+                if not (hasNoExcept f) then
+                    refuse code $"'{f.Name}' may throw across the native boundary."
+                if f.MangledName |> Option.forall System.String.IsNullOrWhiteSpace then
+                    refuse code $"'{f.Name}' has no mangled symbol."
 
     /// A single path of operations on handle identities. Aliases must retain the same
     /// identity; callers must verify every admitted path, including early exits.
@@ -213,6 +238,9 @@ module CppClassAnalysis =
         | Construct of handle: string
         | MethodCall of handle: string * symbol: string
         | Release of handle: string
+        | AcquireErrorPayload of errorHandle: string
+        | ReadErrorPayload of errorHandle: string
+        | ReleaseErrorPayload of errorHandle: string
         | ScopeExit
 
     /// Check a declared operation path against the same class contract generation uses.
@@ -225,34 +253,65 @@ module CppClassAnalysis =
             Diagnostics.diagnostic code $"C++ class '{cls.Name}': {reason}" cls.Location.Location
             |> Diagnostics.refuse
         let shapeCode = marshaledClassShapeCode cls
-        let symbols = cls.Methods |> List.choose (function CppParser.Declaration.Function f -> f.MangledName | _ -> None) |> Set.ofList
+        let safeName = (cls.QualifiedName |> Option.defaultValue cls.Name).Replace("::", "_")
+        let methods = cls.Methods |> List.choose (function CppParser.Declaration.Function f -> Some f | _ -> None)
+        let mangledSymbols = methods |> List.choose _.MangledName
+        let shimSymbols =
+            if usesNativeShim spec then
+                methods |> List.mapi (fun i f ->
+                    let suffix = if (methods |> List.filter (fun other -> other.Name = f.Name)).Length > 1 then "_" + string i else ""
+                    "farscape_cpp_" + safeName + "_" + f.Name + suffix)
+            else []
+        let symbols = Set.ofList (mangledSymbols @ shimSymbols)
         let requireLive states handle =
             match Map.tryFind handle states with
             | Some true -> ()
             | Some false -> refuse Diagnostics.CppObjectUseAfterRelease $"handle '{handle}' is used after its D1 release."
             | None -> refuse shapeCode $"handle '{handle}' has no successful construction."
-        let requireClean states =
+        let requireLiveError errorStates errorHandle =
+            match Map.tryFind errorHandle errorStates with
+            | Some true -> ()
+            | Some false -> refuse Diagnostics.CppObjectUseAfterRelease $"error payload handle '{errorHandle}' is used after its release."
+            | None -> refuse shapeCode $"error payload handle '{errorHandle}' has no acquisition."
+        let requireClean states errorStates =
             match states |> Map.toList |> List.tryFind snd with
             | Some (handle, _) -> refuse shapeCode $"handle '{handle}' has no D1 release on this exit."
-            | None -> ()
-        let rec verify states = function
-            | [] -> requireClean states
+            | None ->
+                match errorStates |> Map.toList |> List.tryFind snd with
+                | Some (errorHandle, _) -> refuse shapeCode $"error payload handle '{errorHandle}' has no release on this exit."
+                | None -> ()
+        let rec verify states errorStates = function
+            | [] -> requireClean states errorStates
             | CppObjectOperation.Construct handle :: rest ->
                 if Map.containsKey handle states then refuse shapeCode $"handle identity '{handle}' is constructed more than once."
-                verify (Map.add handle true states) rest
+                verify (Map.add handle true states) errorStates rest
             | CppObjectOperation.MethodCall (handle, symbol) :: rest ->
                 requireLive states handle
                 if not (symbols.Contains symbol) then refuse shapeCode $"method symbol '{symbol}' is outside the admitted class contract."
-                verify states rest
+                verify states errorStates rest
             | CppObjectOperation.Release handle :: rest ->
                 match Map.tryFind handle states with
                 | Some false -> refuse Diagnostics.CppObjectDoubleRelease $"handle '{handle}' receives its D1 release more than once."
                 | _ -> requireLive states handle
-                verify (Map.add handle false states) rest
+                verify (Map.add handle false states) errorStates rest
+            | CppObjectOperation.AcquireErrorPayload errorHandle :: rest ->
+                if not (usesNativeShim spec) then refuse shapeCode "exception payload operations require a generated native shim."
+                if Map.containsKey errorHandle errorStates then refuse shapeCode $"error payload handle '{errorHandle}' is acquired more than once."
+                verify states (Map.add errorHandle true errorStates) rest
+            | CppObjectOperation.ReadErrorPayload errorHandle :: rest ->
+                if not (usesNativeShim spec) then refuse shapeCode "exception payload operations require a generated native shim."
+                requireLiveError errorStates errorHandle
+                verify states errorStates rest
+            | CppObjectOperation.ReleaseErrorPayload errorHandle :: rest ->
+                if not (usesNativeShim spec) then refuse shapeCode "exception payload operations require a generated native shim."
+                match Map.tryFind errorHandle errorStates with
+                | Some false -> refuse Diagnostics.CppObjectDoubleRelease $"error payload handle '{errorHandle}' receives its release more than once."
+                | _ -> requireLiveError errorStates errorHandle
+                verify states (Map.add errorHandle false errorStates) rest
             | CppObjectOperation.ScopeExit :: rest ->
-                requireClean states
+                requireClean states errorStates
                 if not rest.IsEmpty then refuse shapeCode "operations follow a terminal scope exit."
-        verify Map.empty operations
+        verify Map.empty Map.empty operations
 
     /// Result of analyzing a method's return type for ABI convention.
     type MethodReturnInfo = {
@@ -348,56 +407,241 @@ module CppClassAnalysis =
         let joined = String.concat ", "
         let size = spec.SizeOverride |> Option.defaultWith (fun () -> estimateClassSize cls)
         let align = cls.Measured |> Option.map (fun m -> m.AlignmentBits / 8) |> Option.defaultValue 8
-        let constructors =
-            funcs cls.Constructors
-            |> List.mapi (fun i f ->
-                let suffix = if i = 0 then "" else "_" + string i
-                let name = safeName + "_ctor" + suffix
-                let declarations, arguments = parameterParts f
-                let raw = name + "_c1"
-                [ sprintf "extern \"C\" void %s(%s) noexcept asm(%s);" raw (joined ("void* self" :: declarations)) (quote f.MangledName.Value)
-                  sprintf "extern \"C\" void* %s(%s) noexcept {" name (joined declarations)
-                  sprintf "  void* storage = ::operator new(%d, std::align_val_t(%d), std::nothrow);" size align
-                  "  if (!storage) return nullptr;"
-                  sprintf "  %s(%s);" raw (joined ("storage" :: arguments))
-                  "  return storage;"
-                  "}" ])
-            |> List.concat
         let methods = funcs cls.Methods
-        let forwards =
-            methods
-            |> List.mapi (fun i f ->
-                let suffix = if (methods |> List.filter (fun other -> other.Name = f.Name)).Length > 1 then "_" + string i else ""
-                let name = safeName + "_" + f.Name + suffix
-                let raw = name + "_method"
-                let declarations, arguments = parameterParts f
-                let receivers = if f.IsStatic then [] else [ "void* self" ]
-                let received = if f.IsStatic then [] else [ "self" ]
-                let ret = nativeType f.ReturnType
-                let call = raw + "(" + joined (received @ arguments) + ")"
-                let declaration = sprintf "extern \"C\" %s %s(%s) noexcept asm(%s);" ret raw (joined (receivers @ declarations)) (quote f.MangledName.Value)
-                match (analyzeMethodReturn knownClasses f).ReturnConvention with
-                | SretReturn ->
-                    [ declaration
-                      sprintf "extern \"C\" void %s(%s) noexcept {" name (joined ("void* retStorage" :: receivers @ declarations))
-                      sprintf "  ::new (retStorage) %s(%s);" ret call
-                      "}" ]
-                | RegisterReturn ->
-                    [ declaration
-                      sprintf "extern \"C\" %s %s(%s) noexcept { return %s; }" ret name (joined (receivers @ declarations)) call ])
-            |> List.concat
-        [ "#include <new>"
-          "#include " + quote header
-          sprintf "static_assert(sizeof(%s) <= %d, \"class storage size mismatch\");" className size
-          sprintf "static_assert(alignof(%s) <= %d, \"class storage alignment mismatch\");" className align ]
-        @ constructors
-        @ [ sprintf "extern \"C\" void %s_d1(void* self) noexcept asm(%s);" safeName (quote cls.DestructorMangledName.Value)
-            sprintf "extern \"C\" void %s_dtor(void* self) noexcept {" safeName
-            sprintf "  %s_d1(self);" safeName
-            sprintf "  ::operator delete(self, std::align_val_t(%d));" align
-            "}" ]
-        @ forwards
-        |> String.concat "\n"
+        if usesNativeShim spec then
+            let prefix = "farscape_cpp_" + safeName
+            let errStruct = prefix + "_error"
+            let lastErr = prefix + "_last_error"
+            let clearErr = prefix + "_clear_error"
+            let recordErr = prefix + "_record_error"
+            let staticAsserts =
+                if cls.IsAbstract then []
+                else
+                    [ sprintf "static_assert(sizeof(%s) <= %d, \"class storage size mismatch\");" className size
+                      sprintf "static_assert(alignof(%s) <= %d, \"class storage alignment mismatch\");" className align ]
+            let inlineErr = prefix + "_inline_error"
+            let inlineInUse = prefix + "_inline_in_use"
+            let errorRuntime =
+                [ sprintf "struct %s { int status; int length; char message[256]; bool dynamic; };" errStruct
+                  sprintf "static thread_local %s %s = {0, 0, {0}, false};" errStruct inlineErr
+                  sprintf "static thread_local bool %s = false;" inlineInUse
+                  sprintf "static thread_local %s* %s = nullptr;" errStruct lastErr
+                  sprintf "extern \"C\" void %s_error_dtor(void* err) noexcept {" prefix
+                  "  if (!err) return;"
+                  sprintf "  %s* e = static_cast<%s*>(err);" errStruct errStruct
+                  sprintf "  if (e == &%s) { %s = false; }" inlineErr inlineInUse
+                  "  else if (e->dynamic) { std::free(e); }"
+                  "}"
+                  sprintf "static void %s() noexcept {" clearErr
+                  sprintf "  if (%s) { %s_error_dtor(%s); %s = nullptr; }" lastErr prefix lastErr lastErr
+                  "}"
+                  sprintf "static void %s(int status, const char* msg) noexcept {" recordErr
+                  sprintf "  %s();" clearErr
+                  sprintf "  %s* slot = nullptr;" errStruct
+                  sprintf "  if (!%s) { %s = true; slot = &%s; slot->dynamic = false; }" inlineInUse inlineInUse inlineErr
+                  sprintf "  else { slot = static_cast<%s*>(std::malloc(sizeof(%s))); if (slot) slot->dynamic = true; }" errStruct errStruct
+                  "  if (!slot) return;"
+                  "  slot->status = status;"
+                  "  int len = 0;"
+                  "  if (msg) {"
+                  "    while (msg[len] != '\\0' && len < 255) { slot->message[len] = msg[len]; ++len; }"
+                  "  }"
+                  "  slot->message[len] = '\\0';"
+                  "  slot->length = len;"
+                  sprintf "  %s = slot;" lastErr
+                  "}"
+                  sprintf "extern \"C\" void* %s_take_error() noexcept {" prefix
+                  sprintf "  %s* err = %s;" errStruct lastErr
+                  sprintf "  %s = nullptr;" lastErr
+                  "  return err;"
+                  "}"
+                  sprintf "extern \"C\" int %s_error_code(void* err) noexcept {" prefix
+                  sprintf "  return err ? static_cast<%s*>(err)->status : 0;" errStruct
+                  "}"
+                  sprintf "extern \"C\" int %s_error_len(void* err) noexcept {" prefix
+                  sprintf "  return err ? static_cast<%s*>(err)->length : 0;" errStruct
+                  "}"
+                  sprintf "extern \"C\" int %s_error_byte(void* err, int index) noexcept {" prefix
+                  "  if (!err || index < 0) return -1;"
+                  sprintf "  const %s* e = static_cast<const %s*>(err);" errStruct errStruct
+                  "  return index < e->length ? static_cast<unsigned char>(e->message[index]) : -1;"
+                  "}" ]
+            let shimCtors =
+                if cls.IsAbstract then []
+                else
+                    funcs cls.Constructors
+                    |> List.mapi (fun i f ->
+                        let suffix = if i = 0 then "" else "_" + string i
+                        let name = prefix + "_ctor" + suffix
+                        let declarations, arguments = parameterParts f
+                        [ sprintf "extern \"C\" void* %s(%s) noexcept {" name (joined declarations)
+                          sprintf "  %s();" clearErr
+                          "  try {"
+                          sprintf "    void* obj = static_cast<void*>(new (std::nothrow) %s(%s));" className (joined arguments)
+                          "    if (!obj) {"
+                          sprintf "      %s(3, \"object allocation failed\");" recordErr
+                          "      return nullptr;"
+                          "    }"
+                          "    return obj;"
+                          "  } catch (const std::exception& ex) {"
+                          sprintf "    %s(1, ex.what());" recordErr
+                          "    return nullptr;"
+                          "  } catch (...) {"
+                          sprintf "    %s(2, \"non-std C++ exception\");" recordErr
+                          "    return nullptr;"
+                          "  }"
+                          "}" ])
+                    |> List.concat
+            let shimDtor =
+                [ sprintf "extern \"C\" void %s_dtor(void* self) noexcept {" prefix
+                  "  if (!self) return;"
+                  sprintf "  %s();" clearErr
+                  "  try {"
+                  sprintf "    delete static_cast<%s*>(self);" className
+                  "  } catch (const std::exception& ex) {"
+                  sprintf "    %s(1, ex.what());" recordErr
+                  "  } catch (...) {"
+                  sprintf "    %s(2, \"non-std C++ exception\");" recordErr
+                  "  }"
+                  "}" ]
+            let shimUpcasts =
+                cls.BaseClasses
+                |> List.choose (fun baseName ->
+                    let cleanBase = baseName.Replace("class ", "").Replace("struct ", "").Trim()
+                    knownClasses.TryFind cleanBase)
+                |> List.collect (fun baseCls ->
+                    let baseQualified = qualified baseCls
+                    let baseSafe = baseQualified.Replace("::", "_")
+                    [ sprintf "extern \"C\" void* %s_as_%s(void* self) noexcept {" prefix baseSafe
+                      "  if (!self) return nullptr;"
+                      sprintf "  return static_cast<void*>(static_cast<%s*>(static_cast<%s*>(self)));" baseQualified className
+                      "}" ])
+            let shimMethods =
+                methods
+                |> List.mapi (fun i f ->
+                    let suffix = if (methods |> List.filter (fun other -> other.Name = f.Name)).Length > 1 then "_" + string i else ""
+                    let name = prefix + "_" + f.Name + suffix
+                    let declarations, arguments = parameterParts f
+                    let receivers = if f.IsStatic then [] else [ "void* self" ]
+                    let ret = nativeType f.ReturnType
+                    let call =
+                        if f.IsStatic then sprintf "%s::%s(%s)" className f.Name (joined arguments)
+                        else sprintf "static_cast<%s*>(self)->%s(%s)" className f.Name (joined arguments)
+                    if hasNoExcept f then
+                        match (analyzeMethodReturn knownClasses f).ReturnConvention with
+                        | SretReturn ->
+                            [ sprintf "extern \"C\" void %s(%s) noexcept {" name (joined ("void* retStorage" :: receivers @ declarations))
+                              sprintf "  ::new (retStorage) %s(%s);" ret call
+                              "}" ]
+                        | RegisterReturn ->
+                            if ret = "void" then
+                                [ sprintf "extern \"C\" void %s(%s) noexcept { %s; }" name (joined (receivers @ declarations)) call ]
+                            else
+                                [ sprintf "extern \"C\" %s %s(%s) noexcept { return %s; }" ret name (joined (receivers @ declarations)) call ]
+                    else
+                        let nullCheck =
+                            if f.IsStatic then []
+                            else [ "  if (!self) return -1;" ]
+                        let catchBlocks =
+                            [ "  } catch (const std::exception& ex) {"
+                              sprintf "    %s(1, ex.what());" recordErr
+                              "    return 1;"
+                              "  } catch (...) {"
+                              sprintf "    %s(2, \"non-std C++ exception\");" recordErr
+                              "    return 2;"
+                              "  }"
+                              "}" ]
+                        match (analyzeMethodReturn knownClasses f).ReturnConvention with
+                        | SretReturn ->
+                            [ sprintf "extern \"C\" int %s(%s) noexcept {" name (joined ("void* outResult" :: receivers @ declarations))
+                              "  if (!outResult) return -1;" ]
+                            @ nullCheck
+                            @ [ sprintf "  %s();" clearErr
+                                "  try {"
+                                sprintf "    ::new (outResult) %s(%s);" ret call
+                                "    return 0;" ]
+                            @ catchBlocks
+                        | RegisterReturn ->
+                            if ret = "void" then
+                                [ sprintf "extern \"C\" int %s(%s) noexcept {" name (joined (receivers @ declarations)) ]
+                                @ nullCheck
+                                @ [ sprintf "  %s();" clearErr
+                                    "  try {"
+                                    sprintf "    %s;" call
+                                    "    return 0;" ]
+                                @ catchBlocks
+                            else
+                                [ sprintf "extern \"C\" int %s(%s) noexcept {" name (joined ((ret + "* outResult") :: receivers @ declarations))
+                                  "  if (!outResult) return -1;" ]
+                                @ nullCheck
+                                @ [ sprintf "  %s();" clearErr
+                                    "  try {"
+                                    sprintf "    *outResult = %s;" call
+                                    "    return 0;" ]
+                                @ catchBlocks)
+                |> List.concat
+            [ "#include <new>"
+              "#include <cstdlib>"
+              "#include <exception>"
+              "#include <string>"
+              "#include " + quote header ]
+            @ staticAsserts
+            @ errorRuntime
+            @ shimCtors
+            @ shimDtor
+            @ shimUpcasts
+            @ shimMethods
+            |> String.concat "\n"
+        else
+            let constructors =
+                funcs cls.Constructors
+                |> List.mapi (fun i f ->
+                    let suffix = if i = 0 then "" else "_" + string i
+                    let name = safeName + "_ctor" + suffix
+                    let declarations, arguments = parameterParts f
+                    let raw = name + "_c1"
+                    [ sprintf "extern \"C\" void %s(%s) noexcept asm(%s);" raw (joined ("void* self" :: declarations)) (quote f.MangledName.Value)
+                      sprintf "extern \"C\" void* %s(%s) noexcept {" name (joined declarations)
+                      sprintf "  void* storage = ::operator new(%d, std::align_val_t(%d), std::nothrow);" size align
+                      "  if (!storage) return nullptr;"
+                      sprintf "  %s(%s);" raw (joined ("storage" :: arguments))
+                      "  return storage;"
+                      "}" ])
+                |> List.concat
+            let forwards =
+                methods
+                |> List.mapi (fun i f ->
+                    let suffix = if (methods |> List.filter (fun other -> other.Name = f.Name)).Length > 1 then "_" + string i else ""
+                    let name = safeName + "_" + f.Name + suffix
+                    let raw = name + "_method"
+                    let declarations, arguments = parameterParts f
+                    let receivers = if f.IsStatic then [] else [ "void* self" ]
+                    let received = if f.IsStatic then [] else [ "self" ]
+                    let ret = nativeType f.ReturnType
+                    let call = raw + "(" + joined (received @ arguments) + ")"
+                    let declaration = sprintf "extern \"C\" %s %s(%s) noexcept asm(%s);" ret raw (joined (receivers @ declarations)) (quote f.MangledName.Value)
+                    match (analyzeMethodReturn knownClasses f).ReturnConvention with
+                    | SretReturn ->
+                        [ declaration
+                          sprintf "extern \"C\" void %s(%s) noexcept {" name (joined ("void* retStorage" :: receivers @ declarations))
+                          sprintf "  ::new (retStorage) %s(%s);" ret call
+                          "}" ]
+                    | RegisterReturn ->
+                        [ declaration
+                          sprintf "extern \"C\" %s %s(%s) noexcept { return %s; }" ret name (joined (receivers @ declarations)) call ])
+                |> List.concat
+            [ "#include <new>"
+              "#include " + quote header
+              sprintf "static_assert(sizeof(%s) <= %d, \"class storage size mismatch\");" className size
+              sprintf "static_assert(alignof(%s) <= %d, \"class storage alignment mismatch\");" className align ]
+            @ constructors
+            @ [ sprintf "extern \"C\" void %s_d1(void* self) noexcept asm(%s);" safeName (quote cls.DestructorMangledName.Value)
+                sprintf "extern \"C\" void %s_dtor(void* self) noexcept {" safeName
+                sprintf "  %s_d1(self);" safeName
+                sprintf "  ::operator delete(self, std::align_val_t(%d));" align
+                "}" ]
+            @ forwards
+            |> String.concat "\n"
 
     /// Identity of the exact artifact whose exported symbols were inspected (#118).
     type CppLibraryBuild = {

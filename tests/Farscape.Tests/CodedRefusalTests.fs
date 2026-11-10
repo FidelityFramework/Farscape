@@ -374,6 +374,233 @@ let ``admitted C++ class emits marshaled bindings and its storage adapter runs n
     finally
         Directory.Delete(directory, true)
 
+[<Fact>]
+let ``shimmed C++ exception payload lifecycle refuses use-after-release with FS9217 double-release with FS9218 and leaked payload at exit`` () =
+    let _, baseCls = cppObjectContract ()
+    let vmethod = { mkFunc "compute" "int" [ "x", "int" ] with IsVirtual = true; MangledName = Some "_ZN6Widget7computeEi" }
+    let cls = { baseCls with Methods = [ CppParser.Declaration.Function vmethod ] }
+    let unshimmedSpec : PilotTypes.CppClassSpec =
+        { Name = "Widget"; Namespace = "Test"; Bind = true; KindOverride = None; SizeOverride = None }
+    let shimmedSpec : PilotTypes.CppClassSpec =
+        { unshimmedSpec with KindOverride = Some "shim" }
+    // Direct binding without shim still refuses virtual/throwing class with FS9213
+    let directErr = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+        CppClassAnalysis.verifyCppObjectLifecycle unshimmedSpec cls [])
+    Assert.Equal(Diagnostics.CppInterfaceClassUnadmitted, (only directErr.Refusal).Code)
+    // Valid shimmed lifecycle with object + exception payload cleanup succeeds
+    CppClassAnalysis.verifyCppObjectLifecycle shimmedSpec cls [
+        CppClassAnalysis.CppObjectOperation.Construct "obj"
+        CppClassAnalysis.CppObjectOperation.MethodCall ("obj", "farscape_cpp_Widget_compute")
+        CppClassAnalysis.CppObjectOperation.AcquireErrorPayload "err"
+        CppClassAnalysis.CppObjectOperation.ReadErrorPayload "err"
+        CppClassAnalysis.CppObjectOperation.ReleaseErrorPayload "err"
+        CppClassAnalysis.CppObjectOperation.Release "obj"
+        CppClassAnalysis.CppObjectOperation.ScopeExit ]
+    // Reading error payload after release is refused with FS9217
+    let uafErr = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+        CppClassAnalysis.verifyCppObjectLifecycle shimmedSpec cls [
+            CppClassAnalysis.CppObjectOperation.AcquireErrorPayload "err"
+            CppClassAnalysis.CppObjectOperation.ReleaseErrorPayload "err"
+            CppClassAnalysis.CppObjectOperation.ReadErrorPayload "err" ])
+    Assert.Equal(Diagnostics.CppObjectUseAfterRelease, (only uafErr.Refusal).Code)
+    // Releasing error payload twice is refused with FS9218
+    let dblErr = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+        CppClassAnalysis.verifyCppObjectLifecycle shimmedSpec cls [
+            CppClassAnalysis.CppObjectOperation.AcquireErrorPayload "err"
+            CppClassAnalysis.CppObjectOperation.ReleaseErrorPayload "err"
+            CppClassAnalysis.CppObjectOperation.ReleaseErrorPayload "err" ])
+    Assert.Equal(Diagnostics.CppObjectDoubleRelease, (only dblErr.Refusal).Code)
+    // Leaking error payload at scope exit is refused with the class shape code (FS9212)
+    let leakErr = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+        CppClassAnalysis.verifyCppObjectLifecycle shimmedSpec cls [
+            CppClassAnalysis.CppObjectOperation.AcquireErrorPayload "err"
+            CppClassAnalysis.CppObjectOperation.ScopeExit ])
+    Assert.Equal(Diagnostics.CppValueClassUnadmitted, (only leakErr.Refusal).Code)
+
+[<Fact>]
+let ``shimmed C++ class binds virtual dispatch base casts and throwing methods through generated native shim and runs natively`` () =
+    let directory = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "artifacts", "pilot-fixture-tests", System.Guid.NewGuid().ToString("N")))
+    Directory.CreateDirectory directory |> ignore
+    let run executable arguments =
+        let info = System.Diagnostics.ProcessStartInfo(executable)
+        info.WorkingDirectory <- directory
+        info.RedirectStandardOutput <- true
+        info.RedirectStandardError <- true
+        for argument in arguments do info.ArgumentList.Add argument
+        use proc = System.Diagnostics.Process.Start info
+        let stdout = proc.StandardOutput.ReadToEndAsync()
+        let stderr = proc.StandardError.ReadToEndAsync()
+        proc.WaitForExit()
+        Assert.True(proc.ExitCode = 0, executable + ": " + stderr.Result + stdout.Result)
+        stdout.Result
+    try
+        let header = Path.Combine(directory, "processor.hpp")
+        let headerSource =
+            String.concat "\n" [
+                "#pragma once"
+                "#include <cstddef>"
+                "#include <new>"
+                "namespace demo {"
+                "class Processor {"
+                "protected:"
+                "  int offset;"
+                "public:"
+                "  static void* operator new(std::size_t sz, const std::nothrow_t& tag) noexcept;"
+                "  static void operator delete(void* p) noexcept;"
+                "  explicit Processor(int off);"
+                "  virtual ~Processor() noexcept(false);"
+                "  virtual int compute(int x) noexcept;"
+                "  virtual int checked_divide(int numerator, int divisor);"
+                "};"
+                "class ScaledProcessor : public Processor {"
+                "  int scale;"
+                "public:"
+                "  explicit ScaledProcessor(int off, int s) noexcept;"
+                "  ~ScaledProcessor() noexcept(false) override;"
+                "  int compute(int x) noexcept override;"
+                "};"
+                "}"
+                "extern \"C\" void set_fail_alloc(int fail) noexcept;"
+                "extern \"C\" int processor_destructions() noexcept;"
+                "extern \"C\" int scaled_destructions() noexcept;"
+            ]
+        File.WriteAllText(header, headerSource)
+        let implSource =
+            String.concat "\n" [
+                "#include \"processor.hpp\""
+                "#include <stdexcept>"
+                "static int proc_dtors = 0, scaled_dtors = 0, fail_alloc = 0;"
+                "void* demo::Processor::operator new(std::size_t sz, const std::nothrow_t& tag) noexcept {"
+                "  if (fail_alloc) return nullptr;"
+                "  return ::operator new(sz, tag);"
+                "}"
+                "void demo::Processor::operator delete(void* p) noexcept { ::operator delete(p); }"
+                "extern \"C\" void set_fail_alloc(int fail) noexcept { fail_alloc = fail; }"
+                "demo::Processor::Processor(int off) : offset(off) {"
+                "  if (off < 0) throw std::invalid_argument(\"negative offset\");"
+                "}"
+                "demo::Processor::~Processor() noexcept(false) {"
+                "  ++proc_dtors;"
+                "  if (offset == 999) throw std::runtime_error(\"dtor failure\");"
+                "}"
+                "int demo::Processor::compute(int x) noexcept { return offset + x; }"
+                "int demo::Processor::checked_divide(int numerator, int divisor) {"
+                "  if (divisor == 0) throw std::runtime_error(\"divide by zero\");"
+                "  if (divisor < 0) throw 42;"
+                "  return offset + (numerator / divisor);"
+                "}"
+                "demo::ScaledProcessor::ScaledProcessor(int off, int s) noexcept : Processor(off), scale(s) {}"
+                "demo::ScaledProcessor::~ScaledProcessor() noexcept(false) { ++scaled_dtors; }"
+                "int demo::ScaledProcessor::compute(int x) noexcept { return offset + (x * scale); }"
+                "extern \"C\" int processor_destructions() noexcept { return proc_dtors; }"
+                "extern \"C\" int scaled_destructions() noexcept { return scaled_dtors; }"
+            ]
+        File.WriteAllText(Path.Combine(directory, "processor.cpp"), implSource)
+        let parsed =
+            CppParser.parseHeader { CppParser.defaultOptions header with CppMode = true; IncludeMacros = false }
+            |> Result.defaultWith failwith
+        let classes = parsed |> List.choose (function CppParser.Declaration.Class c -> Some c | _ -> None)
+        let measured =
+            CppParser.extractStructLayoutsForModeDiagnosed header [] [] [] [ "demo::Processor"; "demo::ScaledProcessor" ] true false
+            |> Result.defaultWith (fun refusal -> failwith refusal.Text)
+        let classes = classes |> List.map (fun c ->
+            let key = c.QualifiedName |> Option.defaultValue c.Name
+            { c with Measured = measured.TryFind key })
+        let processor = classes |> List.find (fun c -> c.Name = "Processor")
+        let scaled = classes |> List.find (fun c -> c.Name = "ScaledProcessor")
+        let procSpec : PilotTypes.CppClassSpec =
+            { Name = "demo::Processor"; Namespace = "Test.Cpp"; Bind = true; SizeOverride = None; KindOverride = Some "shim" }
+        let scaledSpec : PilotTypes.CppClassSpec =
+            { Name = "demo::ScaledProcessor"; Namespace = "Test.Cpp"; Bind = true; SizeOverride = None; KindOverride = Some "shim" }
+        let decls = classes |> List.map CppParser.Declaration.Class
+        let ctx =
+            { FidelityCodeGenerator.buildGenerationContext decls Types.LP64 Map.empty with
+                CppClasses = Map.ofList [ procSpec.Name, procSpec; "Processor", procSpec; scaledSpec.Name, scaledSpec; "ScaledProcessor", scaledSpec ] }
+        let code = FidelityCodeGenerator.generateModule ctx Set.empty decls "Test.Cpp" "processor" "C++ shim fixture" []
+        Assert.DoesNotContain("nativeint", code)
+        Assert.DoesNotContain("nativeptr", code)
+        for expected in [ "type demo_Processor"; "type demo_Processor_Error"; "type demo_ScaledProcessor"
+                          "let StatusOk = 0"; "let StatusNullHandle = -1"; "let StatusStdException = 1"; "let StatusUnknownException = 2"; "let StatusAllocationFailed = 3"
+                          "let demo_Processor_error_dtor (err: CHandle<demo_Processor_Error>) : unit"
+                          "let demo_Processor_take_error () : option<CHandle<demo_Processor_Error>>"
+                          "let demo_Processor_take_errorResourceDescriptor : Expr<ResourceDescriptor>"
+                          "Binding = \"Test.Cpp.demo_Processor_error_dtor\""
+                          "let demo_Processor_compute (self: CHandle<demo_Processor>) (x: int) : int"
+                          "let demo_Processor_checked_divide (outResult: CHandle<int>) (self: CHandle<demo_Processor>) (numerator: int) (divisor: int) : int"
+                          "let demo_ScaledProcessor_as_demo_Processor (self: CHandle<demo_ScaledProcessor>) : option<CHandle<demo_Processor>>" ] do
+            Assert.Contains(expected, code)
+        File.WriteAllText(Path.Combine(directory, "shim_proc.cpp"), CppClassAnalysis.renderCppObjectStorageShimC header ctx.KnownClasses procSpec processor)
+        File.WriteAllText(Path.Combine(directory, "shim_scaled.cpp"), CppClassAnalysis.renderCppObjectStorageShimC header ctx.KnownClasses scaledSpec scaled)
+        let runnerSource =
+            String.concat "\n" [
+                "#include <cstdio>"
+                "#include <cstring>"
+                "#include \"processor.hpp\""
+                "extern \"C\" void* farscape_cpp_demo_Processor_ctor(int) noexcept;"
+                "extern \"C\" void farscape_cpp_demo_Processor_dtor(void*) noexcept;"
+                "extern \"C\" int farscape_cpp_demo_Processor_compute(void*, int) noexcept;"
+                "extern \"C\" int farscape_cpp_demo_Processor_checked_divide(int*, void*, int, int) noexcept;"
+                "extern \"C\" void* farscape_cpp_demo_Processor_take_error() noexcept;"
+                "extern \"C\" int farscape_cpp_demo_Processor_error_code(void*) noexcept;"
+                "extern \"C\" int farscape_cpp_demo_Processor_error_len(void*) noexcept;"
+                "extern \"C\" int farscape_cpp_demo_Processor_error_byte(void*, int) noexcept;"
+                "extern \"C\" void farscape_cpp_demo_Processor_error_dtor(void*) noexcept;"
+                "extern \"C\" void* farscape_cpp_demo_ScaledProcessor_ctor(int, int) noexcept;"
+                "extern \"C\" void* farscape_cpp_demo_ScaledProcessor_as_demo_Processor(void*) noexcept;"
+                "int main() {"
+                "  void* baseObj = farscape_cpp_demo_Processor_ctor(10);"
+                "  void* scaledObj = farscape_cpp_demo_ScaledProcessor_ctor(10, 3);"
+                "  if (!baseObj || !scaledObj) return 1;"
+                "  void* scaledAsBase = farscape_cpp_demo_ScaledProcessor_as_demo_Processor(scaledObj);"
+                "  if (!scaledAsBase) return 2;"
+                "  int baseVal = farscape_cpp_demo_Processor_compute(baseObj, 5);"
+                "  int polyVal = farscape_cpp_demo_Processor_compute(scaledAsBase, 5);"
+                "  int divOut = 0;"
+                "  int okStatus = farscape_cpp_demo_Processor_checked_divide(&divOut, scaledAsBase, 20, 4);"
+                "  if (farscape_cpp_demo_Processor_take_error() != nullptr) return 3;"
+                "  int stdExStatus = farscape_cpp_demo_Processor_checked_divide(&divOut, scaledAsBase, 20, 0);"
+                "  void* err1 = farscape_cpp_demo_Processor_take_error();"
+                "  if (!err1 || farscape_cpp_demo_Processor_take_error() != nullptr) return 4;"
+                "  int err1Code = farscape_cpp_demo_Processor_error_code(err1);"
+                "  int err1Len = farscape_cpp_demo_Processor_error_len(err1);"
+                "  char msg[32] = {0};"
+                "  for (int i = 0; i < err1Len && i < 31; ++i) msg[i] = static_cast<char>(farscape_cpp_demo_Processor_error_byte(err1, i));"
+                "  farscape_cpp_demo_Processor_error_dtor(err1);"
+                "  int unkExStatus = farscape_cpp_demo_Processor_checked_divide(&divOut, scaledAsBase, 20, -1);"
+                "  void* err2 = farscape_cpp_demo_Processor_take_error();"
+                "  int err2Code = farscape_cpp_demo_Processor_error_code(err2);"
+                "  farscape_cpp_demo_Processor_error_dtor(err2);"
+                "  void* badCtor = farscape_cpp_demo_Processor_ctor(-5);"
+                "  void* err3 = farscape_cpp_demo_Processor_take_error();"
+                "  int badCtorFailed = (badCtor == nullptr && err3 != nullptr && farscape_cpp_demo_Processor_error_code(err3) == 1) ? 1 : 0;"
+                "  farscape_cpp_demo_Processor_error_dtor(err3);"
+                "  set_fail_alloc(1);"
+                "  void* allocCtor = farscape_cpp_demo_Processor_ctor(7);"
+                "  set_fail_alloc(0);"
+                "  void* errAlloc = farscape_cpp_demo_Processor_take_error();"
+                "  int allocStatus = (allocCtor == nullptr && errAlloc != nullptr) ? farscape_cpp_demo_Processor_error_code(errAlloc) : 0;"
+                "  farscape_cpp_demo_Processor_error_dtor(errAlloc);"
+                "  void* throwDtorObj = farscape_cpp_demo_Processor_ctor(999);"
+                "  farscape_cpp_demo_Processor_dtor(throwDtorObj);"
+                "  void* errDtor = farscape_cpp_demo_Processor_take_error();"
+                "  int dtorExStatus = errDtor ? farscape_cpp_demo_Processor_error_code(errDtor) : 0;"
+                "  farscape_cpp_demo_Processor_error_dtor(errDtor);"
+                "  farscape_cpp_demo_Processor_dtor(baseObj);"
+                "  farscape_cpp_demo_Processor_dtor(scaledAsBase);"
+                "  std::printf(\"%d %d %d %d %d %d %s %d %d %d %d %d %d %d\\n\","
+                "              baseVal, polyVal, okStatus, divOut, stdExStatus, err1Code, msg,"
+                "              unkExStatus, err2Code, badCtorFailed, allocStatus, dtorExStatus,"
+                "              processor_destructions(), scaled_destructions());"
+                "  return 0;"
+                "}"
+            ]
+        File.WriteAllText(Path.Combine(directory, "runner.cpp"), runnerSource)
+        run "/usr/bin/clang++" [ "-std=c++17"; "-shared"; "-fPIC"; "processor.cpp"; "-o"; "libprocessor.so" ] |> ignore
+        run "/usr/bin/clang++" [ "-std=c++17"; "shim_proc.cpp"; "shim_scaled.cpp"; "runner.cpp"; "-L."; "-lprocessor"; "-Wl,-rpath,$ORIGIN"; "-o"; "runner" ] |> ignore
+        Assert.Equal("15 25 0 15 1 1 divide by zero 2 2 1 3 1 3 1", (run (Path.Combine(directory, "runner")) []).Trim())
+    finally
+        Directory.Delete(directory, true)
+
 // ─── Pilot TOML shape (FS9197 to FS9202, and the codes generation gives the same reasons) ───
 
 let private pilotHead = [ "[library]"; "name = \"fixture\""; "headers = [\"x.h\"]"; "[output]"; "mode = \"fidelity\""; "directory = \"out\"" ]
