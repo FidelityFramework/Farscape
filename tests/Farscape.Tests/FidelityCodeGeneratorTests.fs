@@ -639,16 +639,20 @@ let ``rejects unsupported pimpl class struct and destructor`` () =
     let cls = mkClassPimpl "device" "device_impl"
     let cls = { cls with DestructorMangledName = Some "_ZN3xrt6deviceD1Ev" }
     let decls = [CppParser.Declaration.Class cls]
-    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Fidelity.xrt.Core" "xrt_coreutil" Types.LP64 Map.empty |> ignore)
-    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate decls "Fidelity.xrt.Core" "xrt_coreutil" Types.LP64 Map.empty |> ignore)
+    let d = Assert.Single(error.Refusal.Diagnostics)
+    Assert.Equal(Diagnostics.CppPimplClassUnadmitted, d.Code)
+    Assert.Equal("C++ pimpl class 'device' (handle 'std::shared_ptr<device_impl>', 16 bytes) requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source.", d.Message)
 
 [<Fact>]
 let ``rejects unsupported pimpl class constructor with mangled name`` () =
     let ctor = { mkFunc "device" "void" [("id", "unsigned int")] with MangledName = Some "_ZN3xrt6deviceC1Ej" }
     let cls = mkClassWithCtors "device" [mkField "m_impl" "std::shared_ptr<device_impl>"] [ctor] true
     let decls = [CppParser.Declaration.Class cls]
-    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty |> ignore)
-    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty |> ignore)
+    let d = Assert.Single(error.Refusal.Diagnostics)
+    Assert.Equal(Diagnostics.CppPimplClassUnadmitted, d.Code)
+    Assert.Equal("C++ pimpl class 'device' (handle 'std::shared_ptr<device_impl>', 16 bytes) requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source.", d.Message)
 
 [<Fact>]
 let ``rejects unsupported pimpl class method with sret when return type is non-trivial`` () =
@@ -659,38 +663,48 @@ let ``rejects unsupported pimpl class method with sret when return type is non-t
         CppParser.Declaration.Class deviceCls
         CppParser.Declaration.Class uuidCls
     ]
-    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty |> ignore)
-    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty |> ignore)
+    let d = Assert.Single(error.Refusal.Diagnostics)
+    Assert.Equal(Diagnostics.CppPimplClassUnadmitted, d.Code)
+    Assert.Equal("C++ pimpl class 'device' (handle 'std::shared_ptr<device_impl>', 16 bytes) requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source.", d.Message)
 
 [<Fact>]
 let ``rejects unsupported abstract classes`` () =
     let cls = mkClassAbstract "IPlugin"
     let decls = [CppParser.Declaration.Class cls]
-    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty |> ignore)
-    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty |> ignore)
+    let d = Assert.Single(error.Refusal.Diagnostics)
+    Assert.Equal(Diagnostics.CppInterfaceClassUnadmitted, d.Code)
+    Assert.Equal("C++ abstract interface class 'IPlugin' requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source.", d.Message)
 
 [<Fact>]
 let ``rejects unsupported opaque classes`` () =
     let cls = mkClassEmpty "ForwardDeclared"
     let decls = [CppParser.Declaration.Class cls]
-    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty |> ignore)
-    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty |> ignore)
+    let d = Assert.Single(error.Refusal.Diagnostics)
+    Assert.Equal(Diagnostics.CppOpaqueClassUnadmitted, d.Code)
+    Assert.Equal("C++ opaque class 'ForwardDeclared' requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source.", d.Message)
 
 [<Fact>]
 let ``rejects unsupported POD class as struct`` () =
     let fields = [mkField "x" "float"; mkField "y" "float"; mkField "z" "float"]
     let cls = mkClassPod "Vec3" fields
     let decls = [CppParser.Declaration.Class cls]
-    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty |> ignore)
-    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty |> ignore)
+    let d = Assert.Single(error.Refusal.Diagnostics)
+    Assert.Equal(Diagnostics.CppClassAbiUnadmitted, d.Code)
+    Assert.Equal("C++ POD class 'Vec3' (12 bytes) requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source.", d.Message)
 
 [<Fact>]
 let ``rejects unsupported value class with sret annotation`` () =
     let fields = [mkField "data" "uint8_t"]
     let cls = mkClassValue "uuid" fields
     let decls = [CppParser.Declaration.Class cls]
-    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty |> ignore)
-    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty |> ignore)
+    let d = Assert.Single(error.Refusal.Diagnostics)
+    Assert.Equal(Diagnostics.CppValueClassUnadmitted, d.Code)
+    Assert.Equal("C++ value class 'uuid' (1 bytes) requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source.", d.Message)
 
 [<Fact>]
 let ``rejects a C++ class with deprecated methods before unsafe source emission`` () =
@@ -698,38 +712,48 @@ let ``rejects a C++ class with deprecated methods before unsafe source emission`
     let deprecatedMethod = mkFuncWithAttrs "old_start" "void" [] [mkAttr "DeprecatedAttr" [] None]
     let cls = mkClassWithMethods "device" [mkField "m_impl" "std::shared_ptr<device_impl>"] [normalMethod; deprecatedMethod] true
     let decls = [CppParser.Declaration.Class cls]
-    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty |> ignore)
-    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty |> ignore)
+    let d = Assert.Single(error.Refusal.Diagnostics)
+    Assert.Equal(Diagnostics.CppPimplClassUnadmitted, d.Code)
+    Assert.Equal("C++ pimpl class 'device' (handle 'std::shared_ptr<device_impl>', 16 bytes) requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source.", d.Message)
 
 [<Fact>]
 let ``mangled symbols do not admit unsupported C++ method carriers`` () =
     let method = { mkFunc "start" "void" [] with MangledName = Some "_ZN3xrt6device5startEv" }
     let cls = mkClassWithMethods "device" [mkField "m_impl" "std::shared_ptr<device_impl>"] [method] true
     let decls = [CppParser.Declaration.Class cls]
-    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty |> ignore)
-    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty |> ignore)
+    let d = Assert.Single(error.Refusal.Diagnostics)
+    Assert.Equal(Diagnostics.CppPimplClassUnadmitted, d.Code)
+    Assert.Equal("C++ pimpl class 'device' (handle 'std::shared_ptr<device_impl>', 16 bytes) requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source.", d.Message)
 
 [<Fact>]
 let ``rejects unsupported unique_ptr pimpl with 8-byte size`` () =
     let cls = mkClassPimplUnique "stream" "stream_impl"
     let decls = [CppParser.Declaration.Class cls]
-    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty |> ignore)
-    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty |> ignore)
+    let d = Assert.Single(error.Refusal.Diagnostics)
+    Assert.Equal(Diagnostics.CppPimplClassUnadmitted, d.Code)
+    Assert.Equal("C++ pimpl class 'stream' (handle 'std::unique_ptr<stream_impl>', 8 bytes) requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source.", d.Message)
 
 [<Fact>]
 let ``rejects unsupported destructor for value class`` () =
     let fields = [mkField "data" "uint8_t"]
     let cls = { mkClassValue "uuid" fields with DestructorMangledName = Some "_ZN3xrt4uuidD1Ev" }
     let decls = [CppParser.Declaration.Class cls]
-    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty |> ignore)
-    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty |> ignore)
+    let d = Assert.Single(error.Refusal.Diagnostics)
+    Assert.Equal(Diagnostics.CppValueClassUnadmitted, d.Code)
+    Assert.Equal("C++ value class 'uuid' (1 bytes) requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source.", d.Message)
 
 [<Fact>]
 let ``rejects unsupported pimpl bindings for inherited base-class pimpl`` () =
     let cls = mkClassPimplBase "hw_context" "xrt::detail::pimpl<xrt::hw_context_impl>"
     let decls = [CppParser.Declaration.Class cls]
-    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty |> ignore)
-    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty |> ignore)
+    let d = Assert.Single(error.Refusal.Diagnostics)
+    Assert.Equal(Diagnostics.CppPimplClassUnadmitted, d.Code)
+    Assert.Equal("C++ pimpl class 'hw_context' (handle 'xrt::detail::pimpl<xrt::hw_context_impl>', 16 bytes) requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source.", d.Message)
 
 [<Fact>]
 let ``rejects unsupported pimpl struct for xclbin-like inherited pimpl with no dtor`` () =
@@ -739,8 +763,10 @@ let ``rejects unsupported pimpl struct for xclbin-like inherited pimpl with no d
         { mkClass "xclbin" [] [] [CppParser.Declaration.Function ctor] false false false false None with
             BaseClasses = ["xrt::detail::pimpl<xrt::xclbin_impl>"] }
     let decls = [CppParser.Declaration.Class cls]
-    let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty |> ignore)
-    Assert.Contains("supported object storage, ownership and method ABI contract", error.Message)
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate decls "Test" "xrt" Types.LP64 Map.empty |> ignore)
+    let d = Assert.Single(error.Refusal.Diagnostics)
+    Assert.Equal(Diagnostics.CppPimplClassUnadmitted, d.Code)
+    Assert.Equal("C++ pimpl class 'xclbin' (handle 'xrt::detail::pimpl<xrt::xclbin_impl>', 16 bytes) requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source.", d.Message)
 
 let private rangeProjection : PilotTypes.BindingProjection =
     { Name = "read"; Symbol = "native_read"; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []

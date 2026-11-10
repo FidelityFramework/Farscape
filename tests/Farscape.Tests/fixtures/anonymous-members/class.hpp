@@ -1,4 +1,4 @@
-// A C++ record with an anonymous union member: the C++ record path has no representation of it.
+// A C++ record with an anonymous union member (#177): represented on ClassDecl with its clang-measured layout.
 struct fx_cpp_am
 {
   int tag;

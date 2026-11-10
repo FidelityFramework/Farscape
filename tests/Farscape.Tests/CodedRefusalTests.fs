@@ -83,13 +83,39 @@ let ``a value struct with an array field is refused naming the field`` () =
     Assert.Equal(Some "options.value_structs", d.Pilot |> Option.map _.Key)
 
 [<Fact>]
-let ``a C++ class without an admitted ABI contract is refused at its declaration`` () =
-    let c = mkClassPod "Widget" [ mkField "x" "int" ]
-    let error = Assert.Throws<Diagnostics.RefusalException>(fun () ->
-        FidelityCodeGenerator.generate [ CppParser.Declaration.Class c ] "Test" "test" Types.LP64 Map.empty |> ignore)
-    let d = only error.Refusal
+let ``each C++ class shape without an admitted ABI contract is refused with its own code before any output is written`` () =
+    let cases : (CppParser.ClassDecl * string * string) list = [
+        mkClassPod "Widget" [ mkField "x" "int" ],
+        Diagnostics.CppClassAbiUnadmitted,
+        "C++ POD class 'Widget' (4 bytes) requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source."
+        mkClassPimpl "Device" "device_impl",
+        Diagnostics.CppPimplClassUnadmitted,
+        "C++ pimpl class 'Device' (handle 'std::shared_ptr<device_impl>', 16 bytes) requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source."
+        mkClassValue "Uuid" [ mkField "data" "uint8_t" ],
+        Diagnostics.CppValueClassUnadmitted,
+        "C++ value class 'Uuid' (1 bytes) requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source."
+        mkClassAbstract "IPlugin",
+        Diagnostics.CppInterfaceClassUnadmitted,
+        "C++ abstract interface class 'IPlugin' requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source."
+        mkClassEmpty "ForwardDeclared",
+        Diagnostics.CppOpaqueClassUnadmitted,
+        "C++ opaque class 'ForwardDeclared' requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source."
+    ]
+    for cls, expectedCode, expectedMessage in cases do
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            FidelityCodeGenerator.generate [ CppParser.Declaration.Class cls ] "Test" "test" Types.LP64 Map.empty |> ignore)
+        let d = Assert.Single(error.Refusal.Diagnostics)
+        Assert.Equal(expectedCode, d.Code)
+        Assert.Equal(expectedMessage, d.Message)
+    // Pilot generation refuses a C++ header before any output is written.
+    let header = fixturePath "anonymous-members/class.hpp"
+    let _, refusal = refusedPilot [ header ] [] [] [ "fx_cpp_am_read" ] []
+    let d = Assert.Single(refusal.Diagnostics)
     Assert.Equal(Diagnostics.CppClassAbiUnadmitted, d.Code)
-    Assert.Equal("C++ class 'Widget' requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source.", d.Message)
+    Assert.Equal("C++ POD class 'fx_cpp_am' (8 bytes) requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source.", d.Message)
+    match d.Source with
+    | Diagnostics.Located.Known { Path = path; Position = Diagnostics.Located.Known _ } -> Assert.Equal(header, path)
+    | other -> failwithf "the C++ class's clang location is missing: %A" other
 
 // ─── Pilot TOML shape (FS9197 to FS9202, and the codes generation gives the same reasons) ───
 

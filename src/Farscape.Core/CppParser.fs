@@ -805,13 +805,17 @@ module CppParser =
             |> Seq.choose processFieldDecl
             |> List.ofSeq
         let padding = unnamedBitFieldsOf node
+        let hasAnonymousMember =
+            getArray node "inner"
+            |> Seq.exists (fun inner ->
+                getStringOr inner "kind" "" = "FieldDecl" && getBool inner "isImplicit" && getStringOr inner "name" "" = "")
 
         match name, fields with
         | Some n, _ when not (String.IsNullOrEmpty(n)) ->
             Some { Name = n; Fields = fields; Documentation = documentation; IsUnion = isUnion; Attributes = attributes; Anonymous = None; Measured = None; Unattributed = None
                    UnnamedBitFields = padding; TypedefAttributes = []; Location = location }
-        // An unnamed record of only unnamed bit-fields is a defined record too (#183).
-        | _, fs when not fs.IsEmpty || not padding.IsEmpty ->
+        // An unnamed record of only unnamed bit-fields or an anonymous member is a defined record too (#183, #177).
+        | _, fs when not fs.IsEmpty || not padding.IsEmpty || hasAnonymousMember ->
             Some { Name = ""; Fields = fields; Documentation = documentation; IsUnion = isUnion; Attributes = attributes; Anonymous = None; Measured = None; Unattributed = None
                    UnnamedBitFields = padding; TypedefAttributes = []; Location = location }
         | _ -> None
@@ -822,11 +826,12 @@ module CppParser =
     let private unnamedRecordSpelling =
         System.Text.RegularExpressions.Regex(@"^(?<pre>.*?)\b(?<tag>struct|union) \(unnamed at (?<loc>[^()]+)\)(?<post>.*)$")
 
-    /// Clang spells the type of a C11 anonymous member, the implicit unnamed field it declares,
-    /// as `union P::(anonymous at path:line:col)`, scoped by every enclosing record (`P::(anonymous
+    /// Clang spells the type of a C11 or C++ anonymous member, the implicit unnamed field it
+    /// declares, as `union P::(anonymous at path:line:col)` in C or `P::(anonymous union at
+    /// path:line:col)` in C++ (#173, #177), scoped by every enclosing record (`P::(anonymous
     /// union)::`), possibly cv-qualified; `loc` is the anonymous record's own location.
     let private anonymousMemberSpelling =
-        System.Text.RegularExpressions.Regex(@"^(?<pre>(?:const |volatile )*)(?<tag>struct|union) (?:.+::)?\(anonymous at (?<loc>[^()]+)\)$")
+        System.Text.RegularExpressions.Regex(@"^(?<pre>(?:const |volatile )*)(?:(?<tag>struct|union) (?:.+::)?\(anonymous at (?<loc>[^()]+)\)|(?:.+::)?\(anonymous (?<tag>struct|union) at (?<loc>[^()]+)\))$")
 
     /// A clang `path:line:col` location with its path made absolute against the working
     /// directory: clang spells one file `x.h`, `./x.h` or `././x.h` depending on how the
@@ -919,7 +924,13 @@ module CppParser =
     /// paired refuses the unit (FS9122), and so does a generated member name that names another
     /// member of the record, direct or reached through an anonymous member (FS9123): an
     /// anonymous member is never dropped.
-    let private nameAnonymousRecords (header: string) (parent: string) (node: JsonValue) (record: StructDecl) : StructDecl * StructDecl list =
+    let private nameAnonymousMemberFields
+        (header: string)
+        (parent: string)
+        (parentLocation: Diagnostics.Located<Diagnostics.SourceLocation>)
+        (node: JsonValue)
+        (declaredFields: FieldDecl list)
+        : FieldDecl list * StructDecl list =
         let position (declaration: JsonValue) (key: string) =
             getObject declaration "loc" |> Option.bind (fun loc ->
                 match getObject loc "expansionLoc" with
@@ -932,10 +943,10 @@ module CppParser =
                 && position declaration "col" = Some (int64 col)
                 && (position declaration "line" |> Option.forall ((=) (int64 line)))
             | None -> false
-        let rec name (parent: string) (node: JsonValue) (record: StructDecl) : StructDecl * StructDecl list =
+        let rec name (parent: string) (parentLocation: Diagnostics.Located<Diagnostics.SourceLocation>) (node: JsonValue) (declaredFields: FieldDecl list) : FieldDecl list * StructDecl list =
             let nested = ResizeArray<StructDecl>()
             let fields = ResizeArray<FieldDecl>()
-            let declared = record.Fields |> List.map (fun f -> f.Name, f) |> Map.ofList
+            let declared = declaredFields |> List.map (fun f -> f.Name, f) |> Map.ofList
             // Every member name of the record: its named fields and the members clang reaches
             // through its anonymous members (IndirectFieldDecl).
             let memberNames =
@@ -948,7 +959,7 @@ module CppParser =
             let mutable members = 0
             for child in getArray node "inner" do
                 match getStringOr child "kind" "" with
-                | "RecordDecl" when getStringOr child "name" "" = "" && getBool child "completeDefinition" ->
+                | ("RecordDecl" | "CXXRecordDecl") when getStringOr child "name" "" = "" && getBool child "completeDefinition" ->
                     unnamed <- Some child
                 | "FieldDecl" when not (getBool child "isImplicit") ->
                     let field = getStringOr child "name" ""
@@ -965,7 +976,8 @@ module CppParser =
                         | Some (declaration, inner) ->
                             let generated = anonymousRecordName parent field
                             let origin = { Parent = parent; Field = field; Location = spelled.Groups.["loc"].Value; Member = false }
-                            let named, deeper = name generated declaration { inner with Name = generated; Anonymous = Some origin }
+                            let innerFields, deeper = name generated inner.Location.Location declaration inner.Fields
+                            let named = { inner with Name = generated; Fields = innerFields; Anonymous = Some origin }
                             nested.Add named
                             nested.AddRange deeper
                             let spelling = spelled.Groups.["pre"].Value + spelled.Groups.["tag"].Value + " " + generated + spelled.Groups.["post"].Value
@@ -988,7 +1000,8 @@ module CppParser =
                     | Some (declaration, inner) ->
                         let generated = anonymousRecordName parent field
                         let origin = { Parent = parent; Field = field; Location = location; Member = true }
-                        let named, deeper = name generated declaration { inner with Name = generated; Anonymous = Some origin }
+                        let innerFields, deeper = name generated inner.Location.Location declaration inner.Fields
+                        let named = { inner with Name = generated; Fields = innerFields; Anonymous = Some origin }
                         nested.Add named
                         nested.AddRange deeper
                         let spelling = spelled.Groups.["pre"].Value + spelled.Groups.["tag"].Value + " " + generated
@@ -996,11 +1009,15 @@ module CppParser =
                     | None ->
                         // Clang's spelling locates the anonymous member's record; without it, the
                         // enclosing record's location stands for the refusal's source.
-                        let source = if spelled.Success then clangSourceLocation location else record.Location.Location
+                        let source = if spelled.Success then clangSourceLocation location else parentLocation
                         raise (AnonymousMemberRefused (Diagnostics.diagnostic Diagnostics.AnonymousMemberUnrepresented $"an anonymous member of '{parent}' in '{header}', of clang type '{clangType}', cannot be paired with a record clang declares for it, so '{parent}' has no representation of it. An anonymous member is never dropped from its record." source))
                 | _ -> ()
-            { record with Fields = List.ofSeq fields }, List.ofSeq nested
-        name parent node record
+            List.ofSeq fields, List.ofSeq nested
+        name parent parentLocation node declaredFields
+
+    let private nameAnonymousRecords (header: string) (parent: string) (node: JsonValue) (record: StructDecl) : StructDecl * StructDecl list =
+        let fields, nested = nameAnonymousMemberFields header parent record.Location.Location node record.Fields
+        { record with Fields = fields }, nested
 
     /// Extract the explicit value from an EnumConstantDecl AST node, if present.
     /// Returns None when the enum constant has no initializer (implicit sequential value).
@@ -1166,7 +1183,11 @@ module CppParser =
             let childScope =
                 match kind with
                 | "NamespaceDecl" | "RecordDecl" | "CXXRecordDecl" ->
-                    match getString node "parentDeclContextId", getString node "name" with
+                    let declaredName =
+                        match getString node "name" with
+                        | Some n when not (String.IsNullOrEmpty n) -> Some n
+                        | _ -> getString node "id" |> Option.bind (fun id -> Map.tryFind id anonymousRecordNames)
+                    match getString node "parentDeclContextId", declaredName with
                     | None, Some name when not (String.IsNullOrEmpty name) ->
                         scope |> Option.map (fun parents -> parents @ [kind, name])
                     | _ -> None
@@ -1233,8 +1254,17 @@ module CppParser =
                     | None -> ()
 
                 | "CXXRecordDecl" ->
-                    match getString node "name" with
-                    | Some name when not (System.String.IsNullOrEmpty(name)) ->
+                    let resolvedName =
+                        match getString node "name" with
+                        | Some n when not (System.String.IsNullOrEmpty(n)) -> Some n
+                        | _ ->
+                            let named = getString node "id" |> Option.bind (fun id -> Map.tryFind id anonymousRecordNames) |> Option.defaultValue ""
+                            if named <> "" then
+                                typedefNamedTags.Add named |> ignore
+                                Some named
+                            else None
+                    match resolvedName with
+                    | Some name ->
                         let innerNodes = getArray node "inner"
 
                         // Extract base class types from clang's "bases" array.
@@ -1274,20 +1304,14 @@ module CppParser =
                             |> Seq.map Function
                             |> List.ofSeq
 
-                        // The C++ record path has no anonymous-member representation (#173): a
-                        // class with one is refused rather than given a field list without it.
-                        innerNodes
-                        |> Seq.tryFind (fun inner ->
-                            getStringOr inner "kind" "" = "FieldDecl" && getBool inner "isImplicit" && getStringOr inner "name" "" = "")
-                        |> Option.iter (fun inner ->
-                            raise (AnonymousMemberRefused (Diagnostics.diagnostic Diagnostics.AnonymousMemberUnrepresented $"C++ record '{name}' in '{header}' has an anonymous member of clang type '{getQualType inner}'; the C++ record path does not represent anonymous members, and none is dropped from its record." (located node).Location)))
-
-                        let fields =
+                        let declaredFields =
                             innerNodes
                             |> Seq.filter (fun inner ->
                                 getStringOr inner "kind" "" = "FieldDecl")
                             |> Seq.choose processFieldDecl
                             |> List.ofSeq
+                        let fields, nested =
+                            nameAnonymousMemberFields header name (located node).Location node declaredFields
 
                         let isAbstract =
                             innerNodes
@@ -1318,12 +1342,12 @@ module CppParser =
                                 (match getString inner "explicitlyDefaulted" with
                                  | Some "deleted" -> false
                                  | _ ->
-                                    let params =
+                                    let parameters =
                                         getArray inner "inner"
                                         |> Seq.filter (fun p -> getStringOr p "kind" "" = "ParmVarDecl")
                                         |> List.ofSeq
-                                    params.Length = 1 &&
-                                    (let t = getQualType params.[0]
+                                    parameters.Length = 1 &&
+                                    (let t = getQualType parameters.[0]
                                      t.Contains("const") && t.Contains("&") && t.Contains(name))))
 
                         // Detect non-implicit move constructor.
@@ -1336,12 +1360,12 @@ module CppParser =
                                 (match getString inner "explicitlyDefaulted" with
                                  | Some "deleted" -> false
                                  | _ ->
-                                    let params =
+                                    let parameters =
                                         getArray inner "inner"
                                         |> Seq.filter (fun p -> getStringOr p "kind" "" = "ParmVarDecl")
                                         |> List.ofSeq
-                                    params.Length = 1 &&
-                                    (let t = getQualType params.[0]
+                                    parameters.Length = 1 &&
+                                    (let t = getQualType parameters.[0]
                                      t.Contains("&&") && t.Contains(name) && not (t.Contains("const")))))
 
                         results.Add(Class {
@@ -1364,6 +1388,7 @@ module CppParser =
                             QualifiedName = scope |> Option.map (fun parents -> (parents |> List.map snd) @ [name] |> String.concat "::")
                             Location = located node
                         })
+                        for record in nested do results.Add(Struct record)
                     | _ -> ()
 
                 | _ -> ()
@@ -2540,17 +2565,34 @@ module CppParser =
         // bit-field (#176): its layout is clang's, never computed from its declared fields.
         let reaching = records |> List.filter (fun s -> s.TypedefAttributes |> List.exists (fun a -> a.Site <> RecordName))
         let padded = records |> List.filter (fun s -> not s.UnnamedBitFields.IsEmpty)
-        // C++ classes carrying an unnamed bit-field or reaching an attributed typedef (#182),
-        // by the qualified name their dump block carries.
-        let classes =
+        let byName = records |> List.rev |> List.map (fun s -> s.Name, s) |> Map.ofList
+        let classesByName =
             declarations
-            |> List.choose (function
-                | Class c when c.Name <> "" && (not c.UnnamedBitFields.IsEmpty || not c.TypedefAttributes.IsEmpty) -> c.QualifiedName
-                | _ -> None)
+            |> List.choose (function Class c when c.Name <> "" -> Some (c.Name, c) | _ -> None)
+            |> List.rev
+            |> Map.ofList
+        let rec outermostClass (visited: Set<string>) (s: StructDecl) =
+            match s.Anonymous with
+            | None -> None
+            | Some origin ->
+                match classesByName.TryFind origin.Parent with
+                | Some c -> Some c
+                | None when not (visited.Contains origin.Parent) ->
+                    byName.TryFind origin.Parent |> Option.bind (outermostClass (visited.Add s.Name))
+                | None -> None
+        let enclosingClasses =
+            anonymous |> List.choose (outermostClass Set.empty) |> List.choose _.QualifiedName
+        // C++ classes carrying an unnamed bit-field, reaching an attributed typedef (#182), or
+        // enclosing an anonymous record (#177), by the qualified name their dump block carries.
+        let classes =
+            ((declarations
+              |> List.choose (function
+                  | Class c when c.Name <> "" && (not c.UnnamedBitFields.IsEmpty || not c.TypedefAttributes.IsEmpty) -> c.QualifiedName
+                  | _ -> None))
+             @ enclosingClasses)
             |> List.distinct
         if anonymous.IsEmpty && attributed.IsEmpty && reaching.IsEmpty && padded.IsEmpty && classes.IsEmpty then declarations
         else
-        let byName = records |> List.rev |> List.map (fun s -> s.Name, s) |> Map.ofList
         let rec outermost (visited: Set<string>) (s: StructDecl) =
             match s.Anonymous with
             | None -> Some s
@@ -2657,6 +2699,8 @@ module CppParser =
             declarations |> List.choose (function
                 | Struct s when s.Name <> "" && s.Anonymous.IsNone && isDefinedRecord s -> Some (s.Name, "record")
                 | Struct s when s.Name <> "" && s.Anonymous.IsNone -> Some (s.Name, "record declaration")
+                | Class c when c.Name <> "" && (not c.Fields.IsEmpty || not c.UnnamedBitFields.IsEmpty || not c.Methods.IsEmpty || not c.Constructors.IsEmpty || not c.BaseClasses.IsEmpty) -> Some (c.Name, "record")
+                | Class c when c.Name <> "" -> Some (c.Name, "record declaration")
                 | Typedef t -> Some (t.Name, "typedef")
                 | Enum e when e.Name <> "" -> Some (e.Name, "enum")
                 | _ -> None)

@@ -144,15 +144,108 @@ let ``a generated member name that names another member refuses the unit`` () =
         parse "anonymous-members/name-clash.h" |> Result.map ignore)
 
 [<Fact>]
-let ``an anonymous member of a C++ record refuses the unit`` () =
-    let header = fixturePath "anonymous-members/class.hpp"
-    let parsed =
+let ``an anonymous member of a C++ record is a field of its class, typed by its own measured record`` () =
+    let parseCpp (relative: string) =
         CppParser.parseHeader {
-            HeaderFile = header; IncludePaths = []; SystemIncludePaths = []; Defines = []; IncludeRoot = None
+            HeaderFile = fixturePath relative; IncludePaths = []; SystemIncludePaths = []; Defines = []; IncludeRoot = None
             MacroPrefixes = []; IncludeMacros = false; Verbose = false; CppMode = true }
+    let classesAndRecords (relative: string) =
+        match parseCpp relative with
+        | Error error -> failwithf "C++ fixture %s did not parse: %s" relative error
+        | Ok decls ->
+            let classes = decls |> List.choose (function CppParser.Declaration.Class c when c.Name <> "" -> Some (c.Name, c) | _ -> None) |> Map.ofList
+            let structs = decls |> List.choose (function CppParser.Declaration.Struct s when s.Name <> "" -> Some (s.Name, s) | _ -> None) |> Map.ofList
+            classes, structs
+    let classLayoutOf (c: CppParser.ClassDecl) =
+        match c.Measured with
+        | Some m ->
+            m.SizeBits / 8, m.AlignmentBits / 8, CppParser.classFieldOffsetsBits c m |> List.map (fun bits -> bits / 8)
+        | None -> failwithf "C++ record %s carries no clang measurement" c.Name
+
+    let classHeader = fixturePath "anonymous-members/class.hpp"
+    let classes, structs = classesAndRecords "anonymous-members/class.hpp"
+    let cppAm = classes.["fx_cpp_am"]
+    Assert.Equal<string list>(["tag"; "anonymous1"], cppAm.Fields |> List.map _.Name)
+    Assert.Equal("union fx_cpp_am_anonymous1", cppAm.Fields.[1].Type)
+    Assert.Equal((8, 4, [0; 4]), classLayoutOf cppAm)
+    Assert.Equal(CppClassAnalysis.PODClass 8, CppClassAnalysis.classifyClass cppAm)
+    let cppUnion = structs.["fx_cpp_am_anonymous1"]
+    Assert.True(cppUnion.IsUnion)
+    Assert.Equal<string list>(["i"; "f"], cppUnion.Fields |> List.map _.Name)
+    let expectedOrigin : CppParser.AnonymousRecordOrigin = { Parent = "fx_cpp_am"; Field = "anonymous1"; Location = $"{classHeader}:5:3"; Member = true }
+    Assert.Equal(Some expectedOrigin, cppUnion.Anonymous)
+    Assert.Equal((4, 4, [0; 0]), layoutOf cppUnion)
+    clangConfirmsCpp classHeader [
+        "sizeof(fx_cpp_am) == 8"; "alignof(fx_cpp_am) == 4"
+        "offsetof(fx_cpp_am, tag) == 0"; "offsetof(fx_cpp_am, i) == 4"; "offsetof(fx_cpp_am, f) == 4" ]
+
+    // Nested and typedef-named anonymous members in C++ mode.
+    let membersHeader = fixturePath "anonymous-members/members.h"
+    let mClasses, mStructs = classesAndRecords "anonymous-members/members.h"
+    let am = mClasses.["fx_am"]
+    Assert.Equal<string list>(["tag"; "anonymous1"; "anonymous2"; "tail"], am.Fields |> List.map _.Name)
+    Assert.Equal("union fx_am_anonymous1", am.Fields.[1].Type)
+    Assert.Equal("struct fx_am_anonymous2", am.Fields.[2].Type)
+    Assert.Equal((24, 8, [0; 4; 8; 16]), classLayoutOf am)
+    Assert.Equal(CppClassAnalysis.PODClass 24, CppClassAnalysis.classifyClass am)
+    Assert.Equal((4, 4, [0; 0]), layoutOf mStructs.["fx_am_anonymous1"])
+    Assert.Equal((4, 2, [0; 2]), layoutOf mStructs.["fx_am_anonymous2"])
+    let td = mClasses.["fx_am_td"]
+    Assert.Equal<string list>(["head"; "anonymous1"], td.Fields |> List.map _.Name)
+    Assert.Equal((8, 4, [0; 4]), classLayoutOf td)
+    Assert.Equal(CppClassAnalysis.PODClass 8, CppClassAnalysis.classifyClass td)
+    Assert.Equal<string list>(["word"; "anonymous1"], mStructs.["fx_am_td_anonymous1"].Fields |> List.map _.Name)
+    Assert.Equal<string list>(["low"; "high"], mStructs.["fx_am_td_anonymous1_anonymous1"].Fields |> List.map _.Name)
+    Assert.Equal((4, 4, [0; 0]), layoutOf mStructs.["fx_am_td_anonymous1"])
+    Assert.Equal((4, 2, [0; 2]), layoutOf mStructs.["fx_am_td_anonymous1_anonymous1"])
+    clangConfirmsCpp membersHeader [
+        "sizeof(fx_am) == 24"; "alignof(fx_am) == 8"; "offsetof(fx_am, tag) == 0"
+        "offsetof(fx_am, i) == 4"; "offsetof(fx_am, lo) == 8"; "offsetof(fx_am, hi) == 10"; "offsetof(fx_am, tail) == 16"
+        "sizeof(fx_am_td) == 8"; "alignof(fx_am_td) == 4"; "offsetof(fx_am_td, word) == 4"
+        "offsetof(fx_am_td, low) == 4"; "offsetof(fx_am_td, high) == 6" ]
+
+[<Fact>]
+let ``C++ anonymous members refuse member-name clashes, generated record name clashes, and unmeasured anonymous records`` () =
+    let parseCpp (relative: string) =
+        CppParser.parseHeader {
+            HeaderFile = fixturePath relative; IncludePaths = []; SystemIncludePaths = []; Defines = []; IncludeRoot = None
+            MacroPrefixes = []; IncludeMacros = false; Verbose = false; CppMode = true }
+    let mclashHeader = fixturePath "anonymous-members/name-clash.h"
     Assert.Equal(
-        Error $"FS9122: C++ record 'fx_cpp_am' in '{header}' has an anonymous member of clang type 'fx_cpp_am::(anonymous union at {header}:5:3)'; the C++ record path does not represent anonymous members, and none is dropped from its record.",
-        parsed |> Result.map ignore)
+        Error $"FS9123: the generated member name 'anonymous1' of the anonymous member of 'fx_mclash' declared at {mclashHeader}:5:3 in '{mclashHeader}' names another member of that record. A generated name must name one member.",
+        parseCpp "anonymous-members/name-clash.h" |> Result.map ignore)
+    let rclashHeader = fixturePath "anonymous-records/name-clash.h"
+    Assert.Equal(
+        Error $"FS9114: the generated record name 'fx_clash_inner' in '{rclashHeader}' names more than one declaration: the unnamed record of field 'inner' of 'fx_clash' at {rclashHeader}:10:3; a record. A generated name must name one record.",
+        parseCpp "anonymous-records/name-clash.h" |> Result.map ignore)
+    let classHeader = fixturePath "anonymous-members/class.hpp"
+    let info = ClangToolchain.startInfo ["-x"; "c++"; "-std=c++17"; "-Xclang"; "-ast-dump=json"; "-fsyntax-only"; classHeader]
+    use proc = System.Diagnostics.Process.Start info
+    let cppAst = proc.StandardOutput.ReadToEnd()
+    proc.StandardError.ReadToEnd() |> ignore
+    proc.WaitForExit()
+    Assert.Equal(0, proc.ExitCode)
+    Assert.True(CppParser.declarationsOfAst classHeader cppAst |> Result.isOk)
+    let unpairedCppAst = cppAst.Replace("\"tagUsed\": \"union\"", "\"tagUsed\": \"struct\"")
+    Assert.Equal(
+        Error $"FS9122: an anonymous member of 'fx_cpp_am' in '{classHeader}', of clang type 'fx_cpp_am::(anonymous union at {classHeader}:5:3)', cannot be paired with a record clang declares for it, so 'fx_cpp_am' has no representation of it. An anonymous member is never dropped from its record.",
+        CppParser.declarationsOfAst classHeader unpairedCppAst |> Result.map ignore)
+    // An unmeasured anonymous record enclosed by a C++ class is refused with FS9113 before class-shape refusal.
+    let origin : CppParser.AnonymousRecordOrigin = { Parent = "fx_cpp_am"; Field = "anonymous1"; Location = $"{mclashHeader}:5:3"; Member = true }
+    let unmeasuredAnon = { mkStruct "fx_cpp_am_anonymous1" [mkField "i" "int"] None with IsUnion = true; Anonymous = Some origin; Measured = None }
+    let parentClass = mkClassPod "fx_cpp_am" [mkField "tag" "int"; mkField "anonymous1" "union fx_cpp_am_anonymous1"]
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+        FidelityCodeGenerator.generate [CppParser.Declaration.Class parentClass; CppParser.Declaration.Struct unmeasuredAnon] "Test" "test" Types.LP64 Map.empty |> ignore)
+    let d = Assert.Single(error.Refusal.Diagnostics)
+    Assert.Equal(Diagnostics.AnonymousRecordUnmeasured, d.Code)
+    Assert.Equal($"anonymous record 'fx_cpp_am_anonymous1' (anonymous member 'anonymous1' of 'fx_cpp_am', declared at {mclashHeader}:5:3) has no clang-measured layout in its declaring unit; its layout is never computed from its declared fields.", d.Message)
+    // A measured anonymous record inside an unmeasured enclosing C++ class is also refused with FS9113.
+    let measuredAnon = { unmeasuredAnon with Measured = Some { Name = "fx_cpp_am_anonymous1"; SizeBits = 32; DataSizeBits = 32; AlignmentBits = 32; FieldOffsetsBits = [0] } }
+    let errorParent = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+        FidelityCodeGenerator.generate [CppParser.Declaration.Class { parentClass with Measured = None }; CppParser.Declaration.Struct measuredAnon] "Test" "test" Types.LP64 Map.empty |> ignore)
+    let dParent = Assert.Single(errorParent.Refusal.Diagnostics)
+    Assert.Equal(Diagnostics.AnonymousRecordUnmeasured, dParent.Code)
+    Assert.Equal($"C++ record 'fx_cpp_am' encloses anonymous member 'anonymous1' of 'fx_cpp_am' (declared at {mclashHeader}:5:3), and clang has no measurement of 'fx_cpp_am' in its declaring unit; an anonymous record's layout is never computed from its declared fields.", dParent.Message)
 
 /// Clang's own JSON AST of `header` under `flags`, produced by the test harness: `-fms-extensions`
 /// is an option no pilot can select (#178), so only the harness can give the parser its AST.

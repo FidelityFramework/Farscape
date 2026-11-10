@@ -2016,9 +2016,28 @@ module FidelityCodeGenerator =
         OnClass = fun c ->
             if c.Name = "" then GNone
             else
-            // A C++ record carrying an unnamed bit-field or a field whose type reaches an
-            // attributed typedef has clang's layout or none, as a C record does (#182).
+            let rec enclosedByClass (visited: Set<string>) (s: CppParser.StructDecl) =
+                match s.Anonymous with
+                | Some origin when origin.Parent = c.Name -> true
+                | Some origin when not (visited.Contains origin.Parent) ->
+                    ctx.Structs.TryFind origin.Parent |> Option.exists (enclosedByClass (visited.Add origin.Parent))
+                | _ -> false
+            let enclosedAnonymous =
+                ctx.Structs.Values |> Seq.filter (enclosedByClass Set.empty) |> List.ofSeq
+            match enclosedAnonymous |> List.tryFind (fun s -> s.Measured.IsNone) with
+            | Some s ->
+                let origin = s.Anonymous.Value
+                Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.AnonymousRecordUnmeasured $"anonymous record '{s.Name}' ({CppParser.describeOrigin origin}, declared at {origin.Location}) has no clang-measured layout in its declaring unit; its layout is never computed from its declared fields." s.Location.Location)
+            | None -> ()
+            // A C++ record enclosing an anonymous record (#177), carrying an unnamed bit-field, or
+            // having a field whose type reaches an attributed typedef has clang's layout or none, as
+            // a C record does (#182).
             if c.Measured.IsNone then
+                match enclosedAnonymous with
+                | s :: _ ->
+                    let origin = s.Anonymous.Value
+                    Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.AnonymousRecordUnmeasured $"C++ record '{c.Name}' encloses {CppParser.describeOrigin origin} (declared at {origin.Location}), and clang has no measurement of '{c.Name}' in its declaring unit; an anonymous record's layout is never computed from its declared fields." c.Location.Location)
+                | [] -> ()
                 match c.UnnamedBitFields with
                 | b :: _ ->
                     Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.UnnamedBitFieldUnmeasured $"C++ record '{c.Name}' carries {CppParser.describeUnnamedBitField b}, which moves bytes natural alignment of the declared field types cannot place, and clang has no measurement of '{c.Name}' in its declaring unit; an unnamed bit-field is never dropped from its record." c.Location.Location)
@@ -2027,7 +2046,19 @@ module FidelityCodeGenerator =
                 | Some (field, a) ->
                     Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.TypedefAttributeUnmeasured $"C++ record '{c.Name}' field '{field}' has a type reaching typedef '{a.Typedef}', which carries attribute '{a.Attribute.Kind}', and clang has no measurement of '{c.Name}' in its declaring unit; natural alignment of the declared field types never stands in for the typedef's attribute." c.Location.Location)
                 | None -> ()
-            Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.CppClassAbiUnadmitted $"C++ class '{c.Name}' requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source." c.Location.Location)
+            let code, detail =
+                match CppClassAnalysis.classifyClass c with
+                | CppClassAnalysis.PODClass sizeBytes ->
+                    Diagnostics.CppClassAbiUnadmitted, $"C++ POD class '{c.Name}' ({sizeBytes} bytes)"
+                | CppClassAnalysis.PimplClass (implType, sizeBytes) ->
+                    Diagnostics.CppPimplClassUnadmitted, $"C++ pimpl class '{c.Name}' (handle '{implType}', {sizeBytes} bytes)"
+                | CppClassAnalysis.ValueClass (sizeBytes, _) ->
+                    Diagnostics.CppValueClassUnadmitted, $"C++ value class '{c.Name}' ({sizeBytes} bytes)"
+                | CppClassAnalysis.InterfaceClass ->
+                    Diagnostics.CppInterfaceClassUnadmitted, $"C++ abstract interface class '{c.Name}'"
+                | CppClassAnalysis.OpaqueClass ->
+                    Diagnostics.CppOpaqueClassUnadmitted, $"C++ opaque class '{c.Name}'"
+            Diagnostics.refuse (Diagnostics.diagnostic code $"{detail} requires a supported object storage, ownership and method ABI contract; legacy address-based class bindings cannot be emitted as Clef source." c.Location.Location)
         OnDelegate = fun _ -> GNone // A delegate is spelled FnPtr<'F> where it is used; no type of its own
     }
 

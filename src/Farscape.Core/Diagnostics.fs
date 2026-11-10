@@ -89,7 +89,7 @@ namespace Farscape.Core
 /// | FS9181 | a constant on a function-pointer parameter names no sentinel macro of its type  |
 /// | FS9182 | a pilot selects the retired experimental native-pointer surface                 |
 /// | FS9183 | a value struct is no plain record of named scalar or pointer fields             |
-/// | FS9184 | a C++ class has no admitted object storage, ownership and method ABI contract   |
+/// | FS9184 | a C++ POD class has no admitted object storage, ownership and method ABI contract |
 /// | FS9185 | an abi_critical_structs entry names no declared record or scalar typedef        |
 /// | FS9186 | an abi_critical_structs entry names another record kind than it declares        |
 /// | FS9187 | an abi_critical_structs record has no clang-measured layout                     |
@@ -116,6 +116,10 @@ namespace Farscape.Core
 /// | FS9208 | a borrowed result is no pointer to its content's bytes, or is a handle or resource |
 /// | FS9209 | a borrowed result's extent is no integer companion call on its own arguments     |
 /// | FS9210 | a borrowed result's owner or invalidation does not fit its declaration           |
+/// | FS9211 | a C++ pimpl class has no admitted object storage, ownership and method ABI contract |
+/// | FS9212 | a C++ value class has no admitted object storage, ownership and method ABI contract |
+/// | FS9213 | a C++ abstract interface class has no admitted object storage, ownership and method ABI contract |
+/// | FS9214 | a C++ opaque class has no admitted object storage, ownership and method ABI contract |
 ///
 /// Allocation continues past FS9199 as FS92xx: the codes are sequential, four digits after FS.
 /// Each refusal reason has exactly one code and each code one reason.
@@ -378,7 +382,7 @@ module Diagnostics =
     let ValueStructUnrepresentable = "FS9183" // value struct that is no plain record of named scalar or pointer fields (#199)
 
     [<Literal>]
-    let CppClassAbiUnadmitted = "FS9184" // C++ class without an admitted storage, ownership and method ABI contract (#199)
+    let CppClassAbiUnadmitted = "FS9184" // C++ POD class without an admitted storage, ownership and method ABI contract (#199, #116)
 
     [<Literal>]
     let AbiStorageUndeclared = "FS9185" // abi_critical_structs entry naming no declared record or scalar typedef (#199)
@@ -457,6 +461,18 @@ module Diagnostics =
 
     [<Literal>]
     let BorrowedInvalidationInvalid = "FS9210" // borrowed result whose owner is no opaque handle, or an invalidation that does not receive it (#196)
+
+    [<Literal>]
+    let CppPimplClassUnadmitted = "FS9211" // C++ pimpl class without an admitted storage, ownership and method ABI contract (#116)
+
+    [<Literal>]
+    let CppValueClassUnadmitted = "FS9212" // C++ value class without an admitted storage, ownership and method ABI contract (#116)
+
+    [<Literal>]
+    let CppInterfaceClassUnadmitted = "FS9213" // C++ abstract interface class without an admitted storage, ownership and method ABI contract (#116)
+
+    [<Literal>]
+    let CppOpaqueClassUnadmitted = "FS9214" // C++ opaque class without an admitted storage, ownership and method ABI contract (#116)
 
     // =========================================================================
     // Structured diagnostics (#184)
