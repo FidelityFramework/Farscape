@@ -23,9 +23,9 @@ let private resolve (variables: Map<string, string>) (installed: string list) =
 let private resolveArchiver (variables: Map<string, string>) (clangDir: string option) (installed: string list) =
     ClangToolchain.resolveArchiverWith (fun name -> Map.tryFind name variables) clangDir (fun path -> List.contains path installed)
 
-/// Run `body` over a fresh directory under test-results/scratch, deleted afterwards.
+/// Run `body` over a fresh scratch directory in OS temporary storage, deleted afterwards.
 let private withScratch (body: string -> unit) =
-    let directory = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "../..", "test-results", "scratch", "clang-toolchain", System.Guid.NewGuid().ToString("N")))
+    let directory = TestHelpers.TestScratch.create "clang-toolchain"
     Directory.CreateDirectory(directory) |> ignore
     try body directory
     finally Directory.Delete(directory, true)

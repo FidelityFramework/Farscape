@@ -127,7 +127,7 @@ Layout: <ASTRecordLayout
 
     [<Fact>]
     let ``real clang layout probe reports measured bit range overflow`` () =
-        let directory = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "../..", "artifacts", "layout-bit-range", System.Guid.NewGuid().ToString("N")))
+        let directory = TestHelpers.TestScratch.create "layout-bit-range"
         System.IO.Directory.CreateDirectory(directory) |> ignore
         try
             let before = System.IO.Path.Combine(directory, "before.h")
@@ -149,7 +149,7 @@ Layout: <ASTRecordLayout
 
     [<Fact>]
     let ``concurrent layout probes retain their own header measurements`` () =
-        let directory = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "../..", "artifacts", "layout-concurrency", System.Guid.NewGuid().ToString("N")))
+        let directory = TestHelpers.TestScratch.create "layout-concurrency"
         System.IO.Directory.CreateDirectory(directory) |> ignore
         try
             let probes =
@@ -229,7 +229,7 @@ module LayoutModuleRendering =
 module GeneratorDispatch =
 
     let private withLayoutHeader (text: string) names inspect =
-        let directory = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "../..", "artifacts", "array-extent-tests", System.Guid.NewGuid().ToString("N")))
+        let directory = TestHelpers.TestScratch.create "array-extent-tests"
         System.IO.Directory.CreateDirectory(directory) |> ignore
         try
             let header = System.IO.Path.Combine(directory, "arrays.h")
@@ -917,7 +917,7 @@ module GeneratorDispatch =
 
     [<Fact>]
     let ``real header forward declaration followed by definition retains nested layout`` () =
-        let directory = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "../..", "artifacts", "nested-forward-definition", System.Guid.NewGuid().ToString("N")))
+        let directory = TestHelpers.TestScratch.create "nested-forward-definition"
         System.IO.Directory.CreateDirectory(directory) |> ignore
         try
             let header = System.IO.Path.Combine(directory, "forward.h")

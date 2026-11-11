@@ -11,14 +11,13 @@ open Farscape.Core
 module DetectCppModeTests =
 
     let private withTempHeader (ext: string) (content: string) (f: string -> 'a) : 'a =
-        let directory = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "../../test-results/scratch/detection"))
-        Directory.CreateDirectory directory |> ignore
+        let directory = TestHelpers.TestScratch.create "detection"
         let path = Path.Combine(directory, $"farscape_test_{System.Guid.NewGuid():N}{ext}")
         try
             File.WriteAllText(path, content)
             f path
         finally
-            if File.Exists(path) then File.Delete(path)
+            Directory.Delete(directory, true)
 
     [<Fact>]
     let ``detectCppMode returns true for .hpp extension`` () =
@@ -208,8 +207,7 @@ module AnonymousEnumNamingTests =
 module NonNullIdentityTests =
 
     let private parse cppMode (content: string) =
-        let directory = Path.Combine(__SOURCE_DIRECTORY__, "../../artifacts/nonnull-parser")
-        Directory.CreateDirectory directory |> ignore
+        let directory = TestHelpers.TestScratch.create "nonnull-parser"
         let extension = if cppMode then ".hpp" else ".h"
         let path = Path.Combine(directory, $"{System.Guid.NewGuid():N}{extension}")
         try
@@ -221,7 +219,7 @@ module NonNullIdentityTests =
             | Ok declarations -> declarations
             | Error error -> failwith error
         finally
-            if File.Exists path then File.Delete path
+            Directory.Delete(directory, true)
 
     let private functions declarations =
         declarations |> List.choose (function CppParser.Function f -> Some f | _ -> None)

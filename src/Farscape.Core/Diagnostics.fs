@@ -152,6 +152,12 @@ namespace Farscape.Core
 /// | FS9244 | pilot/header layout provenance is missing or mismatched |
 /// | FS9245 | substantiation output or scratch storage cannot be safely written |
 /// | FS9246 | an exported callable has no compiler-owned universal activation for substantiation |
+/// | FS9247 | a dossier manifest, receipt, Rocq facts or Rocq config input is missing, unreadable, unpaired, or violates its typed schema |
+/// | FS9248 | a digest recorded in a dossier input is missing or differs from the current file on disk |
+/// | FS9249 | a companion Rocq project fails to load, has no units, ends inside a comment, sentence or proof, holds an Admitted proof that no named declaration owns, lacks a fact for a proved public entry, or has binder documentation that disagrees with its written binders |
+/// | FS9250 | a Clef declaration, PSG node, obligation anchor, witnessed MLIR symbol, foreign symbol, measured layout or Rocq correspondence target fails exact reconciliation |
+/// | FS9251 | a seam check or refusal control receipt has an invalid schema, package, category, entry identity, refusal code or a failed entry |
+/// | FS9252 | a dossier input or output path is empty or crosses a broken or cyclic symbolic link, or a dossier file cannot be written |
 ///
 /// Allocation continues past FS9199 as FS92xx: the codes are sequential, four digits after FS.
 /// Each refusal reason has exactly one code and each code one reason.
@@ -587,6 +593,18 @@ module Diagnostics =
     let SubstantiationOutputFailure = "FS9245"
     [<Literal>]
     let SubstantiationActivationUnavailable = "FS9246"
+    [<Literal>]
+    let DossierInputMalformed = "FS9247" // dossier manifest, receipt, Rocq facts or Rocq config missing, unreadable, unpaired or off-schema (#209)
+    [<Literal>]
+    let DossierDigestMismatch = "FS9248" // recorded digest missing or stale relative to the current file (#209)
+    [<Literal>]
+    let DossierRocqInvalid = "FS9249" // Rocq project load failure, zero units, unterminated unit, unattributable Admitted proof, missing fact, or binder documentation mismatch (#209)
+    [<Literal>]
+    let DossierCorrespondenceInvalid = "FS9250" // declaration, PSG, obligation, witness, foreign symbol, layout or Rocq target not reconciled (#209)
+    [<Literal>]
+    let DossierCheckReceiptInvalid = "FS9251" // seam check or refusal control receipt invalid or failed (#209)
+    [<Literal>]
+    let DossierOutputFailure = "FS9252" // refused dossier path (empty, broken or cyclic link) or dossier write failure (#209)
 
     // =========================================================================
     // Structured diagnostics (#184)

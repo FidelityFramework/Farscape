@@ -249,7 +249,7 @@ let ``admitted C++ constructor overloads own the same qualified release binding`
 
 [<Fact>]
 let ``admitted C++ class emits marshaled bindings and its storage adapter runs native C1 methods and D1`` () =
-    let directory = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "artifacts", "pilot-fixture-tests", System.Guid.NewGuid().ToString("N")))
+    let directory = TestHelpers.TestScratch.create "pilot-fixture-tests"
     Directory.CreateDirectory directory |> ignore
     let run executable arguments =
         let info = System.Diagnostics.ProcessStartInfo(executable)
@@ -419,7 +419,7 @@ let ``shimmed C++ exception payload lifecycle refuses use-after-release with FS9
 
 [<Fact>]
 let ``shimmed C++ class binds virtual dispatch base casts and throwing methods through generated native shim and runs natively`` () =
-    let directory = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "artifacts", "pilot-fixture-tests", System.Guid.NewGuid().ToString("N")))
+    let directory = TestHelpers.TestScratch.create "pilot-fixture-tests"
     Directory.CreateDirectory directory |> ignore
     let run executable arguments =
         let info = System.Diagnostics.ProcessStartInfo(executable)
@@ -882,7 +882,7 @@ let missingXrtInstantiationHasExactCodedRefusal () =
         d.Message)
 
 let private withTemplateHeader action =
-    let directory = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "artifacts", "pilot-fixture-tests", System.Guid.NewGuid().ToString("N")))
+    let directory = TestHelpers.TestScratch.create "pilot-fixture-tests"
     Directory.CreateDirectory directory |> ignore
     try
         let header = Path.Combine(directory, "templates.hpp")
@@ -1060,7 +1060,7 @@ let private plugifyTool : CppClassAnalysis.CppAbiFactToolProvenance = {
 }
 
 let private withXrtAbiHeader action =
-    let directory = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "artifacts", "pilot-fixture-tests", System.Guid.NewGuid().ToString("N")))
+    let directory = TestHelpers.TestScratch.create "pilot-fixture-tests"
     Directory.CreateDirectory directory |> ignore
     try
         let header = Path.Combine(directory, "xrt_abi_facts.hpp")
@@ -1514,10 +1514,9 @@ let containerDeclsDescribeOpaqueOwnershipAndOperationAbi () =
     Assert.DoesNotContain("_acquire", FidelityCodeGenerator.generateCppTemplateContainerModule ctx vectorInventory noFactory)
     Assert.DoesNotContain("_acquire", CppClassAnalysis.renderCppTemplateContainerShimC "vector.hpp" vectorInventory noFactory)
 
-[<Fact>]
-let containerNativeLibraryInventoryShimAndExecution () =
-    let directory = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "test-results", "scratch", "cpp-container", System.Guid.NewGuid().ToString("N")))
-    Directory.CreateDirectory directory |> ignore
+/// The body of `containerNativeLibraryInventoryShimAndExecution` over the scratch directory
+/// that Fact creates and deletes.
+let private containerNativeLibraryInventoryShimAndExecutionIn (directory: string) =
     let path file = Path.Combine(directory, file)
     let run program arguments = runTemplateFixtureTool program arguments
     File.WriteAllText(path "vecfixture.hpp", """
@@ -1602,6 +1601,12 @@ int main() {
     let result = run runner []
     File.WriteAllText(path "native-result.txt", result)
     Assert.Contains("container-native-ok size=3 values=10,20,30 bounds=4 releases=1", result)
+
+[<Fact>]
+let containerNativeLibraryInventoryShimAndExecution () =
+    let directory = TestHelpers.TestScratch.create "cpp-container"
+    try containerNativeLibraryInventoryShimAndExecutionIn directory
+    finally Directory.Delete(directory, true)
 
 // ─── Fidelity.Platform and BAREWire zero-copy shared buffers (#123) ───
 
@@ -1825,10 +1830,9 @@ let sharedBufferAccessRefusesConcurrentClefMutationReadOnlyMutationAndOverlappin
             CppClassAnalysis.SharedBufferOperation.UnshareFromLibrary
             CppClassAnalysis.SharedBufferOperation.UnmapRegion ])
 
-[<Fact>]
-let sharedBufferDeclsAndNativeZeroCopyBidirectionalExecution () =
-    let directory = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "test-results", "scratch", "shared-buffer", System.Guid.NewGuid().ToString("N")))
-    Directory.CreateDirectory directory |> ignore
+/// The body of `sharedBufferDeclsAndNativeZeroCopyBidirectionalExecution` over the scratch
+/// directory that Fact creates and deletes.
+let private sharedBufferDeclsAndNativeZeroCopyBidirectionalExecutionIn (directory: string) =
     let path file = Path.Combine(directory, file)
     let run program arguments = runTemplateFixtureTool program arguments
     let headerPath = path "shared_tile.hpp"
@@ -2183,6 +2187,12 @@ int main() {
     File.WriteAllText(path "native-result.txt", result)
     Assert.Contains("shared-buffer-native-ok size=24 align=8 seq0=107 acc0=1070 seq1=204 acc1=5100 copies=0 same_addr=1 spaces=1,2,3", result)
 
+[<Fact>]
+let sharedBufferDeclsAndNativeZeroCopyBidirectionalExecution () =
+    let directory = TestHelpers.TestScratch.create "shared-buffer"
+    try sharedBufferDeclsAndNativeZeroCopyBidirectionalExecutionIn directory
+    finally Directory.Delete(directory, true)
+
 // #115: real installed declarations must retain their actual exception and layout facts.
 let private installedXrtSurface =
     lazy (CppClassAnalysis.loadXrtCppSurface "/usr/include/xrt" "/usr/lib/libxrt_coreutil.so" true)
@@ -2312,7 +2322,7 @@ let ``stdlib reference contracts emit opaque storage and refuse absent disabled 
 
 [<Fact>]
 let ``inline companion storage constructors destructors and aliases execute with exact native lifetimes`` () =
-    let directory = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".scratch", "round13-inline", System.Guid.NewGuid().ToString("N")))
+    let directory = TestHelpers.TestScratch.create "round13-inline"
     Directory.CreateDirectory directory |> ignore
     let path name = Path.Combine(directory, name)
     let run executable arguments =
@@ -2393,7 +2403,7 @@ int main() {
 let ``generated XRT C++ marshaled storage adapters compile and execute C1 sret register_xclbin kernel bo run and D1 destruction natively`` () =
     let declarations, contracts = installedXrtSurface.Value
     let classes = CppClassAnalysis.buildClassMap declarations
-    let directory = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", ".scratch", "xrt-cpp-round13", System.Guid.NewGuid().ToString("N")))
+    let directory = TestHelpers.TestScratch.create "xrt-cpp-round13"
     Directory.CreateDirectory directory |> ignore
     let path name = Path.Combine(directory, name)
     let run executable arguments =

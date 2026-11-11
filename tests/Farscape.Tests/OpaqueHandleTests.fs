@@ -299,8 +299,7 @@ void qualifiers(Token _Nullable optional, Token _Nonnull required);
 
     [<Fact>]
     let ``native nonnull preserves restrict prototypes and applies empty arguments only to pointer slots`` () =
-      let directory = System.IO.Path.GetFullPath(System.IO.Path.Combine("artifacts", "ffi-contract-20261013", "native-nonnull-" + System.Guid.NewGuid().ToString("N")))
-      System.IO.Directory.CreateDirectory directory |> ignore
+      let directory = TestScratch.create "native-nonnull"
       let path = System.IO.Path.Combine(directory, "native.h")
       try
         System.IO.File.WriteAllText(path, """

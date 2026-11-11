@@ -134,7 +134,7 @@ let private typesOf (output: string) =
 [<InlineData(true)>]
 [<InlineData(false)>]
 let ``retention and borrowed results resolve selected anchors in another namespace`` includeExtent =
-    let directory = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "../..", "test-results", "scratch", "cross-namespace", System.Guid.NewGuid().ToString("N")))
+    let directory = TestHelpers.TestScratch.create "cross-namespace"
     System.IO.Directory.CreateDirectory(directory) |> ignore
     try
         let header = System.IO.Path.Combine(directory, "anchors.h")
@@ -168,7 +168,7 @@ let ``retention and borrowed results resolve selected anchors in another namespa
 [<InlineData(false, 16, 8)>]
 [<InlineData(true, 8, 4)>]
 let ``measured layout uses the header's actual parse language`` forceC expectedSize expectedOffset =
-    let directory = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "../..", "test-results", "scratch", "layout-language", System.Guid.NewGuid().ToString("N")))
+    let directory = TestHelpers.TestScratch.create "layout-language"
     System.IO.Directory.CreateDirectory(directory) |> ignore
     try
         let header = System.IO.Path.Combine(directory, "language.hpp")

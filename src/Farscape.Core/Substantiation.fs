@@ -52,6 +52,73 @@ module Substantiation =
           Verbose: bool
           AllowWarnings: bool }
 
+    /// Where a PSG node lies inside the library's root modules (#209). A node outside every
+    /// library root module has no owner.
+    [<RequireQualifiedAccess>]
+    type internal PsgNodeOwner =
+        /// The node is, or descends from, this module-level library binding.
+        | Binding of bindingNodeId: int * qualified: string
+        /// The node is inside a library root module and below no module-level binding.
+        | NonBinding
+
+    /// The foreign symbol that a module-level library binding describes as a FunctionDescriptor (#209).
+    [<RequireQualifiedAccess>]
+    type internal DescriptorSymbol =
+        /// The binding is no FunctionDescriptor quotation.
+        | NotDescriptor
+        /// The CName string literal of the descriptor record: the compiler PSG publishes it as
+        /// the literal node of the record's CName field, and the source text at that node's
+        /// range spells the same literal.
+        | Named of cname: string
+        /// A FunctionDescriptor quotation whose CName is not established that way.
+        | Unestablished of reason: string
+
+    /// One module-level library binding as the compiler PSG and the source classifier agree on it.
+    type internal DeclarationNode =
+        { Qualified: string
+          SourcePath: string
+          BindingNodeId: int
+          Range: string
+          Type: string
+          /// 1-based first and last source line of the declaration block.
+          FirstLine: int
+          LastLine: int
+          /// The FidelityExtern (library, symbol) of a foreign declaration.
+          Foreign: (string * string) option
+          /// The symbol the binding describes when it is a FunctionDescriptor quotation.
+          Descriptor: DescriptorSymbol }
+
+    /// A witnessed MLIR definition whose source node or traversal root is a library node.
+    type internal WitnessedDefinition =
+        { Unit: string
+          Symbol: string
+          SourceNode: int
+          TraversalRoot: int
+          Declaration: string option
+          SourceInLibrary: bool
+          RootInLibrary: bool }
+
+    /// A witnessed foreign import whose source boundary resolves to a library declaration.
+    type internal WitnessedImport =
+        { Unit: string
+          Symbol: string
+          Library: string
+          DeclarationNode: int
+          Declaration: string
+          Resource: bool }
+
+    type internal WitnessedObligation = { Anchor: string; Source: string; Kind: string }
+
+    /// The verified PSG and witness-unit correspondence of one validated manifest.
+    type internal Correspondence =
+        { Declarations: DeclarationNode[]
+          Definitions: WitnessedDefinition[]
+          Imports: WitnessedImport[]
+          /// None when the witness manifest carries no proof obligation list.
+          Obligations: WitnessedObligation[] option
+          /// The (Invocation, QuerySha256) of the source proof receipt the witness embeds.
+          SourceProof: (string * string) option }
+
     let private refuse code path message =
         Diagnostics.diagnostic code message (Diagnostics.inFile path "substantiation input or retained evidence")
         |> Diagnostics.refuse
@@ -111,7 +178,7 @@ module Substantiation =
 
     /// System.Text.Json's missing-field defaults are not an input contract. Require every
     /// record field, including empty arrays, and reject unknown or duplicate fields first.
-    let rec private requireJsonShape (schema: Type) (value: JsonElement) =
+    let rec internal requireJsonShape (schema: Type) (value: JsonElement) =
         if FSharpType.IsRecord schema then
             if value.ValueKind <> JsonValueKind.Object then invalidOp $"Expected a {schema.Name} object."
             let fields = FSharpType.GetRecordFields schema
@@ -255,6 +322,10 @@ module Substantiation =
           Activations: string[]
           AllBindings: Set<string>
           BindingSpans: Map<string, (int * int) * (int * int) * bool>
+          BindingExtents: Map<string, int * int>
+          ForeignSymbols: Map<string, string * string>
+          /// The compile-time declarations typed Expr<FunctionDescriptor>.
+          FunctionDescriptors: Set<string>
           BindingDocumentation: Map<string, Set<int * int>>
           AllTypes: Set<string> }
 
@@ -320,6 +391,9 @@ module Substantiation =
             let foreignDeclarations = ResizeArray<string>()
             let allBindings = ResizeArray<string>()
             let bindingSpans = ResizeArray<string * ((int * int) * (int * int) * bool)>()
+            let bindingExtents = ResizeArray<string * (int * int)>()
+            let foreignSymbols = ResizeArray<string * (string * string)>()
+            let functionDescriptors = ResizeArray<string>()
             let bindingDocumentation = ResizeArray<string * Set<int * int>>()
             let allTypes = ResizeArray<string>()
             let descriptorTypes =
@@ -445,6 +519,7 @@ module Substantiation =
                                     let firstLine = lineAt offset
                                     firstLine + 1, offset - lineStarts[firstLine]
                             bindingSpans.Add(parent + "." + bindingName, (firstPos, letPos, foreign))
+                            bindingExtents.Add(parent + "." + bindingName, (fst firstPos, blockEnd))
                             match Map.tryFind (lineStarts[index] + snd letPos) documentation with
                             | Some positions -> bindingDocumentation.Add(parent + "." + bindingName, positions)
                             | None -> ()
@@ -461,6 +536,10 @@ module Substantiation =
                                     if not (Regex.IsMatch(body, @"^\s*NativeDefault\.zeroed\s*\(\s*\)\s*$")) then
                                         invalidOp $"Foreign declaration {qualified} has an authored or unrecognized body; it cannot be omitted from source checking."
                                     foreignDeclarations.Add(parent + "." + bindingName)
+                                    match (attached |> Array.find SubstantiationBoundary.hasFidelityExtern).Literals with
+                                    | [| { IsString = true; Value = Some library }; { IsString = true; Value = Some symbol } |] ->
+                                        foreignSymbols.Add(parent + "." + bindingName, (library, symbol))
+                                    | _ -> invalidOp $"Foreign declaration {qualified} has no library and symbol literal pair."
                                 elif loadingType.Success && selectedMetadata.Contains qualified then
                                     if not ((initialBody loadingType.Groups[1].Value).StartsWith("{", StringComparison.Ordinal)) then
                                         invalidOp $"Selected loading declaration {qualified} must have a literal contract body."
@@ -470,6 +549,7 @@ module Substantiation =
                                     if not (descriptorTypes.Contains typeName) || not ((initialBody quoteType.Groups[2].Value).StartsWith("<@", StringComparison.Ordinal)) then
                                         invalidOp $"Compile-time declaration {qualified} has no admitted descriptor-reading owner."
                                     descriptors.Add qualified
+                                    if typeName = "FunctionDescriptor" then functionDescriptors.Add(parent + "." + bindingName)
                                 elif Regex.IsMatch(tail, @"^\s*=\s*<@") then
                                     invalidOp $"Quotation {qualified} needs an explicit supported descriptor type."
                                 else
@@ -491,13 +571,20 @@ module Substantiation =
                   ForeignDeclarations = foreignDeclarations.ToArray() }
               Text = text; Activations = references.ToArray()
               AllBindings = Set.ofSeq allBindings; BindingSpans = Map.ofSeq bindingSpans
+              BindingExtents = Map.ofSeq bindingExtents; ForeignSymbols = Map.ofSeq foreignSymbols
+              FunctionDescriptors = Set.ofSeq functionDescriptors
               BindingDocumentation = Map.ofSeq bindingDocumentation
               AllTypes = Set.ofSeq allTypes })
+
+    type private PsgInspection =
+        { Declarations: DeclarationNode[]
+          /// Every PSG node inside a library root module, by node identity.
+          Owners: Map<int, PsgNodeOwner> }
 
     // The compiler owns the post-CCS type and module graph. Its parent edges, rather
     // than pretty-printed (and possibly truncated) child lists, bind that graph to
     // the source classifier and the boundary's measured layouts.
-    let private verifyPsg0 path (sources: SourceInventory[]) (boundary: SubstantiationBoundary.BoundaryEvidence) =
+    let private verifyPsg0 path (sources: SourceInventory[]) (boundary: SubstantiationBoundary.BoundaryEvidence) : Result<PsgInspection, Diagnostics.Refusal> =
         protect Diagnostics.SubstantiationSourceInvalid path (fun () ->
             let fail message = refuse Diagnostics.SubstantiationSourceInvalid path message
             use document = JsonDocument.Parse(File.ReadAllText path)
@@ -634,7 +721,8 @@ module Substantiation =
                                 index <- ending + 1
                         else index <- index + 1
                 applications 0 typeText.Length false
-            let libraryBindings = ResizeArray<int * string>()
+            let libraryBindings = ResizeArray<DeclarationNode>()
+            let libraryRoots = Collections.Generic.HashSet<int>()
             for source in sources do
                 let path = Path.GetFullPath source.Digest.Path
                 let roots =
@@ -644,6 +732,7 @@ module Substantiation =
                     match roots with
                     | [| id, (name, _, _) |] when name = source.Digest.ModuleName -> id
                     | _ -> fail $"The compiler PSG root module does not match source module '{source.Digest.ModuleName}'."
+                libraryRoots.Add root |> ignore
                 let bindings = ResizeArray<string * string>()
                 for node in nodes do
                     match parent node |> Option.bind (fun id -> Map.tryFind id moduleIdentities) with
@@ -670,7 +759,13 @@ module Substantiation =
                                 refuse Diagnostics.SubstantiationExternUnresolved path $"The compiler lowered module binding '{qualified}' as a foreign declaration that the source classifier did not inventory."
                             if isForeign && not placeholder then
                                 refuse Diagnostics.SubstantiationExternUnresolved path $"Foreign declaration '{qualified}' was not lowered as a foreign binding by the compiler."
-                            libraryBindings.Add(node.GetProperty("id").GetInt32(), qualified)
+                            let firstLine, lastLine = source.BindingExtents[qualified]
+                            libraryBindings.Add
+                                { Qualified = qualified; SourcePath = path; BindingNodeId = node.GetProperty("id").GetInt32()
+                                  Range = range.Value; Type = node.GetProperty("type").GetString()
+                                  FirstLine = firstLine; LastLine = lastLine
+                                  Foreign = Map.tryFind qualified source.ForeignSymbols
+                                  Descriptor = DescriptorSymbol.NotDescriptor }
                             bindings.Add(qualified, node.GetProperty("type").GetString())
                         | _, Some name ->
                             let simple = name.Split('.') |> Array.last
@@ -682,26 +777,204 @@ module Substantiation =
                     match bindings |> Seq.filter (fun (name, _) -> name = foreign) |> Seq.toArray with
                     | [| _, typeText |] -> verifyForeignType foreign typeText
                     | _ -> refuse Diagnostics.SubstantiationExternUnresolved path $"Foreign declaration '{foreign}' has no unique module binding in the compiler PSG."
-            Map.ofSeq libraryBindings)
+            // A witness attributes a foreign import to the FunctionDescriptor RecordExpr inside a
+            // descriptor binding, not to the binding node (#209). Resolve every node through its
+            // parent edges to the module-level library binding that encloses it, or to the
+            // library module when no binding does. The walk is a loop, not recursion, so stack
+            // use is independent of the length of a parent chain; a cycle and a parent identity
+            // absent from the PSG are refused (FS9233).
+            let bindingById = libraryBindings |> Seq.map (fun declaration -> declaration.BindingNodeId, declaration.Qualified) |> dict
+            let libraryModules =
+                moduleIdentities |> Map.toSeq |> Seq.filter (fun (_, (_, _, owner)) -> libraryRoots.Contains owner) |> Seq.map fst
+                |> Collections.Generic.HashSet
+            let resolved = Collections.Generic.Dictionary<int, PsgNodeOwner option>()
+            for start in ids do
+                let walked = ResizeArray<int>()
+                let onWalk = Collections.Generic.HashSet<int>()
+                let mutable current = start
+                let mutable outcome = ValueNone
+                while outcome.IsNone do
+                    match resolved.TryGetValue current with
+                    | true, known -> outcome <- ValueSome known
+                    | _ ->
+                        if not (onWalk.Add current) then fail "The compiler PSG parent edges contain a cycle."
+                        walked.Add current
+                        match bindingById.TryGetValue current with
+                        | true, qualified -> outcome <- ValueSome(Some(PsgNodeOwner.Binding(current, qualified)))
+                        | _ when libraryModules.Contains current -> outcome <- ValueSome(Some PsgNodeOwner.NonBinding)
+                        | _ ->
+                            match parent nodeById[current] with
+                            | None -> outcome <- ValueSome None
+                            | Some enclosing when not (nodeById.ContainsKey enclosing) ->
+                                fail $"PSG node {current} names parent {enclosing}, which the compiler PSG does not contain."
+                            | Some enclosing -> current <- enclosing
+                for id in walked do resolved[id] <- outcome.Value
+            // The symbol a FunctionDescriptor declaration describes is the CName field of its
+            // record (#209). The compiler publishes that field as a string literal node below
+            // the record; the source text at the node's range must spell the same literal, so
+            // a change confined to the PSG or to the witness manifest does not change the
+            // symbol. The owner map above locates the record without a recursive descent.
+            let functionDescriptors = sources |> Array.map _.FunctionDescriptors |> Set.unionMany
+            let sourceLines = sources |> Array.map (fun source -> Path.GetFullPath source.Digest.Path, source.Text.Split('\n')) |> Map.ofArray
+            let cnameField = Regex(@"\(\s*""CName""\s*,\s*NodeId\s+([0-9]{1,9})\s*\)", RegexOptions.CultureInvariant)
+            let descriptorRecords =
+                nodes
+                |> Array.choose (fun node ->
+                    let kind = node.GetProperty("kind").GetString()
+                    if not (Regex.IsMatch(kind, @"\ARecordExpr\b")) || not (cnameField.IsMatch kind) then None
+                    else
+                        match resolved.TryGetValue(node.GetProperty("id").GetInt32()) with
+                        | true, Some(PsgNodeOwner.Binding(binding, _)) -> Some(binding, node)
+                        | _ -> None)
+                |> Array.groupBy fst
+                |> Map.ofArray
+            let descriptorSymbol (declaration: DeclarationNode) =
+                if not (functionDescriptors.Contains declaration.Qualified) then DescriptorSymbol.NotDescriptor
+                else
+                    match Map.tryFind declaration.BindingNodeId descriptorRecords with
+                    | None -> DescriptorSymbol.Unestablished "the compiler PSG holds no record with a CName field below the binding."
+                    | Some [| _, record |] ->
+                        let field = cnameField.Match(record.GetProperty("kind").GetString())
+                        match Map.tryFind (Int32.Parse field.Groups[1].Value) nodeById with
+                        | Some literal when parent literal = Some(record.GetProperty("id").GetInt32()) ->
+                            let spelled = Regex.Match(literal.GetProperty("kind").GetString(), @"\ALiteral\s*\(\s*String\s+""([^""\\\r\n]+)""\s*\)\s*\z")
+                            let position =
+                                match literal.TryGetProperty "range" with
+                                | true, value when value.ValueKind = JsonValueKind.String -> Regex.Match(value.GetString(), @"^(.+):([0-9]{1,9}):([0-9]{1,9})$")
+                                | _ -> Match.Empty
+                            if not spelled.Success then
+                                DescriptorSymbol.Unestablished "the compiler PSG publishes its CName field as no plain string literal."
+                            elif not position.Success || Path.GetFullPath position.Groups[1].Value <> declaration.SourcePath then
+                                DescriptorSymbol.Unestablished "the compiler PSG publishes no range in the declaring source for its CName literal."
+                            else
+                                let line, column = Int32.Parse position.Groups[2].Value, Int32.Parse position.Groups[3].Value
+                                let lines = sourceLines[declaration.SourcePath]
+                                let expected = "\"" + spelled.Groups[1].Value + "\""
+                                if line >= declaration.FirstLine && line <= declaration.LastLine && line <= lines.Length
+                                   && column + expected.Length <= lines[line - 1].Length
+                                   && String.CompareOrdinal(lines[line - 1], column, expected, 0, expected.Length) = 0 then
+                                    DescriptorSymbol.Named spelled.Groups[1].Value
+                                else
+                                    DescriptorSymbol.Unestablished "the source text at the range of its CName literal does not spell the literal the compiler PSG publishes."
+                        | _ -> DescriptorSymbol.Unestablished "its CName field names no child node of the descriptor record."
+                    | Some _ -> DescriptorSymbol.Unestablished "the compiler PSG holds more than one record with a CName field below the binding."
+            { Declarations = libraryBindings.ToArray() |> Array.map (fun declaration -> { declaration with Descriptor = descriptorSymbol declaration })
+              Owners = resolved |> Seq.choose (fun entry -> entry.Value |> Option.map (fun owner -> entry.Key, owner)) |> Map.ofSeq })
 
-    let private verifyWitnessUnits witnessPath (libraryBindingById: Map<int, string>) (sources: SourceInventory[]) (boundary: SubstantiationBoundary.BoundaryEvidence) =
+    /// Reconcile every witnessed foreign import with the library declaration its source
+    /// boundary node belongs to, and collect the witnessed definitions and proof obligations.
+    let private verifyWitnessUnits witnessPath (psg: PsgInspection) (sources: SourceInventory[]) (boundary: SubstantiationBoundary.BoundaryEvidence) : Result<Correspondence, Diagnostics.Refusal> =
         protect Diagnostics.SubstantiationSourceInvalid witnessPath (fun () ->
             use document = JsonDocument.Parse(File.ReadAllText witnessPath)
+            let definitions = ResizeArray<WitnessedDefinition>()
+            let imports = ResizeArray<WitnessedImport>()
+            let boundaryDeclaration qualified =
+                sources |> Array.exists (fun source ->
+                    Array.contains qualified source.Digest.ForeignDeclarations
+                    || Array.contains qualified source.Digest.CompileTimeDeclarations)
+            let textOf (owner: JsonElement) (name: string) =
+                match owner.ValueKind, owner.TryGetProperty name with
+                | JsonValueKind.Object, (true, value) when value.ValueKind = JsonValueKind.String -> value.GetString()
+                | _ -> ""
+            let declarationsByNode = psg.Declarations |> Array.map (fun node -> node.BindingNodeId, node) |> Map.ofArray
+            let attribute unitId resource declaration (library: string) (symbol: string) =
+                match Map.tryFind declaration psg.Owners with
+                | Some(PsgNodeOwner.Binding(binding, qualified)) ->
+                    if not (boundaryDeclaration qualified) then
+                        refuse Diagnostics.SubstantiationExternUnresolved witnessPath $"The compiler emitted a foreign import for uninventoried declaration '{qualified}'."
+                    if not (boundary.Strata.ForeignCalls && Array.contains symbol boundary.ExternSymbols && Array.contains library boundary.Libraries) then
+                        refuse Diagnostics.SubstantiationExternUnresolved witnessPath $"The compiler foreign import '{qualified}' ({library}, {symbol}) disagrees with the retained boundary."
+                    // Membership in the boundary inventory admits every symbol of the library on
+                    // every declaration. The import must carry the symbol of the declaration its
+                    // node resolves to (#209): the pair of a FidelityExtern declaration, or the
+                    // CName of a FunctionDescriptor. No other library binding owns a foreign
+                    // import: a binding that is neither (a result contract, another descriptor
+                    // kind, a runtime function) declares no symbol to compare, so an import
+                    // that resolves to it is refused.
+                    match Map.tryFind binding declarationsByNode with
+                    | Some { Foreign = Some(declaredLibrary, declaredSymbol) } when (declaredLibrary, declaredSymbol) <> (library, symbol) ->
+                        refuse Diagnostics.SubstantiationExternUnresolved witnessPath $"The compiler foreign import ({library}, {symbol}) names FidelityExtern declaration '{qualified}', which declares ({declaredLibrary}, {declaredSymbol})."
+                    | Some { Descriptor = DescriptorSymbol.Named cname } when cname <> symbol ->
+                        refuse Diagnostics.SubstantiationExternUnresolved witnessPath $"The compiler foreign import ({library}, {symbol}) names FunctionDescriptor '{qualified}', whose CName is '{cname}'."
+                    | Some { Descriptor = DescriptorSymbol.Unestablished reason } ->
+                        refuse Diagnostics.SubstantiationExternUnresolved witnessPath $"The compiler foreign import ({library}, {symbol}) names FunctionDescriptor '{qualified}', whose CName is not established: {reason}"
+                    | Some { Foreign = None; Descriptor = DescriptorSymbol.NotDescriptor } ->
+                        refuse Diagnostics.SubstantiationExternUnresolved witnessPath $"The compiler foreign import ({library}, {symbol}) names declaration '{qualified}', which is neither a FidelityExtern declaration nor a FunctionDescriptor."
+                    | Some _ -> ()
+                    | None ->
+                        refuse Diagnostics.SubstantiationExternUnresolved witnessPath $"The compiler foreign import ({library}, {symbol}) names declaration '{qualified}', which the compiler PSG inspection did not inventory."
+                    imports.Add { Unit = unitId; Symbol = symbol; Library = library; DeclarationNode = declaration; Declaration = qualified; Resource = resource }
+                | Some PsgNodeOwner.NonBinding ->
+                    refuse Diagnostics.SubstantiationExternUnresolved witnessPath $"The compiler foreign import ({library}, {symbol}) names PSG node {declaration}, which is inside a library module and inside no module binding."
+                | None -> ()
+            let ownerOf id =
+                match Map.tryFind id psg.Owners with
+                | Some(PsgNodeOwner.Binding(_, qualified)) -> true, Some qualified
+                | Some PsgNodeOwner.NonBinding -> true, None
+                | None -> false, None
             for unitNode in document.RootElement.GetProperty("units").EnumerateArray() do
+                let unitId = textOf unitNode "id"
+                match unitNode.TryGetProperty "definitions" with
+                | true, values when values.ValueKind = JsonValueKind.Array ->
+                    for definition in values.EnumerateArray() do
+                        match definition.GetProperty("sourceNode"), definition.GetProperty("traversalRoot") with
+                        | sourceNode, traversalRoot when sourceNode.ValueKind = JsonValueKind.Number && traversalRoot.ValueKind = JsonValueKind.Number ->
+                            let sourceInLibrary, declaration = ownerOf (sourceNode.GetInt32())
+                            let rootInLibrary, _ = ownerOf (traversalRoot.GetInt32())
+                            if sourceInLibrary || rootInLibrary then
+                                definitions.Add
+                                    { Unit = unitId; Symbol = definition.GetProperty("symbol").GetString()
+                                      SourceNode = sourceNode.GetInt32(); TraversalRoot = traversalRoot.GetInt32()
+                                      Declaration = declaration; SourceInLibrary = sourceInLibrary; RootInLibrary = rootInLibrary }
+                        | _ -> ()
+                | _ -> ()
                 for importNode in unitNode.GetProperty("imports").EnumerateArray() do
                     match importNode.TryGetProperty "sourceBoundary" with
                     | true, sourceBoundary when sourceBoundary.ValueKind <> JsonValueKind.Null ->
-                        let declaration = sourceBoundary.GetProperty("declaration").GetInt32()
-                        let library = sourceBoundary.GetProperty("library").GetString()
-                        let symbol = importNode.GetProperty("symbol").GetString()
-                        match Map.tryFind declaration libraryBindingById with
-                        | Some qualified ->
-                            if not (sources |> Array.exists (fun source -> Array.contains qualified source.Digest.ForeignDeclarations)) then
-                                refuse Diagnostics.SubstantiationExternUnresolved witnessPath $"The compiler emitted a foreign import for uninventoried declaration '{qualified}'."
-                            if not (boundary.Strata.ForeignCalls && Array.contains symbol boundary.ExternSymbols && Array.contains library boundary.Libraries) then
-                                refuse Diagnostics.SubstantiationExternUnresolved witnessPath $"The compiler foreign import '{qualified}' ({library}, {symbol}) disagrees with the retained boundary."
-                        | None -> ()
-                    | _ -> ())
+                        attribute unitId false (sourceBoundary.GetProperty("declaration").GetInt32())
+                            (sourceBoundary.GetProperty("library").GetString()) (importNode.GetProperty("symbol").GetString())
+                    | _ -> ()
+                // A resource import names its source boundary either as the PSG node identity
+                // or as an object carrying it. Its library and symbol must be present whenever
+                // the node is a library node; an absent value cannot match the retained boundary.
+                match unitNode.TryGetProperty "resourceImports" with
+                | true, values when values.ValueKind = JsonValueKind.Array ->
+                    for resourceNode in values.EnumerateArray() do
+                        match resourceNode.TryGetProperty "sourceBoundary" with
+                        | true, sourceBoundary when sourceBoundary.ValueKind = JsonValueKind.Number ->
+                            attribute unitId true (sourceBoundary.GetInt32()) (textOf resourceNode "library") (textOf resourceNode "symbol")
+                        | true, sourceBoundary when sourceBoundary.ValueKind = JsonValueKind.Object ->
+                            let library =
+                                match textOf sourceBoundary "library" with
+                                | "" -> textOf resourceNode "library"
+                                | named -> named
+                            attribute unitId true (sourceBoundary.GetProperty("declaration").GetInt32()) library (textOf resourceNode "symbol")
+                        | true, sourceBoundary when sourceBoundary.ValueKind <> JsonValueKind.Null ->
+                            refuse Diagnostics.SubstantiationExternUnresolved witnessPath "A witnessed resource import has a source boundary that is neither a PSG node identity nor an object naming one."
+                        | _ -> ()
+                | _ -> ()
+            let sourceProof =
+                match document.RootElement.TryGetProperty "proof" with
+                | true, proof when proof.ValueKind = JsonValueKind.Object ->
+                    match proof.TryGetProperty "source" with
+                    | true, source when source.ValueKind = JsonValueKind.Object -> Some(textOf source "Invocation", textOf source "QuerySha256")
+                    | _ -> None
+                | _ -> None
+            let obligations =
+                match document.RootElement.TryGetProperty "proof" with
+                | true, proof when proof.ValueKind = JsonValueKind.Object ->
+                    match proof.TryGetProperty "obligations" with
+                    | true, values when values.ValueKind = JsonValueKind.Array ->
+                        values.EnumerateArray()
+                        |> Seq.map (fun entry ->
+                            { Anchor = entry.GetProperty("anchor").GetString()
+                              Source = entry.GetProperty("source").GetString()
+                              Kind = entry.GetProperty("kind").GetString() })
+                        |> Seq.toArray |> Some
+                    | _ -> None
+                | _ -> None
+            { Declarations = psg.Declarations; Definitions = definitions.ToArray(); Imports = imports.ToArray()
+              Obligations = obligations; SourceProof = sourceProof })
 
     let private table path key document =
         match Toml.getValue key document with
@@ -764,10 +1037,9 @@ module Substantiation =
                        || (inLibrary && demoted) then
                         refuse Diagnostics.SubstantiationCompilerDiagnostics source (lines[index].Trim()))
 
-    /// Recheck the complete project membership and every retained digest without silently
-    /// recompiling or replacing evidence. A parser checks shape; this checks the live inputs.
-    let validateManifest (manifest: Manifest) =
-        protect Diagnostics.SubstantiationDigestMismatch manifest.FidprojPath (fun () ->
+    /// The body of `validateManifest`. It raises the refusal and returns the correspondence
+    /// that `verifyPsg0` and `verifyWitnessUnits` established during the same pass.
+    let private validateManifestEvidence (manifest: Manifest) : Correspondence =
             requireIntegrity manifest
             ScratchDirectory.canonicalEvidencePath manifest.FidprojPath |> ignore
             ScratchDirectory.canonicalEvidencePath (Path.GetDirectoryName manifest.FidprojPath) |> ignore
@@ -800,8 +1072,8 @@ module Substantiation =
                     if inspected.Digest <> source then
                         refuse Diagnostics.SubstantiationManifestMalformed source.Path "The exported module/declaration inventory does not match the source."
                     inspected)
-            let libraryBindingById = verifyPsg0 manifest.Psg0.Path liveSources manifest.Boundary |> required
-            verifyWitnessUnits manifest.WitnessUnits.Path libraryBindingById liveSources manifest.Boundary |> required
+            let psg = verifyPsg0 manifest.Psg0.Path liveSources manifest.Boundary |> required
+            let correspondence = verifyWitnessUnits manifest.WitnessUnits.Path psg liveSources manifest.Boundary |> required
             for evidence in [ manifest.Compiler; manifest.Dotnet; manifest.Harness; manifest.HarnessProject; manifest.CompilerLog ] do
                 checkDigest evidence.Path evidence.Sha256
             validateCompilerDiagnostics manifest.WarningsAsErrors (Set.ofArray manifest.ElevatedWarningCodes) listed (File.ReadAllText manifest.CompilerLog.Path) |> required
@@ -847,7 +1119,20 @@ module Substantiation =
             finally
                 Directory.Delete(validationWork, true)
                 if Directory.Exists validationRoot && Directory.GetFileSystemEntries(validationRoot).Length = 0 then
-                    Directory.Delete validationRoot)
+                    Directory.Delete validationRoot
+            correspondence
+
+    /// Recheck the complete project membership and every retained digest without silently
+    /// recompiling or replacing evidence. A parser checks shape; this checks the live inputs.
+    let validateManifest (manifest: Manifest) =
+        protect Diagnostics.SubstantiationDigestMismatch manifest.FidprojPath (fun () ->
+            validateManifestEvidence manifest |> ignore)
+
+    /// `validateManifest`, returning the PSG and witness-unit correspondence that the same
+    /// validation pass verified (#209).
+    let internal validateManifestCorrespondence (manifest: Manifest) : Result<Correspondence, Diagnostics.Refusal> =
+        protect Diagnostics.SubstantiationDigestMismatch manifest.FidprojPath (fun () ->
+            validateManifestEvidence manifest)
 
     let private resolveComposer () =
         let path =
@@ -934,9 +1219,11 @@ module Substantiation =
             let sourceDigests = sources |> Array.map _.Digest
             if (sourceDigests |> Array.map _.ModuleName |> Array.distinct).Length <> sourceDigests.Length then
                 refuse Diagnostics.SubstantiationSourceInvalid projectPath "Two source files declare the same exported module."
-            let workRoot =
-                request.WorkDirectory |> Option.defaultWith (fun () -> Path.Combine(Directory.GetCurrentDirectory(), "test-results", "scratch", "substantiation")) |> ScratchDirectory.canonicalEvidencePath
             let output = request.OutputDirectory |> Option.defaultValue directory |> ScratchDirectory.canonicalEvidencePath
+            let workRoot =
+                request.WorkDirectory
+                |> Option.defaultWith (fun () -> Path.Combine(output, package + ".substantiation.evidence"))
+                |> ScratchDirectory.canonicalEvidencePath
             let work = Path.Combine(workRoot, Guid.NewGuid().ToString("N"))
             Directory.CreateDirectory work |> ignore
             let libraries = strings Diagnostics.SubstantiationProjectInvalid projectPath "link.libraries" document false
@@ -999,8 +1286,8 @@ module Substantiation =
             if not (File.Exists witnessPath) then
                 refuse Diagnostics.SubstantiationDigestMismatch witnessPath "The compiler did not retain its witness-unit evidence."
             let witnessUnits = digest witnessPath
-            let libraryBindingById = verifyPsg0 psg0Path sources boundary |> required
-            verifyWitnessUnits witnessPath libraryBindingById sources boundary |> required
+            let psg = verifyPsg0 psg0Path sources boundary |> required
+            verifyWitnessUnits witnessPath psg sources boundary |> required |> ignore
             let proof = SubstantiationProof.evaluate sourcePaths entryPath artifacts |> required
             let manifest =
                 seal

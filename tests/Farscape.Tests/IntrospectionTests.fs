@@ -513,8 +513,7 @@ let ``project signal preflight leaves every existing output intact on unsupporte
 [<InlineData("invalid-description", false)>]
 [<InlineData("sibling", false)>]
 let ``descriptor-only project preserves explicit platform selection before writing`` selection callbacks =
-  let checkout = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "../.."))
-  let directory = Path.Combine(checkout, "artifacts", "ffi-contract-20261013", "platform-selection-" + Guid.NewGuid().ToString("N"))
+  let directory = TestScratch.path "platform-selection"
   let previous = Environment.GetEnvironmentVariable "FIDELITY_PLATFORM_PROJECT"
   try
     Directory.CreateDirectory directory |> ignore
@@ -590,7 +589,7 @@ let ``descriptor-only project preserves explicit platform selection before writi
 [<InlineData("arity")>]
 [<InlineData("deprecated")>]
 let ``result range project validates every supplied contract before output writes`` shape =
-  let directory = Path.Combine(__SOURCE_DIRECTORY__, "../../artifacts/ffi-contract-20261013", "result-project-" + Guid.NewGuid().ToString("N")) |> Path.GetFullPath
+  let directory = TestScratch.path "result-project"
   try
     Directory.CreateDirectory directory |> ignore
     let pilot, output = signalProject directory "long read(int fd, void *buffer, unsigned long count);"

@@ -23,11 +23,12 @@ open Fidelity.Data.TOML
 //   `FnPtr.ofFunction`, and the opaque-handle and context entry that #189 generates and #211
 //   has yet to settle.
 // - The hygiene Fact refuses a Python file in the repository.
-// Every journey works in test-results/native-callbacks/<label> of the checkout and retains
-// that directory; an accepted journey records the SHA-256 of its artifacts beside it in
+// Every journey works in native-callbacks/<label> under the scratch root of the test process
+// (OS temporary storage, farscape-tests/<process>) and retains that directory until the
+// process exits; an accepted journey records the SHA-256 of its artifacts beside it in
 // <label>.sha256, and the Fact verifies that manifest against the retained files. The unit
-// Facts' scratch directories are test-results/scratch/<name>-<guid>. Nothing is written to the
-// system temporary directory.
+// Facts' scratch directories are <name>/<guid> under the same root, deleted when the Fact
+// ends. Nothing is written to the checkout (#215).
 // Clang and llvm-ar compile and archive the foreign C probes only (ClangToolchain); Composer
 // selects its own backend tools. A missing input (fixture, sibling project, Composer.dll,
 // clang, llvm-ar, dotnet, git) fails the Fact that needs it; no Fact is skipped.
@@ -1667,15 +1668,11 @@ let ``the obligation ids are read from the obligations document in order`` () =
 let private repositoryRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
 let private fixtureDirectory = Path.Combine(repositoryRoot, "tests", "native-callbacks")
 
-/// test-results in the checkout, which git ignores. Every directory and file this module
-/// writes is beneath it; nothing is written to the system temporary directory.
-let private testResults = Path.Combine(repositoryRoot, "test-results")
-
-/// Run `body` over the fresh directory test-results/scratch/<name>-<guid>, deleted afterwards
-/// whether `body` returns or fails.
+/// Run `body` over a fresh scratch directory in OS temporary storage, deleted afterwards
+/// whether `body` returns or fails. Every directory and file this module writes is beneath the
+/// scratch root of the test process; nothing is written to the checkout (#215).
 let private withScratch (name: string) (body: string -> unit) : unit =
-    let directory = Path.Combine(testResults, "scratch", name + "-" + Guid.NewGuid().ToString("N"))
-    Directory.CreateDirectory directory |> ignore
+    let directory = TestHelpers.TestScratch.create name
     try body directory
     finally Directory.Delete(directory, true)
 
@@ -2157,8 +2154,9 @@ let private evidenceIn (directory: string) (label: string) : JourneyEvidence =
       ManifestFile = Path.Combine(directory, label + ".sha256")
       DischargesFile = Path.Combine(directory, label + ".discharges") }
 
-/// The evidence of the journey `label` in the checkout, under test-results/native-callbacks.
-let private evidenceOf (label: string) : JourneyEvidence = evidenceIn (Path.Combine(testResults, "native-callbacks")) label
+/// The evidence of the journey `label`: under `native-callbacks` in the scratch root of the
+/// test process, in OS temporary storage. That root is removed when the process exits.
+let private evidenceOf (label: string) : JourneyEvidence = evidenceIn (TestHelpers.TestScratch.shared "native-callbacks") label
 
 /// Write `digests` to `manifest` in the `sha256sum` line format: the digest, two spaces, the path.
 let private writeManifest (manifest: string) (digests: ArtifactDigest list) : unit =
@@ -2342,7 +2340,8 @@ let private requireRetained (receipt: JourneyReceipt) : unit =
 /// discharge summary an earlier run recorded for it, are deleted first: from that point the
 /// earlier manifest would name deleted files. The work directory is retained when `body`
 /// returns and when it fails, so every file a recorded manifest names stays on disk until the
-/// next run of the same journey. The result of `body`.
+/// next run of the same journey, or until the test process exits and its scratch root is
+/// removed. The result of `body`.
 let private withJourneyAt (evidence: JourneyEvidence) (body: string -> 'T) : 'T =
     for earlier in [ evidence.ManifestFile; evidence.DischargesFile ] do
         if File.Exists earlier then File.Delete earlier
@@ -2351,9 +2350,9 @@ let private withJourneyAt (evidence: JourneyEvidence) (body: string -> 'T) : 'T 
     try
         body evidence.WorkDirectory
     with error ->
-        raise (InvalidOperationException($"{error.Message}\nEvidence retained in {evidence.WorkDirectory}", error))
+        raise (InvalidOperationException($"{error.Message}\nEvidence is kept in {evidence.WorkDirectory} until the test process exits", error))
 
-/// `withJourneyAt` over test-results/native-callbacks/<label> in the checkout.
+/// `withJourneyAt` over `native-callbacks/<label>` in the scratch root of the test process.
 let private withJourney (label: string) (body: string -> 'T) : 'T = withJourneyAt (evidenceOf label) body
 
 [<Fact>]
@@ -2416,11 +2415,15 @@ let ``the work directory of a journey is emptied when the journey starts and ret
         same (Path.Combine(directory, "retained")) evidence.WorkDirectory
         same (Path.Combine(directory, "retained.sha256")) evidence.ManifestFile
         same (Path.Combine(directory, "retained.discharges")) evidence.DischargesFile
-        // The journeys of this module keep their evidence in the checkout, under the ignored test-results.
-        let checkout = evidenceOf "single-entry"
-        same (Path.Combine(repositoryRoot, "test-results", "native-callbacks", "single-entry")) checkout.WorkDirectory
-        same (Path.Combine(repositoryRoot, "test-results", "native-callbacks", "single-entry.sha256")) checkout.ManifestFile
-        Assert.True(isBeneath repositoryRoot checkout.WorkDirectory, $"{checkout.WorkDirectory} is not beneath the checkout {repositoryRoot}")
+        // The journeys of this module keep their evidence in OS temporary storage under
+        // farscape-tests, outside the checkout (#215).
+        let journeys = Path.Combine(TestHelpers.TestScratch.root (), "native-callbacks")
+        let retained = evidenceOf "single-entry"
+        same (Path.Combine(journeys, "single-entry")) retained.WorkDirectory
+        same (Path.Combine(journeys, "single-entry.sha256")) retained.ManifestFile
+        let temporary = Path.Combine(Path.GetTempPath(), "farscape-tests")
+        Assert.True(isBeneath temporary retained.WorkDirectory, $"{retained.WorkDirectory} is not beneath {temporary}")
+        Assert.False(isBeneath repositoryRoot retained.WorkDirectory, $"{retained.WorkDirectory} is beneath the checkout {repositoryRoot}")
         // A journey that returns: its result is the body's, and its files stay on disk with
         // the digests its manifest records.
         let record (work: string) : ArtifactDigest list =
@@ -2455,7 +2458,7 @@ let ``the work directory of a journey is emptied when the journey starts and ret
                 withJourneyAt evidence (fun work ->
                     File.WriteAllText(Path.Combine(work, "build-journey.log"), "error")
                     if File.Exists(Path.Combine(work, "build-journey.log")) then failwith "the compile is refused"))
-        same ("the compile is refused\nEvidence retained in " + evidence.WorkDirectory) failure.Message
+        same ("the compile is refused\nEvidence is kept in " + evidence.WorkDirectory + " until the test process exits") failure.Message
         same [ Path.Combine(evidence.WorkDirectory, "build-journey.log") ] (Directory.GetFileSystemEntries evidence.WorkDirectory |> List.ofArray)
         same
             (Error [ ManifestRefusal.ManifestMissing evidence.ManifestFile ]: Result<ArtifactDigest list, ManifestRefusal list>)
@@ -2937,7 +2940,7 @@ let ``unsettled opaque-handle and context callback refusal: Farscape 189 generat
 
 /// The directories a Python file may not be in: the source trees, walked without their build
 /// output. The root's own files are checked without descending into its other directories
-/// (`test-results` and `artifacts` are ignored scratch and evidence output).
+/// (`artifacts` is ignored evidence output).
 let private sourceTrees = [ "src"; "tests"; "scripts" ]
 let private excludedDirectories = [ ".git"; "bin"; "obj"; "artifacts" ]
 

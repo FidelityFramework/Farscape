@@ -402,7 +402,7 @@ let private singleHeader (header: string) (defines: string list) (output: string
 /// the structured refusal after checking `generateBindings` reports exactly its text and that
 /// nothing was written.
 let private singleHeaderRefusal (header: string) (defines: string list) =
-    let output = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "test-results", "scratch", "diagnostics-tests", "single-header-" + System.Guid.NewGuid().ToString("N")))
+    let output = TestScratch.path "single-header"
     try
         let refusal =
             match BindingGenerator.generateBindingsDiagnosed (singleHeader header defines output) with
@@ -479,4 +479,4 @@ let ``each refusal reason has its own code, allocated sequentially from FS9101 w
     // full at FS9199, and allocation continues as FS92xx).
     let numbers = codes |> List.map (snd >> fun code -> int (code.Substring 2)) |> List.sort
     Assert.Equal<int list>([ 9101 .. 9101 + numbers.Length - 1 ], numbers)
-    Assert.Equal(9246, List.last numbers)
+    Assert.Equal(9252, List.last numbers)

@@ -1148,7 +1148,7 @@ let ``callback invocation contract refuses unsupported receiving correspondence 
 [<InlineData("profile-process-status", "process_exit requires signed32 success_status")>]
 [<InlineData("profile-process-mixed", "during_call forbids")>]
 let ``callback invocation project refusal preserves every existing output`` shape reason =
-    let dir = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "artifacts", "callback-receiving-tests", System.Guid.NewGuid().ToString("N")))
+    let dir = TestHelpers.TestScratch.create "callback-receiving-tests"
     System.IO.Directory.CreateDirectory(dir) |> ignore
     try
         let header = System.IO.Path.Combine(dir, "entry.h")
@@ -1371,7 +1371,7 @@ let ``writable buffer quotation preserves exact declaration byte element and ind
     Assert.Contains("Version = \"2025\"", changed)
 
 let private writableProject shape =
-    let dir = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "artifacts", "writable-buffer-tests", System.Guid.NewGuid().ToString("N")))
+    let dir = TestHelpers.TestScratch.create "writable-buffer-tests"
     System.IO.Directory.CreateDirectory(dir) |> ignore
     try
         let header = System.IO.Path.Combine(dir, "read.h")
@@ -1443,7 +1443,7 @@ let ``required ABI layout probe preserves success and refuses extraction error``
 [<InlineData("wrong-kind")>]
 [<InlineData("missing-typedef")>]
 let ``ABI critical layout probe must succeed before generation`` shape =
-    let dir = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "artifacts", "layout-probe-tests", System.Guid.NewGuid().ToString("N")))
+    let dir = TestHelpers.TestScratch.create "layout-probe-tests"
     System.IO.Directory.CreateDirectory(dir) |> ignore
     try
         let header = System.IO.Path.Combine(dir, "record.h")
@@ -1508,7 +1508,7 @@ let ``ABI critical layout probe must succeed before generation`` shape =
 [<InlineData("entry-chain-shared")>]
 [<InlineData("entry-typedef-conflict")>]
 let ``ABI critical layouts are measured in the declaring header's translation unit`` shape =
-    let dir = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "artifacts", "layout-provenance-tests", System.Guid.NewGuid().ToString("N")))
+    let dir = TestHelpers.TestScratch.create "layout-provenance-tests"
     let rootA = System.IO.Path.Combine(dir, "rootA")
     let ext = System.IO.Path.Combine(dir, "ext")
     let rootB = System.IO.Path.Combine(dir, "rootB")

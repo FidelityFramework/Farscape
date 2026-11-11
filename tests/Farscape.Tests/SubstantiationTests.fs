@@ -12,37 +12,57 @@ open Farscape.Core
 open Fidelity.Data.TOML
 
 // #208 owns the manifest and its narrow behavioral controls. All generated inputs,
-// compiler artifacts and solver queries remain in the primary checkout's scratch tree.
+// compiler artifacts and solver queries are in OS temporary storage, under the scratch root
+// of the test process; nothing is written to the checkout (#215).
+// The helpers without `private` are shared with SubstantiationDossierTests (#209).
 let private repository = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
 
-let private scratchRoot =
-    let parent = Path.Combine(repository, "test-results", "scratch", "substantiation-tests-current")
-    Directory.CreateDirectory parent |> ignore
-    for stale in Directory.GetDirectories(parent, "run-*") do
-        try Directory.Delete(stale, true) with _ -> ()
-    let path = Path.Combine(parent, $"run-{Environment.ProcessId}-{Guid.NewGuid():N}")
-    Directory.CreateDirectory path |> ignore
-    path
+/// The scratch directory of this module. Its fixtures and retained compiler evidence are read
+/// by more than one assertion, so no single test deletes it; it is removed with the scratch
+/// root of the test process when the process exits.
+let private scratchRoot = TestHelpers.TestScratch.create "substantiation-tests"
 
 let private scratch label =
     let path = Path.Combine(scratchRoot, label + "-" + Guid.NewGuid().ToString("N"))
     Directory.CreateDirectory(path) |> ignore
     path
 
-let private accepted = function
+let accepted = function
     | Ok value -> value
     | Error (refusal: Diagnostics.Refusal) -> failwith refusal.Text
 
-let private refused code = function
+let refused code = function
     | Error (refusal: Diagnostics.Refusal) -> Assert.Equal<string list>([ code ], refusal.Diagnostics |> List.map (fun diagnostic -> diagnostic.Code) |> List.distinct)
     | Ok _ -> failwithf "expected %s refusal, got success" code
+
+/// The symbolic links that the evidence path policy refuses, created in `directory`: a link
+/// whose target is absent, a link to that link, and two links that name each other. `Absent`
+/// is the target of the broken link; no refusal may create it.
+type RefusedLinks = { Broken: string; Chained: string; Cycle: string; Absent: string }
+
+let refusedLinks (directory: string) : RefusedLinks =
+    let absent = Path.Combine(directory, "absent-target")
+    let broken = Path.Combine(directory, "broken-link")
+    let chained = Path.Combine(directory, "link-to-broken-link")
+    let cycle = Path.Combine(directory, "cycle-a")
+    let back = Path.Combine(directory, "cycle-b")
+    Directory.CreateSymbolicLink(broken, absent) |> ignore
+    Directory.CreateSymbolicLink(chained, broken) |> ignore
+    Directory.CreateSymbolicLink(cycle, back) |> ignore
+    Directory.CreateSymbolicLink(back, cycle) |> ignore
+    { Broken = broken; Chained = chained; Cycle = cycle; Absent = absent }
+
+/// Whether `path` is `directory` or beneath it.
+let isWithin (directory: string) (path: string) : bool =
+    let parent = directory.TrimEnd(Path.DirectorySeparatorChar)
+    path = parent || path.StartsWith(parent + string Path.DirectorySeparatorChar, StringComparison.Ordinal)
 
 let private sha (text: string) =
     SHA256.HashData(Encoding.UTF8.GetBytes text) |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
 
-let private quote (text: string) = JsonSerializer.Serialize text
+let quote (text: string) = JsonSerializer.Serialize text
 
-let private run work label (info: ProcessStartInfo) =
+let run work label (info: ProcessStartInfo) =
     if String.IsNullOrWhiteSpace info.WorkingDirectory then info.WorkingDirectory <- work
     let toolScratch = Path.Combine(work, "tool-scratch")
     Directory.CreateDirectory toolScratch |> ignore
@@ -211,27 +231,69 @@ let ``missing or unsupported compilation target refuses before tooling`` target 
     request project None None work |> Substantiation.evaluate |> refused "FS9232"
 
 [<Fact>]
-let ``system temporary work directory is refused before writing there`` () =
-    let work = scratch "prohibited-workdir"
+let ``work and output directories through broken or cyclic links are refused before writing there`` () =
+    let work = scratch "refused-link-directories"
     let source = Path.Combine(work, "Local.clef")
     let project = Path.Combine(work, "Local.fidproj")
     File.WriteAllText(source, "module Round19.Local\nlet value : int = 1\n")
     File.WriteAllText(project,
         "[package]\nname = \"Local\"\nversion = \"1\"\n[compilation]\ntarget = \"cpu\"\n[build]\nsources = [\"Local.clef\"]\n")
     let selected = request project None None work
-    { selected with WorkDirectory = Some "/tmp" }
-    |> Substantiation.evaluate |> refused "FS9245"
-    { selected with OutputDirectory = Some "/tmp/out" }
-    |> Substantiation.evaluate |> refused "FS9245"
-    let linked = Path.Combine(work, "linked-tmp")
-    Directory.CreateSymbolicLink(linked, "/tmp") |> ignore
-    for hidden in [ linked; Path.Combine(linked, "not-created", "nested") ] do
+    let links = refusedLinks work
+    for hidden in
+        [ links.Broken; links.Chained; links.Cycle
+          Path.Combine(links.Broken, "not-created", "nested"); Path.Combine(links.Cycle, "nested") ] do
         { selected with WorkDirectory = Some hidden }
         |> Substantiation.evaluate |> refused "FS9245"
         { selected with OutputDirectory = Some hidden }
         |> Substantiation.evaluate |> refused "FS9245"
+    Assert.False(Directory.Exists links.Absent || File.Exists links.Absent, "a refusal must not create the target of a broken link")
 
-let private libraryDiagnosticFile = Path.Combine(repository, "test-results", "scratch", "diagnostics", "Second.clef")
+[<Fact>]
+let ``default tool scratch is a process-scoped directory in OS temporary storage outside the checkout`` () =
+    let expected = Path.Combine(Path.GetTempPath(), $"farscape-{Environment.ProcessId}")
+    let root = ScratchDirectory.root ()
+    Assert.Equal(expected, root)
+    Assert.True(isWithin (Path.GetTempPath()) root, $"{root} is not in OS temporary storage")
+    Assert.False(isWithin repository root, $"{root} is inside the checkout {repository}")
+    // A tool launch creates the directory and directs the tool's temporary files to it.
+    let info = ProcessLaunch.startInfo "tool-that-is-not-started" []
+    Assert.True(Directory.Exists root, $"{root} was not created by the tool launch")
+    for variable in [ "TMPDIR"; "TMP"; "TEMP" ] do Assert.Equal(root, info.Environment[variable])
+    // A selected directory replaces the default inside its scope only.
+    let selected = scratch "selected-tool-scratch"
+    Assert.Equal(selected, ScratchDirectory.within selected ScratchDirectory.root)
+    Assert.Equal(expected, ScratchDirectory.root ())
+
+[<Fact>]
+let ``evidence path policy admits OS temporary storage and refuses empty, broken and cyclic paths`` () =
+    let work = scratch "evidence-path-policy"
+    let policy (path: string) =
+        try Ok(ScratchDirectory.canonicalEvidencePath path)
+        with :? Diagnostics.RefusalException as refusal -> Error refusal.Refusal
+    // OS temporary storage is evidence and output storage (#215).
+    Assert.True(isWithin (Path.GetTempPath()) work, $"{work} is not in OS temporary storage")
+    let canonicalWork = policy work |> accepted
+    Assert.True(Directory.Exists canonicalWork)
+    Assert.Equal(Path.Combine(canonicalWork, "not-created", "leaf"), policy (Path.Combine(work, "not-created", "leaf")) |> accepted)
+    policy (Path.GetTempPath()) |> accepted |> ignore
+    // A link to an existing directory resolves to that directory.
+    let real = Path.Combine(work, "real")
+    let linked = Path.Combine(work, "linked")
+    Directory.CreateDirectory real |> ignore
+    Directory.CreateSymbolicLink(linked, real) |> ignore
+    Assert.Equal(Path.Combine(canonicalWork, "real", "leaf"), policy (Path.Combine(linked, "leaf")) |> accepted)
+    // An empty path, a link without its target and a link cycle are refused.
+    for empty in [ ""; " "; "\t" ] do policy empty |> refused "FS9245"
+    let links = refusedLinks work
+    let selfLink = Path.Combine(work, "self-link")
+    Directory.CreateSymbolicLink(selfLink, selfLink) |> ignore
+    for prohibited in [ links.Broken; links.Chained; links.Cycle; selfLink ] do
+        policy prohibited |> refused "FS9245"
+        policy (Path.Combine(prohibited, "leaf")) |> refused "FS9245"
+    Assert.False(Directory.Exists links.Absent || File.Exists links.Absent)
+
+let private libraryDiagnosticFile = Path.Combine(scratchRoot, "diagnostics", "Second.clef")
 
 [<Fact>]
 let ``genuine compiler info is not a reachability demotion`` () =
@@ -245,7 +307,7 @@ let ``demoted library diagnostic is refused using its absolute span`` () =
 
 [<Fact>]
 let ``dependency demotion outside exported library does not claim a library failure`` () =
-    let dependency = Path.Combine(repository, "test-results", "scratch", "dependency", "Second.clef")
+    let dependency = Path.Combine(scratchRoot, "dependency", "Second.clef")
     "Second.clef:7: info CCS8003: Type mismatch [unreachable]\n  span: " + dependency + "(7,0)-(7,18)\n"
     |> Substantiation.validateCompilerDiagnostics false Set.empty [| libraryDiagnosticFile |] |> accepted
 
@@ -263,7 +325,7 @@ let ``unreferenced function warning in the library is independently refused`` ()
 
 [<Fact>]
 let ``registered warning remains elevated in a dependency with advisory warnings allowed`` () =
-    let dependency = Path.Combine(repository, "test-results", "scratch", "dependency", "Second.clef")
+    let dependency = Path.Combine(scratchRoot, "dependency", "Second.clef")
     "Second.clef:7: warning CCS8500: The function 'hidden' is unreferenced.\n  span: " + dependency + "(7,0)-(7,18)\n"
     |> Substantiation.validateCompilerDiagnostics false Set.empty [| libraryDiagnosticFile |] |> refused "FS9235"
 
@@ -304,8 +366,8 @@ let ``malformed warning policy refuses the project with FS9232`` policy =
         "[package]\nname = \"Warnings\"\nversion = \"1\"\n[compilation]\ntarget = \"cpu\"\n[build]\nsources = [\"Warnings.clef\"]\n[substantiation]\n" + policy + "\n")
     request project None None work |> Substantiation.evaluate |> refused "FS9232"
 
-let private proofLibraryPath = Path.Combine(repository, "test-results", "scratch", "proof-fixture", "Boundary.clef")
-let private proofHarnessPath = Path.Combine(repository, "test-results", "scratch", "proof-fixture", "SubstantiationRoot.clef")
+let private proofLibraryPath = Path.Combine(scratchRoot, "proof-fixture", "Boundary.clef")
+let private proofHarnessPath = Path.Combine(scratchRoot, "proof-fixture", "SubstantiationRoot.clef")
 let private proofSources = [| proofLibraryPath |]
 let private proofSource = proofLibraryPath + ":2:1"
 
@@ -509,7 +571,7 @@ let private divDeclaration attribute =
 [<InlineData("[<``StructAttribute``()>]")>]
 [<InlineData("[<System.Runtime.CompilerServices.Struct>]")>]
 [<InlineData("[<\n Struct \n>]")>]
-let ``Round19c every foreign record spelling requires measured pilot provenance`` attribute =
+let ``every foreign record spelling requires measured pilot provenance`` attribute =
     let work, boundary = lexicalBoundaryFixture "r19c-record-no-pilot" (divDeclaration attribute) [| "c" |]
     refuseBoth "FS9244" work boundary
 
@@ -519,13 +581,13 @@ let ``Round19c every foreign record spelling requires measured pilot provenance`
 [<InlineData("type DivT =\n    { quot: int\n      rem: int }", "let inline internal div (value: Round19.Lexical.DivT) : int")>]
 [<InlineData("type Helper = { value: int }\nand DivT = { quot: int; rem: int }", "let rec div (numer: int) (denom: int) : Round19.Lexical.DivT")>]
 [<InlineData("type DivT = { quot: int; rem: int }", "let div\n    (numer: int)\n    (denom: int)\n    : DivT\n   ")>]
-let ``Round19c record detection covers accessibility multiline and recursive definitions`` record signature =
+let ``record detection covers accessibility multiline and recursive definitions`` record signature =
     let declarations = record + "\n[<FidelityExtern(\"c\", \"div\")>]\n" + signature + " = NativeDefault.zeroed ()"
     let work, boundary = lexicalBoundaryFixture "r19c-record-signature" declarations [| "c" |]
     refuseBoth "FS9244" work boundary
 
 [<Fact>]
-let ``Round19c struct type requires measurement even outside an extern signature`` () =
+let ``struct type requires measurement even outside an extern signature`` () =
     let declarations =
         "[<NoComparison; StructAttribute()>]\ntype DivT = { quot: int; rem: int }\n"
         + "[<FidelityExtern(\"c\", \"abs\")>]\nlet abs (value: int) : int = NativeDefault.zeroed ()"
@@ -533,7 +595,7 @@ let ``Round19c struct type requires measurement even outside an extern signature
     refuseBoth "FS9244" work boundary
 
 [<Fact>]
-let ``Round19c helper records outside foreign signatures need no measurement`` () =
+let ``helper records outside foreign signatures need no measurement`` () =
     let declarations =
         "type First = { x: int }\nand Second = { y: int }\n"
         + "[<FidelityExtern(\"c\", \"abs\")>]\nlet abs (value: int) : int = NativeDefault.zeroed ()"
@@ -559,7 +621,7 @@ let private recordPilot work (headerText: string) recordNames =
 [<Theory>]
 [<InlineData("")>]
 [<InlineData("[< Struct >]")>]
-let ``Round19c pilot must measure each foreign record actually used`` attribute =
+let ``pilot must measure each foreign record actually used`` attribute =
     let work, boundary = lexicalBoundaryFixture "r19c-record-missing-layout" (divDeclaration attribute) [| "c" |]
     let pilot = recordPilot work "typedef struct OtherRecord { int value; } OtherRecord;\nint abs(int value);\n" [ "OtherRecord" ]
     let selected = { boundary with PilotPath = Some pilot }
@@ -571,7 +633,7 @@ let ``Round19c pilot must measure each foreign record actually used`` attribute 
     request boundary.FidprojPath (Some pilot) None work |> Substantiation.evaluate |> refused "FS9244"
 
 [<Fact>]
-let ``Round19c one measured record cannot cover another required struct`` () =
+let ``one measured record cannot cover another required struct`` () =
     let declarations =
         "[<Struct>]\ntype Second = { value: int }\n" + divDeclaration "[<Struct>]"
     let work, boundary = lexicalBoundaryFixture "r19c-partial-record-layouts" declarations [| "c" |]
@@ -579,7 +641,7 @@ let ``Round19c one measured record cannot cover another required struct`` () =
     refuseBoth "FS9244" work { boundary with PilotPath = Some pilot }
 
 [<Fact>]
-let ``Round19c records in another source still require foreign layout provenance`` () =
+let ``records in another source still require foreign layout provenance`` () =
     let declarations =
         "[<FidelityExtern(\"c\", \"div\")>]\n"
         + "let div (numer: int) (denom: int) : Round19.Types.DivT = NativeDefault.zeroed ()"
@@ -594,7 +656,7 @@ let ``Round19c records in another source still require foreign layout provenance
 [<Theory>]
 [<InlineData("")>]
 [<InlineData("[<StructAttribute()>]")>]
-let ``Round19c measured pilot admits record layout provenance`` attribute =
+let ``measured pilot admits record layout provenance`` attribute =
     let work, boundary = lexicalBoundaryFixture "r19c-record-measured" (divDeclaration attribute) [| "c" |]
     let pilot = recordPilot work "typedef struct DivT { int quot; int rem; } DivT;\nDivT div(int numer, int denom);\n" [ "DivT" ]
     let evidence = SubstantiationBoundary.evaluate { boundary with PilotPath = Some pilot } |> accepted
@@ -612,7 +674,7 @@ let ``Round19c measured pilot admits record layout provenance`` attribute =
 [<InlineData("[<val: FidelityExtern(\"c\", \"div\")>]")>]
 [<InlineData("[<let: FidelityExternAttribute(\"c\", \"div\")>]")>]
 [<InlineData("[<\n Inline;\n FidelityExtern(\"c\", \"div\")\n>]")>]
-let ``Round19c extern attribute spellings share source admission and boundary analysis`` attribute =
+let ``extern attribute spellings share source admission and boundary analysis`` attribute =
     let declarations =
         "type DivT = { quot: int; rem: int }\n" + attribute
         + "\nlet div (numer: int) (denom: int) : DivT = NativeDefault.zeroed ()"
@@ -623,7 +685,7 @@ let ``Round19c extern attribute spellings share source admission and boundary an
 [<InlineData("lib>")>]
 [<InlineData("lib;x")>]
 [<InlineData("lib>];x")>]
-let ``Round19c attribute argument literals cannot terminate or split an attribute`` library =
+let ``attribute argument literals cannot terminate or split an attribute`` library =
     let declarations =
         "[<Inline; FidelityExtern(\"" + library + "\", \"symbol\")>]\n"
         + "let symbol (value: int) : int = NativeDefault.zeroed ()"
@@ -648,18 +710,18 @@ let ``Round19c attribute argument literals cannot terminate or split an attribut
 [<InlineData("[<FidelityExtern(\"c\", \"abs\"))>]")>]
 [<InlineData("[<``FidelityExternAttribute``(\"c\", \"abs\">]")>]
 [<InlineData("[<Inline; FidelityExternAttribute(\"c\", \"abs\"))>]")>]
-let ``Round19c malformed extern argument lists fail closed`` attribute =
+let ``malformed extern argument lists fail closed`` attribute =
     let declarations = attribute + "\nlet abs (value: int) : int = NativeDefault.zeroed ()"
     let work, boundary = lexicalBoundaryFixture "r19c-malformed-extern" declarations [| "c" |]
     refuseBoth "FS9243" work boundary
 
 [<Fact>]
-let ``Round19c FidelityExtern token outside a recognized attribute fails closed`` () =
+let ``FidelityExtern token outside a recognized attribute fails closed`` () =
     let work, boundary = lexicalBoundaryFixture "r19c-unrecognized-extern" "let FidelityExtern : int = 7" [||]
     refuseBoth "FS9243" work boundary
 
 [<Fact>]
-let ``Round19c string comment opener cannot hide an unresolved foreign declaration`` () =
+let ``string comment opener cannot hide an unresolved foreign declaration`` () =
     let declarations =
         "let pattern : string = \"(*\"\n[<FidelityExtern(\"not_linked\", \"bad\")>]\n"
         + "let bad () : int = NativeDefault.zeroed ()\n(* block comment *)"
@@ -675,7 +737,7 @@ let ``Round19c string comment opener cannot hide an unresolved foreign declarati
 [<InlineData("let text : string = \"FnPtr<int -> int> Nullable CNullable NonNull OwnershipTransfer = CallerOwns StructDescriptor BorrowedView MappedRegion\"")>]
 [<InlineData("let text : string = \"(*\"\n(* outer (* [<Struct>] *) FidelityExtern(\"bad\", \"sym\") *)")>]
 [<InlineData("let quote : char = '\"'\nlet slash : char = '\\\\'\nlet star : char = '*'\nlet text : string = \"//\"")>]
-let ``Round19c literal contents do not invent foreign boundary strata`` declaration =
+let ``literal contents do not invent foreign boundary strata`` declaration =
     let work, boundary = lexicalBoundaryFixture "r19c-literal-decoys" declaration [||]
     let evidence = SubstantiationBoundary.evaluate boundary |> accepted
     Assert.Empty(evidence.ExternSymbols)
@@ -691,7 +753,7 @@ let ``Round19c literal contents do not invent foreign boundary strata`` declarat
     request boundary.FidprojPath None None work |> Substantiation.evaluate |> refused "FS9232"
 
 [<Fact>]
-let ``Round19c shared lexical surface preserves positions and binds structured attributes`` () =
+let ``shared lexical surface preserves positions and binds structured attributes`` () =
     let text =
         "module Round19.Scan\r\n// [<Struct>] ignored\r\n"
         + "let mul () : int = (*) 3 4\r\n"
@@ -731,12 +793,12 @@ let ``Round19c shared lexical surface preserves positions and binds structured a
 [<InlineData("let text : string = \"\"\"unterminated")>]
 [<InlineData("let ``unterminated : int = 7")>]
 [<InlineData("let character : char = '\\n")>]
-let ``Round19c unterminated lexical constructs refuse consistently`` declaration =
+let ``unterminated lexical constructs refuse consistently`` declaration =
     let work, boundary = lexicalBoundaryFixture "r19c-unterminated" declaration [||]
     refuseBoth "FS9233" work boundary
 
 [<Fact>]
-let ``Round19c multiplication operator section is admitted as code`` () =
+let ``multiplication operator section is admitted as code`` () =
     let work, boundary = lexicalBoundaryFixture "r19c-multiplication" "(**)\nlet mul () : int = (*) 3 4" [||]
     let evidence = SubstantiationBoundary.evaluate boundary |> accepted
     Assert.Empty(evidence.ExternSymbols)
@@ -745,32 +807,29 @@ let ``Round19c multiplication operator section is admitted as code`` () =
     request boundary.FidprojPath None None work |> Substantiation.evaluate |> refused "FS9232"
 
 [<Fact>]
-let ``Round19c nested symlink targets and cycles cannot bypass scratch policy`` () =
+let ``links whose targets lie below a broken link or a cycle are refused as work and output directories`` () =
     let work, boundary = lexicalBoundaryFixture "r19c-symlink-policy" "let value : int = 1" [||]
-    let target = Path.Combine(work, "B")
-    let direct = Path.Combine(work, "A")
+    let links = refusedLinks work
+    // A link whose target lies below a broken link, and a link into a cycle.
     let nested = Path.Combine(work, "Nested")
-    Directory.CreateSymbolicLink(target, "/tmp") |> ignore
-    Directory.CreateSymbolicLink(direct, target) |> ignore
-    Directory.CreateSymbolicLink(nested, Path.Combine(target, "not-created")) |> ignore
-    let cycleA = Path.Combine(work, "CycleA")
-    let cycleB = Path.Combine(work, "CycleB")
-    Directory.CreateSymbolicLink(cycleA, cycleB) |> ignore
-    Directory.CreateSymbolicLink(cycleB, cycleA) |> ignore
+    let intoCycle = Path.Combine(work, "IntoCycle")
+    Directory.CreateSymbolicLink(nested, Path.Combine(links.Broken, "not-created")) |> ignore
+    Directory.CreateSymbolicLink(intoCycle, Path.Combine(links.Cycle, "not-created")) |> ignore
     let selected = request boundary.FidprojPath None None work
-    for prohibited in [ direct; nested; Path.Combine(nested, "leaf"); cycleA ] do
+    for prohibited in [ links.Chained; nested; Path.Combine(nested, "leaf"); links.Cycle; intoCycle ] do
         { selected with WorkDirectory = Some prohibited } |> Substantiation.evaluate |> refused "FS9245"
         { selected with OutputDirectory = Some prohibited } |> Substantiation.evaluate |> refused "FS9245"
+    Assert.False(Directory.Exists links.Absent || File.Exists links.Absent, "a refusal must not create the target of a broken link")
 
 [<Fact>]
-let ``Round19c tmp fidproj is refused despite explicit safe output`` () =
-    let work = scratch "r19c-tmp-project"
-    let linked = Path.Combine(work, "tmp-project")
-    Directory.CreateSymbolicLink(linked, "/tmp") |> ignore
-    // Refusal must precede reading or writing the prohibited location.
-    for directory in [ "/tmp"; linked ] do
+let ``fidproj through a broken or cyclic link is refused despite explicit safe output`` () =
+    let work = scratch "r19c-linked-project"
+    let links = refusedLinks work
+    // Refusal must precede reading or writing the refused location.
+    for directory in [ links.Broken; links.Chained; links.Cycle ] do
         let project = Path.Combine(directory, "round19c-never-created-" + Guid.NewGuid().ToString("N") + ".fidproj")
         request project None None work |> Substantiation.evaluate |> refused "FS9245"
+    Assert.False(Directory.Exists links.Absent || File.Exists links.Absent, "a refusal must not create the target of a broken link")
 
 [<Theory>]
 [<InlineData("(* (*) *)")>]
@@ -782,7 +841,7 @@ let ``Round19c tmp fidproj is refused despite explicit safe output`` () =
 [<InlineData("(* \"\"\"*)\"\"\" *)")>]
 [<InlineData("(* @$\"(*\" *)")>]
 [<InlineData("(* $@\"*)\" *)")>]
-let ``Round19d comment strings and operator sections close at the real delimiter`` comment =
+let ``comment strings and operator sections close at the real delimiter`` comment =
     let work, boundary = lexicalBoundaryFixture "r19d-comment-control" (comment + "\nlet seven () : int = 7") [||]
     SubstantiationBoundary.evaluate boundary |> accepted |> ignore
     let withoutTarget = File.ReadAllText(boundary.FidprojPath).Replace("[compilation]\ntarget = \"cpu\"\n", "")
@@ -795,7 +854,7 @@ let ``Round19d comment strings and operator sections close at the real delimiter
 [<InlineData("(* \"*)\" *)")>]
 [<InlineData("(* @\"\"\"(*\" *)")>]
 [<InlineData("(* @$\"\"\"(*\" *)")>]
-let ``Round19d comments cannot hide foreign symbols or record layouts`` comment =
+let ``comments cannot hide foreign symbols or record layouts`` comment =
     let foreign = "[<FidelityExtern(\"not_linked\", \"bad\")>]\nlet bad () : int = NativeDefault.zeroed ()"
     let work, boundary = lexicalBoundaryFixture "r19d-comment-extern" (comment + "\n" + foreign) [| "c" |]
     refuseBoth "FS9243" work boundary
@@ -811,7 +870,7 @@ let ``Round19d comments cannot hide foreign symbols or record layouts`` comment 
 [<InlineData("(* a'\"' *)\nlet seven () : int = 7")>]
 [<InlineData("(* don't '\"' *)\nlet seven () : int = 7")>]
 [<InlineData("(* ''' '\"' *)\nlet seven () : int = 7")>]
-let ``Round19e quote character literals close block comments without hiding code`` declarations =
+let ``quote character literals close block comments without hiding code`` declarations =
     let work, boundary = lexicalBoundaryFixture "comment-character-control" declarations [||]
     let evidence = SubstantiationBoundary.evaluate boundary |> accepted
     Assert.Empty(evidence.ExternSymbols)
@@ -822,7 +881,7 @@ let ``Round19e quote character literals close block comments without hiding code
 [<Theory>]
 [<InlineData("(* 'a'\"' *)")>]
 [<InlineData("(* '''\"' *)")>]
-let ``Round19e completed character before a quote still opens a comment string`` comment =
+let ``completed character before a quote still opens a comment string`` comment =
     let work, boundary = lexicalBoundaryFixture "comment-character-then-string" (comment + "\nlet seven () : int = 7") [||]
     refuseBoth "FS9233" work boundary
 
@@ -837,7 +896,7 @@ let ``Round19e completed character before a quote still opens a comment string``
 [<InlineData("\\a")>]
 [<InlineData("\\f")>]
 [<InlineData("\\v")>]
-let ``Round19e simple comment character escapes preserve the following quote character`` escape =
+let ``simple comment character escapes preserve the following quote character`` escape =
     let declarations = "(* '" + escape + "' '\"' *)\nlet seven () : int = 7"
     let work, boundary = lexicalBoundaryFixture "simple-comment-escape" declarations [||]
     SubstantiationBoundary.evaluate boundary |> accepted |> ignore
@@ -849,7 +908,7 @@ let ``Round19e simple comment character escapes preserve the following quote cha
 [<InlineData("\\x22")>]
 [<InlineData("\\u0022")>]
 [<InlineData("\\U00000022")>]
-let ``Round19e numeric escapes follow Composer comment token boundaries`` escape =
+let ``numeric escapes follow Composer comment token boundaries`` escape =
     let adjacent = "(* '" + escape + "'\"' *)\nlet seven () : int = 7"
     let work, boundary = lexicalBoundaryFixture "numeric-comment-adjacent-quote" adjacent [||]
     SubstantiationBoundary.evaluate boundary |> accepted |> ignore
@@ -860,7 +919,7 @@ let ``Round19e numeric escapes follow Composer comment token boundaries`` escape
     refuseBoth "FS9233" work boundary
 
 [<Fact>]
-let ``Round19e XML documentation offsets exclude string block and ordinary comment decoys`` () =
+let ``XML documentation offsets exclude string block and ordinary comment decoys`` () =
     let text =
         "module Documentation.Surface\nlet prose : string = \"/// string decoy\"\n"
         + "(* /// block decoy *)\n//// ordinary comment decoy\n"
@@ -878,7 +937,7 @@ let ``Round19e XML documentation offsets exclude string block and ordinary comme
 [<InlineData("(* it's \"*)\" *)")>]
 [<InlineData("(* '\"' *)")>]
 [<InlineData("(* '\\\"' *)")>]
-let ``Round19e apostrophes and quoted characters cannot hide following externs`` comment =
+let ``apostrophes and quoted characters cannot hide following externs`` comment =
     let declarations = comment + "\n[<FidelityExtern(\"not_linked\", \"bad\")>]\n// \" *)\nlet private bad () : int = NativeDefault.zeroed ()"
     let work, boundary = lexicalBoundaryFixture "comment-character-extern" declarations [| "c" |]
     let path, text = boundary.Sources[0]
@@ -893,7 +952,7 @@ let ``Round19e apostrophes and quoted characters cannot hide following externs``
 [<InlineData("let seven () : int = 7\nmodule private Hidden =\n    (* '\"' *)\n    [<FidelityExtern(\"not_linked\", \"bad\")>]\n    // \" *)\n    let bad () : int = NativeDefault.zeroed ()", false, "FS9242")>]
 [<InlineData("type DivT = { quot: int; rem: int }\nlet seven () : int = 7\n(* '\"' *)\n[<FidelityExtern(\"c\", \"div\")>]\n// \" *)\nlet private div (numer: int) (denom: int) : DivT = NativeDefault.zeroed ()", true, "FS9244")>]
 [<InlineData("(* '\"' *)\n[<FidelityExtern(\"c\", \"getpid\")>]\n// \" *)\nlet getpid () : int = NativeDefault.zeroed ()", false, "FS9242")>]
-let ``Round19e attribute-only hiding refuses private nested and unmeasured externs`` declarations linked code =
+let ``attribute-only hiding refuses private nested and unmeasured externs`` declarations linked code =
     let libraries = if linked then [| "c" |] else [||]
     let work, boundary = lexicalBoundaryFixture "attribute-only-hiding" declarations libraries
     refuseBoth code work boundary
@@ -918,7 +977,7 @@ let ``Round19e attribute-only hiding refuses private nested and unmeasured exter
 [<InlineData("(* \"unterminated *)")>]
 [<InlineData("(* @\"unterminated *)")>]
 [<InlineData("(* \"\"\"unterminated *)")>]
-let ``Round19d directives interpolations and unterminated comment strings refuse`` declaration =
+let ``directives interpolations and unterminated comment strings refuse`` declaration =
     let work, boundary = lexicalBoundaryFixture "r19d-lexical-refusal" declaration [||]
     refuseBoth "FS9233" work boundary
 
@@ -926,7 +985,7 @@ let ``Round19d directives interpolations and unterminated comment strings refuse
 [<InlineData("// #if NEVER $\"decoy\"\nlet seven () : int = 7")>]
 [<InlineData("(* #if NEVER $\"decoy\" *)\nlet seven () : int = 7")>]
 [<InlineData("let text : string = \"#if NEVER $\\\"decoy\\\"\"")>]
-let ``Round19d directive and interpolation text inside comments and strings is harmless`` declaration =
+let ``directive and interpolation text inside comments and strings is harmless`` declaration =
     let work, boundary = lexicalBoundaryFixture "r19d-lexical-decoy" declaration [||]
     SubstantiationBoundary.evaluate boundary |> accepted |> ignore
     File.WriteAllText(boundary.FidprojPath, File.ReadAllText(boundary.FidprojPath).Replace("[compilation]\ntarget = \"cpu\"\n", ""))
@@ -959,7 +1018,7 @@ let private r19dExtern signature = "[<FidelityExtern(\"c\", \"div\")>]\n" + sign
 [<InlineData("", "let div value : int")>]
 [<InlineData("", "let div (value) : int")>]
 [<InlineData("", "let div (value: int)")>]
-let ``Round19d every foreign signature type must be classified and measured`` declarations signature =
+let ``every foreign signature type must be classified and measured`` declarations signature =
     let work, boundary = lexicalBoundaryFixture "r19d-type-refusal" (declarations + "\n" + r19dExtern signature) [| "c" |]
     refuseBoth "FS9244" work boundary
 
@@ -971,7 +1030,7 @@ let ``Round19d every foreign signature type must be classified and measured`` de
 [<InlineData("type [<Struct>] DivT = { quot: int; rem: int }", "let div () : DivT")>]
 [<InlineData("module Sub =\n    type DivT = { quot: int; rem: int }\n    type Alias = DivT", "let div () : Sub.Alias")>]
 [<InlineData("", "let div () : External.Types.DivT")>]
-let ``Round19d aliases attributes nested and external types require the matching pilot record`` declarations signature =
+let ``aliases attributes nested and external types require the matching pilot record`` declarations signature =
     let work, boundary = lexicalBoundaryFixture "r19d-measured" (declarations + "\n" + r19dExtern signature) [| "c" |]
     let missing = recordPilot work "typedef struct Other { int value; } Other;\nint div(int value);\n" [ "Other" ]
     SubstantiationBoundary.evaluate { boundary with PilotPath = Some missing } |> refused "FS9244"
@@ -990,7 +1049,7 @@ let ``Round19d aliases attributes nested and external types require the matching
 [<InlineData("", "FnPtr<int -> int>")>]
 [<InlineData("type Identity<'T> = 'T", "Identity<Identity<int>>")>]
 [<InlineData("", "option<Nullable<nativeptr<int>>>")>]
-let ``Round19d emitted opaque markers measures and recursive scalar carriers remain admitted`` declaration annotation =
+let ``emitted opaque markers measures and recursive scalar carriers remain admitted`` declaration annotation =
     let _, boundary = lexicalBoundaryFixture "r19d-carriers" (declaration + "\n" + r19dExtern ("let div (value: " + annotation + ") : int")) [| "c" |]
     let evidence = SubstantiationBoundary.evaluate boundary |> accepted
     Assert.False(evidence.Strata.MeasuredRecords)
@@ -1005,13 +1064,10 @@ let ``Round19d emitted opaque markers measures and recursive scalar carriers rem
 [<InlineData("provenance")>]
 [<InlineData("dependency")>]
 [<InlineData("archive")>]
-let ``Round19d all input roles refuse direct and linked system temporary paths`` role =
+let ``all input roles refuse paths through broken and cyclic links`` role =
     let work, original = lexicalBoundaryFixture "r19d-input-path" (r19dExtern "let div () : int") [| "c" |]
-    let hop = Path.Combine(work, "hop")
-    let linked = Path.Combine(work, "linked")
-    Directory.CreateSymbolicLink(hop, "/tmp") |> ignore
-    Directory.CreateSymbolicLink(linked, "hop") |> ignore
-    for prefix in [ "/tmp"; linked ] do
+    let links = refusedLinks work
+    for prefix in [ links.Broken; links.Chained; links.Cycle ] do
         let prohibited = Path.Combine(prefix, "r19d-never-created")
         let pilot = recordPilot work "int div(void);\n" []
         let mutable boundary = original
@@ -1044,7 +1100,7 @@ let ``Round19d all input roles refuse direct and linked system temporary paths``
 [<Theory>]
 [<InlineData("")>]
 [<InlineData(" ")>]
-let ``Round19d explicit empty evidence directories refuse instead of selecting cwd`` path =
+let ``explicit empty evidence directories refuse instead of selecting cwd`` path =
     let work, boundary = lexicalBoundaryFixture "r19d-empty-path" "let seven () : int = 7" [||]
     SubstantiationBoundary.evaluate { boundary with WorkDirectory = path } |> refused "FS9245"
     let selected = request boundary.FidprojPath None None work
@@ -1052,46 +1108,52 @@ let ``Round19d explicit empty evidence directories refuse instead of selecting c
     { selected with OutputDirectory = Some path } |> Substantiation.evaluate |> refused "FS9245"
 
 [<Fact>]
-let ``Round19d symlink parent traversal cannot redirect normalized IO into tmp`` () =
+let ``a broken link on either reading of a parent traversal path is refused`` () =
     let work, boundary = lexicalBoundaryFixture "r19d-parent-traversal" "let seven () : int = 7" [||]
     let deep = Path.Combine(work, "real", "deep")
     Directory.CreateDirectory deep |> ignore
     Directory.CreateSymbolicLink(Path.Combine(work, "portal"), deep) |> ignore
-    Directory.CreateSymbolicLink(Path.Combine(work, "evil"), "/tmp") |> ignore
-    let path = Path.Combine(work, "portal", "..", "evil", "r19d-never-created")
-    SubstantiationBoundary.evaluate { boundary with WorkDirectory = path } |> refused "FS9245"
-    { request boundary.FidprojPath None None work with WorkDirectory = Some path }
-    |> Substantiation.evaluate |> refused "FS9245"
-    refuseBoth "FS9245" work { boundary with PilotPath = Some path }
+    // `portal/..` is `real` on the filesystem and `work` once '..' is normalized lexically.
+    // Each link below is broken and lies on exactly one of those two readings.
+    let absent = Path.Combine(work, "absent-target")
+    Directory.CreateSymbolicLink(Path.Combine(work, "lexical-only"), absent) |> ignore
+    Directory.CreateSymbolicLink(Path.Combine(work, "real", "filesystem-only"), absent) |> ignore
+    for link in [ "lexical-only"; "filesystem-only" ] do
+        let path = Path.Combine(work, "portal", "..", link, "r19d-never-created")
+        SubstantiationBoundary.evaluate { boundary with WorkDirectory = path } |> refused "FS9245"
+        { request boundary.FidprojPath None None work with WorkDirectory = Some path }
+        |> Substantiation.evaluate |> refused "FS9245"
+        refuseBoth "FS9245" work { boundary with PilotPath = Some path }
+    Assert.False(Directory.Exists absent || File.Exists absent, "a refusal must not create the target of a broken link")
 
 [<Theory>]
 [<InlineData("{| quot: int; rem: int |}")>]
 [<InlineData("struct (int * int)")>]
 [<InlineData("struct {| quot: int; rem: int |}")>]
-let ``Round19d nominal measurement cannot authorize an inline aggregate alias`` aggregate =
+let ``nominal measurement cannot authorize an inline aggregate alias`` aggregate =
     let work, boundary = lexicalBoundaryFixture "r19d-aggregate-alias" ("type DivT = " + aggregate + "\n" + r19dExtern "let div () : DivT") [| "c" |]
     let pilot = recordPilot work "typedef struct DivT { int quot; int rem; } DivT;\nDivT div(void);\n" [ "DivT" ]
     refuseBoth "FS9244" work { boundary with PilotPath = Some pilot }
 
 [<Fact>]
-let ``Round19d enum signatures require measured enum width and signedness`` () =
+let ``enum signatures require measured enum width and signedness`` () =
     let _, boundary = lexicalBoundaryFixture "r19d-enum" ("type Choice = | Zero = 0 | One = 1L\n" + r19dExtern "let div () : Choice") [| "c" |]
     let pilot = recordPilot boundary.WorkDirectory "typedef enum Choice { Zero = 0, One = 1 } Choice;\nChoice div(void);\n" []
     let evidence = SubstantiationBoundary.evaluate { boundary with PilotPath = Some pilot } |> accepted
     Assert.Contains(evidence.Enums, fun item -> item.Name = "Choice" && item.WidthBits = 32)
     Assert.False(evidence.Strata.MeasuredRecords)
 
-let private requiredFile label path =
+let requiredFile label path =
     Assert.True(File.Exists path, $"{label} must exist: {path}")
     Path.GetFullPath path
 
-let private sibling variable relative =
+let sibling variable relative =
     match Environment.GetEnvironmentVariable variable with
     | null -> requiredFile variable (Path.Combine(Path.GetDirectoryName repository, relative))
     | configured when String.IsNullOrWhiteSpace configured -> failwithf "%s is explicitly empty; no alternate project is selected" variable
     | configured -> requiredFile variable configured
 
-let private platformTables () =
+let platformTables () =
     let project = sibling "FIDELITY_PLATFORM_PROJECT" "Fidelity.Platform/Environments/Linux/x86_64/Fidelity.Platform.CompilerSurface.fidproj"
     let document =
         match Toml.parse(File.ReadAllText project) with
@@ -1144,14 +1206,19 @@ let private writeProject work sources (archive: string option) =
 
 type private Probe = { Work: string; Project: string; Pilot: string; Provenance: string; Archive: string; Header: string; Sources: string list }
 
-let private nativeProbe () =
+/// The static-archive probe library and its project. `paired` adds a second foreign function,
+/// `substantiation_echo`, with its own FidelityExtern declaration, FunctionDescriptor, result
+/// contract and authored caller, so the witness manifest carries two imports of one library (#209).
+let private nativeProbeWith (paired: bool) =
     let work = scratch "native"
     let header = Path.Combine(work, "probe.h")
     let source = Path.Combine(work, "probe.c")
     let objectFile = Path.Combine(work, "probe.o")
     let archive = Path.Combine(work, "libsubstantiation_probe.a")
-    File.WriteAllText(header, "typedef struct { int unused_field; } UnselectedRecord;\ntypedef void (*UnselectedCallback)(int);\nvoid unselected_callback(UnselectedCallback callback);\nint substantiation_identity(int value);\n")
-    File.WriteAllText(source, "#include \"probe.h\"\nint substantiation_identity(int value) { return value; }\n")
+    File.WriteAllText(header, "typedef struct { int unused_field; } UnselectedRecord;\ntypedef void (*UnselectedCallback)(int);\nvoid unselected_callback(UnselectedCallback callback);\nint substantiation_identity(int value);\n"
+        + (if paired then "int substantiation_echo(int value);\n" else ""))
+    File.WriteAllText(source, "#include \"probe.h\"\nint substantiation_identity(int value) { return value; }\n"
+        + (if paired then "int substantiation_echo(int value) { return value; }\n" else ""))
     run work "foreign-object" (ClangToolchain.startInfo [ "-c"; "-fPIC"; "-Wall"; "-Wextra"; "-Werror"; source; "-o"; objectFile ]) |> ignore
     run work "foreign-archive" (ClangToolchain.arStartInfo [ "rcs"; archive; objectFile ]) |> ignore
     let pilot = Path.Combine(work, "Probe.pilot.toml")
@@ -1162,7 +1229,8 @@ let private nativeProbe () =
       "[output]"; "mode = \"fidelity\""; "directory = \"generated\""
       "[options]"; "c_header_mode = true"; "descriptor_only_dependencies = true"; "link_libraries = true"
       "[[namespace]]"; "name = \"Round19.Probe.Boundary\""; "library = \"substantiation_probe\""
-      "description = \"Substantiation scalar link probe\""; "functions = [\"substantiation_identity\"]" ]
+      "description = \"Substantiation scalar link probe\""
+      "functions = [\"substantiation_identity\"" + (if paired then ", \"substantiation_echo\"" else "") + "]" ]
     |> String.concat "\n" |> fun text -> File.WriteAllText(pilot, text)
     ScratchDirectory.within work (fun () -> BindingGenerator.generateFromProjectDiagnosed pilot false false Types.LP64)
     |> accepted |> ignore
@@ -1181,11 +1249,14 @@ let private nativeProbe () =
         + "    [<Inline>]\n    let documentedNested () : int = 7\n"
         + "/// Earlier scalar documentation group.\n// Ordinary comment separates documentation groups.\n"
         + "/// Current scalar documentation group.\nlet documentedSeven () : int = 7\n"
-        + "(* /// Block documentation decoy. *)\n//// Ordinary documentation decoy.\nlet undocumentedSeven () : int = 7\n")
+        + "(* /// Block documentation decoy. *)\n//// Ordinary documentation decoy.\nlet undocumentedSeven () : int = 7\n"
+        + (if paired then "let echoSeven () : int = Round19.Probe.Boundary.substantiation_echo 7\n" else ""))
     // The native implementation returns exactly its input. The compiler consumes this
     // explicit external hypothesis to emit conditional foreign-result obligations.
     let boundary = Path.Combine(work, "generated", "Boundary", "Boundary.clef")
     File.AppendAllText(boundary, "\nlet identityResultContract : Expr<ResultRangeDescriptor> = <@ {\n    Binding = \"Round19.Probe.Boundary.substantiation_identity\"\n    Role = ReturnValue\n    Lower = Argument 0\n    Upper = Argument 0\n    Hypothesis = ({ Identity = \"Round19.identity-returns-input\"; Version = \"1\"; Source = \"fixture:probe.c\" } : ExternalExecutionHypothesis)\n} @>\n")
+    if paired then
+        File.AppendAllText(boundary, "\nlet echoResultContract : Expr<ResultRangeDescriptor> = <@ {\n    Binding = \"Round19.Probe.Boundary.substantiation_echo\"\n    Role = ReturnValue\n    Lower = Argument 0\n    Upper = Argument 0\n    Hypothesis = ({ Identity = \"Round19.echo-returns-input\"; Version = \"1\"; Source = \"fixture:probe.c\" } : ExternalExecutionHypothesis)\n} @>\n")
     let sources =
         [ loading; Path.Combine(work, "generated", "Types.clef")
           Path.Combine(work, "generated", "Boundary", "Boundary.clef"); scalar ]
@@ -1193,11 +1264,13 @@ let private nativeProbe () =
     let project = writeProject work sources (Some archive)
     { Work = work; Project = project; Pilot = pilot; Provenance = provenance; Archive = archive; Header = header; Sources = sources }
 
+let private nativeProbe () = nativeProbeWith false
+
 [<Theory>]
 [<InlineData("(* (*) *)")>]
 [<InlineData("(* \"(*\" *)")>]
 [<InlineData("(* \"*)\" *)")>]
-let ``Round19d native compiler accepts exact closed comment forms and binds PSG0`` comment =
+let ``native compiler accepts exact closed comment forms and binds PSG0`` comment =
     let work = scratch "r19d-native-comment"
     let source = Path.Combine(work, "Native.clef")
     File.WriteAllText(source, "module Round19d.Native\n" + comment + "\nlet seven () : int = 7\n")
@@ -1213,7 +1286,7 @@ let ``Round19d native compiler accepts exact closed comment forms and binds PSG0
 [<InlineData("(* a'\"' *)\nlet seven () : int = 7")>]
 [<InlineData("(* don't '\"' *)\nlet seven () : int = 7")>]
 [<InlineData("(* ''' '\"' *)\nlet seven () : int = 7")>]
-let ``Round19e native compiler admits quote characters inside block comments`` declarations =
+let ``native compiler admits quote characters inside block comments`` declarations =
     let work = scratch "native-comment-character"
     let source = Path.Combine(work, "Native.clef")
     File.WriteAllText(source, "module CommentCharacter.Native\n" + declarations + "\n")
@@ -1224,10 +1297,90 @@ let ``Round19e native compiler admits quote characters inside block comments`` d
     Assert.Empty(manifest.Boundary.ExternSymbols)
     Substantiation.validateManifest manifest |> accepted
 
+[<Fact>]
+let ``a CLI process removes its default tool scratch on exit and writes nothing to its working directory`` () =
+    let work = scratch "cli-default-scratch"
+    let header = Path.Combine(work, "fx.h")
+    File.WriteAllText(header, "struct fx_point { int x; int y; };\nint fx_sum(struct fx_point point);\n")
+    let cliDirectory = Path.Combine(work, "cli-working-directory")
+    let output = Path.Combine(work, "generated")
+    Directory.CreateDirectory cliDirectory |> ignore
+    let cli = requiredFile "built Farscape CLI" (Path.Combine(repository, "src", "Farscape.Cli", "bin", "Debug", "net10.0", "Farscape.Cli.dll"))
+    let launch =
+        ProcessLaunch.startInfo "dotnet"
+            [ cli; "generate"; "--header"; header; "--library"; "fx"; "--output"; output; "--namespace"; "Fx.Native" ]
+    launch.WorkingDirectory <- cliDirectory
+    run work "generate-cli" launch |> ignore
+    requiredFile "generated binding" (Path.Combine(output, "Native.clef")) |> ignore
+    // Header parsing in the child starts clang with no selected scratch directory, so the child
+    // creates farscape-<pid> in its temporary directory, which `run` sets to <work>/tool-scratch.
+    // The child removes that directory when it exits.
+    Assert.Empty(Directory.GetDirectories(Path.Combine(work, "tool-scratch"), "farscape-*"))
+    Assert.Empty(Directory.GetFileSystemEntries cliDirectory)
+
+[<Fact>]
+let ``a library in OS temporary storage substantiates while broken and cyclic links are refused`` () =
+    let work = scratch "os-temporary-storage"
+    let source = Path.Combine(work, "Native.clef")
+    File.WriteAllText(source, "module Round20.Temporary\nlet seven () : int = 7\n")
+    let project = writeProject work [ source ] None
+    let selected = request project None None work
+    // The project, the work directory and the output directory are in OS temporary storage (#215).
+    for path in [ project; selected.WorkDirectory.Value; selected.OutputDirectory.Value ] do
+        Assert.True(isWithin (Path.GetTempPath()) path, $"{path} is not in OS temporary storage")
+        Assert.False(isWithin repository path, $"{path} is inside the checkout {repository}")
+    let manifest = Substantiation.evaluate selected |> accepted
+    Assert.True(isWithin selected.WorkDirectory.Value manifest.ArtifactsDirectory, $"{manifest.ArtifactsDirectory} is not in the selected work directory")
+    requiredFile "JSON substantiation manifest" (Path.Combine(selected.OutputDirectory.Value, "SubstantiationProbe.substantiation.json")) |> ignore
+    Substantiation.validateManifest manifest |> accepted
+    // The same request and the same manifest through a broken or a cyclic link are refused.
+    let links = refusedLinks work
+    for prohibited in [ links.Broken; links.Cycle ] do
+        { selected with WorkDirectory = Some prohibited } |> Substantiation.evaluate |> refused "FS9245"
+        { selected with OutputDirectory = Some prohibited } |> Substantiation.evaluate |> refused "FS9245"
+        { manifest with ArtifactsDirectory = prohibited }
+        |> Substantiation.seal |> Substantiation.validateManifest |> refused "FS9245"
+    Assert.False(Directory.Exists links.Absent || File.Exists links.Absent, "a refusal must not create the target of a broken link")
+
+[<Fact>]
+let ``an omitted work directory places the evidence under the output directory and creates nothing in the working directory`` () =
+    let work = scratch "default-work-directory"
+    let source = Path.Combine(work, "Native.clef")
+    File.WriteAllText(source, "module Round20.DefaultWork\nlet seven () : int = 7\n")
+    let project = writeProject work [ source ] None
+    let output = Path.Combine(work, "published")
+    // The former default was <working directory>/test-results/scratch/substantiation (#215).
+    // A build output directory can hold a test-results directory left by an earlier build, so
+    // the comparison is of its complete listing and not only of its existence.
+    let legacy = Path.Combine(Directory.GetCurrentDirectory(), "test-results")
+    let listing () =
+        if Directory.Exists legacy then
+            Some(Directory.GetFileSystemEntries(legacy, "*", SearchOption.AllDirectories) |> Array.sort |> List.ofArray)
+        else None
+    let before = listing ()
+    let manifest =
+        { request project None None work with OutputDirectory = Some output; WorkDirectory = None }
+        |> Substantiation.evaluate |> accepted
+    // The evidence root is <output>/<package>.substantiation.evidence, and the retained
+    // compiler artifacts are <evidence root>/<run>/targets/intermediates.
+    let evidence = Path.Combine(ScratchDirectory.canonicalEvidencePath output, "SubstantiationProbe.substantiation.evidence")
+    Assert.True(Directory.Exists evidence, $"{evidence} was not created")
+    Assert.True(isWithin evidence manifest.ArtifactsDirectory, $"{manifest.ArtifactsDirectory} is not under {evidence}")
+    Assert.Equal(evidence, Path.GetFullPath(Path.Combine(manifest.ArtifactsDirectory, "..", "..", "..")))
+    for retained in [ manifest.Psg0.Path; manifest.WitnessUnits.Path; manifest.CompilerLog.Path; manifest.Harness.Path; manifest.HarnessProject.Path ] do
+        Assert.True(isWithin evidence retained, $"{retained} is not under {evidence}")
+    Assert.True(isWithin (Path.GetTempPath()) manifest.ArtifactsDirectory, $"{manifest.ArtifactsDirectory} is not in OS temporary storage")
+    Assert.False(isWithin repository manifest.ArtifactsDirectory, $"{manifest.ArtifactsDirectory} is inside the checkout {repository}")
+    requiredFile "JSON substantiation manifest" (Path.Combine(output, "SubstantiationProbe.substantiation.json")) |> ignore
+    // Nothing was created in the working directory of the process.
+    Assert.True((before = listing ()), $"the default work directory changed {legacy}")
+    Assert.False(Directory.Exists(Path.Combine(legacy, "scratch", "substantiation")), "the former default work directory was created in the working directory")
+    Substantiation.validateManifest manifest |> accepted
+
 [<Theory>]
 [<InlineData(false)>]
 [<InlineData(true)>]
-let ``Round19e descriptor extern after a quoted comment requires and records its link`` linked =
+let ``descriptor extern after a quoted comment requires and records its link`` linked =
     let work = scratch "descriptor-comment-character"
     let source = Path.Combine(work, "Lib.clef")
     File.WriteAllText(source,
@@ -1257,7 +1410,7 @@ let ``Round19e descriptor extern after a quoted comment requires and records its
 [<InlineData("let seven () : int = 7\n(* '\"' *)\n[<FidelityExtern(\"not_linked\", \"bad\")>]\n// \" *)\nlet private bad () : int = NativeDefault.zeroed ()", false, "FS9242")>]
 [<InlineData("let seven () : int = 7\nmodule private Hidden =\n    (* '\"' *)\n    [<FidelityExtern(\"not_linked\", \"bad\")>]\n    // \" *)\n    let bad () : int = NativeDefault.zeroed ()", false, "FS9242")>]
 [<InlineData("type DivT = { quot: int; rem: int }\nlet seven () : int = 7\n(* '\"' *)\n[<FidelityExtern(\"c\", \"div\")>]\n// \" *)\nlet private div (numer: int) (denom: int) : DivT = NativeDefault.zeroed ()", true, "FS9244")>]
-let ``Round19e native projects refuse hidden private and record-returning externs`` declarations linked code =
+let ``native projects refuse hidden private and record-returning externs`` declarations linked code =
     let work = scratch "native-attribute-only-hiding"
     let source = Path.Combine(work, "Lib.clef")
     File.WriteAllText(source, "module Probe.Lib\n" + declarations + "\n")
@@ -1273,7 +1426,7 @@ let ``Round19e native projects refuse hidden private and record-returning extern
 [<InlineData("(* (*) *)\n[<FidelityExtern(\"not_linked\", \"bad\")>]\nlet bad () : int = NativeDefault.zeroed ()", "FS9243")>]
 [<InlineData("(* \"(*\" *)\n[<FidelityExtern(\"not_linked\", \"bad\")>]\nlet bad () : int = NativeDefault.zeroed ()", "FS9243")>]
 [<InlineData("let text : string = @$\"\\\"", "FS9233")>]
-let ``Round19d native project refuses bypass families before sealing`` declarations code =
+let ``native project refuses bypass families before sealing`` declarations code =
     let work = scratch "r19d-native-refusal"
     let source = Path.Combine(work, "Native.clef")
     File.WriteAllText(source, "module Round19d.Native\n" + declarations + "\n")
@@ -1336,7 +1489,7 @@ let ``source receipt attributes library harness and dependency obligations separ
     let query = ids |> List.map (fun id -> queryBlock id "true") |> String.concat ""
     let origins =
         [| proofSource; proofHarnessPath + ":7:3"
-           Path.Combine(repository, "test-results", "scratch", "dependency", "Imported.clef") + ":4:2" |]
+           Path.Combine(scratchRoot, "dependency", "Imported.clef") + ":4:2" |]
     let inventory = JsonNode.Parse(obligations ids)
     let discharge = JsonNode.Parse(receipt query (ids |> List.map (fun id -> id, "unsat")))
     let rows = inventory["obligations"].AsArray()
@@ -1514,7 +1667,7 @@ let ``second unopened exported module type error is not demoted`` () =
     | Ok _ -> failwith "the unopened module's type mismatch was admitted"
     for path, bytes in before do Assert.Equal<byte[]>(bytes, File.ReadAllBytes path)
 
-let private changedBytes path (replacement: byte[] -> byte[]) body =
+let changedBytes path (replacement: byte[] -> byte[]) body =
     let original = File.ReadAllBytes path
     try
         File.WriteAllBytes(path, replacement original)
@@ -1547,18 +1700,16 @@ let ``native static probe substantiates both solver clauses and both manifest fo
             [ cli; "substantiate"; "--fidproj"; probe.Project; "--pilot"; probe.Pilot
               "--link-provenance"; probe.Provenance; "--output"; output
               "--work-dir"; Path.Combine(probe.Work, "substantiation") ]
-    launch.WorkingDirectory <- "/tmp"
+    let cliDirectory = Path.Combine(probe.Work, "cli-working-directory")
+    Directory.CreateDirectory cliDirectory |> ignore
+    launch.WorkingDirectory <- cliDirectory
     launch.Environment["COMPOSER_DLL"] <- sibling "COMPOSER_DLL" "Composer/src/bin/Debug/net10.0/Composer.dll"
     let argumentsPath = recordComposerArguments probe.Work launch
-    let leakedScratch = "/tmp/test-results/scratch/farscape"
-    let beforeScratch =
-        if Directory.Exists leakedScratch then Directory.GetFileSystemEntries(leakedScratch, "*", SearchOption.AllDirectories) |> Array.sort
-        else [||]
-    let scratchExisted = Directory.Exists leakedScratch
     let summary = run probe.Work "substantiate-cli" launch
-    Assert.Equal(scratchExisted, Directory.Exists leakedScratch)
-    if scratchExisted then
-        Assert.Equal<string[]>(beforeScratch, Directory.GetFileSystemEntries(leakedScratch, "*", SearchOption.AllDirectories) |> Array.sort)
+    // The CLI writes only where its options direct it: nothing in its working directory, and
+    // no default scratch directory left in its temporary directory, which `run` selects.
+    Assert.Empty(Directory.GetFileSystemEntries cliDirectory)
+    Assert.Empty(Directory.GetDirectories(Path.Combine(probe.Work, "tool-scratch"), "farscape-*"))
     Assert.Contains("Package: SubstantiationProbe", summary)
     Assert.Contains("UNSAT(H and not C)", summary)
     Assert.Contains("SAT(H)", summary)
@@ -1774,9 +1925,8 @@ let ``native static probe substantiates both solver clauses and both manifest fo
     File.Copy(manifest.WitnessUnits.Path, alternateWitness)
     { manifest with WitnessUnits = { manifest.WitnessUnits with Path = alternateWitness } }
     |> Substantiation.seal |> Substantiation.validateManifest |> refused "FS9236"
-    let linkedWitnessDirectory = Path.Combine(probe.Work, "witness-tmp")
-    Directory.CreateSymbolicLink(linkedWitnessDirectory, "/tmp") |> ignore
-    for prohibited in [ "/tmp/substantiation-never-created-witness.json"; Path.Combine(linkedWitnessDirectory, "10_witness_units.json") ] do
+    let witnessLinks = refusedLinks (scratch "witness-links")
+    for prohibited in [ Path.Combine(witnessLinks.Broken, "10_witness_units.json"); Path.Combine(witnessLinks.Cycle, "10_witness_units.json") ] do
         { manifest with WitnessUnits = { manifest.WitnessUnits with Path = prohibited } }
         |> Substantiation.seal |> Substantiation.validateManifest |> refused "FS9245"
     let alteredWitness expected (alter: JsonNode -> unit) =
@@ -1815,6 +1965,86 @@ let ``native static probe substantiates both solver clauses and both manifest fo
         let units = json["units"].AsArray()
         let unitNode = units[0]
         unitNode["imports"].AsArray().Add importNode)
+    // #209: the compiler attributes the foreign import to the FunctionDescriptor RecordExpr
+    // inside the descriptor binding, not to a module binding node. The parent walk must
+    // resolve the emitted node to the library declaration that encloses it.
+    let retainedWitness = JsonNode.Parse(File.ReadAllText(manifest.WitnessUnits.Path).TrimStart('\uFEFF'))
+    let emittedImports (json: JsonNode) =
+        json["units"].AsArray()
+        |> Seq.collect (fun unitNode -> unitNode["imports"].AsArray())
+        |> Seq.filter (fun importNode -> importNode["symbol"].GetValue<string>() = "substantiation_identity")
+        |> Seq.toArray
+    let emittedImport = Assert.Single(emittedImports retainedWitness)
+    let emittedDeclaration = emittedImport.["sourceBoundary"].["declaration"].GetValue<int>()
+    Assert.Equal("substantiation_probe", emittedImport.["sourceBoundary"].["library"].GetValue<string>())
+    let nodeWithId id = retainedNodes |> Seq.find (fun node -> node["id"].GetValue<int>() = id)
+    let descriptorId = ((bindingNode "substantiation_identityDescriptor" retainedNodes)["id"]).GetValue<int>()
+    Assert.Matches("^(RecordExpr|Binding)\\b", (nodeWithId emittedDeclaration).["kind"].GetValue<string>())
+    let rec enclosingBinding id =
+        if id = descriptorId then true
+        else
+            match (nodeWithId id).["parent"] with
+            | null -> false
+            | parent -> enclosingBinding (parent.GetValue<int>())
+    Assert.True(enclosingBinding emittedDeclaration, "the emitted source boundary node must lie inside the descriptor binding")
+    let correspondence = Substantiation.validateManifestCorrespondence manifest |> accepted
+    let resolvedImport = Assert.Single(correspondence.Imports)
+    Assert.Equal(emittedDeclaration, resolvedImport.DeclarationNode)
+    Assert.Equal("Round19.Probe.Boundary.substantiation_identityDescriptor", resolvedImport.Declaration)
+    Assert.Equal("substantiation_probe", resolvedImport.Library)
+    Assert.Equal("substantiation_identity", resolvedImport.Symbol)
+    Assert.False(resolvedImport.Resource)
+    let descriptorDeclaration = correspondence.Declarations |> Array.find (fun declaration -> declaration.BindingNodeId = descriptorId)
+    Assert.Equal("Round19.Probe.Boundary.substantiation_identityDescriptor", descriptorDeclaration.Qualified)
+    let foreignDeclaration = correspondence.Declarations |> Array.find (fun declaration -> declaration.BindingNodeId = foreignId)
+    Assert.Equal(Some("substantiation_probe", "substantiation_identity"), foreignDeclaration.Foreign)
+    Assert.Equal(Substantiation.DescriptorSymbol.Named "substantiation_identity", descriptorDeclaration.Descriptor)
+    Assert.Equal(Substantiation.DescriptorSymbol.NotDescriptor, foreignDeclaration.Descriptor)
+    Assert.Contains(correspondence.Definitions, fun definition -> definition.Declaration = Some "Round19.Probe.Scalar.seven" && definition.SourceInLibrary && definition.RootInLibrary)
+    Assert.Equal(Some manifest.Proof.TotalObligations, correspondence.Obligations |> Option.map Array.length)
+    // A forged library or symbol on the node identity the compiler actually emitted is refused.
+    let forgeEmitted (alter: JsonNode -> unit) (json: JsonNode) = alter (Assert.Single(emittedImports json))
+    alteredWitness "FS9243" (forgeEmitted (fun importNode -> importNode.["sourceBoundary"].["library"] <- JsonValue.Create "not_linked"))
+    alteredWitness "FS9243" (forgeEmitted (fun importNode -> importNode["symbol"] <- JsonValue.Create "uninventoried_symbol"))
+    // The same node identity, appended with a forged pairing, is refused as well.
+    alteredWitness "FS9243" (appendImport emittedDeclaration "not_linked" "substantiation_identity")
+    alteredWitness "FS9243" (appendImport emittedDeclaration "substantiation_probe" "uninventoried_symbol")
+    // A descendant of an authored runtime binding is no boundary declaration.
+    let authoredBody = ((bindingBody retainedNodes (bindingNode "seven" retainedNodes))["id"]).GetValue<int>()
+    alteredWitness "FS9243" (appendImport authoredBody "substantiation_probe" "substantiation_identity")
+    // A library node below no module binding (the root module, a type definition) is refused.
+    let libraryModuleId = (foreignNode retainedNodes).["parent"].GetValue<int>()
+    alteredWitness "FS9243" (appendImport libraryModuleId "substantiation_probe" "substantiation_identity")
+    let libraryTypeId =
+        retainedNodes
+        |> Seq.find (fun node -> node["kind"].GetValue<string>().StartsWith("TypeDef", StringComparison.Ordinal) && node["range"].GetValue<string>().Contains("Scalar.clef:", StringComparison.Ordinal))
+        |> fun node -> node["id"].GetValue<int>()
+    alteredWitness "FS9243" (appendImport libraryTypeId "substantiation_probe" "substantiation_identity")
+    // Resource imports are attributed through the same parent walk.
+    let appendResource (sourceBoundary: JsonNode) (library: string) (symbol: string) (json: JsonNode) =
+        let resource = JsonObject()
+        resource["sourceBoundary"] <- sourceBoundary
+        resource["library"] <- JsonValue.Create library
+        resource["symbol"] <- JsonValue.Create symbol
+        let units = json["units"].AsArray()
+        let unitNode = units[0]
+        unitNode["resourceImports"].AsArray().Add resource
+    alteredWitness "" (appendResource (JsonValue.Create emittedDeclaration) "substantiation_probe" "substantiation_identity")
+    alteredWitness "FS9243" (appendResource (JsonValue.Create emittedDeclaration) "not_linked" "substantiation_identity")
+    alteredWitness "FS9243" (appendResource (JsonValue.Create authoredId) "substantiation_probe" "substantiation_identity")
+    alteredWitness "FS9243" (appendResource (JsonValue.Create libraryModuleId) "substantiation_probe" "substantiation_identity")
+    alteredWitness "FS9243" (appendResource (JsonValue.Create "not-a-node") "substantiation_probe" "substantiation_identity")
+    alteredWitness "" (appendResource (JsonValue.Create 2147483001) "platform-owned" "platform-symbol")
+    // Parent edges that form a cycle or name an absent node cannot be walked and are refused.
+    let harnessMain (nodes: JsonArray) =
+        nodes |> Seq.find (fun node ->
+            node["kind"].GetValue<string>().StartsWith("Binding (\"main\"", StringComparison.Ordinal)
+            && node["range"].GetValue<string>().Contains("SubstantiationRoot.clef:", StringComparison.Ordinal))
+    alteredPsg0 "FS9233" (fun nodes ->
+        let binding = harnessMain nodes
+        let child = (children nodes binding)[0]
+        binding["parent"] <- child["id"].DeepClone())
+    alteredPsg0 "FS9233" (fun nodes -> (harnessMain nodes)["parent"] <- JsonValue.Create 2147483600)
     Substantiation.validateManifest manifest |> accepted
     Assert.False(Directory.Exists(Path.Combine(manifest.ArtifactsDirectory, "recheck-boundary")), "boundary validation must clean its temporary directory")
     let checkMalformed changed =
@@ -1827,9 +2057,8 @@ let ``native static probe substantiates both solver clauses and both manifest fo
     { manifest with Boundary = { manifest.Boundary with ExternSymbols = [||] } } |> checkMalformed
     { manifest with Boundary = { manifest.Boundary with ExternSymbols = [| "invented_one"; "invented_two" |] } }
     |> checkMalformed
-    for projectPath in [ "/tmp/round19c-never-created.fidproj"; Path.Combine(probe.Work, "tmp-project", "Library.fidproj") ] do
-        if projectPath.StartsWith(probe.Work, StringComparison.Ordinal) then
-            Directory.CreateSymbolicLink(Path.GetDirectoryName projectPath, "/tmp") |> ignore
+    let projectLinks = refusedLinks (scratch "project-links")
+    for projectPath in [ Path.Combine(projectLinks.Broken, "Library.fidproj"); Path.Combine(projectLinks.Cycle, "Library.fidproj") ] do
         { manifest with FidprojPath = projectPath }
         |> Substantiation.seal |> Substantiation.validateManifest |> refused "FS9245"
     for codes in [ [||]; [| "CCS8500"; "CCS8500" |]; [| "CCS8777"; "CCS8500" |]; [| "CCS8500"; "invalid" |] ] do
@@ -1868,8 +2097,11 @@ let ``native static probe substantiates both solver clauses and both manifest fo
           (fun boundary -> { boundary with Files = boundary.Files |> Array.map (fun file -> { file with Kind = "unknown-kind" }) }) ] do
         { manifest with Boundary = mutate manifest.Boundary } |> checkMalformed
     // A structurally coherent reseal still cannot replace measured live boundary facts.
+    // The witnessed foreign import now resolves to its library declaration (#209), so a
+    // replaced extern symbol inventory is refused at witness reconciliation (FS9243), before
+    // the fresh boundary evaluation that refused it with FS9236 while the import was skipped.
     { manifest with Boundary = { manifest.Boundary with ExternSymbols = [| "invented_symbol" |] } }
-    |> Substantiation.seal |> Substantiation.validateManifest |> refused "FS9236"
+    |> Substantiation.seal |> Substantiation.validateManifest |> refused "FS9243"
     { manifest with
         Boundary =
             { manifest.Boundary with RestsOn = manifest.Boundary.RestsOn |> Array.map (fun hypothesis -> { hypothesis with Statement = "invented evidence" }) } }
@@ -1940,6 +2172,195 @@ let ``native static probe substantiates both solver clauses and both manifest fo
             | Error refusal -> Assert.Contains("The calling convention is not a declared case.", refusal.Text)
             | Ok _ -> failwith "the malformed compiler-read descriptor was admitted")
     for path, digest in original do Assert.Equal(digest, ClangToolchain.sha256 path)
+
+[<Fact>]
+let ``witnessed imports swapped between two FunctionDescriptors of one library are refused`` () =
+    let probe = nativeProbeWith true
+    // As for the static probe above, the library project carries no archive map.
+    File.WriteAllLines(probe.Project, File.ReadAllLines probe.Project |> Array.filter (fun line -> not (line.StartsWith("archives =", StringComparison.Ordinal))))
+    let manifest =
+        request probe.Project (Some probe.Pilot) (Some probe.Provenance) probe.Work
+        |> Substantiation.evaluate |> accepted
+    let identity, echo = "substantiation_identity", "substantiation_echo"
+    let qualified (name: string) = "Round19.Probe.Boundary." + name
+    Assert.Equal<string[]>([| echo; identity |], manifest.Boundary.ExternSymbols |> Array.sort)
+    Assert.Equal<string[]>([| "substantiation_probe" |], manifest.Boundary.Libraries)
+    // Each import resolves to its own descriptor, and each descriptor names its own symbol.
+    let correspondence = Substantiation.validateManifestCorrespondence manifest |> accepted
+    Assert.Equal<(string * string * string)[]>(
+        [| qualified (echo + "Descriptor"), "substantiation_probe", echo
+           qualified (identity + "Descriptor"), "substantiation_probe", identity |],
+        correspondence.Imports |> Array.map (fun import -> import.Declaration, import.Library, import.Symbol) |> Array.sort)
+    let declaration (name: string) = correspondence.Declarations |> Array.find (fun node -> node.Qualified = qualified name)
+    for symbol in [ identity; echo ] do
+        Assert.Equal(Substantiation.DescriptorSymbol.Named symbol, (declaration (symbol + "Descriptor")).Descriptor)
+        Assert.Equal(None, (declaration (symbol + "Descriptor")).Foreign)
+        Assert.Equal(Substantiation.DescriptorSymbol.NotDescriptor, (declaration symbol).Descriptor)
+        Assert.Equal(Some("substantiation_probe", symbol), (declaration symbol).Foreign)
+    Assert.Equal(Substantiation.DescriptorSymbol.NotDescriptor, (declaration "identityResultContract").Descriptor)
+    // Every alteration rebinds the file digests and the envelope, so each refusal below is the
+    // reconciliation and not the digest check.
+    let jsonBytes (alter: JsonNode -> unit) (bytes: byte[]) =
+        let json = JsonNode.Parse(Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF'))
+        alter json
+        Encoding.UTF8.GetBytes(json.ToJsonString())
+    let rebound () =
+        { manifest with
+            Psg0 = { manifest.Psg0 with Sha256 = ClangToolchain.sha256 manifest.Psg0.Path }
+            WitnessUnits = { manifest.WitnessUnits with Sha256 = ClangToolchain.sha256 manifest.WitnessUnits.Path } }
+        |> Substantiation.seal |> Substantiation.validateManifest
+    let expecting (expected: string) (result: Result<unit, Diagnostics.Refusal>) =
+        if expected = "" then accepted result else refused expected result
+    let alteredWitness expected (alter: JsonNode -> unit) =
+        changedBytes manifest.WitnessUnits.Path (jsonBytes alter) (fun () -> rebound () |> expecting expected)
+    let alteredPsg0 expected (alter: JsonArray -> unit) =
+        changedBytes manifest.Psg0.Path (jsonBytes (fun json -> alter (json["nodes"].AsArray()))) (fun () -> rebound () |> expecting expected)
+    let importOf (symbol: string) (json: JsonNode) =
+        json["units"].AsArray()
+        |> Seq.collect (fun unitNode -> unitNode["imports"].AsArray())
+        |> Seq.filter (fun importNode -> importNode["symbol"].GetValue<string>() = symbol)
+        |> Seq.exactlyOne
+    let nodeOf (importNode: JsonNode) = importNode.["sourceBoundary"].["declaration"].GetValue<int>()
+    alteredWitness "" ignore
+    alteredPsg0 "" ignore
+    // Both symbols are extern symbols of the one linked library, so the boundary inventory
+    // admits either of them on either declaration. One import renamed to the other symbol:
+    alteredWitness "FS9243" (fun json -> (importOf identity json)["symbol"] <- JsonValue.Create echo)
+    // The two symbols exchanged between the two descriptor nodes:
+    alteredWitness "FS9243" (fun json ->
+        let first, second = importOf identity json, importOf echo json
+        first["symbol"] <- JsonValue.Create echo
+        second["symbol"] <- JsonValue.Create identity)
+    // The two descriptor node identities exchanged between the two symbols:
+    alteredWitness "FS9243" (fun json ->
+        let first, second = importOf identity json, importOf echo json
+        let firstNode, secondNode = nodeOf first, nodeOf second
+        first.["sourceBoundary"].["declaration"] <- JsonValue.Create secondNode
+        second.["sourceBoundary"].["declaration"] <- JsonValue.Create firstNode)
+    // The same rule holds on the module binding nodes: a descriptor binding carries its
+    // CName, and a FidelityExtern binding carries its own library and symbol.
+    let retainedPsg = JsonNode.Parse(File.ReadAllText(manifest.Psg0.Path).TrimStart('\uFEFF'))
+    let retainedNodes = retainedPsg["nodes"].AsArray()
+    let bindingId (name: string) =
+        retainedNodes
+        |> Seq.find (fun node -> node["kind"].GetValue<string>().StartsWith("Binding (\"" + name + "\"", StringComparison.Ordinal))
+        |> fun node -> node["id"].GetValue<int>()
+    let retarget (symbol: string) (node: int) (json: JsonNode) =
+        (importOf symbol json).["sourceBoundary"].["declaration"] <- JsonValue.Create node
+    alteredWitness "" (retarget identity (bindingId (identity + "Descriptor")))
+    alteredWitness "FS9243" (retarget identity (bindingId (echo + "Descriptor")))
+    alteredWitness "" (retarget identity (bindingId identity))
+    alteredWitness "FS9243" (retarget identity (bindingId echo))
+    // A resource import is attributed by the same rule.
+    let retainedWitness = JsonNode.Parse(File.ReadAllText(manifest.WitnessUnits.Path).TrimStart('\uFEFF'))
+    let identityRecord = nodeOf (importOf identity retainedWitness)
+    let appendResource (node: int) (symbol: string) (json: JsonNode) =
+        let resource = JsonObject()
+        resource["sourceBoundary"] <- JsonValue.Create node
+        resource["library"] <- JsonValue.Create "substantiation_probe"
+        resource["symbol"] <- JsonValue.Create symbol
+        let units = json["units"].AsArray()
+        let unitNode = units[0]
+        unitNode["resourceImports"].AsArray().Add resource
+    alteredWitness "" (appendResource identityRecord identity)
+    alteredWitness "FS9243" (appendResource identityRecord echo)
+    // The CName is the literal the compiler PSG publishes for the record's CName field, and
+    // the source text at that literal's range spells it. A PSG literal renamed to the other
+    // valid symbol, or moved off its source position, establishes no CName; the import that
+    // resolves to the descriptor is then refused, whether or not the witness is renamed to match.
+    let cnameLiteral (nodes: JsonArray) =
+        let record = nodes |> Seq.find (fun node -> node["id"].GetValue<int>() = identityRecord)
+        let field = System.Text.RegularExpressions.Regex.Match(record["kind"].GetValue<string>(), @"\(""CName"",\s*NodeId\s+([0-9]+)\)")
+        Assert.True(field.Success, "the witnessed node is not the FunctionDescriptor record")
+        let literal = Int32.Parse field.Groups[1].Value
+        nodes |> Seq.find (fun node -> node["id"].GetValue<int>() = literal)
+    let renameLiteral (nodes: JsonArray) = (cnameLiteral nodes)["kind"] <- JsonValue.Create("Literal (String \"" + echo + "\")")
+    let retainedLiteral = cnameLiteral retainedNodes
+    Assert.Equal("Literal (String \"" + identity + "\")", retainedLiteral["kind"].GetValue<string>())
+    alteredPsg0 "FS9243" renameLiteral
+    changedBytes manifest.Psg0.Path (jsonBytes (fun json -> renameLiteral (json["nodes"].AsArray()))) (fun () ->
+        alteredWitness "FS9243" (fun json -> (importOf identity json)["symbol"] <- JsonValue.Create echo))
+    alteredPsg0 "FS9243" (fun nodes ->
+        let literal = cnameLiteral nodes
+        let range = literal["range"].GetValue<string>()
+        let columnAt = range.LastIndexOf ':'
+        literal["range"] <- JsonValue.Create(range.Substring(0, columnAt + 1) + string (Int32.Parse(range.Substring(columnAt + 1)) + 1)))
+    alteredPsg0 "FS9243" (fun nodes -> (cnameLiteral nodes)["kind"] <- JsonValue.Create "Literal (Int32 7)")
+    Substantiation.validateManifest manifest |> accepted
+
+[<Fact>]
+let ``a witnessed import retargeted to a result contract or a runtime binding is refused`` () =
+    let probe = nativeProbe ()
+    // As for the static probe above, the library project carries no archive map.
+    File.WriteAllLines(probe.Project, File.ReadAllLines probe.Project |> Array.filter (fun line -> not (line.StartsWith("archives =", StringComparison.Ordinal))))
+    let manifest =
+        request probe.Project (Some probe.Pilot) (Some probe.Provenance) probe.Work
+        |> Substantiation.evaluate |> accepted
+    let library, identity = "substantiation_probe", "substantiation_identity"
+    let correspondence = Substantiation.validateManifestCorrespondence manifest |> accepted
+    let declaration (qualified: string) = correspondence.Declarations |> Array.find (fun node -> node.Qualified = qualified)
+    let foreign = declaration ("Round19.Probe.Boundary." + identity)
+    let descriptor = declaration ("Round19.Probe.Boundary." + identity + "Descriptor")
+    let contract = declaration "Round19.Probe.Boundary.identityResultContract"
+    let runtime = declaration "Round19.Probe.Scalar.seven"
+    Assert.Equal(Some(library, identity), foreign.Foreign)
+    Assert.Equal(Substantiation.DescriptorSymbol.Named identity, descriptor.Descriptor)
+    // The result contract and the runtime function are library bindings that declare no
+    // foreign symbol: neither a FidelityExtern declaration nor a FunctionDescriptor.
+    for binding in [ contract; runtime ] do
+        Assert.Equal(None, binding.Foreign)
+        Assert.Equal(Substantiation.DescriptorSymbol.NotDescriptor, binding.Descriptor)
+    // The result contract is a compile-time declaration of the boundary inventory, and the
+    // import's library and symbol stay those of the retained boundary. Only the comparison
+    // with the declaration that the import's node resolves to can refuse the retargeting.
+    let exported (select: Substantiation.SourceDigest -> string[]) = manifest.Sources |> Array.collect select
+    Assert.Contains(contract.Qualified, exported (fun source -> source.CompileTimeDeclarations))
+    Assert.Contains(runtime.Qualified, exported (fun source -> source.RuntimeDeclarations))
+    let alteredWitness expected (alter: JsonNode -> unit) =
+        changedBytes manifest.WitnessUnits.Path (fun bytes ->
+            let json = JsonNode.Parse(Encoding.UTF8.GetString(bytes).TrimStart('﻿'))
+            alter json
+            Encoding.UTF8.GetBytes(json.ToJsonString())) (fun () ->
+                let result =
+                    { manifest with WitnessUnits = { manifest.WitnessUnits with Sha256 = ClangToolchain.sha256 manifest.WitnessUnits.Path } }
+                    |> Substantiation.seal |> Substantiation.validateManifest
+                if expected = "" then accepted result else refused expected result)
+    let emittedImport (json: JsonNode) =
+        json["units"].AsArray()
+        |> Seq.collect (fun unitNode -> unitNode["imports"].AsArray())
+        |> Seq.filter (fun importNode -> importNode["symbol"].GetValue<string>() = identity)
+        |> Seq.exactlyOne
+    let retarget (node: int) (json: JsonNode) =
+        (emittedImport json).["sourceBoundary"].["declaration"] <- JsonValue.Create node
+    let appendResource (node: int) (json: JsonNode) =
+        let resource = JsonObject()
+        resource["sourceBoundary"] <- JsonValue.Create node
+        resource["library"] <- JsonValue.Create library
+        resource["symbol"] <- JsonValue.Create identity
+        let units = json["units"].AsArray()
+        let unitNode = units[0]
+        unitNode["resourceImports"].AsArray().Add resource
+    // A descendant of the result contract binding resolves to that binding by the parent walk.
+    let retainedPsg = JsonNode.Parse(File.ReadAllText(manifest.Psg0.Path).TrimStart('﻿'))
+    let contractChild =
+        retainedPsg["nodes"].AsArray()
+        |> Seq.find (fun node ->
+            match node["parent"] with
+            | null -> false
+            | parent -> parent.GetValue<int>() = contract.BindingNodeId)
+        |> fun node -> node["id"].GetValue<int>()
+    // Controls: the unaltered witness, and the import on each of its two owning bindings.
+    alteredWitness "" ignore
+    alteredWitness "" (retarget descriptor.BindingNodeId)
+    alteredWitness "" (retarget foreign.BindingNodeId)
+    alteredWitness "" (appendResource descriptor.BindingNodeId)
+    // The same import, with its library and symbol unchanged, on a binding that owns none.
+    alteredWitness "FS9243" (retarget contract.BindingNodeId)
+    alteredWitness "FS9243" (retarget contractChild)
+    alteredWitness "FS9243" (retarget runtime.BindingNodeId)
+    alteredWitness "FS9243" (appendResource contract.BindingNodeId)
+    alteredWitness "FS9243" (appendResource runtime.BindingNodeId)
+    Substantiation.validateManifest manifest |> accepted
 
 [<Theory>]
 [<InlineData(true, true)>]

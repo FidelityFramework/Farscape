@@ -250,6 +250,20 @@ module SubstantiationProof =
 
     let private obligationIds json = obligationRows json |> Array.map fst
 
+    /// The retained obligation inventory as (anchor, source, kind) for the dossier (#209).
+    /// The kind is empty when the inventory row carries none.
+    let internal obligationInventory (json: string) : Result<(string * string * string) array, Diagnostics.Refusal> =
+        protect Diagnostics.SubstantiationProofInvalid "06a_obligations.json" (fun () ->
+            let rows = obligationRows json
+            use document = JsonDocument.Parse json
+            let kinds =
+                array "06a_obligations.json" "obligations" document.RootElement
+                |> Array.map (fun row ->
+                    match row.TryGetProperty "kind" with
+                    | true, kind when kind.ValueKind = JsonValueKind.String -> kind.GetString()
+                    | _ -> "")
+            Array.map2 (fun (anchor, source) kind -> anchor, source, kind) rows kinds)
+
     let private verdicts (output: string) =
         output.Split([| '\r'; '\n' |], StringSplitOptions.RemoveEmptyEntries) |> Array.map _.Trim()
 

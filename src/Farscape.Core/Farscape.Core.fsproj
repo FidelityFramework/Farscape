@@ -6,6 +6,7 @@
     <PackageId>Fidelity.Farscape</PackageId>
     <Description>F# bindings generator for C/C++ headers, part of the Fidelity native compilation ecosystem. Uses XParsec parser combinators, active patterns, catamorphisms, and a typed code AST.</Description>
     <PackageTags>fsharp;f#;bindings;codegen;native;fidelity;xparsec</PackageTags>
+    <FidelityDataProject Condition="'$(FidelityDataProject)' == ''">$(MSBuildThisFileDirectory)../../../Fidelity.Data/src/Fidelity.Data/Fidelity.Data.fsproj</FidelityDataProject>
   </PropertyGroup>
 
   <!-- CppParser.declarationsOfAst reads an AST without measurements; tests only (#173). -->
@@ -49,13 +50,13 @@
     <Compile Include="SubstantiationProof.fs" />
     <Compile Include="SubstantiationBoundary.fs" />
     <Compile Include="Substantiation.fs" />
+    <Compile Include="SubstantiationDossier.fs" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="FSharp.Data" Version="6.6.0" />
-    <Reference Include="Fidelity.Data">
-      <HintPath>../../../Fidelity.Data/src/Fidelity.Data/bin/Debug/net10.0/Fidelity.Data.dll</HintPath>
-    </Reference>
+    <PackageReference Include="FSharp.Data.Rocq" Version="0.1.0-preview.3" />
+    <ProjectReference Include="$(FidelityDataProject)" />
   </ItemGroup>
 
   <!-- XParsec: NuGet for packaging, local project ref for dev override -->

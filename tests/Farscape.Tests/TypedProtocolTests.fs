@@ -39,7 +39,7 @@ xml_interfaces = ["wl_callback"]
           "wl_proxy_get_version", "uint32_t", ["p","struct wl_proxy *"] ]
         |> List.map (fun(n,r,p)->CppParser.Declaration.Function(TestHelpers.mkFunc n r p))
     let ctx = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 layouts
-    let dir = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "../..", "artifacts/ffi-contract-20261013", "typed-existing-"+Guid.NewGuid().ToString("N")))
+    let dir = TestHelpers.TestScratch.path "typed-existing"
     try
         let files = TypedProtocolGenerator.generate project [{Name="test";Interfaces=[iface]}] declarations ctx dir
         let callbacks = File.ReadAllText(Path.Combine(dir,"Bridge/Callbacks.clef"))
@@ -86,7 +86,7 @@ uint32_t wl_proxy_get_version(struct wl_proxy *p);
 [<InlineData("constructor-string")>]
 [<InlineData("constructor-string-errno")>]
 let ``XML-only whole project validates complete protocol before changing output`` shape =
-  let directory = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "../..", "artifacts/ffi-contract-20261013", "typed-project-"+Guid.NewGuid().ToString("N")))
+  let directory = TestHelpers.TestScratch.path "typed-project"
   try
     Directory.CreateDirectory directory |> ignore
     let header = Path.Combine(directory, "native.h")
@@ -135,7 +135,7 @@ let ``XML-only whole project validates complete protocol before changing output`
 [<InlineData("layout", "FS9176", "Typed Wayland requires 64-bit measured wl_argument cells")>]
 [<InlineData("constructor-string", "FS9177", "Typed constructor string arguments need an explicit ownership profile ('wl_callback_spawn')")>]
 let ``each typed protocol refusal carries its code, its location and the typed_protocol key`` shape (code: string) (message: string) =
-  let directory = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "../..", "artifacts/ffi-contract-20261013", "typed-diagnostics-"+Guid.NewGuid().ToString("N")))
+  let directory = TestHelpers.TestScratch.path "typed-diagnostics"
   try
     Directory.CreateDirectory directory |> ignore
     let header = Path.Combine(directory, "native.h")

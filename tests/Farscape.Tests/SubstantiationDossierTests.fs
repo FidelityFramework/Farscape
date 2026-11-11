@@ -1,0 +1,1273 @@
+module Farscape.Tests.SubstantiationDossierTests
+
+open System
+open System.Diagnostics
+open System.IO
+open System.Security.Cryptography
+open System.Text
+open System.Text.Json
+open System.Text.Json.Nodes
+open Xunit
+open Farscape.Core
+open Farscape.Tests.SubstantiationTests
+
+// #209 owns the dossier generator. One real library is substantiated once per test run; the
+// Rocq projects, receipts and mutated manifests are built per test. Everything is in OS
+// temporary storage, under the scratch root of the test process; nothing is written to the
+// checkout (#215).
+let private repository = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
+
+/// The scratch directory of this module. The substantiated library is one lazy fixture that
+/// every test reads, so no single test deletes it; it is removed with the scratch root of the
+/// test process when the process exits.
+let private scratchRoot = TestHelpers.TestScratch.create "dossier-tests"
+
+let private scratch label =
+    let path = Path.Combine(scratchRoot, label + "-" + Guid.NewGuid().ToString("N"))
+    Directory.CreateDirectory path |> ignore
+    path
+
+let private writeLines path (lines: string list) = File.WriteAllText(path, String.concat "\n" lines + "\n")
+
+// ---------------------------------------------------------------------------
+// The substantiated library: a static archive with a measured C struct, link provenance,
+// generated FidelityExtern declarations and FunctionDescriptors, and an authored function.
+// ---------------------------------------------------------------------------
+
+type private Library =
+    { Work: string
+      Manifest: Substantiation.Manifest
+      ManifestJson: string
+      ManifestToml: string
+      Archive: string
+      Provenance: string
+      Scalar: string }
+
+let private library =
+    lazy
+        (let work = scratch "library"
+         let header = Path.Combine(work, "probe.h")
+         let source = Path.Combine(work, "probe.c")
+         let objectFile = Path.Combine(work, "probe.o")
+         let archive = Path.Combine(work, "libdossier_probe.a")
+         writeLines header
+             [ "typedef struct DossierPair { int left; int right; } DossierPair;"
+               "int dossier_identity(int value);"
+               "int dossier_pair_sum(DossierPair pair);" ]
+         writeLines source
+             [ "#include \"probe.h\""
+               "int dossier_identity(int value) { return value; }"
+               "int dossier_pair_sum(DossierPair pair) { return pair.left + pair.right; }" ]
+         run work "foreign-object" (ClangToolchain.startInfo [ "-c"; "-fPIC"; "-Wall"; "-Wextra"; "-Werror"; source; "-o"; objectFile ]) |> ignore
+         run work "foreign-archive" (ClangToolchain.arStartInfo [ "rcs"; archive; objectFile ]) |> ignore
+         let pilot = Path.Combine(work, "Probe.pilot.toml")
+         writeLines pilot
+             [ "[library]"; "name = \"dossier_probe\""; "headers = [" + quote header + "]"
+               "include_paths = [" + quote work + "]"
+               "[library.artifact]"; "kind = \"static-archive\""; "path = " + quote archive
+               "sha256 = " + quote (ClangToolchain.sha256 archive)
+               "[output]"; "mode = \"fidelity\""; "directory = \"generated\""
+               "[options]"; "c_header_mode = true"; "descriptor_only_dependencies = true"; "link_libraries = true"
+               "value_structs = [\"DossierPair\"]"; "abi_critical_structs = [\"DossierPair\"]"
+               "[[namespace]]"; "name = \"Dossier.Probe.Boundary\""; "library = \"dossier_probe\""
+               "description = \"Dossier measured record probe\""; "functions = [\"dossier_identity\", \"dossier_pair_sum\"]" ]
+         ScratchDirectory.within work (fun () -> BindingGenerator.generateFromProjectDiagnosed pilot false false Types.LP64)
+         |> accepted |> ignore
+         let provenance =
+             match Directory.GetFiles(work, "*.link-provenance.toml", SearchOption.AllDirectories) with
+             | [| path |] -> path
+             | paths -> failwithf "expected one generated link provenance manifest, got %A" paths
+         let loading = Path.Combine(work, "Loading.clef")
+         (File.ReadAllText(Path.Combine(repository, "tests", "native-callbacks", "Loading.clef"))).Replace("landingprobe", "dossier_probe")
+         |> fun text -> File.WriteAllText(loading, text)
+         // The generated type module of a measured value struct carries unannotated literal
+         // constants and an unquoted StructDescriptor value, which the #208 source classifier
+         // refuses (FS9246). The record type is therefore authored here; the boundary module,
+         // its FidelityExtern declarations and its FunctionDescriptors are generator output.
+         let types = Path.Combine(work, "Types.clef")
+         writeLines types [ "module Dossier.Probe.Boundary.Types"; "type DossierPair = { left: int; right: int }" ]
+         let boundary = Path.Combine(work, "generated", "Boundary", "Boundary.clef")
+         File.AppendAllText(boundary,
+             "\nlet identityResultContract : Expr<ResultRangeDescriptor> = <@ {\n    Binding = \"Dossier.Probe.Boundary.dossier_identity\"\n    Role = ReturnValue\n    Lower = Argument 0\n    Upper = Argument 0\n    Hypothesis = ({ Identity = \"Dossier.identity-returns-input\"; Version = \"1\"; Source = \"fixture:probe.c\" } : ExternalExecutionHypothesis)\n} @>\n")
+         let scalar = Path.Combine(work, "Scalar.clef")
+         writeLines scalar
+             [ "module Dossier.Probe.Scalar"
+               "let seven () : int = Dossier.Probe.Boundary.dossier_identity 7"
+               "let three () : int = 3" ]
+         let sources = [ loading; types; boundary; scalar ]
+         sources |> List.iter (requiredFile "library source" >> ignore)
+         let dependencies, platform = platformTables ()
+         let metadata = sibling "BAREWIRE_METADATA_PROJECT" "BAREWire/src/BAREWire.BindingMetadata.fidproj"
+         let project = Path.Combine(work, "DossierProbe.fidproj")
+         writeLines project
+             [ "[package]"; "name = \"DossierProbe\""; "version = \"1.0.0\""
+               "[compilation]"; "target = \"cpu\""
+               "[build]"; "output_kind = \"library\""
+               "sources = [" + (sources |> List.map quote |> String.concat ", ") + "]"
+               "[dependencies]"; yield! dependencies
+               "metadata = { path = " + quote metadata + " }"
+               "[platform]"; yield! platform
+               "loading = \"Landing.Acceptance.Loading.contract\""
+               "[link]"; "libraries = [\"dossier_probe\"]" ]
+         let output = Path.Combine(work, "manifest")
+         let manifest =
+             Substantiation.evaluate
+                 { FidprojPath = project
+                   PilotPath = Some pilot
+                   LinkProvenancePath = Some provenance
+                   OutputDirectory = Some output
+                   WorkDirectory = Some(Path.Combine(work, "substantiation"))
+                   AllowWarnings = false
+                   Verbose = false }
+             |> accepted
+         { Work = work
+           Manifest = manifest
+           ManifestJson = requiredFile "JSON manifest" (Path.Combine(output, "DossierProbe.substantiation.json"))
+           ManifestToml = requiredFile "TOML manifest" (Path.Combine(output, "DossierProbe.substantiation.toml"))
+           Archive = archive
+           Provenance = provenance
+           Scalar = scalar })
+
+// ---------------------------------------------------------------------------
+// The companion Rocq project. Each .glob carries the exact MD5 of its .v bytes on the
+// DIGEST line, so FSharp.Data.Rocq accepts it as current without a Rocq process.
+// ---------------------------------------------------------------------------
+
+let private lawsSource =
+    [ "(** * Probe laws *)"
+      ""
+      "Axiom H_c_abi : forall n : nat, n + 0 = n."
+      ""
+      "(** The identity result equals its argument <script>alert(1)</script> & holds for every input."
+      "    - [n:] the value passed to the foreign identity function. *)"
+      "Theorem identity_returns_input (n : nat) : n = n."
+      "Proof. reflexivity. Qed."
+      ""
+      "(** The measured pair layout agrees with the C ABI."
+      "    - [a:] the left field."
+      "    - [b:] the right field,"
+      "      measured at bit offset 32. *)"
+      "Theorem pair_layout_sound : forall (a b : nat), a + 0 = a /\\ b = b."
+      "Proof. intros a b. split. apply H_c_abi. reflexivity. Qed."
+      ""
+      "(** A helper fact about addition. *)"
+      "Lemma add_zero_helper (n : nat) : n + 0 = n."
+      "Proof. apply H_c_abi. Qed."
+      "" ]
+    |> String.concat "\n"
+
+let private limitsSource =
+    [ "(** Dropping the range precondition admits a failing input. *)"
+      "Theorem unbounded_input_falsified : ~ (forall n : nat, n = 0)."
+      "Proof. intro H. discriminate (H 1). Qed."
+      ""
+      "(** Seven is a valid identity argument. *Check, not a guarantee.* *)"
+      "Theorem seven_is_admitted : 7 = 7."
+      "Proof. reflexivity. Qed."
+      "" ]
+    |> String.concat "\n"
+
+let private admittedSource =
+    [ ""
+      "(** The pair sum is commutative. *)"
+      "Theorem pair_sum_commutes (a b : nat) : a + b = b + a."
+      "Admitted."
+      "" ]
+    |> String.concat "\n"
+
+/// Declarations outside the public theorem keywords whose proofs end in Admitted, while
+/// every Theorem of the unit ends in Qed: an internal Lemma and a Definition built in proof mode.
+let private unfinishedSource =
+    [ ""
+      "(** An internal helper that is not proved. *)"
+      "Lemma helper_unfinished : 1 = 1."
+      "Proof. Admitted."
+      ""
+      "(** A value built in proof mode and not finished. *)"
+      "Definition def_unfinished : nat."
+      "Proof. Admitted."
+      "" ]
+    |> String.concat "\n"
+
+let private unfinishedSymbols = [ "prf", "Lemma", "helper_unfinished"; "def", "Definition", "def_unfinished" ]
+
+/// Admitted proofs under the remaining declaration forms: a Remark, an Example, an Instance
+/// and an obligation of a Program Definition, which the Program Definition owns.
+let private unfinishedFormsSource =
+    [ ""
+      "Remark remark_unfinished : 2 = 2."
+      "Proof. Admitted."
+      ""
+      "Example example_unfinished : 3 = 3."
+      "Admitted."
+      ""
+      "Class Marker : Prop := marker : True."
+      "Instance instance_unfinished : Marker."
+      "Proof. Admitted."
+      ""
+      "Program Definition program_unfinished : nat := _."
+      "Next Obligation. Admitted."
+      "" ]
+    |> String.concat "\n"
+
+let private unfinishedFormsSymbols =
+    [ "prf", "Remark", "remark_unfinished"; "def", "Example", "example_unfinished"
+      "inst", "Instance", "instance_unfinished"; "def", "Definition", "program_unfinished" ]
+
+let private md5 (bytes: byte[]) = Convert.ToHexStringLower(MD5.HashData bytes)
+
+/// A `.glob` naming each `keyword name` declaration of `source` at its byte span.
+let private glob (moduleName: string) (source: string) (symbols: (string * string * string) list) =
+    let definitions =
+        symbols |> List.map (fun (kind, keyword, name) ->
+            let declared = source.IndexOf(keyword + " " + name, StringComparison.Ordinal)
+            Assert.True(declared >= 0, $"{keyword} {name} is not written in the fixture source")
+            let start = declared + keyword.Length + 1
+            $"{kind} {start}:{start + name.Length - 1} <> {name}")
+    String.concat "\n" ([ "DIGEST " + md5 (Encoding.UTF8.GetBytes source); "F" + moduleName ] @ definitions) + "\n"
+
+type private Rocq =
+    { Directory: string
+      Project: string
+      Facts: string
+      Config: string
+      Laws: string
+      LawsGlob: string }
+
+let private lawsSymbols = [ "ax", "Axiom", "H_c_abi"; "prf", "Theorem", "identity_returns_input"; "prf", "Theorem", "pair_layout_sound"; "prf", "Lemma", "add_zero_helper" ]
+let private limitsSymbols = [ "prf", "Theorem", "unbounded_input_falsified"; "prf", "Theorem", "seven_is_admitted" ]
+
+let private fact (proposition: string) (assumptions: JsonNode) =
+    let entry = JsonObject()
+    entry["type"] <- JsonValue.Create proposition
+    entry["binders"] <- JsonObject()
+    if not (isNull assumptions) then entry["assumptions"] <- assumptions
+    entry :> JsonNode
+
+let private axioms (names: string list) =
+    let values = JsonArray()
+    for name in names do values.Add(JsonValue.Create name)
+    values :> JsonNode
+
+let private closed () = JsonValue.Create "closed" :> JsonNode
+
+/// Write a two-unit Rocq project. `laws` and `limits` are the unit sources; `alterFacts`
+/// and `alterConfig` edit the default facts and config before they are written.
+let private rocqWith (laws: string) (limits: string) (extraLimitsSymbols: (string * string * string) list) (alterFacts: JsonObject -> unit) (alterConfig: JsonObject -> unit) =
+    let directory = scratch "rocq"
+    let theories = Path.Combine(directory, "theories")
+    Directory.CreateDirectory theories |> ignore
+    let project = Path.Combine(directory, "_CoqProject")
+    File.WriteAllText(project, "-Q theories DossierProofs\n\ntheories/Laws.v\ntheories/Limits.v\n")
+    let lawsPath = Path.Combine(theories, "Laws.v")
+    let limitsPath = Path.Combine(theories, "Limits.v")
+    File.WriteAllText(lawsPath, laws)
+    File.WriteAllText(limitsPath, limits)
+    File.WriteAllText(Path.ChangeExtension(lawsPath, ".glob"), glob "DossierProofs.Laws" laws lawsSymbols)
+    File.WriteAllText(Path.ChangeExtension(limitsPath, ".glob"), glob "DossierProofs.Limits" limits (limitsSymbols @ extraLimitsSymbols))
+    let digests = JsonObject()
+    digests["theories/Laws.v"] <- JsonValue.Create(md5 (Encoding.UTF8.GetBytes laws))
+    digests["theories/Limits.v"] <- JsonValue.Create(md5 (Encoding.UTF8.GetBytes limits))
+    let symbols = JsonObject()
+    symbols["DossierProofs.Laws.H_c_abi"] <- fact "forall n : nat, n + 0 = n" null
+    symbols["DossierProofs.Laws.identity_returns_input"] <- fact "forall n : nat, n = n" (closed ())
+    symbols["DossierProofs.Laws.pair_layout_sound"] <- fact "forall a b : nat, a + 0 = a /\\ b = b" (axioms [ "H_c_abi" ])
+    symbols["DossierProofs.Laws.add_zero_helper"] <- fact "forall n : nat, n + 0 = n" (axioms [ "H_c_abi" ])
+    symbols["DossierProofs.Limits.unbounded_input_falsified"] <- fact "~ (forall n : nat, n = 0)" (closed ())
+    symbols["DossierProofs.Limits.seven_is_admitted"] <- fact "7 = 7" (closed ())
+    let facts = JsonObject()
+    facts["rocqVersion"] <- JsonValue.Create "9.1.0"
+    facts["digests"] <- digests
+    facts["symbols"] <- symbols
+    alterFacts facts
+    let factsPath = Path.Combine(directory, "facts.json")
+    File.WriteAllText(factsPath, facts.ToJsonString())
+    let correspondence (symbol: string) (targets: string list) =
+        let entry = JsonObject()
+        entry["RocqSymbol"] <- JsonValue.Create symbol
+        let values = JsonArray()
+        for target in targets do values.Add(JsonValue.Create target)
+        entry["Targets"] <- values
+        entry :> JsonNode
+    let config = JsonObject()
+    config["SchemaVersion"] <- JsonValue.Create 1
+    config["FalsifiedSuffix"] <- JsonValue.Create "_falsified"
+    config["CheckMarker"] <- JsonValue.Create "*Check, not a guarantee.*"
+    let mappings = JsonArray()
+    mappings.Add(correspondence "DossierProofs.Laws.identity_returns_input" [ "Dossier.Probe.Scalar.seven" ])
+    mappings.Add(correspondence "DossierProofs.Laws.pair_layout_sound" [ "H-ABI-1"; "DossierPair" ])
+    config["Correspondence"] <- mappings
+    alterConfig config
+    let configPath = Path.Combine(directory, "rocq-dossier.json")
+    File.WriteAllText(configPath, config.ToJsonString())
+    { Directory = directory; Project = project; Facts = factsPath; Config = configPath
+      Laws = lawsPath; LawsGlob = Path.ChangeExtension(lawsPath, ".glob") }
+
+let private rocq () = rocqWith lawsSource limitsSource [] ignore ignore
+
+// ---------------------------------------------------------------------------
+// Receipts and requests
+// ---------------------------------------------------------------------------
+
+let private seamReceipt (lib: Library) : SubstantiationDossier.SeamChecksReceipt =
+    let check category : SubstantiationDossier.SeamCheckEntry =
+        { Id = "seam-" + category
+          Category = category
+          Summary = "Linked target binary run for " + category
+          BinarySha256 = ClangToolchain.sha256 lib.Archive
+          Passed = true
+          Command = "./dossier-seam --category " + category }
+    { SchemaVersion = 1
+      Package = lib.Manifest.Package
+      ManifestIntegritySha256 = lib.Manifest.IntegritySha256
+      TargetTriple = "x86_64-unknown-linux-gnu"
+      Checks =
+        lib.Manifest.Boundary.RequiredSeamChecks
+        |> Array.filter (fun category -> category <> "falsification-refusal-controls")
+        |> Array.map check }
+
+let private refusalReceipt (lib: Library) : SubstantiationDossier.RefusalControlsReceipt =
+    { SchemaVersion = 1
+      Package = lib.Manifest.Package
+      ManifestIntegritySha256 = lib.Manifest.IntegritySha256
+      Controls =
+        [| { Id = "unlinked-extern"
+             ExpectedCode = "FS9243"
+             ObservedCode = "FS9243"
+             MisuseSummary = "A FidelityExtern names a symbol that no archive member defines."
+             ProtectionSummary = "Substantiation refuses the library before any manifest is written."
+             Passed = true } |] }
+
+let private writeJson (label: string) (value: 'T) =
+    let path = Path.Combine(scratch label, label + ".json")
+    File.WriteAllText(path, JsonSerializer.Serialize value)
+    path
+
+let private writeText (label: string) (text: string) =
+    let path = Path.Combine(scratch label, label + ".json")
+    File.WriteAllText(path, text)
+    path
+
+let private requestFor (manifestPath: string) : SubstantiationDossier.Request =
+    { ManifestPath = manifestPath
+      OutputDirectory = Some(scratch "output")
+      RocqProjectPath = None
+      RocqFactsPath = None
+      RocqConfigPath = None
+      SeamChecksReceiptPath = None
+      RefusalControlsReceiptPath = None }
+
+let private withRocq (fixture: Rocq) (request: SubstantiationDossier.Request) =
+    { request with RocqProjectPath = Some fixture.Project; RocqFactsPath = Some fixture.Facts; RocqConfigPath = Some fixture.Config }
+
+/// The request is refused with exactly `code`, the refusal text holds `fragment`, and no
+/// dossier file is written.
+let private refusedWithText code (fragment: string) (request: SubstantiationDossier.Request) =
+    let result = SubstantiationDossier.generate request
+    refused code result
+    match result with
+    | Error refusal -> Assert.Contains(fragment, refusal.Text)
+    | Ok _ -> ()
+    match request.OutputDirectory with
+    | Some output when Directory.Exists output && isNull (DirectoryInfo output).LinkTarget ->
+        Assert.Empty(Directory.GetFiles(output, "*.dossier.*"))
+    | _ -> ()
+
+/// The request is refused with exactly `code`, and no dossier file is written.
+let private refusedWith code (request: SubstantiationDossier.Request) = refusedWithText code "" request
+
+/// A resealed copy of the manifest, written beside nothing else, as a dossier input.
+let private resealed (lib: Library) (alter: Substantiation.Manifest -> Substantiation.Manifest) =
+    let path = Path.Combine(scratch "manifest", "DossierProbe.substantiation.json")
+    File.WriteAllText(path, lib.Manifest |> alter |> Substantiation.seal |> Substantiation.toJson)
+    path
+
+let private binderNote (name: string) (note: string) : SubstantiationDossier.DossierBinderNote = { Name = name; Note = note }
+
+let private isAscii (text: string) = text |> Seq.forall (fun ch -> ch <= '\u007F')
+
+let private sections =
+    [ "1. Open -- Unfinished / Unproved Items"
+      "2. Falsified -- Verified Guardrails and Operating Limits"
+      "3. Checks -- Precondition Sanity and Real-Binary Seam Runs"
+      "4. Guarantees -- Proven Safety Properties"
+      "5. External C/OS and Domain Assumptions (Rests on)"
+      "6. Symbol and Proof Traceability (Correspondence)" ]
+
+// ---------------------------------------------------------------------------
+// End-to-end generation
+// ---------------------------------------------------------------------------
+
+[<Fact>]
+let ``dossier API and CLI write one reconciled report for a real library with Rocq and receipts`` () =
+    let lib = library.Value
+    let fixture = rocq ()
+    let seam = writeJson "seam-checks" (seamReceipt lib)
+    let refusals = writeJson "refusal-controls" (refusalReceipt lib)
+    let request =
+        { (requestFor lib.ManifestJson |> withRocq fixture) with
+            SeamChecksReceiptPath = Some seam
+            RefusalControlsReceiptPath = Some refusals }
+    let generated = SubstantiationDossier.generate request |> accepted
+    let dossier = generated.Dossier
+    let cliOutput = scratch "cli-output"
+    let cli = requiredFile "built Farscape CLI" (Path.Combine(repository, "src", "Farscape.Cli", "bin", "Debug", "net10.0", "Farscape.Cli.dll"))
+    let launch =
+        ProcessLaunch.startInfo "dotnet"
+            [ cli; "dossier"; "--manifest"; lib.ManifestJson; "--output"; cliOutput
+              "--rocq-project"; fixture.Project; "--rocq-facts"; fixture.Facts; "--rocq-config"; fixture.Config
+              "--seam-checks"; seam; "--refusal-controls"; refusals ]
+    let summary = run cliOutput "dossier-cli" launch
+    let complete = "SUBSTANTIATED -- All compiler safety obligations are proven and all required target seam checks are recorded."
+    Assert.Contains("Package: DossierProbe", summary)
+    Assert.Contains("Overall status: " + complete, summary)
+    Assert.Contains($"Open: {dossier.Counts.Open}", summary)
+    Assert.Contains($"Falsified: {dossier.Counts.Falsified}", summary)
+    Assert.Contains($"Checks: {dossier.Counts.Checks}", summary)
+    Assert.Contains($"Guarantees: {dossier.Counts.Guarantees}", summary)
+    // The CLI and the API write the same three documents, byte for byte.
+    for extension, apiPath in [ "json", generated.JsonPath; "md", generated.MarkdownPath; "html", generated.HtmlPath ] do
+        let cliPath = Path.Combine(cliOutput, "DossierProbe.dossier." + extension)
+        Assert.Contains(cliPath, summary)
+        Assert.Equal(Path.Combine(request.OutputDirectory.Value, "DossierProbe.dossier." + extension), apiPath)
+        Assert.Equal<byte[]>(File.ReadAllBytes apiPath, File.ReadAllBytes cliPath)
+    let json = File.ReadAllText generated.JsonPath
+    let markdown = File.ReadAllText generated.MarkdownPath
+    let html = File.ReadAllText generated.HtmlPath
+    Assert.Equal<SubstantiationDossier.Dossier>(dossier, SubstantiationDossier.parseDossierJson json |> accepted)
+    Assert.Equal(json, SubstantiationDossier.toJson dossier)
+    Assert.Equal(1, dossier.SchemaVersion)
+    Assert.Equal("Farscape Substantiation Report: DossierProbe", dossier.Title)
+    Assert.Equal(complete, dossier.OverallStatus)
+    Assert.Equal(lib.Manifest.IntegritySha256, dossier.ManifestIntegritySha256)
+    // The fixture data is ASCII, so every byte of the three documents is 7-bit ASCII.
+    for document in [ json; markdown; html ] do Assert.True(isAscii document, "a generated document carries a non-ASCII character")
+    Assert.StartsWith("# Farscape Substantiation Report: DossierProbe\n", markdown)
+    Assert.Contains("<h1>Farscape Substantiation Report: DossierProbe</h1>", html)
+    Assert.Contains("**" + complete + "**", markdown)
+    Assert.Contains("<p class=\"banner banner-good\">" + complete + "</p>", html)
+    Assert.Contains("## How to Read This Report (No Formal-Methods Background Required)", markdown)
+    for heading in sections do
+        Assert.Contains("\n## " + heading + "\n", markdown)
+        Assert.Contains("<h2>" + heading + "</h2>", html)
+    Assert.StartsWith("<!DOCTYPE html>\n<html lang=\"en\">", html)
+    for element in [ "<header>"; "<section id=\"open\">"; "<section id=\"traceability\">"; "<table>"; "<style>"; "<span class=\"badge badge-good\">VERIFIED</span>" ] do
+        Assert.Contains(element, html)
+    // Legend health.
+    Assert.Equal<string[]>(
+        [| "Good (0 open)"; "Good (intentional protection)"; "Good (all recorded)"; "Good (proven)" |],
+        dossier.Legend |> Array.map (fun row -> row.Health))
+    Assert.Equal<string[]>(sections |> List.take 4 |> List.toArray, dossier.Legend |> Array.map (fun row -> row.Section))
+    // Section 1.
+    Assert.Equal(0, dossier.Open.CompilerOpenObligations)
+    Assert.Equal(0, dossier.Open.CompilerRefutedObligations)
+    Assert.Empty(dossier.Open.RocqOpen)
+    Assert.Contains("- Compiler open safety obligations: 0\n- Compiler refuted safety obligations: 0\n- Companion Rocq open theorems (Admitted): 0. No unfinished proof obligations remain.\n", markdown)
+    // Section 2.
+    Assert.True(dossier.Falsified.CompilerNonVacuityReceipts > 0, "the result range contract must produce non-vacuity receipts")
+    Assert.Contains($"{dossier.Falsified.CompilerNonVacuityReceipts} verified clause witness(es) confirming each safety conclusion can fail if its precondition is violated.", markdown)
+    Assert.True(dossier.Falsified.RefusalControlsAttached)
+    Assert.Equal("unlinked-extern", (Assert.Single dossier.Falsified.RefusalControls).Id)
+    Assert.Contains("| Id | ExpectedCode | MisuseSummary | ProtectionSummary |", markdown)
+    Assert.DoesNotContain("No external compile-time refusal receipt was attached", markdown)
+    let falsified = Assert.Single dossier.Falsified.RocqFalsified
+    Assert.Equal("DossierProofs.Limits.unbounded_input_falsified", falsified.Symbol)
+    Assert.Equal("~ (forall n : nat, n = 0)", falsified.Proposition)
+    Assert.Equal("Dropping the range precondition admits a failing input.", falsified.Summary)
+    // Section 3.
+    let proof = lib.Manifest.Proof
+    Assert.True(proof.CompilerPremiseReceiptsCount > 0, "the result range contract must produce premise receipts")
+    Assert.Contains(
+        $"cvc5 verified satisfiable preconditions on {proof.PremisesSatCount}/{proof.TotalObligations} total obligations ({proof.LibraryPremisesSatCount}/{proof.LibraryObligations} in exported library modules; {proof.CompilerPremiseReceiptsCount} conditional branch probe(s)).",
+        markdown)
+    Assert.Equal<string[]>(lib.Manifest.Boundary.RequiredSeamChecks, dossier.Checks.SeamCategories |> Array.map (fun category -> category.Category))
+    Assert.Contains("measured-record-abi", lib.Manifest.Boundary.RequiredSeamChecks)
+    Assert.All(dossier.Checks.SeamCategories, fun category ->
+        Assert.Equal("VERIFIED", category.Status)
+        Assert.NotEmpty category.Evidence)
+    let measuredSeam = dossier.Checks.SeamCategories |> Array.find (fun category -> category.Category = "measured-record-abi")
+    Assert.Equal("Pass and return by-value C structs matching probed byte size, alignment, and field offsets", measuredSeam.Description)
+    Assert.Equal<string[]>([| $"seam-measured-record-abi (binary sha256:{ClangToolchain.sha256 lib.Archive}; target x86_64-unknown-linux-gnu)" |], measuredSeam.Evidence)
+    let controlsSeam = dossier.Checks.SeamCategories |> Array.find (fun category -> category.Category = "falsification-refusal-controls")
+    Assert.Equal<string[]>([| "unlinked-extern (FS9243)" |], controlsSeam.Evidence)
+    Assert.Equal(0, dossier.Counts.PendingSeamCategories)
+    let check = Assert.Single dossier.Checks.RocqChecks
+    Assert.Equal("DossierProofs.Limits.seven_is_admitted", check.Symbol)
+    // Section 4.
+    let trust = "Depends on external C/OS contract (Rests on: H-ABI-1, H-Link-1)"
+    Assert.Equal(trust, dossier.Guarantees.TrustScope)
+    Assert.Equal(proof.LibraryObligations, dossier.Guarantees.LibraryObligations.Length)
+    Assert.All(dossier.Guarantees.LibraryObligations, fun obligation ->
+        Assert.Equal(trust, obligation.TrustScope)
+        Assert.False(String.IsNullOrWhiteSpace obligation.Kind)
+        Assert.StartsWith(lib.Scalar + ":", obligation.Source))
+    let foreignResult = dossier.Guarantees.LibraryObligations |> Array.filter (fun obligation -> obligation.Kind = "foreign-result-coverage")
+    Assert.NotEmpty foreignResult
+    Assert.All(foreignResult, fun obligation ->
+        Assert.Equal("Every foreign return sentinel and result branch is exhaustively handled", obligation.Guarantee)
+        Assert.Equal("Dossier.Probe.Scalar.seven", obligation.Declaration)
+        Assert.False obligation.ModuleLevel)
+    Assert.Contains(dossier.Guarantees.LibraryObligations, fun obligation ->
+        obligation.Kind = "integer-literal-range" && obligation.Guarantee = "Proven compiler obligation (integer-literal-range)" && obligation.Declaration = "Dossier.Probe.Scalar.three")
+    Assert.Contains($"Activation harness obligations proven: {proof.HarnessObligations}/{proof.HarnessObligations} in Farscape.SubstantiationRoot.", markdown)
+    Assert.Equal<string[]>(
+        [| "DossierProofs.Laws.identity_returns_input"; "DossierProofs.Laws.pair_layout_sound" |],
+        dossier.Guarantees.RocqGuarantees |> Array.map (fun entry -> entry.Symbol))
+    let closedGuarantee = dossier.Guarantees.RocqGuarantees[0]
+    Assert.Equal("closed", closedGuarantee.Assumptions)
+    Assert.Equal("Self-contained (no external assumptions)", closedGuarantee.TrustScope)
+    Assert.Equal("The identity result equals its argument <script>alert(1)</script> & holds for every input.", closedGuarantee.Summary)
+    Assert.Equal("forall n : nat, n = n", closedGuarantee.Proposition)
+    Assert.Equal<SubstantiationDossier.DossierBinderNote[]>([| binderNote "n" "the value passed to the foreign identity function." |], closedGuarantee.BinderNotes)
+    Assert.Equal<string[]>([| "Dossier.Probe.Scalar.seven" |], closedGuarantee.CorrespondsTo)
+    Assert.EndsWith("theories/Laws.v:7", closedGuarantee.Source)
+    let axiomGuarantee = dossier.Guarantees.RocqGuarantees[1]
+    Assert.Equal("rests-on", axiomGuarantee.Assumptions)
+    Assert.Equal<string[]>([| "H_c_abi" |], axiomGuarantee.Axioms)
+    Assert.Equal("Depends on external assumptions (Rests on: H_c_abi)", axiomGuarantee.TrustScope)
+    Assert.Equal<SubstantiationDossier.DossierBinderNote[]>(
+        [| binderNote "a" "the left field."; binderNote "b" "the right field, measured at bit offset 32." |],
+        axiomGuarantee.BinderNotes)
+    Assert.Equal<string[]>([| "H-ABI-1"; "DossierPair" |], axiomGuarantee.CorrespondsTo)
+    // A Lemma is an internal helper: it is in no group and in no document.
+    for document in [ json; markdown; html ] do Assert.DoesNotContain("add_zero_helper", document)
+    // Section 5.
+    Assert.Equal<string[]>([| "H-ABI-1"; "H-Link-1" |], dossier.Assumptions.Hypotheses |> Array.map (fun hypothesis -> hypothesis.Id))
+    Assert.Equal("Binary Layout and Calling Convention (H-ABI)", dossier.Assumptions.Hypotheses[0].Category)
+    Assert.Equal<string[]>([| "scalar-handle-link-and-call"; "measured-record-abi" |], dossier.Assumptions.Hypotheses[0].TestedBy)
+    Assert.Equal("Linked Library Binary Identity (H-Link)", dossier.Assumptions.Hypotheses[1].Category)
+    Assert.Equal<string[]>([| "scalar-handle-link-and-call"; "static-dynamic-link-elision" |], dossier.Assumptions.Hypotheses[1].TestedBy)
+    Assert.Equal<string[]>([| "H_c_abi" |], dossier.Assumptions.RocqAxioms)
+    // Section 6: every exported declaration is one row, traced through the PSG and the witness.
+    let exported =
+        lib.Manifest.Sources |> Array.collect (fun source ->
+            Array.concat [ source.RuntimeDeclarations; source.ForeignDeclarations; source.CompileTimeDeclarations ])
+    Assert.Equal<Set<string>>(Set.ofArray exported, dossier.Traceability.Declarations |> Array.map (fun row -> row.Declaration) |> Set.ofArray)
+    Assert.Equal(exported.Length, dossier.Traceability.Declarations.Length)
+    let row name = dossier.Traceability.Declarations |> Array.find (fun declaration -> declaration.Declaration = name)
+    // The compiler names the FunctionDescriptor RecordExpr as the import's source boundary; the
+    // parent walk attributes the witnessed import to the descriptor declaration's row.
+    let descriptor = row "Dossier.Probe.Boundary.dossier_identityDescriptor"
+    Assert.Equal("descriptor", descriptor.Kind)
+    let link = Assert.Single descriptor.ForeignLinks
+    Assert.Equal("dossier_probe", link.Library)
+    Assert.Equal("dossier_identity", link.Symbol)
+    Assert.Equal("probe.o", link.Member)
+    Assert.Equal("global-strong", link.Binding)
+    Assert.Matches("^[0-9a-f]{64}$", link.MemberSha256)
+    use witness = JsonDocument.Parse(File.ReadAllText lib.Manifest.WitnessUnits.Path)
+    let emitted =
+        witness.RootElement.GetProperty("units").EnumerateArray()
+        |> Seq.collect (fun unitNode -> unitNode.GetProperty("imports").EnumerateArray())
+        |> Seq.filter (fun import -> import.GetProperty("symbol").GetString() = "dossier_identity")
+        |> Seq.exactlyOne
+    let emittedNode = emitted.GetProperty("sourceBoundary").GetProperty("declaration").GetInt32()
+    Assert.NotEqual(descriptor.PsgNode, emittedNode)
+    let foreign = row "Dossier.Probe.Boundary.dossier_identity"
+    Assert.Equal("foreign", foreign.Kind)
+    Assert.Equal<SubstantiationDossier.DossierForeignLink[]>([| link |], foreign.ForeignLinks)
+    let measured = row "Dossier.Probe.Boundary.dossier_pair_sum"
+    Assert.Equal<string[]>([| "DossierPair" |], measured.MeasuredTypes)
+    Assert.Equal("dossier_pair_sum", (Assert.Single measured.ForeignLinks).Symbol)
+    let seven = row "Dossier.Probe.Scalar.seven"
+    Assert.Equal("runtime", seven.Kind)
+    Assert.Equal<string[]>([| "Dossier.Probe.Scalar.seven" |], seven.MlirSymbols)
+    Assert.Equal<string[]>([| "DossierProofs.Laws.identity_returns_input" |], seven.RocqTheorems)
+    Assert.Equal<string[]>(
+        dossier.Guarantees.LibraryObligations |> Array.filter (fun obligation -> obligation.Declaration = seven.Declaration) |> Array.map (fun obligation -> obligation.Anchor),
+        seven.Obligations)
+    Assert.NotEmpty seven.Obligations
+    Assert.StartsWith(lib.Scalar + ":2:", seven.Source)
+    Assert.Contains("| `Dossier.Probe.Boundary.dossier_identityDescriptor` | descriptor |", markdown)
+    Assert.Contains("`dossier_probe / dossier_identity (probe.o)`", markdown)
+    Assert.Contains("<code>dossier_probe / dossier_identity (probe.o)</code>", html)
+    let layout = Assert.Single dossier.Traceability.Layouts
+    Assert.Equal("DossierPair", layout.Name)
+    Assert.Equal(64, layout.SizeBits)
+    Assert.Equal<int[]>([| 0; 32 |], layout.FieldOffsetsBits)
+    Assert.Contains("| `DossierPair` | record |", markdown)
+    Assert.True(dossier.Traceability.RocqAttached)
+    Assert.Equal("9.1.0", dossier.Traceability.RocqVersion)
+    Assert.Equal<string[]>([| "DossierProofs.Laws"; "DossierProofs.Limits" |], dossier.Traceability.RocqUnits |> Array.map (fun unitEntry -> unitEntry.Module))
+    Assert.Equal(md5 (File.ReadAllBytes fixture.Laws), dossier.Traceability.RocqUnits[0].SourceMd5)
+    Assert.Equal(md5 (File.ReadAllBytes fixture.LawsGlob), dossier.Traceability.RocqUnits[0].GlobMd5)
+    let digestItems = dossier.Traceability.Digests |> Array.map (fun digest -> digest.Item)
+    for item in [ "Package"; "Manifest Integrity SHA-256"; "Fidproj SHA-256"; "Composer SHA-256"; "cvc5 Version and SHA-256"; "Clang Identity and Target"; "Link Mode"
+                  "link-provenance"; "static-archive"; "pilot"; "header"; "Rocq Version"; "Rocq Unit DossierProofs.Laws"; "Rocq Unit DossierProofs.Limits" ] do
+        Assert.Contains(item, digestItems)
+    Assert.Contains(dossier.Traceability.Digests, fun digest -> digest.Item = "static-archive" && digest.Path = lib.Archive && digest.Value = ClangToolchain.sha256 lib.Archive)
+    // Rocq documentation is data: markup characters never reach either document unescaped.
+    Assert.Contains("The identity result equals its argument &lt;script&gt;alert(1)&lt;/script&gt; &amp; holds for every input.", html)
+    Assert.DoesNotContain("<script", html)
+    Assert.Contains("&lt;script&gt;alert(1)&lt;/script&gt; &amp; holds", markdown)
+    Assert.DoesNotContain("<script", markdown)
+    // The counts the CLI prints.
+    Assert.Equal(0, dossier.Counts.Open)
+    Assert.Equal(proof.CompilerNonVacuityReceiptsCount + 2, dossier.Counts.Falsified)
+    Assert.Equal(proof.PremisesSatCount + (lib.Manifest.Boundary.RequiredSeamChecks.Length - 1) + 1, dossier.Counts.Checks)
+    Assert.Equal(proof.DischargedUnsatCount + 2, dossier.Counts.Guarantees)
+
+[<Fact>]
+let ``an admitted Rocq theorem is reported open with warning health and the action note`` () =
+    let lib = library.Value
+    let fixture = rocqWith lawsSource (limitsSource + admittedSource) [ "prf", "Theorem", "pair_sum_commutes" ] ignore ignore
+    let generated = requestFor lib.ManifestToml |> withRocq fixture |> SubstantiationDossier.generate |> accepted
+    let dossier = generated.Dossier
+    let markdown = File.ReadAllText generated.MarkdownPath
+    let html = File.ReadAllText generated.HtmlPath
+    let status = "WARNING: PARTIAL MECHANIZATION -- Compiler safety obligations are proven, but 1 or more companion Rocq theorems remain Admitted (unfinished) in Section 1."
+    Assert.Equal(status, dossier.OverallStatus)
+    Assert.Contains("<p class=\"banner banner-warning\">" + status + "</p>", html)
+    Assert.Equal("Warning (unfinished Rocq proof)", dossier.Legend[0].Health)
+    // No seam receipt was supplied: the third legend row reports the pending runs.
+    Assert.Equal("Action on target change (seam runs pending)", dossier.Legend[2].Health)
+    // facts.json carries no entry for the admitted theorem; it is still listed as open.
+    let admitted = Assert.Single dossier.Open.RocqOpen
+    Assert.Equal("DossierProofs.Limits.pair_sum_commutes", admitted.Symbol)
+    Assert.Equal("Open", admitted.Group)
+    Assert.Equal("The pair sum is commutative.", admitted.Summary)
+    Assert.Equal("(a b : nat) : a + b = b + a", admitted.Proposition)
+    Assert.Equal("", admitted.TrustScope)
+    Assert.Equal(1, dossier.Counts.Open)
+    Assert.Contains("- Companion Rocq open theorems (Admitted): 1\n", markdown)
+    Assert.DoesNotContain("No unfinished proof obligations remain.", markdown)
+    Assert.Contains("| Rocq Symbol | Source | Statement Summary |", markdown)
+    Assert.Contains("| `DossierProofs.Limits.pair_sum_commutes` |", markdown)
+    Assert.Contains("\nCaller action: Do not rely on this theorem's claim yet. Maintainer action: Replace Admitted with Qed.\n", markdown)
+    Assert.Contains("<p>Caller action: Do not rely on this theorem&#39;s claim yet. Maintainer action: Replace Admitted with Qed.</p>", html)
+    // The other groups are unchanged by the open theorem.
+    Assert.Equal(2, dossier.Guarantees.RocqGuarantees.Length)
+    Assert.Single dossier.Falsified.RocqFalsified |> ignore
+    Assert.Single dossier.Checks.RocqChecks |> ignore
+
+[<Fact>]
+let ``an admitted Lemma and an admitted proof-mode Definition are reported open while every Theorem is proved`` () =
+    let lib = library.Value
+    let status = "WARNING: PARTIAL MECHANIZATION -- Compiler safety obligations are proven, but 1 or more companion Rocq theorems remain Admitted (unfinished) in Section 1."
+    let symbolsOf (entries: SubstantiationDossier.DossierRocqEntry[]) = entries |> Array.map (fun entry -> entry.Symbol)
+    let generate (fixture: Rocq) = requestFor lib.ManifestJson |> withRocq fixture |> SubstantiationDossier.generate |> accepted
+    // The same project without the unfinished declarations reports no open item.
+    let proved = (generate (rocq ())).Dossier
+    Assert.Empty proved.Open.RocqOpen
+    Assert.Equal(0, proved.Counts.Open)
+    Assert.Equal("Good (0 open)", proved.Legend[0].Health)
+    Assert.NotEqual<string>(status, proved.OverallStatus)
+    // Every Theorem of both units ends in Qed; the Lemma and the Definition end in Admitted.
+    // facts.json carries no entry for either, as for any constant Rocq did not check.
+    let generated = generate (rocqWith lawsSource (limitsSource + unfinishedSource) unfinishedSymbols ignore ignore)
+    let dossier = generated.Dossier
+    let markdown = File.ReadAllText generated.MarkdownPath
+    let html = File.ReadAllText generated.HtmlPath
+    Assert.Equal<string[]>(
+        [| "DossierProofs.Limits.helper_unfinished"; "DossierProofs.Limits.def_unfinished" |],
+        symbolsOf dossier.Open.RocqOpen)
+    let helper, definition = dossier.Open.RocqOpen[0], dossier.Open.RocqOpen[1]
+    Assert.Equal("Lemma", helper.Keyword)
+    Assert.Equal("An internal helper that is not proved.", helper.Summary)
+    Assert.Equal(": 1 = 1", helper.Proposition)
+    Assert.Equal("Definition", definition.Keyword)
+    Assert.Equal("A value built in proof mode and not finished.", definition.Summary)
+    Assert.Equal(": nat", definition.Proposition)
+    for entry in dossier.Open.RocqOpen do
+        Assert.Equal("Open", entry.Group)
+        Assert.Equal("not-reported", entry.Assumptions)
+        Assert.Empty entry.Axioms
+        Assert.Equal("", entry.TrustScope)
+        Assert.Empty entry.CorrespondsTo
+    Assert.Equal(proved.Counts.Open + 2, dossier.Counts.Open)
+    Assert.Equal(status, dossier.OverallStatus)
+    Assert.Equal("Warning (unfinished Rocq proof)", dossier.Legend[0].Health)
+    Assert.Contains("<p class=\"banner banner-warning\">" + status + "</p>", html)
+    Assert.Contains("- Companion Rocq open theorems (Admitted): 2\n", markdown)
+    Assert.DoesNotContain("No unfinished proof obligations remain.", markdown)
+    Assert.Contains("| `DossierProofs.Limits.helper_unfinished` |", markdown)
+    Assert.Contains("| `DossierProofs.Limits.def_unfinished` |", markdown)
+    // The proved groups hold the public theorems only, exactly as without the open items.
+    Assert.Equal<string[]>(symbolsOf proved.Guarantees.RocqGuarantees, symbolsOf dossier.Guarantees.RocqGuarantees)
+    Assert.Equal<string[]>(symbolsOf proved.Falsified.RocqFalsified, symbolsOf dossier.Falsified.RocqFalsified)
+    Assert.Equal<string[]>(symbolsOf proved.Checks.RocqChecks, symbolsOf dossier.Checks.RocqChecks)
+    Assert.Equal(proved.Counts.Guarantees, dossier.Counts.Guarantees)
+    // Each of the two alone is one open item.
+    let lemmaOnly = unfinishedSource.Substring(0, unfinishedSource.IndexOf("(** A value built", StringComparison.Ordinal))
+    let definitionOnly = "\n" + unfinishedSource.Substring(unfinishedSource.IndexOf("(** A value built", StringComparison.Ordinal))
+    for source, symbol, name in
+        [ lemmaOnly, unfinishedSymbols[0], "DossierProofs.Limits.helper_unfinished"
+          definitionOnly, unfinishedSymbols[1], "DossierProofs.Limits.def_unfinished" ] do
+        let single = (generate (rocqWith lawsSource (limitsSource + source) [ symbol ] ignore ignore)).Dossier
+        Assert.Equal<string[]>([| name |], symbolsOf single.Open.RocqOpen)
+        Assert.Equal(proved.Counts.Open + 1, single.Counts.Open)
+        Assert.Equal(status, single.OverallStatus)
+    // The remaining declaration forms: a Remark, an Example, an Instance, and the Program
+    // Definition that owns an admitted obligation.
+    let forms = (generate (rocqWith lawsSource (limitsSource + unfinishedFormsSource) unfinishedFormsSymbols ignore ignore)).Dossier
+    Assert.Equal<(string * string)[]>(
+        [| "DossierProofs.Limits.remark_unfinished", "Remark"
+           "DossierProofs.Limits.example_unfinished", "Example"
+           "DossierProofs.Limits.instance_unfinished", "Instance"
+           "DossierProofs.Limits.program_unfinished", "Definition" |],
+        forms.Open.RocqOpen |> Array.map (fun entry -> entry.Symbol, entry.Keyword))
+    Assert.Equal(proved.Counts.Open + 4, forms.Counts.Open)
+    Assert.Equal(status, forms.OverallStatus)
+    // An open item outside the public theorem keywords is no Correspondence symbol.
+    let mapped =
+        rocqWith lawsSource (limitsSource + unfinishedSource) unfinishedSymbols ignore (fun config ->
+            let entry = JsonObject()
+            entry["RocqSymbol"] <- JsonValue.Create "DossierProofs.Limits.helper_unfinished"
+            let targets = JsonArray()
+            targets.Add(JsonValue.Create "Dossier.Probe.Scalar.seven")
+            entry["Targets"] <- targets
+            config["Correspondence"].AsArray().Add entry)
+    requestFor lib.ManifestJson |> withRocq mapped |> refusedWithText "FS9250" "is no public theorem statement"
+
+[<Fact>]
+let ``a dossier without Rocq or receipts reports pending seam runs and the fixed absence texts`` () =
+    let lib = library.Value
+    let generated = requestFor lib.ManifestJson |> SubstantiationDossier.generate |> accepted
+    let dossier = generated.Dossier
+    let markdown = File.ReadAllText generated.MarkdownPath
+    let pending = "SUBSTANTIATED (COMPILER PROOFS COMPLETE; TARGET SEAM RUNS PENDING) -- All compiler safety obligations are proven; run target binary seam checks in Section 3 before production deployment."
+    Assert.Equal(pending, dossier.OverallStatus)
+    Assert.Equal(lib.Manifest.Boundary.RequiredSeamChecks.Length, dossier.Counts.PendingSeamCategories)
+    Assert.All(dossier.Checks.SeamCategories, fun category ->
+        Assert.Equal("PENDING TARGET RUN", category.Status)
+        Assert.Empty category.Evidence)
+    Assert.False(dossier.Traceability.RocqAttached)
+    Assert.False(dossier.Falsified.RefusalControlsAttached)
+    for absence in
+        [ "No external compile-time refusal receipt was attached to this dossier run (--refusal-controls)."
+          "No companion Rocq counterexample theorems attached."
+          "No companion Rocq check witnesses attached."
+          "Companion Rocq open theorems (Admitted): 0. No unfinished proof obligations remain." ] do
+        Assert.Contains(absence, markdown)
+    Assert.DoesNotContain("### Companion Rocq Guarantees", markdown)
+    Assert.Contains("### Companion Rocq counterexamples (\\*\\_falsified)", markdown)
+    Assert.Contains("<h3>Companion Rocq counterexamples (*_falsified)</h3>", File.ReadAllText generated.HtmlPath)
+    // The same manifest in its TOML form yields the same report.
+    let fromToml = requestFor lib.ManifestToml |> SubstantiationDossier.generate |> accepted
+    Assert.Equal<SubstantiationDossier.Dossier>({ dossier with ManifestPath = lib.ManifestToml; Traceability = fromToml.Dossier.Traceability }, fromToml.Dossier)
+    Assert.Equal<SubstantiationDossier.DossierDeclaration[]>(dossier.Traceability.Declarations, fromToml.Dossier.Traceability.Declarations)
+    // A partial receipt set leaves exactly the unrecorded categories pending.
+    let partial = { seamReceipt lib with Checks = (seamReceipt lib).Checks |> Array.take 1 }
+    let partly =
+        { requestFor lib.ManifestJson with SeamChecksReceiptPath = Some(writeJson "seam-checks" partial) }
+        |> SubstantiationDossier.generate |> accepted
+    Assert.Equal(pending, partly.Dossier.OverallStatus)
+    Assert.Equal(lib.Manifest.Boundary.RequiredSeamChecks.Length - 1, partly.Dossier.Counts.PendingSeamCategories)
+    Assert.Equal("VERIFIED", partly.Dossier.Checks.SeamCategories[0].Status)
+
+[<Fact>]
+let ``obligation kinds map to the fixed guarantee texts`` () =
+    for kind, text in
+        [ "ForeignResultCoverage", "Every foreign return sentinel and result branch is exhaustively handled"
+          "ResourceConversion", "Foreign handle acquisition and null/validity conversion preserve ownership invariants"
+          "ResourceCleanup", "Owned foreign resource is released along every execution path"
+          "SnapshotBorrowBound", "Borrowed memory view access stays within proven byte capacity and lifetime"
+          "OptionalEntryArgumentConversion", "Optional foreign argument conversion preserves presence and pointer validity"
+          "OptionalEntryAbsenceArgumentConversion", "Absent optional foreign argument passes the exact null/sentinel representation" ] do
+        Assert.Equal(text, SubstantiationDossier.guaranteeOf (Some kind))
+    // Composer writes kinds in kebab-case; both spellings of one kind select one text.
+    Assert.Equal(SubstantiationDossier.guaranteeOf (Some "ResourceCleanup"), SubstantiationDossier.guaranteeOf (Some "resource-cleanup"))
+    Assert.Equal("Proven compiler obligation (numeric-carrier-coverage)", SubstantiationDossier.guaranteeOf (Some "numeric-carrier-coverage"))
+    Assert.Equal("Proven compiler safety obligation", SubstantiationDossier.guaranteeOf None)
+
+[<Fact>]
+let ``dossier JSON parsing is a strict round trip and HTML escapes every non-ASCII character`` () =
+    let lib = library.Value
+    let dossier = (requestFor lib.ManifestJson |> withRocq (rocq ()) |> SubstantiationDossier.generate |> accepted).Dossier
+    let json = SubstantiationDossier.toJson dossier
+    Assert.Equal<SubstantiationDossier.Dossier>(dossier, SubstantiationDossier.parseDossierJson json |> accepted)
+    let edited (alter: JsonObject -> unit) =
+        let node = JsonNode.Parse(json).AsObject()
+        alter node
+        node.ToJsonString()
+    for malformed in
+        [ "{"
+          "[]"
+          edited (fun node -> node.Remove "Package" |> ignore)
+          edited (fun node -> node["Unknown"] <- JsonValue.Create 1)
+          edited (fun node -> node["Package"] <- null)
+          edited (fun node -> node["SchemaVersion"] <- JsonValue.Create 2)
+          edited (fun node -> node.["Counts"].AsObject().Remove "Open" |> ignore)
+          json.Replace("\"SchemaVersion\": 1,", "\"SchemaVersion\": 1,\n  \"SchemaVersion\": 1,") ] do
+        SubstantiationDossier.parseDossierJson malformed |> refused "FS9247"
+    // A non-ASCII proposition and markup in a symbol reach HTML only as character references.
+    let entry = { dossier.Guarantees.RocqGuarantees[0] with Proposition = "\u2200 n : nat, n = n \U0001D53D"; Symbol = "A.<b>\"'&" }
+    let html = SubstantiationDossier.toHtml { dossier with Guarantees = { dossier.Guarantees with RocqGuarantees = [| entry |] } }
+    Assert.True(isAscii html)
+    Assert.Contains("<code>&#x2200; n : nat, n = n &#x1D53D;</code>", html)
+    Assert.Contains("<code>A.&lt;b&gt;&quot;&#39;&amp;</code>", html)
+    let markdown = SubstantiationDossier.toMarkdown { dossier with Guarantees = { dossier.Guarantees with RocqGuarantees = [| { entry with Summary = "a|b `c` <d> [e] *f* _g_ \\h"; Symbol = "x`y|z" } |] } }
+    Assert.Contains("a\\|b \\`c\\` &lt;d&gt; \\[e\\] \\*f\\* \\_g\\_ \\\\h", markdown)
+    Assert.Contains("``x`y\\|z``", markdown)
+
+// ---------------------------------------------------------------------------
+// Fail-closed controls
+// ---------------------------------------------------------------------------
+
+[<Fact>]
+let ``stale manifest evidence refuses with FS9248`` () =
+    let lib = library.Value
+    let manifest = lib.Manifest
+    let artifact name = Path.Combine(manifest.ArtifactsDirectory, name)
+    let evidence =
+        [ lib.Scalar
+          artifact "06c_psg_discharge.json"
+          artifact "06a_obligations.json"
+          artifact "06b_premises_sat.stdout"
+          manifest.WitnessUnits.Path
+          manifest.Psg0.Path
+          lib.Provenance
+          lib.Archive
+          manifest.FidprojPath
+          manifest.Proof.StageReceipts[0].Path ]
+    for path in evidence do
+        changedBytes path (fun bytes -> Array.append bytes [| 10uy |]) (fun () ->
+            requestFor lib.ManifestJson |> refusedWith "FS9248")
+        let held = path + ".held"
+        try
+            File.Move(path, held)
+            requestFor lib.ManifestJson |> refusedWith "FS9248"
+        finally
+            File.Move(held, path)
+    // A tool whose bytes differ from the recorded digest is stale evidence as well.
+    resealed lib (fun manifest -> { manifest with Compiler = { manifest.Compiler with Sha256 = String.replicate 64 "0" } })
+    |> requestFor |> refusedWith "FS9248"
+    requestFor lib.ManifestJson |> SubstantiationDossier.generate |> accepted |> ignore
+
+[<Fact>]
+let ``stale Rocq and receipt digests refuse with FS9248`` () =
+    let lib = library.Value
+    // The .v bytes no longer match the DIGEST line of the .glob.
+    let stale = rocq ()
+    File.AppendAllText(stale.Laws, "\n")
+    requestFor lib.ManifestJson |> withRocq stale |> refusedWith "FS9248"
+    // facts.json records a digest that differs from the .glob DIGEST line.
+    let digest path (alter: JsonObject -> unit) = rocqWith lawsSource limitsSource [] (fun facts -> alter (facts["digests"].AsObject())) ignore |> path
+    for facts in
+        [ digest id (fun digests -> digests["theories/Laws.v"] <- JsonValue.Create(String.replicate 32 "0"))
+          digest id (fun digests -> digests.Remove "theories/Limits.v" |> ignore)
+          digest id (fun digests -> digests["theories/Extra.v"] <- JsonValue.Create(String.replicate 32 "0")) ] do
+        requestFor lib.ManifestJson |> withRocq facts |> refusedWith "FS9248"
+    // A receipt that records another manifest's integrity digest.
+    let other = String.replicate 64 "a"
+    { requestFor lib.ManifestJson with SeamChecksReceiptPath = Some(writeJson "seam-checks" { seamReceipt lib with ManifestIntegritySha256 = other }) }
+    |> refusedWith "FS9248"
+    { requestFor lib.ManifestJson with RefusalControlsReceiptPath = Some(writeJson "refusal-controls" { refusalReceipt lib with ManifestIntegritySha256 = other }) }
+    |> refusedWith "FS9248"
+
+[<Fact>]
+let ``an invalid companion Rocq project refuses with FS9249`` () =
+    let lib = library.Value
+    let refusedRocq (fixture: Rocq) = requestFor lib.ManifestJson |> withRocq fixture |> refusedWith "FS9249"
+    // GlobMissing.
+    let missingGlob = rocq ()
+    File.Delete missingGlob.LawsGlob
+    refusedRocq missingGlob
+    // GlobHasNoDigest.
+    let noDigest = rocq ()
+    File.WriteAllText(noDigest.LawsGlob, (File.ReadAllText noDigest.LawsGlob).Replace("DIGEST " + md5 (File.ReadAllBytes noDigest.Laws), "DIGEST NO"))
+    refusedRocq noDigest
+    // SourceMissing and ProjectFileMissing.
+    let missingSource = rocq ()
+    File.Delete missingSource.Laws
+    refusedRocq missingSource
+    let missingProject = rocq ()
+    File.Delete missingProject.Project
+    refusedRocq missingProject
+    // A project that lists no unit.
+    let empty = rocqWith lawsSource limitsSource [] (fun facts -> facts["digests"] <- JsonObject()) ignore
+    File.WriteAllText(empty.Project, "-Q theories DossierProofs\n")
+    refusedRocq empty
+    // A proved public theorem without a fact, without a type, or without assumptions.
+    let symbols (alter: JsonObject -> unit) = rocqWith lawsSource limitsSource [] (fun facts -> alter (facts["symbols"].AsObject())) ignore
+    refusedRocq (symbols (fun entries -> entries.Remove "DossierProofs.Laws.identity_returns_input" |> ignore))
+    refusedRocq (symbols (fun entries -> entries.Remove "DossierProofs.Limits.unbounded_input_falsified" |> ignore))
+    refusedRocq (symbols (fun entries -> entries.Remove "DossierProofs.Limits.seven_is_admitted" |> ignore))
+    refusedRocq (symbols (fun entries -> entries.["DossierProofs.Laws.identity_returns_input"].AsObject().Remove "assumptions" |> ignore))
+    refusedRocq (symbols (fun entries -> entries.["DossierProofs.Limits.seven_is_admitted"].AsObject().Remove "type" |> ignore))
+    // Binder documentation that names no written binder, repeats one, or reverses the order.
+    let laws (before: string) (after: string) =
+        Assert.Contains(before, lawsSource)
+        rocqWith (lawsSource.Replace(before, after)) limitsSource [] ignore ignore
+    refusedRocq (laws "- [n:] the value passed" "- [wrong_binder:] the value passed")
+    refusedRocq (laws "    - [n:] the value passed to the foreign identity function. *)" "    - [n:] the value passed.\n    - [n:] the same binder again. *)")
+    refusedRocq (laws "    - [a:] the left field.\n    - [b:] the right field,\n      measured at bit offset 32. *)" "    - [b:] the right field.\n    - [a:] the left field. *)")
+    // The same check applies to an internal Lemma, which is no public entry.
+    refusedRocq (laws "(** A helper fact about addition. *)" "(** A helper fact about addition.\n    - [m:] no such binder. *)")
+    // A subsequence of the written binders, in written order, is accepted.
+    let subsequence = laws "    - [a:] the left field.\n    - [b:] the right field,\n      measured at bit offset 32. *)" "    - [b:] the right field. *)"
+    let generated = requestFor lib.ManifestJson |> withRocq subsequence |> SubstantiationDossier.generate |> accepted
+    Assert.Equal<SubstantiationDossier.DossierBinderNote[]>([| binderNote "b" "the right field." |], generated.Dossier.Guarantees.RocqGuarantees[1].BinderNotes)
+
+[<Fact>]
+let ``an unterminated Rocq unit and an admission that no declaration owns refuse with FS9249`` () =
+    let lib = library.Value
+    // Each unit carries a current .glob and, where a theorem is named, a .glob symbol and a
+    // facts.json entry for it. Without the refusal the theorem would be listed as proved.
+    let limitsWith (extra: string) (symbols: (string * string * string) list) =
+        rocqWith lawsSource (limitsSource + extra) symbols (fun facts ->
+            for _, _, name in symbols do
+                facts["symbols"].AsObject().["DossierProofs.Limits." + name] <- fact "True" (closed ())) ignore
+    let refusedUnit (fragment: string) (fixture: Rocq) =
+        requestFor lib.ManifestJson |> withRocq fixture |> refusedWithText "FS9249" fragment
+    // Control: the same theorem, terminated and closed by Qed, is a guarantee.
+    let complete = limitsWith "\nTheorem closed_proof : True.\nProof. exact I. Qed.\n" [ "prf", "Theorem", "closed_proof" ]
+    let proved = (requestFor lib.ManifestJson |> withRocq complete |> SubstantiationDossier.generate |> accepted).Dossier
+    Assert.Contains("DossierProofs.Limits.closed_proof", proved.Guarantees.RocqGuarantees |> Array.map (fun entry -> entry.Symbol))
+    Assert.Empty proved.Open.RocqOpen
+    // The unit ends inside a declaration sentence: the statement has no terminator.
+    refusedUnit "ends inside a sentence that has no terminator" (limitsWith "\nTheorem dangling : True" [])
+    refusedUnit "ends inside a sentence that has no terminator" (limitsWith "\nTheorem closed_proof : True.\nProof. exact I. Qed.\nLemma dangling : 1 = 1" [ "prf", "Theorem", "closed_proof" ])
+    // The unit ends inside a proof: no Qed, Defined, Admitted or Abort closes it.
+    refusedUnit "ends inside the proof of 'open_proof'" (limitsWith "\nTheorem open_proof : True.\nProof. exact I.\n" [ "prf", "Theorem", "open_proof" ])
+    refusedUnit "ends inside the proof of 'open_definition'" (limitsWith "\nDefinition open_definition : nat.\nProof. exact 0.\n" [ "def", "Definition", "open_definition" ])
+    // The statement is the last sentence of the unit, so the proof it opens has no sentence.
+    refusedUnit "the file ends inside a proof" (limitsWith "\nTheorem last_statement : True.\n" [ "prf", "Theorem", "last_statement" ])
+    // The unit ends inside a comment that encloses no sentence.
+    refusedUnit "unterminated comment" (limitsWith "\n(* Lemma hidden : False. Admitted." [])
+    // An Admitted sentence that closes no proof of a declaration: an obligation with no
+    // Program declaration before it, and Admitted with no proof open.
+    refusedUnit "This Admitted sentence closes no proof of a declaration" (limitsWith "\nNext Obligation. Admitted.\n" [])
+    refusedUnit "This Admitted sentence closes no proof of a declaration" (limitsWith "\nAdmitted.\n" [])
+    // Admit Obligations admits the obligations of a Program declaration without an Admitted sentence.
+    refusedUnit "Admit Obligations admits obligations" (limitsWith "\nProgram Definition program_admitted : nat := _.\nAdmit Obligations.\n" [ "def", "Definition", "program_admitted" ])
+    // An Admitted declaration that has no name cannot be listed.
+    refusedUnit "declaration has no name" (limitsWith "\nLemma unnamed_in_glob : 1 = 1.\nAdmitted.\n" [])
+
+[<Fact>]
+let ``unreconciled correspondence refuses with FS9250`` () =
+    let lib = library.Value
+    let manifest = lib.Manifest
+    // Rocq correspondence naming no Clef declaration, no Rocq statement, or an internal Lemma.
+    let mapping (symbol: string) (target: string) =
+        rocqWith lawsSource limitsSource [] ignore (fun config ->
+            let entry = JsonObject()
+            entry["RocqSymbol"] <- JsonValue.Create symbol
+            let targets = JsonArray()
+            targets.Add(JsonValue.Create target)
+            entry["Targets"] <- targets
+            config["Correspondence"].AsArray().Add entry)
+    for fixture in
+        [ mapping "DossierProofs.Limits.seven_is_admitted" "Dossier.Probe.Scalar.absent"
+          mapping "DossierProofs.Limits.seven_is_admitted" "H-Callback-1"
+          mapping "DossierProofs.Limits.absent" "Dossier.Probe.Scalar.seven"
+          mapping "DossierProofs.Laws.add_zero_helper" "Dossier.Probe.Scalar.seven" ] do
+        requestFor lib.ManifestJson |> withRocq fixture |> refusedWith "FS9250"
+    // Each admitted target kind resolves: a declaration, a measured layout and a hypothesis.
+    for target in [ "Dossier.Probe.Boundary.dossier_pair_sumDescriptor"; "DossierPair"; "H-Link-1" ] do
+        requestFor lib.ManifestJson |> withRocq (mapping "DossierProofs.Limits.seven_is_admitted" target) |> SubstantiationDossier.generate |> accepted |> ignore
+    // A witness manifest rebound to a valid digest still has to reconcile.
+    let witness expected (alter: JsonNode -> unit) =
+        changedBytes manifest.WitnessUnits.Path (fun bytes ->
+            let json = JsonNode.Parse(Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF'))
+            alter json
+            Encoding.UTF8.GetBytes(json.ToJsonString())) (fun () ->
+                let request =
+                    resealed lib (fun manifest -> { manifest with WitnessUnits = { manifest.WitnessUnits with Sha256 = ClangToolchain.sha256 manifest.WitnessUnits.Path } })
+                    |> requestFor
+                if expected = "" then SubstantiationDossier.generate request |> accepted |> ignore
+                else refusedWith expected request)
+    let obligations (json: JsonNode) = json.["proof"].["obligations"].AsArray()
+    witness "" ignore
+    // The obligation list of the witness against the retained obligation inventory.
+    witness "FS9250" (fun json -> (obligations json).[0].["kind"] <- JsonValue.Create "")
+    witness "FS9250" (fun json -> (obligations json).[0].["kind"] <- JsonValue.Create "forged-kind")
+    witness "FS9250" (fun json -> (obligations json).[0].["source"] <- JsonValue.Create "/forged/Source.clef:1:1")
+    witness "FS9250" (fun json -> (obligations json).[0].["anchor"] <- JsonValue.Create "forged_anchor")
+    witness "FS9250" (fun json -> (obligations json).RemoveAt 0)
+    witness "FS9250" (fun json -> (obligations json).Add((obligations json).[0].DeepClone()))
+    // The source proof receipt embedded in the witness against 06c_psg_discharge.json.
+    witness "FS9250" (fun json -> json.["proof"].["source"].["Invocation"] <- JsonValue.Create(Guid.NewGuid().ToString()))
+    witness "FS9250" (fun json -> json.["proof"].["source"].["QuerySha256"] <- JsonValue.Create(String.replicate 64 "0"))
+    // A witnessed definition whose source node is a library node and whose traversal root is not.
+    witness "FS9250" (fun json ->
+        let definitions = json.["units"].AsArray().[0].["definitions"].AsArray()
+        let definition (symbol: string) = definitions |> Seq.find (fun entry -> entry.["symbol"].GetValue<string>() = symbol)
+        (definition "Dossier.Probe.Scalar.seven").["traversalRoot"] <- (definition "main").["traversalRoot"].DeepClone())
+    // Without a proof obligation list every obligation takes the fixed fallback text.
+    changedBytes manifest.WitnessUnits.Path (fun bytes ->
+        let json = JsonNode.Parse(Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF'))
+        json["proof"] <- null
+        Encoding.UTF8.GetBytes(json.ToJsonString())) (fun () ->
+            let generated =
+                resealed lib (fun manifest -> { manifest with WitnessUnits = { manifest.WitnessUnits with Sha256 = ClangToolchain.sha256 manifest.WitnessUnits.Path } })
+                |> requestFor |> SubstantiationDossier.generate |> accepted
+            Assert.All(generated.Dossier.Guarantees.LibraryObligations, fun obligation ->
+                Assert.Equal("", obligation.Kind)
+                Assert.Equal("Proven compiler safety obligation", obligation.Guarantee)))
+    // A forged pairing on the witnessed foreign import is a substantiation FS9243, reported
+    // by the dossier as a correspondence failure.
+    let emittedImport (json: JsonNode) =
+        json["units"].AsArray()
+        |> Seq.collect (fun unitNode -> unitNode["imports"].AsArray())
+        |> Seq.find (fun import -> import["symbol"].GetValue<string>() = "dossier_identity")
+    witness "FS9250" (fun json -> (emittedImport json).["sourceBoundary"].["library"] <- JsonValue.Create "not_linked")
+    witness "FS9250" (fun json -> (emittedImport json).["symbol"] <- JsonValue.Create "uninventoried_symbol")
+    // A valid symbol of the same library on the wrong FunctionDescriptor is refused as well:
+    // the import of `dossier_identity` renamed to `dossier_pair_sum`, and the same import
+    // moved to the `dossier_pair_sum` descriptor binding.
+    let retainedPsg = JsonNode.Parse(File.ReadAllText(manifest.Psg0.Path).TrimStart('\uFEFF'))
+    let pairSumDescriptor =
+        retainedPsg["nodes"].AsArray()
+        |> Seq.find (fun node -> node["kind"].GetValue<string>().StartsWith("Binding (\"dossier_pair_sumDescriptor\"", StringComparison.Ordinal))
+        |> fun node -> node["id"].GetValue<int>()
+    witness "FS9250" (fun json -> (emittedImport json).["symbol"] <- JsonValue.Create "dossier_pair_sum")
+    witness "FS9250" (fun json -> (emittedImport json).["sourceBoundary"].["declaration"] <- JsonValue.Create pairSumDescriptor)
+    requestFor lib.ManifestJson |> SubstantiationDossier.generate |> accepted |> ignore
+
+[<Fact>]
+let ``a witnessed import retargeted to a result contract or a runtime binding refuses with FS9250`` () =
+    let lib = library.Value
+    let manifest = lib.Manifest
+    let linked, identity = "dossier_probe", "dossier_identity"
+    let correspondence = Substantiation.validateManifestCorrespondence manifest |> accepted
+    let declaration (qualified: string) = correspondence.Declarations |> Array.find (fun node -> node.Qualified = qualified)
+    let foreign = declaration "Dossier.Probe.Boundary.dossier_identity"
+    let descriptor = declaration "Dossier.Probe.Boundary.dossier_identityDescriptor"
+    let contract = declaration "Dossier.Probe.Boundary.identityResultContract"
+    let runtime = declaration "Dossier.Probe.Scalar.seven"
+    Assert.Equal(Some(linked, identity), foreign.Foreign)
+    Assert.Equal(Substantiation.DescriptorSymbol.Named identity, descriptor.Descriptor)
+    // The result contract and the runtime function declare no foreign symbol.
+    for binding in [ contract; runtime ] do
+        Assert.Equal(None, binding.Foreign)
+        Assert.Equal(Substantiation.DescriptorSymbol.NotDescriptor, binding.Descriptor)
+    let witnessed = Assert.Single(correspondence.Imports |> Array.filter (fun import -> import.Symbol = identity))
+    Assert.Equal((linked, descriptor.Qualified), (witnessed.Library, witnessed.Declaration))
+    // 1. The dossier's own reconciliation of a verified correspondence. The import keeps its
+    //    library and symbol, which the library's FidelityExtern declaration declares; only
+    //    the declaration it names changes.
+    let owners (altered: Substantiation.Correspondence) : Result<unit, Diagnostics.Refusal> =
+        try Ok(SubstantiationDossier.requireImportOwners manifest.WitnessUnits.Path altered)
+        with :? Diagnostics.RefusalException as refusal -> Error refusal.Refusal
+    let retargeted (owner: string) (node: int) : Substantiation.Correspondence =
+        { correspondence with
+            Imports =
+                correspondence.Imports |> Array.map (fun import ->
+                    if import.Symbol = identity then { import with Declaration = owner; DeclarationNode = node } else import) }
+    let refusedOwner (fragment: string) (altered: Substantiation.Correspondence) =
+        let result = owners altered
+        refused "FS9250" result
+        match result with
+        | Error refusal -> Assert.Contains(fragment, refusal.Text)
+        | Ok () -> ()
+    owners correspondence |> accepted
+    owners (retargeted descriptor.Qualified descriptor.BindingNodeId) |> accepted
+    owners (retargeted foreign.Qualified foreign.BindingNodeId) |> accepted
+    refusedOwner "is neither a FidelityExtern declaration nor a FunctionDescriptor" (retargeted contract.Qualified contract.BindingNodeId)
+    refusedOwner "is neither a FidelityExtern declaration nor a FunctionDescriptor" (retargeted runtime.Qualified runtime.BindingNodeId)
+    refusedOwner "is no unique module binding of the library" (retargeted "Dossier.Probe.Boundary.absent" 0)
+    // 2. The same retargeting in the retained witness manifest, rebound to a valid digest
+    //    and a valid envelope, through the complete generator.
+    let witness expected (fragment: string) (node: int) =
+        changedBytes manifest.WitnessUnits.Path (fun bytes ->
+            let json = JsonNode.Parse(Encoding.UTF8.GetString(bytes).TrimStart('﻿'))
+            let emitted =
+                json["units"].AsArray()
+                |> Seq.collect (fun unitNode -> unitNode["imports"].AsArray())
+                |> Seq.filter (fun import -> import["symbol"].GetValue<string>() = identity)
+                |> Seq.exactlyOne
+            emitted.["sourceBoundary"].["declaration"] <- JsonValue.Create node
+            Encoding.UTF8.GetBytes(json.ToJsonString())) (fun () ->
+                let request =
+                    resealed lib (fun manifest -> { manifest with WitnessUnits = { manifest.WitnessUnits with Sha256 = ClangToolchain.sha256 manifest.WitnessUnits.Path } })
+                    |> requestFor
+                if expected = "" then SubstantiationDossier.generate request |> accepted |> ignore
+                else refusedWithText expected fragment request)
+    witness "" "" witnessed.DeclarationNode
+    witness "" "" descriptor.BindingNodeId
+    witness "" "" foreign.BindingNodeId
+    witness "FS9250" "nor a FunctionDescriptor. (substantiation FS9243)" contract.BindingNodeId
+    witness "FS9250" "(substantiation FS9243)" runtime.BindingNodeId
+    requestFor lib.ManifestJson |> SubstantiationDossier.generate |> accepted |> ignore
+
+[<Fact>]
+let ``invalid seam and refusal receipts refuse with FS9251`` () =
+    let lib = library.Value
+    let seam = seamReceipt lib
+    let first = seam.Checks[0]
+    let seamWith (check: SubstantiationDossier.SeamCheckEntry) = { seam with Checks = Array.append [| check |] (Array.tail seam.Checks) }
+    for receipt in
+        [ { seam with SchemaVersion = 2 }
+          { seam with Package = "OtherPackage" }
+          { seam with TargetTriple = " " }
+          seamWith { first with Category = "unknown-category" }
+          seamWith { first with Category = "falsification-refusal-controls" }
+          seamWith { first with Category = "callback-registration-invocation" }
+          seamWith { first with Passed = false }
+          seamWith { first with Id = "" }
+          seamWith { first with Id = seam.Checks[1].Id }
+          seamWith { first with BinarySha256 = "abc" }
+          seamWith { first with Summary = "" }
+          seamWith { first with Command = " " } ] do
+        { requestFor lib.ManifestJson with SeamChecksReceiptPath = Some(writeJson "seam-checks" receipt) } |> refusedWith "FS9251"
+    let refusals = refusalReceipt lib
+    let control = refusals.Controls[0]
+    for receipt in
+        [ { refusals with SchemaVersion = 0 }
+          { refusals with Package = "OtherPackage" }
+          { refusals with Controls = [| { control with ObservedCode = "FS9242" } |] }
+          { refusals with Controls = [| { control with ExpectedCode = "fs9243"; ObservedCode = "fs9243" } |] }
+          { refusals with Controls = [| { control with ExpectedCode = "FS"; ObservedCode = "FS" } |] }
+          { refusals with Controls = [| { control with Passed = false } |] }
+          { refusals with Controls = [| { control with Id = " " } |] }
+          { refusals with Controls = [| control; control |] }
+          { refusals with Controls = [| { control with MisuseSummary = "" } |] }
+          { refusals with Controls = [| { control with ProtectionSummary = "" } |] } ] do
+        { requestFor lib.ManifestJson with RefusalControlsReceiptPath = Some(writeJson "refusal-controls" receipt) } |> refusedWith "FS9251"
+
+[<Fact>]
+let ``a dossier is generated from and into OS temporary storage outside the checkout`` () =
+    let lib = library.Value
+    let request = requestFor lib.ManifestJson
+    // Every input and output of this dossier is in OS temporary storage (#215).
+    for path in [ lib.Work; lib.ManifestJson; lib.Manifest.FidprojPath; lib.Manifest.ArtifactsDirectory; request.OutputDirectory.Value ] do
+        Assert.True(isWithin (Path.GetTempPath()) path, $"{path} is not in OS temporary storage")
+        Assert.False(isWithin repository path, $"{path} is inside the checkout {repository}")
+    let generated = SubstantiationDossier.generate request |> accepted
+    for extension, written in [ "json", generated.JsonPath; "md", generated.MarkdownPath; "html", generated.HtmlPath ] do
+        Assert.Equal(Path.Combine(request.OutputDirectory.Value, "DossierProbe.dossier." + extension), written)
+        Assert.True(File.Exists written, $"{written} was not written")
+    // A link to an existing directory is admitted, and the documents are in its target.
+    let target = scratch "linked-output-target"
+    let link = Path.Combine(scratch "linked-output", "link")
+    Directory.CreateSymbolicLink(link, target) |> ignore
+    let linked = SubstantiationDossier.generate { request with OutputDirectory = Some link } |> accepted
+    Assert.Equal<SubstantiationDossier.Dossier>(generated.Dossier, linked.Dossier)
+    Assert.Equal<string[]>(
+        [| "DossierProbe.dossier.html"; "DossierProbe.dossier.json"; "DossierProbe.dossier.md" |],
+        Directory.GetFiles target |> Array.map Path.GetFileName |> Array.sort)
+
+[<Fact>]
+let ``dossier paths that are empty or cross a broken or cyclic link refuse with FS9252`` () =
+    let lib = library.Value
+    let fixture = rocq ()
+    let links = refusedLinks (scratch "refused-links")
+    let valid = requestFor lib.ManifestJson
+    for prefix in [ links.Broken; links.Chained; links.Cycle ] do
+        for request in
+            [ { valid with ManifestPath = Path.Combine(prefix, "DossierProbe.substantiation.json") }
+              { valid with OutputDirectory = Some prefix }
+              { valid with OutputDirectory = Some(Path.Combine(prefix, "nested")) }
+              { (valid |> withRocq fixture) with RocqProjectPath = Some(Path.Combine(prefix, "_CoqProject")) }
+              { (valid |> withRocq fixture) with RocqFactsPath = Some(Path.Combine(prefix, "facts.json")) }
+              { (valid |> withRocq fixture) with RocqConfigPath = Some(Path.Combine(prefix, "config.json")) }
+              { valid with SeamChecksReceiptPath = Some(Path.Combine(prefix, "seam.json")) }
+              { valid with RefusalControlsReceiptPath = Some(Path.Combine(prefix, "controls.json")) } ] do
+            refusedWith "FS9252" request
+    // An explicit empty output directory does not select a default.
+    for empty in [ ""; " " ] do
+        refusedWith "FS9252" { valid with OutputDirectory = Some empty }
+    // A unit of the Rocq project that is a symbolic link without its target.
+    let linkedUnit = rocq ()
+    File.Delete linkedUnit.Laws
+    File.CreateSymbolicLink(linkedUnit.Laws, Path.Combine(scratch "absent-unit", "never-created.v")) |> ignore
+    valid |> withRocq linkedUnit |> refusedWith "FS9252"
+    // Evidence that the manifest records behind a refused link.
+    resealed lib (fun manifest -> { manifest with WitnessUnits = { manifest.WitnessUnits with Path = Path.Combine(links.Broken, "10_witness_units.json") } })
+    |> requestFor |> refusedWith "FS9252"
+    resealed lib (fun manifest -> { manifest with Compiler = { manifest.Compiler with Path = Path.Combine(links.Cycle, "Composer.dll") } })
+    |> requestFor |> refusedWith "FS9252"
+    Assert.False(Directory.Exists links.Absent || File.Exists links.Absent, "a refusal must not create the target of a broken link")
+
+[<Fact>]
+let ``malformed or unpaired dossier inputs refuse with FS9247`` () =
+    let lib = library.Value
+    let fixture = rocq ()
+    let valid = requestFor lib.ManifestJson
+    // Pairing.
+    refusedWith "FS9247" { valid with RocqProjectPath = Some fixture.Project }
+    refusedWith "FS9247" { valid with RocqFactsPath = Some fixture.Facts }
+    refusedWith "FS9247" { valid with RocqConfigPath = Some fixture.Config }
+    // The manifest.
+    refusedWith "FS9247" { valid with ManifestPath = Path.Combine(scratch "absent", "DossierProbe.substantiation.json") }
+    let asText = Path.Combine(scratch "extension", "DossierProbe.substantiation.txt")
+    File.Copy(lib.ManifestJson, asText)
+    refusedWith "FS9247" { valid with ManifestPath = asText }
+    let unsealed = Path.Combine(scratch "unsealed", "DossierProbe.substantiation.json")
+    File.WriteAllText(unsealed, (File.ReadAllText lib.ManifestJson).Replace("\"Package\": \"DossierProbe\"", "\"Package\": \"Renamed\""))
+    refusedWith "FS9247" { valid with ManifestPath = unsealed }
+    refusedWith "FS9247" { valid with ManifestPath = writeText "broken-manifest" "{" }
+    // A resealed manifest whose boundary contradicts its own source inventory.
+    resealed lib (fun manifest -> { manifest with Boundary = { manifest.Boundary with ExternSymbols = [||] } })
+    |> requestFor |> refusedWith "FS9247"
+    // Receipts: a duplicate key, an unknown field, a missing field, a null and a wrong type.
+    let seamJson = JsonSerializer.Serialize(seamReceipt lib)
+    let seamEdited (alter: JsonObject -> unit) =
+        let node = JsonNode.Parse(seamJson).AsObject()
+        alter node
+        node.ToJsonString()
+    Assert.StartsWith("{\"SchemaVersion\":1,", seamJson)
+    for text in
+        [ "{\"SchemaVersion\":1," + seamJson.Substring 1
+          seamEdited (fun node -> node["Unknown"] <- JsonValue.Create true)
+          seamEdited (fun node -> node.Remove "TargetTriple" |> ignore)
+          seamEdited (fun node -> node["TargetTriple"] <- null)
+          seamEdited (fun node -> node["SchemaVersion"] <- JsonValue.Create "1")
+          seamEdited (fun node -> node.["Checks"].AsArray().[0].AsObject().Remove "Passed" |> ignore)
+          seamEdited (fun node -> node.["Checks"].AsArray().[0].["Passed"] <- JsonValue.Create "true")
+          "not json" ] do
+        refusedWith "FS9247" { valid with SeamChecksReceiptPath = Some(writeText "seam-checks" text) }
+    refusedWith "FS9247" { valid with SeamChecksReceiptPath = Some(Path.Combine(scratch "absent", "seam-checks.json")) }
+    let refusalJson = JsonSerializer.Serialize(refusalReceipt lib)
+    for text in
+        [ "{\"Package\":\"DossierProbe\"," + refusalJson.Substring 1
+          refusalJson.Replace("\"Passed\":true", "\"Passed\":null")
+          refusalJson.Replace("\"Controls\":", "\"Extra\":0,\"Controls\":") ] do
+        refusedWith "FS9247" { valid with RefusalControlsReceiptPath = Some(writeText "refusal-controls" text) }
+    // The Rocq config.
+    let config (alter: JsonObject -> unit) = rocqWith lawsSource limitsSource [] ignore alter
+    for malformed in
+        [ config (fun node -> node["SchemaVersion"] <- JsonValue.Create 2)
+          config (fun node -> node["FalsifiedSuffix"] <- JsonValue.Create "")
+          config (fun node -> node["CheckMarker"] <- JsonValue.Create "")
+          config (fun node -> node.Remove "CheckMarker" |> ignore)
+          config (fun node -> node["Extra"] <- JsonValue.Create 1)
+          config (fun node -> node.["Correspondence"].AsArray().Add(node.["Correspondence"].AsArray().[0].DeepClone()))
+          config (fun node -> node.["Correspondence"].AsArray().[0].["Targets"] <- JsonArray())
+          config (fun node -> node.["Correspondence"].AsArray().[0].["RocqSymbol"] <- JsonValue.Create " ") ] do
+        valid |> withRocq malformed |> refusedWith "FS9247"
+    // facts.json.
+    let facts (alter: JsonObject -> unit) = rocqWith lawsSource limitsSource [] alter ignore
+    let theorem (node: JsonObject) = node.["symbols"].["DossierProofs.Laws.identity_returns_input"].AsObject()
+    for malformed in
+        [ facts (fun node -> node["extra"] <- JsonValue.Create 1)
+          facts (fun node -> node.Remove "rocqVersion" |> ignore)
+          facts (fun node -> node["rocqVersion"] <- JsonValue.Create "")
+          facts (fun node -> node["digests"] <- JsonArray())
+          facts (fun node -> node.["digests"].["theories/Laws.v"] <- JsonValue.Create 7)
+          facts (fun node -> (theorem node)["assumptions"] <- JsonValue.Create "open")
+          facts (fun node -> (theorem node)["assumptions"] <- JsonArray())
+          facts (fun node -> (theorem node)["assumptions"] <- null)
+          facts (fun node -> (theorem node)["type"] <- JsonValue.Create "")
+          facts (fun node -> (theorem node).Remove "binders" |> ignore)
+          facts (fun node -> (theorem node)["binders"] <- JsonArray())
+          facts (fun node -> (theorem node)["extra"] <- JsonValue.Create 1) ] do
+        valid |> withRocq malformed |> refusedWith "FS9247"
+    let duplicated = rocq ()
+    File.WriteAllText(duplicated.Facts, (File.ReadAllText duplicated.Facts).Replace("\"rocqVersion\":\"9.1.0\",", "\"rocqVersion\":\"9.1.0\",\"rocqVersion\":\"9.1.0\","))
+    valid |> withRocq duplicated |> refusedWith "FS9247"
+    let absentFacts = rocq ()
+    File.Delete absentFacts.Facts
+    valid |> withRocq absentFacts |> refusedWith "FS9247"
+
+[<Fact>]
+let ``the dossier CLI reports a refusal on stderr and exits 1`` () =
+    let lib = library.Value
+    let fixture = rocq ()
+    let output = scratch "cli-refusal"
+    let cli = requiredFile "built Farscape CLI" (Path.Combine(repository, "src", "Farscape.Cli", "bin", "Debug", "net10.0", "Farscape.Cli.dll"))
+    let launch = ProcessLaunch.startInfo "dotnet" [ cli; "dossier"; "--manifest"; lib.ManifestJson; "--output"; output; "--rocq-project"; fixture.Project ]
+    launch.WorkingDirectory <- output
+    launch.Environment["TMPDIR"] <- output
+    use child = new Process(StartInfo = launch)
+    Assert.True(child.Start(), "the Farscape CLI did not start")
+    let stdout = child.StandardOutput.ReadToEndAsync()
+    let stderr = child.StandardError.ReadToEndAsync()
+    Assert.True(child.WaitForExit 120000, "the Farscape CLI did not exit")
+    child.WaitForExit()
+    Assert.Equal(1, child.ExitCode)
+    Assert.Equal("", stdout.Result)
+    Assert.StartsWith("FS9247: ", stderr.Result)
+    Assert.Contains("FS9247 declared in " + fixture.Project, stderr.Result)
+    Assert.Empty(Directory.GetFiles(output, "*.dossier.*"))

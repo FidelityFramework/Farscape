@@ -15,9 +15,9 @@ open TestHelpers
 
 // ─── Fixture construction ───
 
-/// Run `body` over a fresh directory under test-results/scratch, deleted afterwards.
+/// Run `body` over a fresh scratch directory in OS temporary storage, deleted afterwards.
 let private withScratch (body: string -> unit) =
-    let directory = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "../..", "test-results", "scratch", "archive-inspection", System.Guid.NewGuid().ToString("N")))
+    let directory = TestHelpers.TestScratch.create "archive-inspection"
     Directory.CreateDirectory(directory) |> ignore
     try body directory
     finally Directory.Delete(directory, true)

@@ -529,7 +529,7 @@ let substantiateCommand =
     let pilot = Input.option<FileInfo> "--pilot" |> desc "Pilot TOML providing measured foreign boundary contracts"
     let provenance = Input.option<FileInfo> "--link-provenance" |> desc "Exact library link-provenance TOML"
     let output = Input.option<DirectoryInfo> "--output" |> desc "Manifest output directory (default: library project directory)"
-    let work = Input.option<DirectoryInfo> "--work-dir" |> desc "Retained harness and proof evidence directory (default: test-results/scratch/substantiation)"
+    let work = Input.option<DirectoryInfo> "--work-dir" |> desc "Retained harness and proof evidence directory (default: <output>/<Package>.substantiation.evidence)"
     let verbose = Input.option<bool> "--verbose" |> desc "Print retained Composer diagnostics" |> def false
     let allowWarnings = Input.option<bool> "--allow-warnings" |> desc "Permit advisory warnings; required substantiation diagnostic codes remain errors" |> def false
     let action (fidproj: FileInfo, pilot: FileInfo, provenance: FileInfo, output: DirectoryInfo, work: DirectoryInfo, verbose, allowWarnings) =
@@ -568,6 +568,48 @@ let substantiateCommand =
         setAction action
     }
 
+let dossierCommand =
+    let manifest = Input.option<FileInfo> "--manifest" |> desc "Path to <Package>.substantiation.json or <Package>.substantiation.toml" |> required
+    let output = Input.option<DirectoryInfo> "--output" |> desc "Output directory for <Package>.dossier.{json,md,html} (default: manifest directory)"
+    let rocqProject = Input.option<FileInfo> "--rocq-project" |> desc "Path to the companion _CoqProject"
+    let rocqFacts = Input.option<FileInfo> "--rocq-facts" |> desc "Path to the companion Rocq facts.json"
+    let rocqConfig = Input.option<FileInfo> "--rocq-config" |> desc "Path to the companion Rocq dossier config JSON"
+    let seamChecks = Input.option<FileInfo> "--seam-checks" |> desc "Path to the physical seam checks receipt JSON"
+    let refusalControls = Input.option<FileInfo> "--refusal-controls" |> desc "Path to the compile-time refusal controls receipt JSON"
+    let action (manifest: FileInfo, output: DirectoryInfo, rocqProject: FileInfo, rocqFacts: FileInfo, rocqConfig: FileInfo, seamChecks: FileInfo, refusalControls: FileInfo) =
+        let path (file: FileInfo) = Option.ofObj file |> Option.map _.FullName
+        let request: SubstantiationDossier.Request =
+            { ManifestPath = manifest.FullName
+              OutputDirectory = Option.ofObj output |> Option.map _.FullName
+              RocqProjectPath = path rocqProject
+              RocqFactsPath = path rocqFacts
+              RocqConfigPath = path rocqConfig
+              SeamChecksReceiptPath = path seamChecks
+              RefusalControlsReceiptPath = path refusalControls }
+        match SubstantiationDossier.generate request with
+        | Error refusal ->
+            Console.Error.WriteLine refusal.Text
+            for diagnostic in refusal.Diagnostics do
+                for location in Diagnostics.renderLocation diagnostic do Console.Error.WriteLine location
+            1
+        | Ok generated ->
+            let dossier = generated.Dossier
+            printLine $"Package: {dossier.Package}"
+            printLine $"Overall status: {dossier.OverallStatus}"
+            printLine $"Open: {dossier.Counts.Open}"
+            printLine $"Falsified: {dossier.Counts.Falsified}"
+            printLine $"Checks: {dossier.Counts.Checks}"
+            printLine $"Guarantees: {dossier.Counts.Guarantees}"
+            printLine generated.JsonPath
+            printLine generated.MarkdownPath
+            printLine generated.HtmlPath
+            0
+    command "dossier" {
+        description "Write the substantiation report of a substantiated library as JSON, Markdown and HTML"
+        inputs (manifest, output, rocqProject, rocqFacts, rocqConfig, seamChecks, refusalControls)
+        setAction action
+    }
+
 [<EntryPoint>]
 let main argv =
     rootCommand argv {
@@ -577,4 +619,5 @@ let main argv =
         addCommand pilotCommand
         addCommand projectGenerateCommand
         addCommand substantiateCommand
+        addCommand dossierCommand
     }

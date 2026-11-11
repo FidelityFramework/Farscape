@@ -4,6 +4,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <IsPackable>false</IsPackable>
     <GenerateProgramFile>false</GenerateProgramFile>
+    <FidelityDataProject Condition="'$(FidelityDataProject)' == ''">$(MSBuildThisFileDirectory)../../../Fidelity.Data/src/Fidelity.Data/Fidelity.Data.fsproj</FidelityDataProject>
   </PropertyGroup>
 
   <ItemGroup>
@@ -53,14 +54,12 @@
     <Compile Include="ArchiveInspectionTests.fs" />
     <Compile Include="NativeCallbackRunnerTests.fs" />
     <Compile Include="SubstantiationTests.fs" />
+    <Compile Include="SubstantiationDossierTests.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="coverlet.collector" Version="6.0.2" />
-    <Reference Include="Fidelity.Data">
-      <HintPath>../../../Fidelity.Data/src/Fidelity.Data/bin/Debug/net10.0/Fidelity.Data.dll</HintPath>
-    </Reference>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
@@ -68,6 +67,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/Farscape.Core/Farscape.Core.fsproj" />
+    <ProjectReference Include="$(FidelityDataProject)" />
   </ItemGroup>
 
 </Project>

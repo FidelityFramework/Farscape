@@ -3,7 +3,9 @@ namespace Farscape.Core
 open System
 open System.Diagnostics
 
-/// Foreign-tool scratch belongs to the caller's output tree, never the system temporary directory.
+/// Foreign-tool scratch is the directory the caller selects with `within`. A process that
+/// selects none uses a process-scoped directory in OS temporary storage; no scratch directory
+/// is created in the working directory or in a source checkout (#215).
 module ScratchDirectory =
     let private current = System.Threading.AsyncLocal<string option>()
 
@@ -36,19 +38,23 @@ module ScratchDirectory =
                     let targetRoot = if IO.Path.IsPathRooted target then IO.Path.GetPathRoot target else parent
                     let targetParts = if IO.Path.IsPathRooted target then segments (target.Substring(targetRoot.Length)) else segments target
                     let resolved = resolve (Set.add candidate active) targetRoot targetParts
+                    // `LinkTarget` returns the stored target of a link whose target is absent;
+                    // it does not fail. No evidence exists at such a path, and a write through
+                    // the link would create its target, so the path is refused here.
+                    if not (IO.File.Exists resolved || IO.Directory.Exists resolved) then
+                        pathFailure path "A path segment has an unresolved symbolic link."
                     resolve active resolved rest
         resolve Set.empty root (segments (rooted.Substring(root.Length)))
 
-    /// Tool executables use canonicalPath; all substantiation evidence uses this policy.
+    /// Tool executables use canonicalPath; all substantiation evidence uses this policy: the
+    /// path is explicit and nonempty, and no symbolic link on it is cyclic or lacks its target.
+    /// OS temporary storage is admitted as evidence and output storage (#215).
     let canonicalEvidencePath (path: string) =
         if String.IsNullOrWhiteSpace path then pathFailure path "Substantiation evidence paths must be explicit and nonempty."
         let canonical = canonicalPath path
-        let lexical = canonicalPath (IO.Path.GetFullPath path)
-        let prohibited (value: string) = value = "/tmp" || value.StartsWith("/tmp/", StringComparison.Ordinal)
-        // File APIs may normalize '..' before opening; neither interpretation may
-        // enter system temporary storage, even when callers retain the original spelling.
-        if prohibited canonical || prohibited lexical then
-            pathFailure path "System temporary storage is not substantiation evidence or output storage."
+        // File APIs normalize '..' lexically before opening, so the symbolic-link checks
+        // apply to that interpretation as well as to the filesystem one.
+        canonicalPath (IO.Path.GetFullPath path) |> ignore
         canonical
 
     let tryCheckoutDirectory () =
@@ -58,12 +64,21 @@ module ScratchDirectory =
             else locate directory.Parent
         locate (IO.DirectoryInfo Environment.CurrentDirectory)
 
+    /// The scratch directory of a process that selected none. Forcing the value registers,
+    /// once, the best-effort removal of the directory when the process exits.
+    let private processDefault =
+        lazy (
+            let directory = IO.Path.Combine(IO.Path.GetTempPath(), $"farscape-{Environment.ProcessId}")
+            AppDomain.CurrentDomain.ProcessExit.Add(fun _ ->
+                try
+                    if IO.Directory.Exists directory then IO.Directory.Delete(directory, true)
+                with _ -> ())
+            directory)
+
     let root () =
         match current.Value with
         | Some directory -> directory
-        | None ->
-            let project = tryCheckoutDirectory () |> Option.defaultValue Environment.CurrentDirectory
-            IO.Path.Combine(project, "test-results", "scratch", "farscape")
+        | None -> processDefault.Value
 
     let within (directory: string) (action: unit -> 'T) : 'T =
         if String.IsNullOrWhiteSpace directory then invalidArg "directory" "Scratch directory must be explicit."

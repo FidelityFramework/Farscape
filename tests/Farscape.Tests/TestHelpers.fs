@@ -133,6 +133,44 @@ let mkDecl name retType parms attrs =
 let mkDeclWithDoc name retType parms doc =
     CppParser.Declaration.Function (mkFuncWithDoc name retType parms doc)
 
+// ─── Test scratch storage ───
+
+/// Scratch directories of the tests. Every one is in OS temporary storage under
+/// `farscape-tests/<process>`; none is created in the repository checkout (#215).
+module TestScratch =
+    /// The parent of every scratch directory of this test process. Forcing the value
+    /// registers, once, the removal of the whole tree when the process exits; that removal
+    /// covers the module-shared fixtures that no single test owns.
+    let private processRoot =
+        lazy (
+            let directory =
+                System.IO.Path.Combine(
+                    System.IO.Path.GetTempPath(), "farscape-tests",
+                    $"{System.Environment.ProcessId}-{System.Guid.NewGuid():N}")
+            System.IO.Directory.CreateDirectory directory |> ignore
+            System.AppDomain.CurrentDomain.ProcessExit.Add(fun _ ->
+                try
+                    if System.IO.Directory.Exists directory then System.IO.Directory.Delete(directory, true)
+                with _ -> ())
+            directory)
+
+    /// The parent of every scratch directory of this test process.
+    let root () : string = processRoot.Value
+
+    /// The path of a scratch directory named `name` under the process root. The directory is
+    /// not created, and the same `name` gives the same path for the life of the process.
+    let shared (name: string) : string = System.IO.Path.Combine(processRoot.Value, name)
+
+    /// The path of a new scratch directory for the test area `area`. The directory is not created.
+    let path (area: string) : string =
+        System.IO.Path.Combine(processRoot.Value, area, System.Guid.NewGuid().ToString("N"))
+
+    /// A new, empty scratch directory for the test area `area`.
+    let create (area: string) : string =
+        let directory = path area
+        System.IO.Directory.CreateDirectory directory |> ignore
+        directory
+
 // ─── Pilot project fixtures ───
 
 /// The header fixture tree: minimal headers, one directory per concern.
@@ -154,10 +192,10 @@ and withPilotGenerating (generate: string -> Result<BindingGenerator.GenerationR
                         (headers: string list) (library: string list) (options: string list) (functions: string list)
                         (ns: string list) (trailing: string list)
                         (check: Result<BindingGenerator.GenerationResult, string> -> string -> unit) =
-    let dir = System.IO.Path.GetFullPath(System.IO.Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "artifacts", "pilot-fixture-tests", System.Guid.NewGuid().ToString("N")))
+    let dir = TestScratch.create "pilot-fixture-tests"
     let output = System.IO.Path.Combine(dir, "output")
-    System.IO.Directory.CreateDirectory(output) |> ignore
     try
+        System.IO.Directory.CreateDirectory(output) |> ignore
         let quoted (items: string list) = items |> List.map (fun item -> "\"" + item + "\"") |> String.concat ", "
         let pilot =
             [ "[library]"; "name = \"fixture\""; "headers = [" + quoted headers + "]" ] @ library @
