@@ -1,0 +1,31 @@
+[library]
+name = "landingprobe"
+headers = ["@HEADER@"]
+include_paths = ["@INCLUDE@"]
+
+[output]
+mode = "fidelity"
+directory = "@OUTPUT@"
+
+[options]
+c_header_mode = true
+descriptor_only_dependencies = true
+link_libraries = true
+
+[[options.bindings]]
+name = "landing_other_invoke"
+callback_invocations = [{ parameter = 0, identity = "landingprobe.landing_other_invoke.callback", version = "1", source = "tests/native-callbacks/other_probe.c", scope = "during_call" }]
+
+[[options.bindings]]
+name = "landing_other_invoke_void"
+callback_invocations = [{ parameter = 0, identity = "landingprobe.landing_other_invoke_void.callback", version = "1", source = "tests/native-callbacks/other_probe.c", scope = "during_call" }]
+
+[annotations.nonnull]
+landing_other_invoke = [0]
+landing_other_invoke_void = [0]
+
+[[namespace]]
+name = "@NAMESPACE@"
+description = "Native entry ABI witness for the second header, Layer 2"
+library = "landingprobe"
+functions = ["landing_other_invoke", "landing_other_invoke_void", "landing_other_record"]

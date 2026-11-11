@@ -1,0 +1,28 @@
+/// The process-link loading contract of the prebuilt probe archive.
+module Landing.Acceptance.Loading
+
+type ProcessLinkContract =
+  { Identity: string
+    Version: string
+    Source: string
+    Library: string
+    Runtime: string
+    Os: string
+    Arch: string
+    LoadAt: string
+    LiveUntil: string
+    Unloading: string
+    ExportedLibrary: string }
+
+let contract: ProcessLinkContract =
+  { Identity = "landingprobe-process-image"
+    Version = "1"
+    Source = "tests/native-callbacks/probe.c"
+    Library = "landingprobe"
+    Runtime = "libc"
+    Os = "linux"
+    Arch = "x86_64"
+    LoadAt = "ProcessStartup"
+    LiveUntil = "ProcessTermination"
+    Unloading = "Forbidden"
+    ExportedLibrary = "Forbidden" }

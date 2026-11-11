@@ -12,15 +12,20 @@ c_header_mode = true
 descriptor_only_dependencies = true
 link_libraries = true
 
+[[options.bindings]]
+name = "landing_invoke"
+callback_invocations = [{ parameter = 0, identity = "landingprobe.landing_invoke.callback", version = "1", source = "tests/native-callbacks/probe.c", scope = "during_call" }]
+
+[[options.bindings]]
+name = "landing_invoke_void"
+callback_invocations = [{ parameter = 0, identity = "landingprobe.landing_invoke_void.callback", version = "1", source = "tests/native-callbacks/probe.c", scope = "during_call" }]
+
 [annotations.nonnull]
-nonnull_returns = ["landing_token", "landing_data"]
-landing_read = [0]
-landing_read_data = [0]
-landing_invoke = [0, 1]
-landing_invoke_void = [0, 1]
+landing_invoke = [0]
+landing_invoke_void = [0]
 
 [[namespace]]
 name = "@NAMESPACE@"
 description = "Native entry ABI witness, Layer 2"
 library = "landingprobe"
-functions = ["landing_token", "landing_data", "landing_read", "landing_read_data", "landing_invoke", "landing_invoke_void", "landing_record"]
+functions = ["landing_invoke", "landing_invoke_void", "landing_record"]

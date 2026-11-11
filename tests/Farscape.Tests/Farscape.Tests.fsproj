@@ -51,6 +51,7 @@
     <Compile Include="CallbackEntryArgumentTests.fs" />
     <Compile Include="BorrowedResultTests.fs" />
     <Compile Include="ArchiveInspectionTests.fs" />
+    <Compile Include="NativeCallbackRunnerTests.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

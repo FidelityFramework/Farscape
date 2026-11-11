@@ -8,8 +8,9 @@ open TestHelpers
 
 // ═══════════════════════════════════════════════════════════════════
 // Static archive inspection, link provenance and the Static Binding Elision Test (#204).
-// The archives are built at test time from C sources by the resolved clang and an archiver;
-// the malformed ones are written byte by byte. Every fixture directory is deleted afterwards.
+// The archives are built at test time from C sources by the resolved clang and the resolved
+// llvm-ar (ClangToolchain selects both); the malformed ones are written byte by byte. Every
+// fixture directory is deleted afterwards.
 // ═══════════════════════════════════════════════════════════════════
 
 // ─── Fixture construction ───
@@ -39,20 +40,14 @@ let private compile (directory: string) (name: string) (flags: string list) (sou
     run (ClangToolchain.startInfo ([ "-c" ] @ flags @ [ sourcePath; "-o"; objectPath ]))
     objectPath
 
-/// The directory of the clang that compiles the fixtures.
-let private clangDirectory () = Path.GetDirectoryName(Path.GetFullPath(ClangToolchain.path ()))
+/// The directory of the clang that compiles the fixtures, its symbolic links followed.
+let private clangDirectory () = ClangToolchain.realDirectory ()
 
-/// The archiver: llvm-ar beside the resolved clang, else /usr/bin/llvm-ar, else /usr/bin/ar.
-let private archiver =
-    lazy (
-        match [ Path.Combine(clangDirectory (), "llvm-ar"); "/usr/bin/llvm-ar"; "/usr/bin/ar" ] |> List.tryFind File.Exists with
-        | Some path -> path
-        | None -> failwith "an archiver is required: llvm-ar beside clang, /usr/bin/llvm-ar or /usr/bin/ar")
-
-/// Archive `objects` as `<directory>/<name>` with the archiver's `modifiers` (`rcs`, `rcsT`).
+/// Archive `objects` as `<directory>/<name>` with the `modifiers` (`rcs`, `rcsT`) of the llvm-ar
+/// ClangToolchain resolves. This module selects no archiver of its own.
 let private archive (directory: string) (name: string) (modifiers: string) (objects: string list) : string =
     let archivePath = Path.Combine(directory, name)
-    run (ProcessLaunch.startInfo archiver.Value (modifiers :: archivePath :: objects))
+    run (ClangToolchain.arStartInfo (modifiers :: archivePath :: objects))
     archivePath
 
 /// The llvm-nm that reads the bitcode the resolved clang writes: `FIDELITY_LLVM_NM` when the
