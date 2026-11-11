@@ -1461,7 +1461,7 @@ generate_descriptors = true
     [<Fact>]
     let ``round-trip options with generate_descriptors`` () =
         let project : PilotProject = {
-            Library = { Name = "drm"; Headers = ["xf86drm.h"]; XmlProtocols = []; Introspection = []; IncludePaths = []; SystemIncludePaths = []; Defines = []; MacroPrefixes = []; PkgConfig = [] }
+            Library = { Name = "drm"; Headers = ["xf86drm.h"]; XmlProtocols = []; Introspection = []; IncludePaths = []; SystemIncludePaths = []; Defines = []; MacroPrefixes = []; PkgConfig = []; Artifact = None }
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
             ErrorConventions = None
@@ -1632,3 +1632,111 @@ module DescriptorGen =
         Assert.Contains("Offset = 8", output)
         Assert.Contains("Repr = Repr.U32", output)
         Assert.Contains("Repr = Repr.U64", output)
+
+    [<Fact>]
+    let ``multi-header abi_critical_structs pilot measures each declaring unit distinctly`` () =
+        let dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "farscape-multiheader-abi-" + System.Guid.NewGuid().ToString("N"))
+        System.IO.Directory.CreateDirectory dir |> ignore
+        try
+            let h1 = System.IO.Path.Combine(dir, "packed_frame.h")
+            let h2 = System.IO.Path.Combine(dir, "aligned_frame.h")
+            let outDir = System.IO.Path.Combine(dir, "out")
+            let pilot = System.IO.Path.Combine(dir, "frames.pilot.toml")
+            System.IO.File.WriteAllText(h1, "struct __attribute__((packed)) fx_packed_frame { char tag; int payload; };\nint fx_send_packed(struct fx_packed_frame *f);\n")
+            System.IO.File.WriteAllText(h2, "struct __attribute__((aligned(16))) fx_aligned_frame { char tag; int payload; };\nint fx_send_aligned(struct fx_aligned_frame *f);\n")
+            System.IO.File.WriteAllText(pilot, FSharp.Core.String.concat "\n" [
+                "[library]"
+                "name = \"frames\""
+                $"headers = [\"{h1}\", \"{h2}\"]"
+                ""
+                "[output]"
+                "mode = \"fidelity\""
+                $"directory = \"{outDir}\""
+                ""
+                "[options]"
+                "c_header_mode = true"
+                "abi_critical_structs = [\"struct fx_packed_frame\", \"struct fx_aligned_frame\"]"
+                ""
+                "[[namespace]]"
+                "name = \"Frames.Core\""
+                "description = \"Multi-header ABI layouts\""
+                "library = \"frames\""
+                "functions = [\"fx_send_packed\", \"fx_send_aligned\"]"
+                "" ])
+            match BindingGenerator.generateFromProjectDiagnosed pilot false false Types.LP64 with
+            | Error r -> failwithf "multi-header layout pilot failed: %s" r.Text
+            | Ok _ ->
+                let typesClef = System.IO.File.ReadAllText(System.IO.Path.Combine(outDir, "Types.clef"))
+                Assert.Contains("Name = \"fx_packed_frame\"", typesClef)
+                Assert.Contains("Size = 5", typesClef)
+                Assert.Contains("Alignment = 1", typesClef)
+                Assert.Contains("Name = \"fx_aligned_frame\"", typesClef)
+                Assert.Contains("Size = 16", typesClef)
+                Assert.Contains("Alignment = 16", typesClef)
+        finally
+            System.IO.Directory.Delete(dir, true)
+
+    [<Fact>]
+    let ``POSIX socket headers generate pure Fidelity bindings including unnamed atomic counter records`` () =
+        let candidateRoots = [ "/usr/include/x86_64-linux-gnu"; "/usr/include" ]
+        let existingRoots = candidateRoots |> List.filter System.IO.Directory.Exists
+        let resolvePosixHeader (relPath: string) =
+            match existingRoots |> List.map (fun r -> System.IO.Path.Combine(r, relPath)) |> List.tryFind System.IO.File.Exists with
+            | Some fullPath -> fullPath
+            | None -> failwithf "Required POSIX socket header '%s' was not found under %A" relPath candidateRoots
+        let resolvedHeaders =
+            [ "sys/socket.h"; "sys/un.h"; "netinet/in.h"; "arpa/inet.h"; "netdb.h" ]
+            |> List.map resolvePosixHeader
+        let headersToml =
+            resolvedHeaders
+            |> List.map (fun h -> $"\"{h}\"")
+            |> FSharp.Core.String.concat ", "
+        let sysIncludesToml =
+            existingRoots
+            |> List.map (fun r -> $"\"{r}\"")
+            |> FSharp.Core.String.concat ", "
+        let dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "farscape-socket-surface-" + System.Guid.NewGuid().ToString("N"))
+        System.IO.Directory.CreateDirectory dir |> ignore
+        try
+            let outDir = System.IO.Path.Combine(dir, "out")
+            let pilot = System.IO.Path.Combine(dir, "socket.pilot.toml")
+            System.IO.File.WriteAllText(pilot, FSharp.Core.String.concat "\n" [
+                "[library]"
+                "name = \"c\""
+                $"headers = [{headersToml}]"
+                $"system_include_paths = [{sysIncludesToml}]"
+                "defines = [\"_POSIX_C_SOURCE=200809L\"]"
+                ""
+                "[output]"
+                "mode = \"fidelity\""
+                $"directory = \"{outDir}\""
+                ""
+                "[options]"
+                "c_header_mode = true"
+                "abi_critical_structs = [\"struct sockaddr\", \"struct sockaddr_un\", \"struct sockaddr_in\", \"struct sockaddr_in6\", \"struct addrinfo\", \"struct linger\"]"
+                "flexible_arrays = [{ record = \"cmsghdr\", field = \"__cmsg_data\", count_field = \"cmsg_len\", count_rule = \"record_bytes\", source = \"POSIX.1-2024 sys/socket.h CMSG_DATA\" }]"
+                ""
+                "[[namespace]]"
+                "name = \"Fidelity.Libc.Socket\""
+                "description = \"POSIX socket surface (#156)\""
+                "library = \"c\""
+                "functions = [\"socket\", \"bind\", \"listen\", \"accept\", \"connect\", \"send\", \"recv\", \"setsockopt\", \"htons\", \"htonl\", \"inet_pton\", \"getaddrinfo\", \"freeaddrinfo\"]"
+                "" ])
+            match BindingGenerator.generateFromProjectDiagnosed pilot false false Types.LP64 with
+            | Error r -> failwithf "POSIX socket surface generation failed: %s" r.Text
+            | Ok res ->
+                Assert.NotEmpty(res.OutputFiles)
+                let typesClef = System.IO.File.ReadAllText(System.IO.Path.Combine(outDir, "Types.clef"))
+                let sockClefFile = res.OutputFiles |> List.find (fun p -> p.EndsWith(".clef") && not (p.EndsWith("Types.clef")))
+                let sockClef = System.IO.File.ReadAllText(sockClefFile)
+                Assert.Contains("Name = \"sockaddr_in\"", typesClef)
+                Assert.Contains("Name = \"sockaddr_in6\"", typesClef)
+                Assert.Contains("Name = \"sockaddr_un\"", typesClef)
+                Assert.Contains("Name = \"addrinfo\"", typesClef)
+                for fn in [ "let socket "; "let bind "; "let listen "; "let accept "; "let connect "; "let send "; "let recv "; "let getaddrinfo "; "let freeaddrinfo " ] do
+                    Assert.Contains(fn, sockClef)
+                for forbidden in [ "nativeint"; "nativeptr"; "box "; ": obj" ] do
+                    Assert.DoesNotContain(forbidden, typesClef)
+                    Assert.DoesNotContain(forbidden, sockClef)
+        finally
+            System.IO.Directory.Delete(dir, true)

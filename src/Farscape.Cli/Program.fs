@@ -316,6 +316,7 @@ let pilotInitCommand =
                 Defines = []
                 MacroPrefixes = []
                 PkgConfig = []
+                Artifact = None
             }
             Output = { Mode = "fidelity"; Directory = outputDir }
             Namespaces = [

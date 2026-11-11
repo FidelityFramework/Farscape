@@ -29,6 +29,24 @@ module PilotTypes =
         Signals: string list
     }
 
+    /// The kind of link artifact a `[library.artifact]` table declares (#204), the pilot's
+    /// `kind` spelling.
+    [<RequireQualifiedAccess>]
+    type StaticArtifactKind =
+        /// `static-archive`: a GNU `ar` archive of ELF64 relocatable objects or LLVM bitcode.
+        | StaticArchive
+
+    /// A link artifact the library's bindings are checked against (#204), from the pilot's
+    /// `[library.artifact]` table. The artifact is identified by its bytes: generation refuses
+    /// a file whose SHA-256 differs from the one declared here.
+    type LibraryArtifact = {
+        /// Path to the artifact; a relative path is relative to the pilot file's directory.
+        Path: string
+        /// SHA-256 of the artifact file: 64 lowercase hexadecimal digits.
+        Sha256: string
+        Kind: StaticArtifactKind
+    }
+
     /// Library-level metadata in a .pilot.toml [library] section.
     type LibrarySpec = {
         /// Library name, e.g. "libc"
@@ -54,6 +72,9 @@ module PilotTypes =
         /// pkg-config package names used to resolve include paths and defines.
         /// Stored for reproducibility (e.g. ["gtk+-3.0"] or ["webkit2gtk-4.1"; "gtk+-3.0"]).
         PkgConfig: string list
+        /// The static archive the library's selected extern symbols are verified against
+        /// (`[library.artifact]`, #204). None: no artifact is inspected.
+        Artifact: LibraryArtifact option
     }
     with
         /// Backward-compat: returns the single header (or first if multiple).

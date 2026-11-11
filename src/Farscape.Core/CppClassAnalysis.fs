@@ -1367,6 +1367,7 @@ module CppClassAnalysis =
     type SharedMemorySpaceKind =
         | HostShared
         | DeviceUnified
+        | FileMapped
 
     type SharedAccessMode =
         | SharedReadOnly
@@ -1696,6 +1697,7 @@ module CppClassAnalysis =
             match spec.MemorySpace with
             | HostShared -> 1
             | DeviceUnified -> 2
+            | FileMapped -> 3
         let spaceAccessCode =
             match spec.SpaceAccess with
             | SharedReadOnly -> 1
@@ -1739,22 +1741,75 @@ module CppClassAnalysis =
                 [ $"  region->elements[index].{firstField.Name} = static_cast<{firstField.CType}>(region->elements[index].{firstField.Name} + static_cast<{firstField.CType}>(delta));"
                   "  region->library_addr = reinterpret_cast<std::uintptr_t>(&region->elements[0]);"
                   "  return StatusOk;" ]
+        let mapEntrySource =
+            match spec.MemorySpace with
+            | FileMapped ->
+                [ $"extern \"C\" void* {prefix}_map(int fd) noexcept {{"
+                  "  if (fd < 0 || g_next_region >= 16) return nullptr;"
+                  "  struct ::stat st{};"
+                  $"  if (::fstat(fd, &st) != 0 || st.st_size < 0 || static_cast<std::size_t>(st.st_size) < {spec.RegionByteExtent}u) return nullptr;"
+                  $"  std::size_t map_bytes = {spec.RegionByteExtent}u;"
+                  $"  int init_prot = ({spaceAccessCode} == AccessReadOnly) ? PROT_READ : (PROT_READ | PROT_WRITE);"
+                  "  void* mem = ::mmap(nullptr, map_bytes, init_prot, MAP_SHARED, fd, 0);"
+                  "  if (mem == MAP_FAILED || !mem) return nullptr;"
+                  $"  if ((reinterpret_cast<std::uintptr_t>(mem) & ({spec.RegionAlignment}u - 1u)) != 0u) {{ ::munmap(mem, map_bytes); return nullptr; }}"
+                  "  auto& slot = g_regions[g_next_region++];"
+                  "  std::memset(&slot, 0, sizeof(SharedRegionState));"
+                  "  slot.elements = static_cast<SharedElement*>(mem);"
+                  "  slot.mapped_bytes = map_bytes;"
+                  "  slot.backing_fd = fd;"
+                  "  slot.mapped = true;"
+                  $"  slot.memory_space = {memorySpaceCode};"
+                  $"  slot.space_access = {spaceAccessCode};"
+                  "  slot.share_mode = AccessNone;"
+                  "  slot.shared_count = 0;"
+                  "  slot.clef_addr = reinterpret_cast<std::uintptr_t>(&slot.elements[0]);"
+                  "  slot.library_addr = 0;"
+                  "  slot.copy_count = 0;"
+                  "  return &slot;"
+                  "}" ]
+            | HostShared
+            | DeviceUnified ->
+                [ $"extern \"C\" void* {prefix}_map() noexcept {{"
+                  "  if (g_next_region >= 16) return nullptr;"
+                  $"  std::size_t map_bytes = align_page_extent({spec.RegionByteExtent}u, {spec.RegionAlignment}u);"
+                  $"  int init_prot = ({spaceAccessCode} == AccessReadOnly) ? PROT_READ : (PROT_READ | PROT_WRITE);"
+                  "  void* mem = ::mmap(nullptr, map_bytes, init_prot, MAP_SHARED | MAP_ANONYMOUS, -1, 0);"
+                  "  if (mem == MAP_FAILED || !mem) return nullptr;"
+                  $"  if ((reinterpret_cast<std::uintptr_t>(mem) & ({spec.RegionAlignment}u - 1u)) != 0u) {{ ::munmap(mem, map_bytes); return nullptr; }}"
+                  "  auto& slot = g_regions[g_next_region++];"
+                  "  std::memset(&slot, 0, sizeof(SharedRegionState));"
+                  "  slot.elements = static_cast<SharedElement*>(mem);"
+                  "  slot.mapped_bytes = map_bytes;"
+                  "  slot.backing_fd = -1;"
+                  "  slot.mapped = true;"
+                  $"  slot.memory_space = {memorySpaceCode};"
+                  $"  slot.space_access = {spaceAccessCode};"
+                  "  slot.share_mode = AccessNone;"
+                  "  slot.shared_count = 0;"
+                  "  slot.clef_addr = reinterpret_cast<std::uintptr_t>(&slot.elements[0]);"
+                  "  slot.library_addr = 0;"
+                  "  slot.copy_count = 0;"
+                  "  return &slot;"
+                  "}" ]
         String.concat "\n" (
             [ $"#include \"{escapedHeader}\""
               "#include <cstddef>"
               "#include <cstdint>"
               "#include <cstring>"
               "#include <sys/mman.h>"
+              "#include <sys/stat.h>"
               "#include <unistd.h>"
               "namespace {"
               $"using SharedElement = {spec.StructName};"
               "enum { StatusOk = 0, StatusNullHandle = -1, StatusOutOfRange = 4, StatusLifetimeError = 5, StatusAccessConflict = 6 };"
               "enum { AccessNone = 0, AccessReadOnly = 1, AccessWriteOnly = 2, AccessReadWrite = 3, AccessExclusiveMutable = 4 };"
-              "enum { SpaceHostShared = 1, SpaceDeviceUnified = 2 };" ]
+              "enum { SpaceHostShared = 1, SpaceDeviceUnified = 2, SpaceFileMapped = 3 };" ]
             @ staticAsserts
             @ [ "struct SharedRegionState {"
                 "  SharedElement* elements;"
                 "  std::size_t mapped_bytes;"
+                "  int backing_fd;"
                 "  bool mapped;"
                 "  int memory_space;"
                 "  int space_access;"
@@ -1766,40 +1821,21 @@ module CppClassAnalysis =
                 "};"
                 "static SharedRegionState g_regions[16];"
                 "static int g_next_region = 0;"
-                "static std::size_t align_page_extent(std::size_t bytes, std::size_t req_align) noexcept {"
+                "[[maybe_unused]] static std::size_t align_page_extent(std::size_t bytes, std::size_t req_align) noexcept {"
                 "  long page = ::sysconf(_SC_PAGESIZE);"
                 "  std::size_t gran = page > 0 ? static_cast<std::size_t>(page) : 4096u;"
                 "  if (req_align > gran) gran = req_align;"
                 "  return ((bytes + gran - 1u) / gran) * gran;"
                 "}"
-                "}"
-                $"extern \"C\" void* {prefix}_map() noexcept {{"
-                "  if (g_next_region >= 16) return nullptr;"
-                $"  std::size_t map_bytes = align_page_extent({spec.RegionByteExtent}u, {spec.RegionAlignment}u);"
-                $"  int init_prot = ({spaceAccessCode} == AccessReadOnly) ? PROT_READ : (PROT_READ | PROT_WRITE);"
-                "  void* mem = ::mmap(nullptr, map_bytes, init_prot, MAP_SHARED | MAP_ANONYMOUS, -1, 0);"
-                "  if (mem == MAP_FAILED || !mem) return nullptr;"
-                $"  if ((reinterpret_cast<std::uintptr_t>(mem) & ({spec.RegionAlignment}u - 1u)) != 0u) {{ ::munmap(mem, map_bytes); return nullptr; }}"
-                "  auto& slot = g_regions[g_next_region++];"
-                "  std::memset(&slot, 0, sizeof(SharedRegionState));"
-                "  slot.elements = static_cast<SharedElement*>(mem);"
-                "  slot.mapped_bytes = map_bytes;"
-                "  slot.mapped = true;"
-                $"  slot.memory_space = {memorySpaceCode};"
-                $"  slot.space_access = {spaceAccessCode};"
-                "  slot.share_mode = AccessNone;"
-                "  slot.shared_count = 0;"
-                "  slot.clef_addr = reinterpret_cast<std::uintptr_t>(&slot.elements[0]);"
-                "  slot.library_addr = 0;"
-                "  slot.copy_count = 0;"
-                "  return &slot;"
-                "}"
-                $"extern \"C\" int {prefix}_unmap(void* self) noexcept {{"
+                "}" ]
+            @ mapEntrySource
+            @ [ $"extern \"C\" int {prefix}_unmap(void* self) noexcept {{"
                 "  if (!self) return StatusNullHandle;"
                 "  auto* region = static_cast<SharedRegionState*>(self);"
                 "  if (!region->mapped || !region->elements || region->share_mode != AccessNone) return StatusLifetimeError;"
                 "  ::munmap(region->elements, region->mapped_bytes);"
                 "  region->elements = nullptr;"
+                "  region->backing_fd = -1;"
                 "  region->mapped = false;"
                 "  return StatusOk;"
                 "}" ]
@@ -1813,7 +1849,7 @@ module CppClassAnalysis =
                 "  if (region->space_access == AccessReadOnly && accessMode != AccessReadOnly) return StatusAccessConflict;"
                 "  if (region->space_access == AccessWriteOnly && accessMode != AccessWriteOnly) return StatusAccessConflict;"
                 $"  if (elementCount <= 0 || elementCount > {spec.ElementCount} || static_cast<std::size_t>(elementCount) * sizeof(SharedElement) > {spec.RegionByteExtent}u) return StatusOutOfRange;"
-                "  if (accessMode == AccessReadOnly) { ::mprotect(region->elements, region->mapped_bytes, PROT_READ); }"
+                "  if (accessMode == AccessReadOnly && ::mprotect(region->elements, region->mapped_bytes, PROT_READ) != 0) return StatusAccessConflict;"
                 "  region->share_mode = accessMode;"
                 "  region->shared_count = elementCount;"
                 "  region->library_addr = reinterpret_cast<std::uintptr_t>(&region->elements[0]);"
@@ -1824,7 +1860,7 @@ module CppClassAnalysis =
                 "  auto* region = static_cast<SharedRegionState*>(self);"
                 "  if (!region->mapped || !region->elements || region->share_mode == AccessNone) return StatusLifetimeError;"
                 "  int restore_prot = (region->space_access == AccessReadOnly) ? PROT_READ : (PROT_READ | PROT_WRITE);"
-                "  ::mprotect(region->elements, region->mapped_bytes, restore_prot);"
+                "  if (::mprotect(region->elements, region->mapped_bytes, restore_prot) != 0) return StatusAccessConflict;"
                 "  region->share_mode = AccessNone;"
                 "  region->shared_count = 0;"
                 "  return StatusOk;"

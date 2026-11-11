@@ -46,6 +46,20 @@ module PilotSerializer =
         let table =
             if lib.PkgConfig.IsEmpty then table
             else TomlTable.add "pkg_config" (TomlValue.Array (lib.PkgConfig |> List.map TomlValue.String)) table
+        // The static archive artifact (#204) is the nested table [library.artifact].
+        let table =
+            match lib.Artifact with
+            | Some artifact ->
+                let kind =
+                    match artifact.Kind with
+                    | StaticArtifactKind.StaticArchive -> "static-archive"
+                let artifactTable =
+                    TomlTable.empty
+                    |> TomlTable.add "path" (TomlValue.String artifact.Path)
+                    |> TomlTable.add "sha256" (TomlValue.String artifact.Sha256)
+                    |> TomlTable.add "kind" (TomlValue.String kind)
+                TomlTable.add "artifact" (TomlValue.Table artifactTable) table
+            | None -> table
         TomlValue.Table table
 
     /// Convert an OutputSpec to a TomlTable.
@@ -469,6 +483,25 @@ module PilotSerializer =
             arr |> List.choose (function TomlValue.String s -> Some s | _ -> None)
         | _ -> []
 
+    /// The optional `[library.artifact]` table (#204): `path`, `sha256` and `kind`, each a
+    /// required nonempty string, and no other key. `kind` admits only `static-archive` and
+    /// `sha256` only 64 hexadecimal digits (FS9201 otherwise); the digest is kept lowercase.
+    let private deserializeArtifact (library: TomlTable) : LibraryArtifact option =
+        let key = "library.artifact"
+        TomlTable.tryFind "artifact" library
+        |> Option.map (fun value ->
+            let table = tableAt key "[library.artifact] must be a table" value
+            onlyKeys key "[library.artifact] admits only path, sha256 and kind" ["path"; "sha256"; "kind"] table
+            let path = nonemptyText key "[library.artifact] requires a nonempty path" "path" table
+            let sha256 = nonemptyText key "[library.artifact] requires a nonempty sha256" "sha256" table
+            if sha256.Length <> 64 || not (sha256 |> Seq.forall System.Uri.IsHexDigit) then
+                refuse Diagnostics.PilotValueUnadmitted $"{key}.sha256" "[library.artifact].sha256 must be the 64 hexadecimal digits of a SHA-256"
+            let kind =
+                match nonemptyText key "[library.artifact] requires a nonempty kind" "kind" table with
+                | "static-archive" -> StaticArtifactKind.StaticArchive
+                | other -> refuse Diagnostics.PilotValueUnadmitted $"{key}.kind" $"[library.artifact].kind '{other}' is not admitted; the only admitted kind is static-archive"
+            { LibraryArtifact.Path = path; Sha256 = sha256.ToLowerInvariant(); Kind = kind })
+
     /// Parse a LibrarySpec from the [library] table.
     /// Accepts either `headers = [...]` (new) or `header = "..."` (backward compat).
     let private deserializeLibrary (doc: TomlDocument) : LibrarySpec =
@@ -496,7 +529,8 @@ module PilotSerializer =
               SystemIncludePaths = optionalStringArray "system_include_paths" table
               Defines = optionalStringArray "defines" table
               MacroPrefixes = optionalStringArray "macro_prefixes" table
-              PkgConfig = optionalStringArray "pkg_config" table }
+              PkgConfig = optionalStringArray "pkg_config" table
+              Artifact = deserializeArtifact table }
 
     /// Parse an OutputSpec from the [output] table.
     let private deserializeOutput (doc: TomlDocument) : OutputSpec =

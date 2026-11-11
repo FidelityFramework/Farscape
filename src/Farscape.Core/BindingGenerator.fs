@@ -7,6 +7,94 @@ open PilotTypes
 
 module BindingGenerator =
 
+    /// Check the emitted Clef surface before publishing any part of a generation.
+    let verifyEmittedClefPurity (emittedFiles: (string * string) list) : Result<unit, Diagnostics.Refusal> =
+        let forbidden = set [ "obj"; "box"; "null"; "nativeint"; "nativeptr" ]
+        let tokensIn (code: string) =
+            let found = ResizeArray<string>()
+            let mutable index = 0
+            let at (text: string) =
+                index + text.Length <= code.Length
+                && System.String.CompareOrdinal(code, index, text, 0, text.Length) = 0
+            let identifierPart c = System.Char.IsLetterOrDigit c || c = '_' || c = '\''
+            let characterLength () =
+                // A prime or type-variable prefix is not an opening character quote.
+                // Admit only a single character or a complete escape followed by its quote.
+                if index + 2 < code.Length && code[index + 1] <> '\\'
+                   && code[index + 1] <> '\'' && code[index + 1] <> '\r'
+                   && code[index + 1] <> '\n' && code[index + 2] = '\'' then 3
+                elif index + 3 < code.Length && code[index + 1] = '\\' then
+                    let isHex c =
+                        (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+                    let digits start count predicate =
+                        start + count < code.Length && code[start + count] = '\''
+                        && Seq.forall (fun offset -> predicate code[start + offset]) (seq { 0 .. count - 1 })
+                    match code[index + 2] with
+                    | '\'' | '"' | '\\' | 'a' | 'b' | 'f' | 'n' | 'r' | 't' | 'v'
+                        when code[index + 3] = '\'' -> 4
+                    | 'x' when digits (index + 3) 2 isHex -> 6
+                    | 'u' when digits (index + 3) 4 isHex -> 8
+                    | 'U' when digits (index + 3) 8 isHex -> 12
+                    | c when c >= '0' && c <= '9'
+                             && digits (index + 2) 3 (fun digit -> digit >= '0' && digit <= '9') -> 6
+                    | _ -> 0
+                else 0
+            while index < code.Length do
+                if at "//" then
+                    index <- index + 2
+                    while index < code.Length && code[index] <> '\n' && code[index] <> '\r' do
+                        index <- index + 1
+                elif at "(*" then
+                    index <- index + 2
+                    let mutable depth = 1
+                    while index < code.Length && depth > 0 do
+                        if at "(*" then
+                            depth <- depth + 1
+                            index <- index + 2
+                        elif at "*)" then
+                            depth <- depth - 1
+                            index <- index + 2
+                        else index <- index + 1
+                elif at "\"\"\"" then
+                    index <- index + 3
+                    while index < code.Length && not (at "\"\"\"") do
+                        index <- index + 1
+                    if index < code.Length then index <- index + 3
+                elif code[index] = '"' then
+                    index <- index + 1
+                    let mutable closed = false
+                    while index < code.Length && not closed do
+                        match code[index] with
+                        | '\\' -> index <- min code.Length (index + 2)
+                        | '"' ->
+                            closed <- true
+                            index <- index + 1
+                        | _ -> index <- index + 1
+                else
+                    let literalLength = if code[index] = '\'' then characterLength () else 0
+                    if literalLength > 0 then index <- index + literalLength
+                    elif System.Char.IsLetter code[index] || code[index] = '_' || code[index] = '\'' then
+                        let start = index
+                        index <- index + 1
+                        while index < code.Length && identifierPart code[index] do
+                            index <- index + 1
+                        let token = code.Substring(start, index - start)
+                        if forbidden.Contains token then found.Add token
+                    else index <- index + 1
+            found |> Set.ofSeq |> Set.toList
+        let diagnostics =
+            emittedFiles |> List.choose (fun (relativeFile, code) ->
+                match tokensIn code with
+                | [] -> None
+                | tokens ->
+                    let names = String.concat ", " tokens
+                    Diagnostics.diagnostic Diagnostics.EmittedClefImpure
+                        $"Emitted Clef file '{relativeFile}' contains forbidden token(s): {names}."
+                        (Diagnostics.Located.Unknown "emitted Clef surface purity check; no header declaration location applies")
+                    |> Some)
+        if diagnostics.IsEmpty then Ok ()
+        else Error (Diagnostics.refusalsOf diagnostics " No bindings were written.")
+
     /// A requested ABI layout probe cannot be replaced by declared layouts. Its failure is
     /// raised as a refusal keeping the probe's structured diagnostics (#186), its text after
     /// "ABI-critical struct layout extraction failed: ".
@@ -842,6 +930,10 @@ module BindingGenerator =
                 else []
 
             // Settle every source projection before replacing any generated file.
+            (outputPath, generatedCode) :: wrapperOutputs
+            |> List.map (fun (path, code) -> Path.GetRelativePath(options.OutputDirectory, path), code)
+            |> verifyEmittedClefPurity
+            |> Result.defaultWith Diagnostics.raiseRefusal
             Directory.CreateDirectory(options.OutputDirectory) |> ignore
             for path, code in (outputPath, generatedCode) :: wrapperOutputs do
                 File.WriteAllText(path, code)
@@ -1218,6 +1310,37 @@ module BindingGenerator =
                         logVerbose $"  class: {c.Name} (fields={c.Fields.Length}, methods={c.Methods.Length}) -> {classification}" verbose
 
                 // Build generation context once from the full declaration list
+                let preflightAbiCritical (checkCtx: FidelityCodeGenerator.GenerationContext) =
+                    match project.Options with
+                    | Some opts ->
+                        let nativeCarrier = opts.NativePointerSurface || opts.CHeaderMode
+                        for requested in opts.AbiCriticalStructs do
+                            let name = requested.Replace("typedef ", "").Replace("struct ", "").Replace("union ", "")
+                            let expectedUnion =
+                                if requested.StartsWith("struct ") then Some false
+                                elif requested.StartsWith("union ") then Some true
+                                else None
+                            let declared = checkCtx.Structs.TryFind name
+                            let refuse code message =
+                                let source =
+                                    declared |> Option.map _.Location.Location
+                                    |> Option.defaultValue (Diagnostics.Located.Unknown $"no parsed header declares a record named '{name}'")
+                                Diagnostics.diagnostic code message source
+                                |> Diagnostics.withPilotKey "options.abi_critical_structs" None
+                                |> Diagnostics.refuse
+                            if requested.StartsWith("typedef ") && not (checkCtx.TypedefMap.ContainsKey name) then
+                                refuse Diagnostics.AbiStorageUndeclared $"ABI-critical typedef '{name}' is not declared."
+                            if expectedUnion |> Option.exists (fun expected -> declared |> Option.exists (fun record -> record.IsUnion <> expected)) then
+                                refuse Diagnostics.AbiStorageKindMismatch $"ABI-critical storage '{name}' does not match the requested record kind."
+                            if declared.IsNone then
+                                let unit = FidelityCodeGenerator.inUnitOf "typedef" name { checkCtx with DeclarationUnits = unitTypedefMaps }
+                                match FidelityCodeGenerator.resolveCType unit.TypedefMap dataModel Set.empty unit.Delegates unit.Enums name with
+                                | FidelityCodeGenerator.Scalar r when expectedUnion.IsNone && r.Bits > 0 -> ()
+                                | _ ->
+                                    let what = if nativeCarrier then "Native carrier" else "ABI-critical"
+                                    refuse Diagnostics.AbiStorageUndeclared $"{what} storage '{name}' has no known scalar or measured record representation."
+                    | None -> ()
+
                 let structLayouts =
                     let abiStructNames =
                         match project.Options with
@@ -1235,10 +1358,42 @@ module BindingGenerator =
                                     (Diagnostics.Located.Unknown "the measuring unit and the pilot's declaring header are named in the message")
                                 |> Diagnostics.withPilotKey "options.abi_critical_structs" None
                                 |> Diagnostics.refuse)
+                        preflightAbiCritical probeCtx
+                        let headerDeclsByPath = List.zip project.Library.Headers headerDeclLists |> Map.ofList
                         units
                         |> List.map (fun (headerFile, names) ->
+                            let ownDecls =
+                                match headerDeclsByPath.TryFind headerFile with
+                                | Some declarations -> declarations
+                                | None ->
+                                    Diagnostics.diagnostic Diagnostics.AbiStorageUnitDisagrees
+                                        $"ABI layout measuring unit '{headerFile}' has no parsed declaration list."
+                                        (Diagnostics.Located.Unknown "the measuring header is absent from the pilot's parsed declaring units")
+                                    |> Diagnostics.withPilotKey "options.abi_critical_structs" None
+                                    |> Diagnostics.refuse
+                            let unitTypedefs = (unitFactsWith included headerFile ownDecls).Typedefs
+                            let spelledNames =
+                                names |> List.map (fun req ->
+                                    if req.StartsWith("typedef ") || req.StartsWith("struct ") || req.StartsWith("union ") then req
+                                    elif unitTypedefs.ContainsKey req then "typedef " + req
+                                    else
+                                        let record =
+                                            ownDecls
+                                            |> List.tryPick (function CppParser.Declaration.Struct s when s.Name = req -> Some s | _ -> None)
+                                            |> Option.orElseWith (fun () -> probeCtx.Structs.TryFind req)
+                                        match record with
+                                        | Some record when record.IsUnion -> "union " + req
+                                        | Some _ -> "struct " + req
+                                        | None -> req)
                             let measured =
-                                CppParser.extractStructLayoutsForModeDiagnosed headerFile project.Library.IncludePaths project.Library.SystemIncludePaths project.Library.Defines names (headerCppMode headerFile) verbose
+                                CppParser.extractStructLayoutsForModeDiagnosed headerFile project.Library.IncludePaths project.Library.SystemIncludePaths project.Library.Defines spelledNames (headerCppMode headerFile) verbose
+                                |> Result.mapError (fun refusal ->
+                                    if not refusal.Diagnostics.IsEmpty then refusal
+                                    else
+                                        Diagnostics.diagnostic Diagnostics.AbiStorageUnmeasured refusal.Text
+                                            (Diagnostics.inFile headerFile "clang layout probe failed in this declaring unit")
+                                        |> Diagnostics.withPilotKey "options.abi_critical_structs" None
+                                        |> Diagnostics.refusalOf)
                                 |> requireLayoutProbe
                             logVerbose $"Extracted layouts for {measured.Count} ABI-critical struct(s) in {headerFile}" verbose
                             headerFile, measured)
@@ -1251,40 +1406,19 @@ module BindingGenerator =
 
                 let ctx =
                     let baseCtx = FidelityCodeGenerator.buildGenerationContext declarations dataModel structLayouts
+                    preflightAbiCritical baseCtx
                     match project.Options with
                     | Some opts ->
                         let nativeCarrier = opts.NativePointerSurface || opts.CHeaderMode
                         for requested in opts.AbiCriticalStructs do
                             let name = requested.Replace("typedef ", "").Replace("struct ", "").Replace("union ", "")
-                            let expectedUnion =
-                                if requested.StartsWith("struct ") then Some false
-                                elif requested.StartsWith("union ") then Some true
-                                else None
                             let declared = baseCtx.Structs.TryFind name
-                            // Each entry is refused under `options.abi_critical_structs` (#199), at
-                            // the record's clang location when a header declares it.
-                            let refuse code message =
-                                let source =
-                                    declared |> Option.map _.Location.Location
-                                    |> Option.defaultValue (Diagnostics.Located.Unknown $"no parsed header declares a record named '{name}'")
-                                Diagnostics.diagnostic code message source
+                            if declared.IsSome && not (structLayouts.ContainsKey name) then
+                                let source = declared |> Option.map _.Location.Location |> Option.defaultValue (Diagnostics.Located.Unknown $"no parsed header declares a record named '{name}'")
+                                let what = if nativeCarrier then "Native carrier" else "ABI-critical"
+                                Diagnostics.diagnostic Diagnostics.AbiStorageUnmeasured $"{what} storage '{name}' requires a measured layout; header probe did not provide it." source
                                 |> Diagnostics.withPilotKey "options.abi_critical_structs" None
                                 |> Diagnostics.refuse
-                            if requested.StartsWith("typedef ") && not (baseCtx.TypedefMap.ContainsKey name) then
-                                refuse Diagnostics.AbiStorageUndeclared $"ABI-critical typedef '{name}' is not declared."
-                            if expectedUnion |> Option.exists (fun expected -> declared |> Option.exists (fun record -> record.IsUnion <> expected)) then
-                                refuse Diagnostics.AbiStorageKindMismatch $"ABI-critical storage '{name}' does not match the requested record kind."
-                            if declared.IsSome then
-                                if not (structLayouts.ContainsKey name) then
-                                    let what = if nativeCarrier then "Native carrier" else "ABI-critical"
-                                    refuse Diagnostics.AbiStorageUnmeasured $"{what} storage '{name}' requires a measured layout; header probe did not provide it."
-                            else
-                                let unit = FidelityCodeGenerator.inUnitOf "typedef" name { baseCtx with DeclarationUnits = unitTypedefMaps }
-                                match FidelityCodeGenerator.resolveCType unit.TypedefMap dataModel Set.empty unit.Delegates unit.Enums name with
-                                | FidelityCodeGenerator.Scalar r when expectedUnion.IsNone && r.Bits > 0 -> ()
-                                | _ ->
-                                    let what = if nativeCarrier then "Native carrier" else "ABI-critical"
-                                    refuse Diagnostics.AbiStorageUndeclared $"{what} storage '{name}' has no known scalar or measured record representation."
                     | _ -> ()
                     // An external contract must survive neither duplicate-map collapse
                     // nor namespace filtering. Refuse before any generation effects.
@@ -1442,7 +1576,8 @@ module BindingGenerator =
                         // Declared value structs: the record types and descriptors by-value
                         // claims cite (#162), emitted though no namespace classifies them here.
                         let valueStructs = ctx.ValueStructs |> Set.filter ctx.Structs.ContainsKey
-                        { classified with SharedTypes = Set.unionMany [constants; storageNames; requestedStorage; signalTypes; valueStructs]; LocalTypes = Map.empty }
+                        let cppClassNames = ctx.CppClasses |> Map.toSeq |> Seq.map fst |> Set.ofSeq
+                        { classified with SharedTypes = Set.unionMany [constants; storageNames; requestedStorage; signalTypes; valueStructs; cppClassNames]; LocalTypes = Map.empty }
                     else
                         { classified with
                             SharedTypes = Set.unionMany [classified.SharedTypes; storageNames; signalTypes]
@@ -1505,21 +1640,18 @@ module BindingGenerator =
                     if typedProtocol then TypedProtocolGenerator.render project xmlProtocols declarations ctx outputDir
                     else []
 
-                // ── Shared Types.clef (root level) ──────────────────────────
+                // Render shared Types.clef, error modules, and L2 callback wrappers in memory
+                // before archive verification and disk writes so any refusal fails cleanly with zero writes.
                 let sharedTypeDecls = PilotAnalyzer.filterTypesOnly classification.SharedTypes declarations
                 let sharedHandles = Set.intersect ctx.OpaqueHandles classification.SharedTypes
                 let sharedCode =
                     FidelityCodeGenerator.generateModule ctx sharedHandles sharedTypeDecls
                         sharedTypesNs project.Library.Name "Shared type definitions" []
-                let sharedTypesPath = Path.Combine(outputDir, "Types.clef")
-                Directory.CreateDirectory(outputDir) |> ignore
-                File.WriteAllText(sharedTypesPath, sharedCode)
                 let viewMarkers = MappedReturnGenerator.markers project |> List.map CodeRenderer.render |> String.concat "\n"
-                if viewMarkers <> "" then File.AppendAllText(sharedTypesPath, "\n" + viewMarkers)
-                logVerbose $"Shared types module: {sharedTypesPath} ({classification.SharedTypes.Count} types)" verbose
+                let sharedCode = if viewMarkers = "" then sharedCode else sharedCode + "\n" + viewMarkers
 
-                // ── Error module ────────────────────────────────────────────
-                let errorModuleFiles =
+                // ── Error module (pure in-memory preparation) ────────────────
+                let errorModulePlan =
                     match errorHandling with
                     | WrapperTypes.UseErrno _ ->
                         // Extract errno macros from declarations; if none present
@@ -1552,10 +1684,7 @@ module BindingGenerator =
                                     []
                         let errnoNs = $"{nsPrefix}.Errno"
                         let output = ErrnoModuleGenerator.generateWithModel effectiveMacros errnoNs project.Library.Name dataModel
-                        let errorPath = Path.Combine(outputDir, "Errno.clef")
-                        File.WriteAllText(errorPath, output)
-                        logVerbose $"Errno module: {errorPath}" verbose
-                        [errorPath]
+                        [ ("Errno.clef", "Errno module", output) ]
                     | WrapperTypes.UseEnumError (errorType, _, _, _) ->
                         // Find enum by name or by typedef (anonymous enum pattern)
                         let errorEnum =
@@ -1591,10 +1720,7 @@ module BindingGenerator =
                                     let typesModule = $"{nsPrefix}.Types"
                                     match EnumErrorModuleGenerator.generate enumDecl config errorNs [typesModule] with
                                     | Some output ->
-                                        let errorPath = Path.Combine(outputDir, $"{config.ErrorStructName}.clef")
-                                        File.WriteAllText(errorPath, output)
-                                        logVerbose $"Error module: {errorPath}" verbose
-                                        [errorPath]
+                                        [ ($"{config.ErrorStructName}.clef", "Error module", output) ]
                                     | None -> []
                                 | _ -> []
                             | None -> []
@@ -1612,18 +1738,10 @@ module BindingGenerator =
                         sb.AppendLine("    /// Override in an Overlay module for domain-specific error mapping.") |> ignore
                         sb.AppendLine("    let describe (code: int) : string =") |> ignore
                         sb.AppendLine($"        \"{libPrefix} error (code \" + Format.int code + \")\"") |> ignore
-                        let output = sb.ToString()
-                        let errorPath = Path.Combine(outputDir, "ReturnCode.clef")
-                        File.WriteAllText(errorPath, output)
-                        logVerbose $"ReturnCode module: {errorPath}" verbose
-                        [errorPath]
+                        [ ("ReturnCode.clef", "ReturnCode module", sb.ToString()) ]
                     | _ -> []
 
-                // ── BAREWire descriptors ─────────────────────────────────────
-                // Every struct's StructDescriptor is emitted inside its layout module in the
-                // Types module (wiki 14_Binding_Generation_Gaps §2); there is no separate Descriptors file to write.
-
-                // ── Callback spec (resolved here, used by L2 marshaling) ────
+                // ── Callback spec & L2 marshaling plan (pure in-memory preparation) ────
                 let callbackSpec =
                     if generateWrappers then
                         let spec =
@@ -1659,6 +1777,131 @@ module BindingGenerator =
                             logVerbose $"Callback patterns: {spec.Registrations.Length} registration(s), {spec.ListenerStructs.Length} listener struct(s)" verbose
                             Some spec
                     else None
+
+                let unpairedConstructors =
+                    let allInterfaces = xmlProtocols |> List.collect (fun p -> p.Interfaces)
+                    let withDestroy =
+                        allInterfaces
+                        |> List.filter (fun i -> i.Requests |> List.exists (fun r -> r.IsDestructor))
+                        |> List.map (fun i -> i.Name) |> Set.ofList
+                    let constructed =
+                        allInterfaces |> List.collect (fun i ->
+                            i.Requests |> List.collect (fun r ->
+                                r.Args |> List.choose (fun a ->
+                                    if a.Type = ProtocolParser.NewId then a.Interface else None)))
+                        |> List.distinct
+                    constructed |> List.filter (fun n -> not (Set.contains n withDestroy))
+
+                let layer3Req = if typedProtocol then None else PilotAnalyzer.analyzeLayer3Requirements project callbackSpec unpairedConstructors
+
+                let callbackWrapperContent =
+                    match layer3Req with
+                    | None -> None
+                    | Some req ->
+                        match req.HasCallbackWrappers, callbackSpec with
+                        | true, Some spec ->
+                            let bridgeName = $"{nsPrefix}.Bridge"
+                            let callbackNs = $"{bridgeName}.Callbacks"
+                            let functionToNs =
+                                project.Namespaces |> List.collect (fun ns ->
+                                    PilotAnalyzer.filterDeclarationsForNamespace ns declarations
+                                    |> List.choose (function
+                                        | CppParser.Declaration.Function f -> Some (f.Name, ns.Name)
+                                        | _ -> None))
+                                |> Map.ofList
+                            let resolveModule funcName =
+                                functionToNs |> Map.tryFind funcName |> Option.defaultValue nsPrefix
+                            let registrationModules =
+                                spec.Registrations
+                                |> List.map (fun reg -> resolveModule reg.Function)
+                                |> List.distinct
+                            let callbackOpens =
+                                [ $"{nsPrefix}.Types" ] @ registrationModules
+                                |> List.distinct
+                            CallbackWrapperGenerator.generateTypedWithModules spec declarations callbackNs ctx callbackOpens resolveModule
+                        | _ -> None
+
+                let emittedTexts =
+                    [ yield "Types.clef", sharedCode
+                      for (fileName, _, errorOutput) in errorModulePlan do
+                          yield fileName, errorOutput
+                      for (ns, _, localCode, _, funcCode, wrapperCode) in namespaceCode do
+                          let lastSegment = ns.Name.Split('.') |> Array.last
+                          for code in Option.toList localCode do
+                              yield Path.Combine(lastSegment, "Types.clef"), code
+                          yield Path.Combine(lastSegment, $"{lastSegment}.clef"), funcCode
+                          for code in Option.toList wrapperCode do
+                              yield Path.Combine(lastSegment, $"{lastSegment}Api.clef"), code
+                      for (path, protoCode) in typedProtocolContents do
+                          yield Path.GetRelativePath(outputDir, path), protoCode
+                      for code in Option.toList signalCode do
+                          yield Path.Combine("Bridge", "Signals.clef"), code
+                      for code in Option.toList callbackWrapperContent do
+                          let libLastSegment = nsPrefix.Split('.') |> Array.last
+                          yield Path.Combine("..", $"{libLastSegment}Bridge", "Callbacks.clef"), code ]
+                verifyEmittedClefPurity emittedTexts |> Result.defaultWith Diagnostics.raiseRefusal
+
+                // ── Static archive artifact (#204) ──────────────────────────
+                // A declared [library.artifact] is inspected, and every extern symbol the
+                // library's emitted bindings (shared types, error modules, C functions, C++ mangled
+                // free functions, C++ class constructors/destructors/methods/shims, wrappers, mapped
+                // returns, typed protocol externs, signal bridges, L2 callback wrappers) bind is
+                // resolved to the archive member defining it, before any output write:
+                // a refusal (FS9224 to FS9230) leaves prior output as it is. The artifact changes
+                // no .clef file and nothing in the .fidproj; its only output is the link provenance
+                // record written beside the .fidproj.
+                let externAttributePattern =
+                    System.Text.RegularExpressions.Regex(
+                        @"^\s*\[<FidelityExtern\(""(?<lib>(?:\\.|[^""\\])*)"",\s*""(?<sym>(?:\\.|[^""\\])*)""\)>\]\s*$",
+                        System.Text.RegularExpressions.RegexOptions.Multiline)
+                let linkProvenance =
+                    project.Library.Artifact |> Option.map (fun artifact ->
+                        let artifactPath =
+                            if Path.IsPathRooted artifact.Path then artifact.Path
+                            else Path.GetFullPath(Path.Combine(projectDir, artifact.Path))
+                        let requiredSymbols =
+                            emittedTexts
+                            |> List.collect (fun (_, code) ->
+                                externAttributePattern.Matches(code)
+                                |> Seq.cast<System.Text.RegularExpressions.Match>
+                                |> Seq.choose (fun m ->
+                                    if m.Groups["lib"].Value = project.Library.Name then Some m.Groups["sym"].Value
+                                    else None)
+                                |> Seq.toList)
+                            |> List.distinct
+                            |> List.sort
+                        if requiredSymbols.IsEmpty then
+                            Diagnostics.diagnostic Diagnostics.ArchiveMissingSymbol
+                                $"Static archive contract for library '{project.Library.Name}' has no bound extern symbols in the selected Clef surface."
+                                (Diagnostics.Located.Unknown "the emitted Clef surface binds no extern symbols for the declared library artifact")
+                            |> Diagnostics.withPilotKey "library.artifact" None
+                            |> Diagnostics.refuse
+                        let provenance =
+                            ArchiveInspection.inspect artifactPath (Some artifact.Sha256)
+                            |> Result.defaultWith Diagnostics.raiseRefusal
+                        let resolvedBindings =
+                            ArchiveInspection.verifyRequiredSymbols provenance requiredSymbols
+                            |> Result.defaultWith Diagnostics.raiseRefusal
+                        ArchiveInspection.renderLinkProvenanceToml project.Library.Name provenance resolvedBindings [])
+
+                // ── Shared Types.clef (root level) ──────────────────────────
+                let sharedTypesPath = Path.Combine(outputDir, "Types.clef")
+                Directory.CreateDirectory(outputDir) |> ignore
+                File.WriteAllText(sharedTypesPath, sharedCode)
+                logVerbose $"Shared types module: {sharedTypesPath} ({classification.SharedTypes.Count} types)" verbose
+
+                // ── Error module ────────────────────────────────────────────
+                let errorModuleFiles =
+                    errorModulePlan
+                    |> List.map (fun (fileName, label, output) ->
+                        let errorPath = Path.Combine(outputDir, fileName)
+                        File.WriteAllText(errorPath, output)
+                        logVerbose $"{label}: {errorPath}" verbose
+                        errorPath)
+
+                // ── BAREWire descriptors ─────────────────────────────────────
+                // Every struct's StructDescriptor is emitted inside its layout module in the
+                // Types module (wiki 14_Binding_Generation_Gaps §2); there is no separate Descriptors file to write.
 
                 // ── Namespace subfolders ─────────────────────────────────────
                 let nsFiles =
@@ -1709,23 +1952,18 @@ module BindingGenerator =
                 // Generate canonical fidproj for the binding library
                 let fidprojFile = generateFidproj project (if typedProtocol then nsPrefix + ".Native" else nsPrefix) outputDir dependencies allFiles verbose
 
+                // The link provenance record of a declared static archive (#204):
+                // <Package>.link-provenance.toml beside <Package>.fidproj.
+                let linkProvenanceFiles =
+                    match linkProvenance with
+                    | Some contents ->
+                        let provenancePath = Path.ChangeExtension(fidprojFile, ".link-provenance.toml")
+                        File.WriteAllText(provenancePath, contents)
+                        logVerbose $"Link provenance: {provenancePath}" verbose
+                        [provenancePath]
+                    | None -> []
+
                 // ── Layer 2 Marshaling Bridge package ─────────────────────
-                let unpairedConstructors =
-                    let allInterfaces = xmlProtocols |> List.collect (fun p -> p.Interfaces)
-                    let withDestroy =
-                        allInterfaces
-                        |> List.filter (fun i -> i.Requests |> List.exists (fun r -> r.IsDestructor))
-                        |> List.map (fun i -> i.Name) |> Set.ofList
-                    let constructed =
-                        allInterfaces |> List.collect (fun i ->
-                            i.Requests |> List.collect (fun r ->
-                                r.Args |> List.choose (fun a ->
-                                    if a.Type = ProtocolParser.NewId then a.Interface else None)))
-                        |> List.distinct
-                    constructed |> List.filter (fun n -> not (Set.contains n withDestroy))
-
-                let layer3Req = if typedProtocol then None else PilotAnalyzer.analyzeLayer3Requirements project callbackSpec unpairedConstructors
-
                 let layer3Files =
                     match layer3Req with
                     | None -> []
@@ -1737,40 +1975,15 @@ module BindingGenerator =
 
                         let fidprojDir = Path.GetDirectoryName fidprojFile
 
-                        // Build function-to-namespace resolver for callbacks
-                        let functionToNs =
-                            project.Namespaces |> List.collect (fun ns ->
-                                PilotAnalyzer.filterDeclarationsForNamespace ns declarations
-                                |> List.choose (function
-                                    | CppParser.Declaration.Function f -> Some (f.Name, ns.Name)
-                                    | _ -> None))
-                            |> Map.ofList
-                        let resolveModule funcName =
-                            functionToNs |> Map.tryFind funcName |> Option.defaultValue nsPrefix
-
                         // Callback wrappers file
                         let callbackFiles =
-                            match req.HasCallbackWrappers, callbackSpec with
-                            | true, Some spec ->
-                                let callbackNs = $"{bridgeName}.Callbacks"
-                                // Forward typed entries through the binding module that owns each declaration.
-                                let registrationModules =
-                                    spec.Registrations
-                                    |> List.map (fun reg -> resolveModule reg.Function)
-                                    |> List.distinct
-                                let callbackOpens =
-                                    [ $"{nsPrefix}.Types" ] @ registrationModules
-                                    |> List.distinct
-                                let generated =
-                                    CallbackWrapperGenerator.generateTypedWithModules spec declarations callbackNs ctx callbackOpens resolveModule
-                                match generated with
-                                | Some output ->
-                                    let callbackPath = Path.Combine(bridgeDir, "Callbacks.clef")
-                                    File.WriteAllText(callbackPath, output)
-                                    logVerbose $"  L2 marshaling: Callbacks.clef" verbose
-                                    [callbackPath]
-                                | None -> []
-                            | _ -> []
+                            match callbackWrapperContent with
+                            | Some output ->
+                                let callbackPath = Path.Combine(bridgeDir, "Callbacks.clef")
+                                File.WriteAllText(callbackPath, output)
+                                logVerbose $"  L2 marshaling: Callbacks.clef" verbose
+                                [callbackPath]
+                            | None -> []
 
                         let bridgeFiles = callbackFiles
 
@@ -1869,7 +2082,7 @@ module BindingGenerator =
                     | _ -> []
 
                 let allOutputFiles =
-                    allFiles @ [fidprojFile] @ layer3Files
+                    allFiles @ [fidprojFile] @ layer3Files @ linkProvenanceFiles
 
                 Ok {
                     OutputFiles = allOutputFiles
@@ -1881,12 +2094,16 @@ module BindingGenerator =
     /// The pilot key whose input causes each refusal code that pilot input causes (#184): a
     /// malformed define is a `[library] defines` entry, a record without a value type is
     /// missing from `[options] value_structs`, and a GIR-named C type comes from the
-    /// `[library] introspection` files.
+    /// `[library] introspection` files. A static archive refusal (FS9224 to FS9230, #204) comes
+    /// from the `[library.artifact]` table.
     let pilotKeyOf (code: string) : string option =
         match code with
         | Diagnostics.DefineMalformed -> Some "library.defines"
         | Diagnostics.RecordWithoutValueType -> Some "options.value_structs"
         | Diagnostics.GirTypeUndeclared | Diagnostics.GirTypeDivergent -> Some "library.introspection"
+        | Diagnostics.ArchiveMalformed | Diagnostics.ArchiveDigestMismatch | Diagnostics.ArchiveThinUnsupported
+        | Diagnostics.ArchiveMemberFormatUnsupported | Diagnostics.ArchiveMissingSymbol
+        | Diagnostics.ArchiveDuplicateStrongSymbol | Diagnostics.ArchiveBitcodeToolUnavailable -> Some "library.artifact"
         | _ -> None
 
     /// A project generation's failure: an FS91xx refusal raised inside generation keeps its

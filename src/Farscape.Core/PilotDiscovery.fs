@@ -434,6 +434,7 @@ module PilotDiscovery =
             Defines = []
             MacroPrefixes = []
             PkgConfig = []
+            Artifact = None
           }
           Output = { Mode = outputMode; Directory = outputDir }
           Namespaces = [

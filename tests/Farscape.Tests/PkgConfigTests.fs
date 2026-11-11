@@ -120,7 +120,7 @@ let ``a pilot's system include paths from real pkgconf reach clang`` () =
 let ``a pilot's system include paths survive serialization`` () =
     let project : PilotTypes.PilotProject =
         { Library = { Name = "fx"; Headers = ["fx.h"]; XmlProtocols = []; Introspection = []; IncludePaths = ["/a"]; SystemIncludePaths = ["/s 1"; "/s2"]
-                      Defines = []; MacroPrefixes = []; PkgConfig = ["fx-isystem"] }
+                      Defines = []; MacroPrefixes = []; PkgConfig = ["fx-isystem"]; Artifact = None }
           Output = { Mode = "fidelity"; Directory = "out" }
           Namespaces = []; ErrorConventions = None; Options = None; Callbacks = None; Nonnull = None
           ProtocolConfig = None; Layer3 = None; CppConfig = None }

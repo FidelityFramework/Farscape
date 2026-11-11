@@ -1559,7 +1559,11 @@ module FidelityCodeGenerator =
             then wrapOption returnType
             else returnType
 
-        let symbol = projection |> Option.map (fun b -> b.Symbol) |> Option.defaultValue func.Name
+        let defaultSymbol =
+            match func.MangledName with
+            | Some m when m.StartsWith("_Z", System.StringComparison.Ordinal) -> m
+            | _ -> func.Name
+        let symbol = projection |> Option.map (fun b -> b.Symbol) |> Option.defaultValue defaultSymbol
         let constants = projection |> Option.map (fun p -> p.ConstantParameters) |> Option.defaultValue []
         // An integer constant: one the wrapper passes as a literal. A sentinel has no Clef value;
         // its descriptor carries it.
@@ -2060,22 +2064,9 @@ module FidelityCodeGenerator =
         let binding suffix ownership (parameters: (FsParam * string) list) returnType returnRef =
             let name = spec.SafeName + suffix
             let symbol = prefix + suffix
-            let argArray =
-                match parameters with
-                | [] -> Literal "[||]"
-                | _ ->
-                    let items =
-                        parameters
-                        |> List.map (fun (p, _) -> $"box {ActivePatterns.cleanParamName p.Name}")
-                        |> String.concat "; "
-                    Literal $"[| {items} |]"
-            let body =
-                FunctionCall("FidelityExtern", "invoke",
-                    [ Literal (quoteString spec.Namespace)
-                      Literal (quoteString name)
-                      Identifier (name + "Descriptor")
-                      argArray ])
-            [ ValueBinding(name + "Descriptor", Generic("Expr", Named "FunctionDescriptor"),
+            [ LetBinding(name, List.map fst parameters, returnType, NativeZeroed,
+                         [ $"FidelityExtern({quoteString spec.LibraryName}, {quoteString symbol})" ])
+              ValueBinding(name + "Descriptor", Generic("Expr", Named "FunctionDescriptor"),
                 Quoted(RecordBlock [
                     "CName", Literal (quoteString symbol)
                     "Parameters", ArrayBlock (parameters |> List.map (fun (p, repr) -> RecordConstruction [
@@ -2083,14 +2074,13 @@ module FidelityCodeGenerator =
                     "ReturnType", Literal returnRef
                     "CallingConvention", Identifier "CDecl"
                     "OwnershipTransfer", Identifier ownership ]))
-              BlankLine
-              LetBinding(name, List.map fst parameters, returnType, body,
-                         [ $"FidelityExtern({quoteString spec.LibraryName}, {quoteString symbol})" ])
               BlankLine ]
         let spaceName, memoryRegionSource =
-            match spec.MemorySpace with
-            | CppClassAnalysis.SharedMemorySpaceKind.HostShared -> "Fidelity.Platform.HostShared", "MemoryRegionKind.SRAM"
-            | CppClassAnalysis.SharedMemorySpaceKind.DeviceUnified -> "Fidelity.Platform.DeviceUnified", "MemoryRegionKind.DMA"
+            match spec.MemorySpace, spec.SpaceAccess with
+            | CppClassAnalysis.SharedMemorySpaceKind.HostShared, _ -> "Fidelity.Platform.HostShared", "MemoryRegionKind.SRAM"
+            | CppClassAnalysis.SharedMemorySpaceKind.DeviceUnified, _ -> "Fidelity.Platform.DeviceUnified", "MemoryRegionKind.DMA"
+            | CppClassAnalysis.SharedMemorySpaceKind.FileMapped, CppClassAnalysis.SharedAccessMode.SharedReadOnly -> "Fidelity.Platform.FileMapped", "MemoryRegionKind.Flash"
+            | CppClassAnalysis.SharedMemorySpaceKind.FileMapped, _ -> "Fidelity.Platform.FileMapped", "MemoryRegionKind.SRAM"
         let accessName =
             match spec.SpaceAccess with
             | CppClassAnalysis.SharedAccessMode.SharedReadOnly -> "ReadOnly"
@@ -2153,6 +2143,11 @@ module FidelityCodeGenerator =
                 @ binding ("_clef_write_" + field.Name) "Borrowed"
                     [ self; { Name = "index"; Type = Named "int" }, intRef; { Name = "value"; Type = Named field.ClefType }, fieldRepr ]
                     (Named "int") intRef)
+        let mapParameters =
+            match spec.MemorySpace with
+            | CppClassAnalysis.FileMapped -> [ { Name = "fd"; Type = Named "int" }, intRef ]
+            | CppClassAnalysis.HostShared
+            | CppClassAnalysis.DeviceUnified -> []
         [ OpaqueMarker spec.SafeName
           SubModule(spec.SafeName,
               [ LiteralBinding("Size", string spec.MeasuredSize)
@@ -2184,7 +2179,7 @@ module FidelityCodeGenerator =
                       "Version", Literal (quoteString "1.0")
                       "Source", Literal (quoteString (prefix + "_map")) ] ]))
             BlankLine ]
-        @ binding "_map" "CallerOwns" [] (Generic("option", handle spec.SafeName)) pointer
+        @ binding "_map" "CallerOwns" mapParameters (Generic("option", handle spec.SafeName)) pointer
         @ binding "_share_to_library" "Borrowed"
             [ self; { Name = "accessMode"; Type = Named "int" }, intRef; { Name = "elementCount"; Type = Named "int" }, intRef ]
             (Named "int") intRef

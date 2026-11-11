@@ -331,6 +331,7 @@ let ``PilotSerializer round-trips xml_protocols`` () =
             Defines = []
             MacroPrefixes = []
             PkgConfig = []
+            Artifact = None
         }
         Output = { Mode = "fidelity"; Directory = "./out" }
         Namespaces = []
@@ -362,6 +363,7 @@ let ``PilotSerializer round-trips xml_interfaces`` () =
             Defines = []
             MacroPrefixes = []
             PkgConfig = []
+            Artifact = None
         }
         Output = { Mode = "fidelity"; Directory = "./out" }
         Namespaces = [{

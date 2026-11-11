@@ -124,6 +124,19 @@ namespace Farscape.Core
 /// | FS9216 | a C++ ABI fact lacks provenance or conflicts with the library build or AST      |
 /// | FS9217 | a marshaled C++ object is used after its D1 release                            |
 /// | FS9218 | a marshaled C++ object receives its D1 release more than once                   |
+/// | FS9219 | a template container access is out of range or its operation contract is invalid |
+/// | FS9220 | a shared buffer layout is unmeasured or violates its placement, alignment or byte-order contract |
+/// | FS9221 | a shared buffer region's byte extent is too small, overflows or is accessed out of bounds |
+/// | FS9222 | a shared buffer region's lifetime does not cover the library's retention of it  |
+/// | FS9223 | a shared buffer access violates its ReadOnly/ReadWrite exclusivity               |
+/// | FS9224 | a static archive is missing, unreadable, no GNU ar archive, or has a malformed member or ELF64 table |
+/// | FS9225 | a static archive's SHA-256 differs from the pilot's, or its bytes changed during inspection |
+/// | FS9226 | a static archive is a thin archive, whose member bytes are outside the archive digest |
+/// | FS9227 | a static archive member is neither an ELF64 relocatable object nor LLVM bitcode  |
+/// | FS9228 | a selected binding's extern symbol is defined by no member of the static archive |
+/// | FS9229 | a symbol has strong global definitions in two or more static archive members    |
+/// | FS9230 | a static archive has an LLVM bitcode member and llvm-nm is unresolved or exits nonzero |
+/// | FS9231 | an emitted .clef module carries a forbidden CLR or raw-pointer token (obj, box, null, nativeint, nativeptr) outside comments and string literals |
 ///
 /// Allocation continues past FS9199 as FS92xx: the codes are sequential, four digits after FS.
 /// Each refusal reason has exactly one code and each code one reason.
@@ -504,6 +517,30 @@ module Diagnostics =
 
     [<Literal>]
     let SharedBufferConflictingAccess = "FS9223" // shared buffer access violates ReadOnly/ReadWrite exclusivity or mutates concurrently while the library holds an active shared view (#123)
+
+    [<Literal>]
+    let ArchiveMalformed = "FS9224" // static archive artifact missing or unreadable, not a GNU ar archive, or with a malformed or truncated member header, extended-name table or ELF64 table (#204)
+
+    [<Literal>]
+    let ArchiveDigestMismatch = "FS9225" // static archive SHA-256 differs from [library.artifact].sha256, or the file bytes changed between the pre- and post-inspection SHA-256 (#204)
+
+    [<Literal>]
+    let ArchiveThinUnsupported = "FS9226" // thin archive (`!<thin>\n`) refused: its member bytes are outside the archive digest (#204)
+
+    [<Literal>]
+    let ArchiveMemberFormatUnsupported = "FS9227" // archive member that is neither an ELF64 relocatable (ET_REL) object nor LLVM bitcode or a bitcode wrapper (#204)
+
+    [<Literal>]
+    let ArchiveMissingSymbol = "FS9228" // selected binding extern symbol of the library defined by no archive member (#204)
+
+    [<Literal>]
+    let ArchiveDuplicateStrongSymbol = "FS9229" // symbol with strong global definitions in two or more archive members (#204)
+
+    [<Literal>]
+    let ArchiveBitcodeToolUnavailable = "FS9230" // LLVM bitcode member present and llvm-nm cannot be resolved or exits nonzero (#204)
+
+    [<Literal>]
+    let EmittedClefImpure = "FS9231"
 
     // =========================================================================
     // Structured diagnostics (#184)

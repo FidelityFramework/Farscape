@@ -17,6 +17,7 @@
     <Compile Include="Diagnostics.fs" />
     <Compile Include="AttributeContracts.fs" />
     <Compile Include="ProcessLaunch.fs" />
+    <Compile Include="ArchiveInspection.fs" />
     <Compile Include="Types.fs" />
     <Compile Include="CppParser.fs" />
     <Compile Include="PkgConfig.fs" />

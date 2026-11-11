@@ -827,17 +827,18 @@ module CppParser =
         | _ -> None
 
     /// Clang spells the type of a field declared with an unnamed record as
-    /// `struct (unnamed at path:line:col)` (or `union`), possibly cv-qualified or with an
-    /// array extent; `loc` is the unnamed record's own location.
+    /// `struct (unnamed at path:line:col)` (Clang 22+) or `struct (unnamed struct at path:line:col)`
+    /// (Clang 18), or scoped as `Parent::(unnamed struct at path:line:col)` in C++, possibly
+    /// cv-qualified or with a pointer/array declarator suffix; `loc` is the unnamed record's location.
     let private unnamedRecordSpelling =
-        System.Text.RegularExpressions.Regex(@"^(?<pre>.*?)\b(?<tag>struct|union) \(unnamed at (?<loc>[^()]+)\)(?<post>.*)$")
+        System.Text.RegularExpressions.Regex(@"^(?<pre>(?:const |volatile )*)(?:(?<tag>struct|union) (?:.+::)?\(unnamed(?: (?:struct|union))? at (?<loc>[^()]+)\)|(?:.+::)?\(unnamed (?<tag>struct|union) at (?<loc>[^()]+)\))(?<post>.*)$")
 
     /// Clang spells the type of a C11 or C++ anonymous member, the implicit unnamed field it
     /// declares, as `union P::(anonymous at path:line:col)` in C or `P::(anonymous union at
     /// path:line:col)` in C++ (#173, #177), scoped by every enclosing record (`P::(anonymous
     /// union)::`), possibly cv-qualified; `loc` is the anonymous record's own location.
     let private anonymousMemberSpelling =
-        System.Text.RegularExpressions.Regex(@"^(?<pre>(?:const |volatile )*)(?:(?<tag>struct|union) (?:.+::)?\(anonymous at (?<loc>[^()]+)\)|(?:.+::)?\(anonymous (?<tag>struct|union) at (?<loc>[^()]+)\))$")
+        System.Text.RegularExpressions.Regex(@"^(?<pre>(?:const |volatile )*)(?:(?<tag>struct|union) (?:.+::)?\(anonymous(?: (?:struct|union))? at (?<loc>[^()]+)\)|(?:.+::)?\(anonymous (?<tag>struct|union) at (?<loc>[^()]+)\))$")
 
     /// A clang `path:line:col` location with its path made absolute against the working
     /// directory: clang spells one file `x.h`, `./x.h` or `././x.h` depending on how the
@@ -2056,7 +2057,7 @@ module CppParser =
                 let args = ResizeArray<string>()
                 if cppMode then args.AddRange(["-x"; "c++"; "-std=c++17"])
                 args.AddRange(searchArguments includePaths systemIncludePaths defines)
-                for arg in ["-Xclang"; "-fdump-record-layouts-simple"; "-fsyntax-only"; tempFile] do
+                for arg in ["-Wno-unused-variable"; "-Xclang"; "-fdump-record-layouts-simple"; "-fsyntax-only"; tempFile] do
                     args.Add(arg)
 
                 let startInfo = clangStartInfo args
@@ -2072,19 +2073,25 @@ module CppParser =
                 if verbose then
                     printfn "[CppParser] Layout stderr: %d bytes, exit code: %d" stderr.Length proc.ExitCode
 
-                // Parse layout data from stderr (clang may return non-zero due to unused variables)
-                match parseRecordLayouts (stdout + "\n" + stderr) with
-                | Error reason -> Error (Diagnostics.uncoded $"Record layout dump could not be parsed: {reason}")
-                | Ok layouts ->
-                    // Filter to only the requested struct names
-                    let filtered =
-                        structNames
-                        |> List.choose (fun name ->
-                            let key = name.Replace("typedef ", "").Replace("struct ", "").Replace("union ", "")
-                            layouts |> Map.tryFind key |> Option.map (fun l -> (key, l)))
-                        |> Map.ofList
-
-                    Ok filtered
+                if proc.ExitCode <> 0 then
+                    Error (Diagnostics.uncoded $"clang layout probe for '{headerFile}' exited with code {proc.ExitCode}: {stderr.Trim()}")
+                else
+                    match parseRecordLayouts (stdout + "\n" + stderr) with
+                    | Error reason -> Error (Diagnostics.uncoded $"Record layout dump could not be parsed: {reason}")
+                    | Ok layouts ->
+                        let requestedKeys =
+                            structNames
+                            |> List.map (fun name -> name.Replace("typedef ", "").Replace("struct ", "").Replace("union ", ""))
+                            |> List.distinct
+                        let filtered =
+                            requestedKeys
+                            |> List.choose (fun key -> layouts |> Map.tryFind key |> Option.map (fun l -> (key, l)))
+                            |> Map.ofList
+                        match requestedKeys |> List.filter (fun key -> not (filtered.ContainsKey key)) with
+                        | [] -> Ok filtered
+                        | missing ->
+                            let names = String.concat ", " (missing |> List.map (sprintf "'%s'"))
+                            Error (Diagnostics.uncoded $"clang layout probe for '{headerFile}' produced no record layout for {names}")
             with ex ->
                 Error (Diagnostics.uncoded $"Failed to extract struct layouts: {ex.Message}")
         try File.Delete(tempFile) with _ -> ()
@@ -2670,8 +2677,9 @@ module CppParser =
             | Error _ ->
                 (spelled |> List.collect (fun root -> match probe [root] [] with Ok blocks -> blocks | Error _ -> []))
                 @ (synthesized |> List.collect (fun copy -> match probe [] [copy] with Ok blocks -> blocks | Error _ -> []))
-        // A field's unnamed record is dumped `P::(unnamed at loc)`, an anonymous member's
-        // record `P::(anonymous at loc)`.
+        // A field's unnamed record is dumped `P::(unnamed at loc)` (Clang 22+) or
+        // `P::(unnamed struct|union at loc)` (Clang 18); an anonymous member's record is dumped
+        // `P::(anonymous at loc)` or `P::(anonymous struct|union at loc)`.
         let unnamedAt (marker: string) (dumpName: string) =
             let at = dumpName.LastIndexOf marker
             if at < 0 || not (dumpName.EndsWith ")") then None
@@ -2682,8 +2690,10 @@ module CppParser =
                 | Some origin ->
                     match clangLocation origin.Location with
                     | Some location ->
-                        let marker = if origin.Member then "(anonymous at " else "(unnamed at "
-                        blocks |> List.filter (fun block -> unnamedAt marker block.Name = Some location)
+                        let markers =
+                            if origin.Member then [ "(anonymous at "; "(anonymous struct at "; "(anonymous union at " ]
+                            else [ "(unnamed at "; "(unnamed struct at "; "(unnamed union at " ]
+                        blocks |> List.filter (fun block -> markers |> List.exists (fun marker -> unnamedAt marker block.Name = Some location))
                     | None -> []
                 | None -> blocks |> List.filter (fun block -> block.Name = s.Name)
             match candidates |> List.distinctBy (fun l -> l.SizeBits, l.DataSizeBits, l.AlignmentBits, l.FieldOffsetsBits) with

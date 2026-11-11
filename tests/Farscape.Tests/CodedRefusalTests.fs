@@ -783,6 +783,60 @@ let ``an abi_critical_structs entry naming another record kind is refused at the
     | Diagnostics.Located.Known { Path = path } -> Assert.Equal(header, path)
     | other -> failwithf "the record's location is missing: %A" other
 
+[<Fact>]
+let ``a multi-header abi_critical_structs probe refuses with FS9187 when a declaring unit fails to measure the record`` () =
+    let dir = Path.Combine(Path.GetTempPath(), "farscape-probe-fail-" + System.Guid.NewGuid().ToString("N"))
+    Directory.CreateDirectory dir |> ignore
+    try
+        let h1 = Path.Combine(dir, "unit_ok.h")
+        let h2 = Path.Combine(dir, "unit_poisoned.h")
+        // Both units parse cleanly and declare `struct fx_dual` identically so `agreeRecords`
+        // passes and `measurementUnits` assigns both headers, while `unit_poisoned.h` poisons
+        // `fx_dual` after its declarations so clang's `sizeof(struct fx_dual)` layout probe fails
+        // in `unit_poisoned.h` (#52).
+        File.WriteAllText(h1, "struct fx_dual { int a; int tag; };\nint fx_use_one(struct fx_dual *p);\n")
+        File.WriteAllText(h2, "struct fx_dual { int a; int tag; };\nint fx_use_two(struct fx_dual *p);\n#pragma GCC poison fx_dual\n")
+        let project, refusal =
+            refusedPilot [ h1; h2 ] [] [ "c_header_mode = true"; "abi_critical_structs = [\"struct fx_dual\"]" ] [ "fx_use_one"; "fx_use_two" ] []
+        let d = only refusal
+        Assert.Equal("FS9187", d.Code)
+        Assert.Equal(Diagnostics.AbiStorageUnmeasured, d.Code)
+        Assert.Equal(pilotKey project "options.abi_critical_structs", d.Pilot)
+        Assert.Contains("unit_poisoned.h", d.Message)
+    finally
+        Directory.Delete(dir, true)
+
+[<Fact>]
+let ``emitted Clef purity ignores literals comments and identifier primes but refuses forbidden code tokens`` () =
+    let pureCode =
+        String.concat "\n" [
+            "// nativeint"
+            "(* null box obj (* nativeptr *) *)"
+            "let message = \"nativeptr null\""
+            "let escaped = \"quote: \\\"obj\\\" and slash: \\\\ nativeint\""
+            "let multiline = \"\"\"box \" null nativeptr\"\"\""
+            "let letter = 'x'"
+            "let newline = '\\n'"
+            "let quote = '\\''"
+            "let namespace' = 1"
+            "let identity (value: 'T) : 'T = value"
+            "let nativeinteger = namespace'"
+            "let box' = 1" ]
+    match BindingGenerator.verifyEmittedClefPurity [ "Pure.clef", pureCode ] with
+    | Ok () -> ()
+    | Error refusal -> failwithf "Pure Clef was refused: %s" refusal.Text
+    for token in [ "obj"; "box"; "null"; "nativeint"; "nativeptr" ] do
+        for prefix in [ ""; "let namespace' = 1\n"; "let identity (value: 'T) = value\n" ] do
+            let code = prefix + "let rejected = " + token
+            match BindingGenerator.verifyEmittedClefPurity [ "Pure.clef", pureCode; "Nested/Impure.clef", code ] with
+            | Ok () -> failwithf "Forbidden code token '%s' was admitted after %A" token prefix
+            | Error refusal ->
+                let d = only refusal
+                Assert.Equal(Diagnostics.EmittedClefImpure, d.Code)
+                Assert.Equal("FS9231", d.Code)
+                Assert.Contains("Nested/Impure.clef", d.Message)
+                Assert.Contains(token, d.Message)
+
 // #118: an AST template recipe never authorizes an absent binary instantiation.
 let private xrtLibrary = "/usr/lib/libxrt_coreutil.so"
 let private patchTemplate = "xrt::module_elf::patch_it_impl"
@@ -1850,17 +1904,31 @@ extern "C" std::uintptr_t shared_tile_library_last_address() noexcept {
             Namespace = "Test.DeviceSharedBuffers"
             MemorySpace = CppClassAnalysis.SharedMemorySpaceKind.DeviceUnified
             SpaceAccess = CppClassAnalysis.SharedAccessMode.SharedReadWrite }
+    let fileMappedSpec =
+        { hostSpec with
+            SafeName = "FileTensorTileBuffer"
+            Namespace = "Test.FileSharedBuffers"
+            MemorySpace = CppClassAnalysis.SharedMemorySpaceKind.FileMapped
+            SpaceAccess = CppClassAnalysis.SharedAccessMode.SharedReadOnly }
     let ctx = FidelityCodeGenerator.buildGenerationContext [] Types.LP64 measuredLayouts
     let declarations = FidelityCodeGenerator.generateSharedBufferDecls ctx hostSpec
     Assert.Contains(CodeAST.OpaqueMarker "SharedTensorTileBuffer", declarations)
     Assert.DoesNotContain(declarations, function CodeAST.RecordType _ -> true | _ -> false)
+    let externBodies =
+        declarations
+        |> List.choose (function CodeAST.LetBinding(_, _, _, body, attrs) when not attrs.IsEmpty -> Some body | _ -> None)
+    Assert.NotEmpty(externBodies)
+    Assert.All(externBodies, fun body -> Assert.Equal(CodeAST.NativeZeroed, body))
     let clefSource = FidelityCodeGenerator.generateSharedBufferModule ctx hostSpec
     let deviceClefSource = FidelityCodeGenerator.generateSharedBufferModule ctx deviceSpec
+    let fileClefSource = FidelityCodeGenerator.generateSharedBufferModule ctx fileMappedSpec
     File.WriteAllText(path "SharedBuffers.clef", clefSource)
     File.WriteAllText(path "DeviceSharedBuffers.clef", deviceClefSource)
-    for source in [ clefSource; deviceClefSource ] do
-        for forbidden in [ "nativeint"; "nativeptr"; "Ptr<" ] do
+    File.WriteAllText(path "FileSharedBuffers.clef", fileClefSource)
+    for source in [ clefSource; deviceClefSource; fileClefSource ] do
+        for forbidden in [ "nativeint"; "nativeptr"; "Ptr<"; "box "; "box("; ": obj"; "obj array"; "null"; "FidelityExtern.invoke"; "DllImport"; "Marshal"; "UnmanagedFunctionPointer" ] do
             Assert.DoesNotContain(forbidden, source)
+        Assert.Contains("NativeDefault.zeroed ()", source)
     for expected in [
         "open BAREWire.Hardware"
         "open BAREWire.Descriptors"
@@ -1890,366 +1958,46 @@ extern "C" std::uintptr_t shared_tile_library_last_address() noexcept {
         "DeviceTensorTileBuffer_map"
         "DeviceTensorTileBuffer_memory_space_kind" ] do
         Assert.Contains(expected, deviceClefSource)
+    for expected in [
+        "Fidelity.Platform.FileMapped"
+        "MemoryRegionKind.Flash"
+        "Access = \"ReadOnly\""
+        "AccessKind.ReadOnly"
+        "FileTensorTileBuffer_map"
+        "let FileTensorTileBuffer_map (fd: int)"
+        "Name = \"fd\""
+        "FileTensorTileBuffer_memory_space_kind" ] do
+        Assert.Contains(expected, fileClefSource)
     let hostShimSource = CppClassAnalysis.renderSharedBufferZeroCopyShimC hostSpec
     let deviceShimSource = CppClassAnalysis.renderSharedBufferZeroCopyShimC deviceSpec
+    let fileShimSource = CppClassAnalysis.renderSharedBufferZeroCopyShimC fileMappedSpec
+    Assert.DoesNotContain("MAP_ANONYMOUS", fileShimSource)
+    Assert.Contains("MAP_SHARED, fd, 0", fileShimSource)
     File.WriteAllText(path "shim_host.cpp", hostShimSource)
     File.WriteAllText(path "shim_device.cpp", deviceShimSource)
+    File.WriteAllText(path "shim_file.cpp", fileShimSource)
     let library = path "libsharedtile.so"
     // First compile without shims to verify validateSharedBufferLibraryExports refuses missing FFI exports with FS9220
     let incompleteLibrary = path "libsharedtile_incomplete.so"
     run "/usr/bin/clang++" [ "-std=c++17"; "-shared"; "-fPIC"; path "shared_tile.cpp"; "-o"; incompleteLibrary ] |> ignore
     sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
         CppClassAnalysis.validateSharedBufferLibraryExports incompleteLibrary measuredLayouts hostSpec)
-    // Compile targeted library with generated HostShared and DeviceUnified zero-copy shims so libsharedtile.so exports all FidelityExtern symbols
-    run "/usr/bin/clang++" [ "-std=c++17"; "-shared"; "-fPIC"; path "shared_tile.cpp"; path "shim_host.cpp"; path "shim_device.cpp"; "-o"; library ] |> ignore
+    // Compile targeted library with generated HostShared, DeviceUnified and FileMapped zero-copy shims so libsharedtile.so exports all FidelityExtern symbols
+    run "/usr/bin/clang++" [ "-std=c++17"; "-shared"; "-fPIC"; path "shared_tile.cpp"; path "shim_host.cpp"; path "shim_device.cpp"; path "shim_file.cpp"; "-o"; library ] |> ignore
     CppClassAnalysis.validateSharedBufferLibraryExports library measuredLayouts hostSpec
     CppClassAnalysis.validateSharedBufferLibraryExports library measuredLayouts deviceSpec
+    CppClassAnalysis.validateSharedBufferLibraryExports library measuredLayouts fileMappedSpec
 
-    // Compile and execute the generated .clef modules against the real BAREWire Descriptors.fs and Validator.fs
-    let barewireRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "..", "BAREWire", "src"))
-    File.WriteAllText(path "BareWireDescriptorsSurface.fs", String.concat "\n" [
-        "namespace BAREWire.Descriptors"
-        "open System"
-        "open System.Reflection"
-        "open System.Runtime.InteropServices"
-        "open Microsoft.FSharp.Reflection"
-        "open Microsoft.FSharp.Quotations"
-        "open Microsoft.FSharp.Quotations.Patterns"
-        "open BAREWire.Hardware"
-        "type Expr<'T> = Microsoft.FSharp.Quotations.Expr<'T>"
-        "module NativeDefault ="
-        "    let zeroed<'T> () : 'T = Unchecked.defaultof<'T>"
-        "type CallingConvention = | CDecl"
-        "type PassBy = | Value"
-        "type OwnershipTransfer = | CallerOwns | CalleeOwns | Borrowed"
-        "type Signedness = | Signed | Unsigned"
-        "type TypeRef = | Integer of Signedness * int | Float of int | Pointer of int | Bool | Void"
-        "type ParameterDescriptor = { Name: string; Type: TypeRef; PassBy: PassBy }"
-        "type FunctionDescriptor = { CName: string; Parameters: ParameterDescriptor array; ReturnType: TypeRef; CallingConvention: CallingConvention; OwnershipTransfer: OwnershipTransfer }"
-        "type ReleaseBinding = { Binding: string; Parameter: int }"
-        "type ResourceKind = | OwnedNullableReturn of ReleaseBinding"
-        "type HypothesisDescriptor = { Identity: string; Version: string; Source: string }"
-        "type ResourceDescriptor = { Resource: ResourceKind; Hypothesis: HypothesisDescriptor }"
-        "type MemorySpaceDescriptor = { Space: string; MemoryRegion: MemoryRegionKind; Access: string; ByteOrder: string; ElementSize: int; ElementCount: int; RegionByteExtent: int; RegionAlignment: int; RegionLifetimeDepth: int; LibraryRetentionDepth: int }"
-        "type CHandle<'T> = | CHandle of nativeint"
-        "[<System.AttributeUsage(System.AttributeTargets.Method ||| System.AttributeTargets.Property, AllowMultiple = false)>]"
-        "type FidelityExternAttribute(library: string, symbol: string) ="
-        "    inherit System.Attribute()"
-        "    member _.Library = library"
-        "    member _.Symbol = symbol"
-        "[<UnmanagedFunctionPointer(System.Runtime.InteropServices.CallingConvention.Cdecl)>] type MapNativeDelegate = delegate of unit -> nativeint"
-        "[<UnmanagedFunctionPointer(System.Runtime.InteropServices.CallingConvention.Cdecl)>] type PtrToIntDelegate = delegate of nativeint -> int"
-        "[<UnmanagedFunctionPointer(System.Runtime.InteropServices.CallingConvention.Cdecl)>] type PtrToVoidDelegate = delegate of nativeint -> unit"
-        "[<UnmanagedFunctionPointer(System.Runtime.InteropServices.CallingConvention.Cdecl)>] type PtrPtrToIntDelegate = delegate of nativeint * nativeint -> int"
-        "[<UnmanagedFunctionPointer(System.Runtime.InteropServices.CallingConvention.Cdecl)>] type PtrPtrIntToIntDelegate = delegate of nativeint * nativeint * int -> int"
-        "[<UnmanagedFunctionPointer(System.Runtime.InteropServices.CallingConvention.Cdecl)>] type PtrIntIntToIntDelegate = delegate of nativeint * int * int -> int"
-        "[<UnmanagedFunctionPointer(System.Runtime.InteropServices.CallingConvention.Cdecl)>] type PtrIntU32ToIntDelegate = delegate of nativeint * int * uint32 -> int"
-        "[<UnmanagedFunctionPointer(System.Runtime.InteropServices.CallingConvention.Cdecl)>] type PtrIntI64ToIntDelegate = delegate of nativeint * int * int64 -> int"
-        "type OutSlot() ="
-        "    let ptr = Marshal.AllocHGlobal(8)"
-        "    do Marshal.WriteInt64(ptr, 0L)"
-        "    member _.Handle : CHandle<int> = CHandle ptr"
-        "    member _.ReadInt32() : int = Marshal.ReadInt32(ptr)"
-        "    member _.ReadUInt32() : uint32 = uint32 (Marshal.ReadInt32(ptr))"
-        "    member _.ReadInt64() : int64 = Marshal.ReadInt64(ptr)"
-        "    member _.ReadUInt64() : uint64 = uint64 (Marshal.ReadInt64(ptr))"
-        "    interface IDisposable with"
-        "        member _.Dispose() = Marshal.FreeHGlobal(ptr)"
-        "module FidelityExtern ="
-        "    let allocOutSlot () = new OutSlot()"
-        "    let rec evalExpr (e: Microsoft.FSharp.Quotations.Expr) : obj ="
-        "        match e with"
-        "        | Patterns.Value(v, _) -> v"
-        "        | Patterns.NewRecord(rcdType, args) -> FSharpValue.MakeRecord(rcdType, args |> List.map evalExpr |> List.toArray)"
-        "        | Patterns.NewArray(elemType, elems) ->"
-        "            let arr = Array.CreateInstance(elemType, elems.Length)"
-        "            elems |> List.iteri (fun i el -> arr.SetValue(evalExpr el, i))"
-        "            box arr"
-        "        | Patterns.NewUnionCase(uc, args) -> FSharpValue.MakeUnion(uc, args |> List.map evalExpr |> List.toArray)"
-        "        | Patterns.Coerce(inner, _) -> evalExpr inner"
-        "        | Patterns.Let(_, _, body) -> evalExpr body"
-        "        | _ -> invalidOp $\"Unsupported quotation node in FidelityExtern descriptor: {e}\""
-        "    let private extractHandlePtr (v: obj) : nativeint ="
-        "        if isNull v then invalidOp \"Null CHandle passed to FidelityExtern\""
-        "        let _, fields = FSharpValue.GetUnionFields(v, v.GetType())"
-        "        fields[0] :?> nativeint"
-        "    let private validateParameterType (moduleName: string) (functionName: string) (pDesc: ParameterDescriptor) (pType: Type) ="
-        "        if pDesc.PassBy <> PassBy.Value then invalidOp $\"Unsupported PassBy on {moduleName}.{functionName}.{pDesc.Name}\""
-        "        match pDesc.Type with"
-        "        | Pointer 64 ->"
-        "            if not (pType.IsGenericType && pType.GetGenericTypeDefinition() = typedefof<CHandle<_>>) then"
-        "                invalidOp $\"Parameter '{pDesc.Name}' of {moduleName}.{functionName} expects CHandle<_> for Pointer 64, got {pType}\""
-        "        | Integer (_, 32) | Integer (_, 64) ->"
-        "            if pType <> typeof<int> then"
-        "                invalidOp $\"Parameter '{pDesc.Name}' of {moduleName}.{functionName} expects int for {pDesc.Type}, got {pType}\""
-        "        | other -> invalidOp $\"Unsupported ParameterDescriptor.Type {other} on {moduleName}.{functionName}\""
-        "    let invoke<'R> (moduleName: string) (functionName: string) (descriptorExpr: Expr<FunctionDescriptor>) (args: obj array) : 'R ="
-        "        let asm = typeof<FidelityExternAttribute>.Assembly"
-        "        let moduleType = asm.GetType(moduleName, false)"
-        "        if isNull moduleType then invalidOp $\"FidelityExtern module '{moduleName}' not found\""
-        "        let methodInfo = moduleType.GetMethod(functionName, BindingFlags.Public ||| BindingFlags.Static)"
-        "        if isNull methodInfo then invalidOp $\"FidelityExtern function '{moduleName}.{functionName}' not found\""
-        "        let attrs = methodInfo.GetCustomAttributes(typeof<FidelityExternAttribute>, false)"
-        "        if attrs.Length <> 1 then invalidOp $\"Missing FidelityExternAttribute on '{moduleName}.{functionName}'\""
-        "        let attr = attrs[0] :?> FidelityExternAttribute"
-        "        if String.IsNullOrWhiteSpace attr.Library || String.IsNullOrWhiteSpace attr.Symbol then"
-        "            invalidOp $\"Invalid empty FidelityExtern library or symbol on '{moduleName}.{functionName}'\""
-        "        let desc = evalExpr descriptorExpr :?> FunctionDescriptor"
-        "        if attr.Symbol <> desc.CName then"
-        "            invalidOp $\"FidelityExtern symbol '{attr.Symbol}' does not match FunctionDescriptor.CName '{desc.CName}' on '{moduleName}.{functionName}'\""
-        "        if desc.CallingConvention <> CallingConvention.CDecl then"
-        "            invalidOp $\"Unsupported calling convention on '{moduleName}.{functionName}'\""
-        "        let paramInfos = methodInfo.GetParameters()"
-        "        if paramInfos.Length <> desc.Parameters.Length || args.Length <> desc.Parameters.Length then"
-        "            invalidOp $\"Parameter count mismatch on '{moduleName}.{functionName}': method={paramInfos.Length} descriptor={desc.Parameters.Length} args={args.Length}\""
-        "        for i = 0 to desc.Parameters.Length - 1 do"
-        "            validateParameterType moduleName functionName desc.Parameters[i] paramInfos[i].ParameterType"
-        "        match desc.ReturnType, desc.OwnershipTransfer with"
-        "        | Pointer 64, CallerOwns ->"
-        "            let retType = methodInfo.ReturnType"
-        "            if not (retType.IsGenericType && retType.GetGenericTypeDefinition() = typedefof<option<_>>) then"
-        "                invalidOp $\"CallerOwns Pointer 64 return on '{moduleName}.{functionName}' must be option<CHandle<_>>\""
-        "            let innerType = retType.GetGenericArguments()[0]"
-        "            if not (innerType.IsGenericType && innerType.GetGenericTypeDefinition() = typedefof<CHandle<_>>) then"
-        "                invalidOp $\"CallerOwns option inner type on '{moduleName}.{functionName}' must be CHandle<_>\""
-        "            let resProp = moduleType.GetProperty(functionName + \"ResourceDescriptor\", BindingFlags.Public ||| BindingFlags.Static)"
-        "            if isNull resProp then invalidOp $\"Missing ResourceDescriptor for CallerOwns '{moduleName}.{functionName}'\""
-        "            let resDesc = evalExpr (resProp.GetValue(null) :?> Microsoft.FSharp.Quotations.Expr) :?> ResourceDescriptor"
-        "            match resDesc.Resource with"
-        "            | OwnedNullableReturn rel ->"
-        "                if rel.Parameter <> 0 || not (rel.Binding.StartsWith(moduleName + \".\", StringComparison.Ordinal)) then"
-        "                    invalidOp $\"Invalid ReleaseBinding '{rel.Binding}' on '{moduleName}.{functionName}'\""
-        "                let relFn = rel.Binding.Substring(moduleName.Length + 1)"
-        "                let relMethod = moduleType.GetMethod(relFn, BindingFlags.Public ||| BindingFlags.Static)"
-        "                let relDescProp = moduleType.GetProperty(relFn + \"Descriptor\", BindingFlags.Public ||| BindingFlags.Static)"
-        "                if isNull relMethod || isNull relDescProp then invalidOp $\"Missing release function '{rel.Binding}'\""
-        "                let relDesc = evalExpr (relDescProp.GetValue(null) :?> Microsoft.FSharp.Quotations.Expr) :?> FunctionDescriptor"
-        "                if relDesc.OwnershipTransfer <> OwnershipTransfer.CalleeOwns || relDesc.Parameters.Length <> 1 || relDesc.Parameters[0].Type <> Pointer 64 then"
-        "                    invalidOp $\"Release function '{rel.Binding}' does not have a valid CalleeOwns Pointer 64 contract\""
-        "        | Integer (Signed, 32), (Borrowed | CalleeOwns) ->"
-        "            if methodInfo.ReturnType <> typeof<int> then"
-        "                invalidOp $\"Return type mismatch on '{moduleName}.{functionName}': expected int, got {methodInfo.ReturnType}\""
-        "        | Void, (Borrowed | CalleeOwns) ->"
-        "            if methodInfo.ReturnType <> typeof<unit> && methodInfo.ReturnType <> typeof<System.Void> then"
-        "                invalidOp $\"Void return type mismatch on '{moduleName}.{functionName}'\""
-        "        | rt, own -> invalidOp $\"Unsupported return/ownership ({rt}, {own}) on '{moduleName}.{functionName}'\""
-        "        let asmDir = System.IO.Path.GetDirectoryName(asm.Location)"
-        "        let candidateSo = System.IO.Path.Combine(asmDir, \"lib\" + attr.Library + \".so\")"
-        "        let libHandle = if System.IO.File.Exists(candidateSo) then NativeLibrary.Load(candidateSo) else NativeLibrary.Load(attr.Library)"
-        "        let fnPtr = NativeLibrary.GetExport(libHandle, attr.Symbol)"
-        "        let paramTypes = desc.Parameters |> Array.map (fun p -> p.Type)"
-        "        match paramTypes, desc.ReturnType with"
-        "        | [||], Pointer 64 ->"
-        "            let d = Marshal.GetDelegateForFunctionPointer<MapNativeDelegate>(fnPtr)"
-        "            let rawPtr = d.Invoke()"
-        "            if rawPtr = 0n then Unchecked.defaultof<'R>"
-        "            else"
-        "                let retType = typeof<'R>"
-        "                let handleType = retType.GetGenericArguments()[0]"
-        "                let handleCase = FSharpType.GetUnionCases(handleType)[0]"
-        "                let handleVal = FSharpValue.MakeUnion(handleCase, [| box rawPtr |])"
-        "                let someCase = FSharpType.GetUnionCases(retType) |> Array.find (fun c -> c.Name = \"Some\")"
-        "                FSharpValue.MakeUnion(someCase, [| handleVal |]) :?> 'R"
-        "        | [| Pointer 64 |], Integer (Signed, 32) ->"
-        "            let d = Marshal.GetDelegateForFunctionPointer<PtrToIntDelegate>(fnPtr)"
-        "            box (d.Invoke(extractHandlePtr args[0])) :?> 'R"
-        "        | [| Pointer 64 |], Void ->"
-        "            let d = Marshal.GetDelegateForFunctionPointer<PtrToVoidDelegate>(fnPtr)"
-        "            d.Invoke(extractHandlePtr args[0])"
-        "            Unchecked.defaultof<'R>"
-        "        | [| Pointer 64; Pointer 64 |], Integer (Signed, 32) ->"
-        "            let d = Marshal.GetDelegateForFunctionPointer<PtrPtrToIntDelegate>(fnPtr)"
-        "            box (d.Invoke(extractHandlePtr args[0], extractHandlePtr args[1])) :?> 'R"
-        "        | [| Pointer 64; Pointer 64; Integer (Signed, 32) |], Integer (Signed, 32) ->"
-        "            let d = Marshal.GetDelegateForFunctionPointer<PtrPtrIntToIntDelegate>(fnPtr)"
-        "            box (d.Invoke(extractHandlePtr args[0], extractHandlePtr args[1], args[2] :?> int)) :?> 'R"
-        "        | [| Pointer 64; Integer (Signed, 32); Integer (Signed, 32) |], Integer (Signed, 32) ->"
-        "            let d = Marshal.GetDelegateForFunctionPointer<PtrIntIntToIntDelegate>(fnPtr)"
-        "            box (d.Invoke(extractHandlePtr args[0], args[1] :?> int, args[2] :?> int)) :?> 'R"
-        "        | [| Pointer 64; Integer (Signed, 32); Integer (Unsigned, 32) |], Integer (Signed, 32) ->"
-        "            let d = Marshal.GetDelegateForFunctionPointer<PtrIntU32ToIntDelegate>(fnPtr)"
-        "            box (d.Invoke(extractHandlePtr args[0], args[1] :?> int, uint32 (args[2] :?> int))) :?> 'R"
-        "        | [| Pointer 64; Integer (Signed, 32); Integer (Signed, 64) |], Integer (Signed, 32) ->"
-        "            let d = Marshal.GetDelegateForFunctionPointer<PtrIntI64ToIntDelegate>(fnPtr)"
-        "            box (d.Invoke(extractHandlePtr args[0], args[1] :?> int, int64 (args[2] :?> int))) :?> 'R"
-        "        | _ -> invalidOp $\"Unsupported ABI signature on '{moduleName}.{functionName}'\"" ])
-    File.WriteAllText(path "SharedBuffers.clef.fs", clefSource)
-    File.WriteAllText(path "DeviceSharedBuffers.clef.fs", deviceClefSource)
-    File.WriteAllText(path "ClefSharedBufferRunner.fs", String.concat "\n" [
-        "module Test.ClefSharedBufferRunner"
-        "open System"
-        "open BAREWire.Hardware"
-        "open BAREWire.Descriptors"
-        "open Test.SharedBuffers"
-        "open Test.DeviceSharedBuffers"
-        "let BadSymbolDescriptor : Expr<FunctionDescriptor> ="
-        "    <@ { CName = \"farscape_shared_buffer_nonexistent_symbol\"; Parameters = [||]; ReturnType = Integer (Signed, 32); CallingConvention = CDecl; OwnershipTransfer = Borrowed } @>"
-        "[<FidelityExtern(\"sharedtile\", \"farscape_shared_buffer_nonexistent_symbol\")>]"
-        "let badSymbolBinding () : int ="
-        "    FidelityExtern.invoke \"Test.ClefSharedBufferRunner\" \"badSymbolBinding\" BadSymbolDescriptor [||]"
-        "let MismatchedCNameDescriptor : Expr<FunctionDescriptor> ="
-        "    <@ { CName = \"farscape_shared_buffer_SharedTensorTileBuffer_unmap\"; Parameters = [||]; ReturnType = Integer (Signed, 32); CallingConvention = CDecl; OwnershipTransfer = Borrowed } @>"
-        "[<FidelityExtern(\"sharedtile\", \"farscape_shared_buffer_SharedTensorTileBuffer_map\")>]"
-        "let mismatchedCNameBinding () : int ="
-        "    FidelityExtern.invoke \"Test.ClefSharedBufferRunner\" \"mismatchedCNameBinding\" MismatchedCNameDescriptor [||]"
-        "let BadLibDescriptor : Expr<FunctionDescriptor> ="
-        "    <@ { CName = \"farscape_shared_buffer_SharedTensorTileBuffer_map\"; Parameters = [||]; ReturnType = Integer (Signed, 32); CallingConvention = CDecl; OwnershipTransfer = Borrowed } @>"
-        "[<FidelityExtern(\"nonexistent_sharedtile_lib\", \"farscape_shared_buffer_SharedTensorTileBuffer_map\")>]"
-        "let badLibraryBinding () : int ="
-        "    FidelityExtern.invoke \"Test.ClefSharedBufferRunner\" \"badLibraryBinding\" BadLibDescriptor [||]"
-        "let BadParamDescriptor : Expr<FunctionDescriptor> ="
-        "    <@ { CName = \"farscape_shared_buffer_SharedTensorTileBuffer_unmap\"; Parameters = [| { Name = \"self\"; Type = Pointer 64; PassBy = Value } |]; ReturnType = Integer (Signed, 32); CallingConvention = CDecl; OwnershipTransfer = CalleeOwns } @>"
-        "[<FidelityExtern(\"sharedtile\", \"farscape_shared_buffer_SharedTensorTileBuffer_unmap\")>]"
-        "let badParamTypeBinding (self: int) : int ="
-        "    FidelityExtern.invoke \"Test.ClefSharedBufferRunner\" \"badParamTypeBinding\" BadParamDescriptor [| box self |]"
-        "let private expectExternFailure (name: string) (action: unit -> unit) ="
-        "    let mutable threw = false"
-        "    try action () with _ -> threw <- true"
-        "    if not threw then failwith $\"Expected FidelityExtern failure for {name}, but call succeeded\""
-        "let runClefVerification (_libraryPath: string) : string ="
-        "    let hostDesc : StructDescriptor = SharedTensorTileBuffer.Descriptor"
-        "    let hostPeriph : PeripheralDescriptor = SharedTensorTileBuffer.PeripheralDescriptor"
-        "    let devDesc : StructDescriptor = DeviceTensorTileBuffer.Descriptor"
-        "    let devPeriph : PeripheralDescriptor = DeviceTensorTileBuffer.PeripheralDescriptor"
-        "    if not (Layout.isPointerFree hostDesc.Layout) || not (Layout.isPointerFree devDesc.Layout) then failwith \"BAREWire layout must be pointer-free\""
-        "    if hostDesc.Layout.Size <> 24 || hostDesc.Layout.Alignment <> 8 || hostDesc.Layout.Fields.Length <> 4 then failwith \"HostShared StructDescriptor layout mismatch\""
-        "    if hostPeriph.MemoryRegion <> MemoryRegionKind.SRAM || devPeriph.MemoryRegion <> MemoryRegionKind.DMA then failwith \"PeripheralDescriptor MemoryRegionKind mismatch\""
-        "    if hostDesc.Layout.Fields[0].Count <> 1 || hostDesc.Layout.Fields[0].BitFields.Length <> 0 then failwith \"FieldDescriptor Count/BitFields mismatch\""
-        "    // Verify negative FidelityExtern metadata controls fail when invoked"
-        "    expectExternFailure \"badSymbolBinding\" (fun () -> badSymbolBinding () |> ignore)"
-        "    expectExternFailure \"mismatchedCNameBinding\" (fun () -> mismatchedCNameBinding () |> ignore)"
-        "    expectExternFailure \"badLibraryBinding\" (fun () -> badLibraryBinding () |> ignore)"
-        "    expectExternFailure \"badParamTypeBinding\" (fun () -> badParamTypeBinding 0 |> ignore)"
-        "    use outSlot = FidelityExtern.allocOutSlot ()"
-        "    let outH = outSlot.Handle"
-        "    // 1. Execute generated HostShared FidelityExtern functions end-to-end"
-        "    let h ="
-        "        match SharedTensorTileBuffer_map () with"
-        "        | Some handle -> handle"
-        "        | None -> failwith \"SharedTensorTileBuffer_map returned None\""
-        "    if SharedTensorTileBuffer_memory_space_kind outH h <> SharedTensorTileBuffer.StatusOk || outSlot.ReadInt32() <> 1 then"
-        "        failwith $\"HostShared space_kind mismatch: {outSlot.ReadInt32()}\""
-        "    if SharedTensorTileBuffer_clef_write_sequence h 0 100 <> 0"
-        "       || SharedTensorTileBuffer_clef_write_accumulator h 0 1000 <> 0"
-        "       || SharedTensorTileBuffer_clef_write_scale h 0 10 <> 0"
-        "       || SharedTensorTileBuffer_clef_write_checksum h 0 0 <> 0 then"
-        "        failwith \"HostShared Clef write via generated FidelityExtern failed\""
-        "    if SharedTensorTileBuffer_clef_write_sequence h -1 1 <> SharedTensorTileBuffer.StatusOutOfRange"
-        "       || SharedTensorTileBuffer_clef_write_sequence h 4 1 <> SharedTensorTileBuffer.StatusOutOfRange then"
-        "        failwith \"HostShared bounds check failed\""
-        "    if SharedTensorTileBuffer_share_to_library h 3 4 <> 0 then"
-        "        failwith \"HostShared share_to_library failed\""
-        "    if SharedTensorTileBuffer_clef_write_sequence h 0 99 <> SharedTensorTileBuffer.StatusAccessConflict then"
-        "        failwith \"HostShared concurrent ClefWrite was not refused\""
-        "    if SharedTensorTileBuffer_unmap h <> SharedTensorTileBuffer.StatusLifetimeError then"
-        "        failwith \"HostShared premature unmap was not refused\""
-        "    if SharedTensorTileBuffer_library_transform_in_place h 0 7 <> 0 then"
-        "        failwith \"HostShared library_transform_in_place failed\""
-        "    if SharedTensorTileBuffer_unshare_from_library h <> 0 then"
-        "        failwith \"HostShared unshare_from_library failed\""
-        "    if SharedTensorTileBuffer_clef_read_sequence outH h 0 <> 0 then failwith \"HostShared read sequence failed\""
-        "    let seq0 = outSlot.ReadUInt32()"
-        "    if SharedTensorTileBuffer_clef_read_accumulator outH h 0 <> 0 then failwith \"HostShared read accumulator failed\""
-        "    let acc0 = outSlot.ReadInt64()"
-        "    if SharedTensorTileBuffer_clef_read_checksum outH h 0 <> 0 then failwith \"HostShared read checksum failed\""
-        "    let chk0 = outSlot.ReadUInt32()"
-        "    if seq0 <> 107u || acc0 <> 1070L || chk0 <> (107u ^^^ 1070u) then"
-        "        failwith $\"HostShared unexpected mutated values: seq0={seq0} acc0={acc0} chk0={chk0}\""
-        "    if SharedTensorTileBuffer_clef_address_identity outH h <> 0 then failwith \"HostShared clef_address_identity failed\""
-        "    let clefAddr = outSlot.ReadUInt64()"
-        "    if SharedTensorTileBuffer_library_address_identity outH h <> 0 then failwith \"HostShared library_address_identity failed\""
-        "    let libAddr = outSlot.ReadUInt64()"
-        "    if SharedTensorTileBuffer_copy_count outH h <> 0 then failwith \"HostShared copy_count failed\""
-        "    let copies = outSlot.ReadInt32()"
-        "    if clefAddr = 0UL || clefAddr <> libAddr || copies <> 0 then"
-        "        failwith $\"HostShared zero-copy identity failed: clefAddr={clefAddr} libAddr={libAddr} copies={copies}\""
-        "    if SharedTensorTileBuffer_unmap h <> 0 || SharedTensorTileBuffer_unmap h <> SharedTensorTileBuffer.StatusLifetimeError then"
-        "        failwith \"HostShared unmap lifecycle check failed\""
-        "    // 2. Execute generated DeviceUnified FidelityExtern functions end-to-end"
-        "    let devH ="
-        "        match DeviceTensorTileBuffer_map () with"
-        "        | Some handle -> handle"
-        "        | None -> failwith \"DeviceTensorTileBuffer_map returned None\""
-        "    if DeviceTensorTileBuffer_memory_space_kind outH devH <> DeviceTensorTileBuffer.StatusOk || outSlot.ReadInt32() <> 2 then"
-        "        failwith $\"DeviceUnified space_kind mismatch: {outSlot.ReadInt32()}\""
-        "    if DeviceTensorTileBuffer_clef_write_sequence devH 0 100 <> 0"
-        "       || DeviceTensorTileBuffer_clef_write_accumulator devH 0 1000 <> 0"
-        "       || DeviceTensorTileBuffer_clef_write_scale devH 0 10 <> 0"
-        "       || DeviceTensorTileBuffer_clef_write_checksum devH 0 0 <> 0 then"
-        "        failwith \"DeviceUnified Clef write via generated FidelityExtern failed\""
-        "    if DeviceTensorTileBuffer_share_to_library devH 3 4 <> 0 then"
-        "        failwith \"DeviceUnified share_to_library failed\""
-        "    if DeviceTensorTileBuffer_clef_write_sequence devH 0 99 <> DeviceTensorTileBuffer.StatusAccessConflict then"
-        "        failwith \"DeviceUnified concurrent ClefWrite was not refused\""
-        "    if DeviceTensorTileBuffer_unmap devH <> DeviceTensorTileBuffer.StatusLifetimeError then"
-        "        failwith \"DeviceUnified premature unmap was not refused\""
-        "    if DeviceTensorTileBuffer_library_transform_in_place devH 0 7 <> 0 then"
-        "        failwith \"DeviceUnified library_transform_in_place failed\""
-        "    if DeviceTensorTileBuffer_unshare_from_library devH <> 0 then"
-        "        failwith \"DeviceUnified unshare_from_library failed\""
-        "    if DeviceTensorTileBuffer_clef_read_sequence outH devH 0 <> 0 then failwith \"DeviceUnified read sequence failed\""
-        "    let devSeq0 = outSlot.ReadUInt32()"
-        "    if DeviceTensorTileBuffer_clef_read_accumulator outH devH 0 <> 0 then failwith \"DeviceUnified read accumulator failed\""
-        "    let devAcc0 = outSlot.ReadInt64()"
-        "    if DeviceTensorTileBuffer_clef_read_checksum outH devH 0 <> 0 then failwith \"DeviceUnified read checksum failed\""
-        "    let devChk0 = outSlot.ReadUInt32()"
-        "    if devSeq0 <> 107u || devAcc0 <> 1070L || devChk0 <> (107u ^^^ 1070u) then"
-        "        failwith $\"DeviceUnified unexpected mutated values: seq0={devSeq0} acc0={devAcc0} chk0={devChk0}\""
-        "    if DeviceTensorTileBuffer_clef_address_identity outH devH <> 0 then failwith \"DeviceUnified clef_address_identity failed\""
-        "    let devClefAddr = outSlot.ReadUInt64()"
-        "    if DeviceTensorTileBuffer_library_address_identity outH devH <> 0 then failwith \"DeviceUnified library_address_identity failed\""
-        "    let devLibAddr = outSlot.ReadUInt64()"
-        "    if DeviceTensorTileBuffer_copy_count outH devH <> 0 then failwith \"DeviceUnified copy_count failed\""
-        "    let devCopies = outSlot.ReadInt32()"
-        "    if devClefAddr = 0UL || devClefAddr <> devLibAddr || devCopies <> 0 then"
-        "        failwith $\"DeviceUnified zero-copy identity failed: clefAddr={devClefAddr} libAddr={devLibAddr} copies={devCopies}\""
-        "    if DeviceTensorTileBuffer_unmap devH <> 0 || DeviceTensorTileBuffer_unmap devH <> DeviceTensorTileBuffer.StatusLifetimeError then"
-        "        failwith \"DeviceUnified unmap lifecycle check failed\""
-        "    \"clef-compiled-ok host=SRAM:1 device=DMA:2 copies=0 same_addr=1\"" ])
-    let runtimeDir = Path.GetDirectoryName(typeof<obj>.Assembly.Location)
-    let fsharpCorePath = typeof<list<_>>.Assembly.Location
-    let fscPath = "/home/hhh/.local/share/mise/installs/dotnet/10.0.401/sdk/10.0.401/FSharp/fsc.dll"
-    let clefDll = path "ClefSharedBuffers.dll"
-    let sysRefs =
-        [ "System.Runtime.dll"
-          "System.Runtime.Numerics.dll"
-          "System.Runtime.InteropServices.dll"
-          "System.Console.dll"
-          "System.Collections.dll" ]
-        |> List.map (fun r -> "-r:" + Path.Combine(runtimeDir, r))
-    let fscArgs =
-        [ fscPath
-          "--nologo"
-          "--target:library"
-          "--targetprofile:netcore"
-          "--out:" + clefDll
-          "-r:" + fsharpCorePath ]
-        @ sysRefs
-        @ [ Path.Combine(barewireRoot, "Hardware", "Descriptors.fs")
-            path "BareWireDescriptorsSurface.fs"
-            path "SharedBuffers.clef.fs"
-            path "DeviceSharedBuffers.clef.fs"
-            path "ClefSharedBufferRunner.fs" ]
-    run "/home/hhh/.local/share/mise/installs/dotnet/10.0.401/dotnet" fscArgs |> ignore
-    let compiledClefAssembly = System.Reflection.Assembly.LoadFrom(clefDll)
-    for modName, prefixName in [ "Test.SharedBuffers", "SharedTensorTileBuffer"; "Test.DeviceSharedBuffers", "DeviceTensorTileBuffer" ] do
-        let modType = compiledClefAssembly.GetType(modName, true)
-        let mapMethod = modType.GetMethod(prefixName + "_map")
-        let unmapMethod = modType.GetMethod(prefixName + "_unmap")
-        let mappedOpt = mapMethod.Invoke(null, [||])
-        Assert.NotNull(mappedOpt)
-        let _, optFields = Microsoft.FSharp.Reflection.FSharpValue.GetUnionFields(mappedOpt, mappedOpt.GetType())
-        let unmapStatus = unmapMethod.Invoke(null, [| optFields[0] |]) :?> int
-        Assert.Equal(0, unmapStatus)
-    let runnerType = compiledClefAssembly.GetType("Test.ClefSharedBufferRunner")
-    let runMethod = runnerType.GetMethod("runClefVerification")
-    let clefExecResult = runMethod.Invoke(null, [| box library |]) :?> string
-    Assert.Equal("clef-compiled-ok host=SRAM:1 device=DMA:2 copies=0 same_addr=1", clefExecResult)
-
-    File.WriteAllText(path "runner.cpp", """
+    let shortBackingPath = (path "short_tile.bin").Replace("\\", "/")
+    let validBackingPath = (path "valid_tile.bin").Replace("\\", "/")
+    let runnerSource =
+        ("""
 #include "shared_tile.hpp"
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
+#include <fcntl.h>
+#include <unistd.h>
 
 extern "C" void* farscape_shared_buffer_SharedTensorTileBuffer_map() noexcept;
 extern "C" int farscape_shared_buffer_SharedTensorTileBuffer_unmap(void*) noexcept;
@@ -2273,6 +2021,18 @@ extern "C" void* farscape_shared_buffer_DeviceTensorTileBuffer_map() noexcept;
 extern "C" int farscape_shared_buffer_DeviceTensorTileBuffer_unmap(void*) noexcept;
 extern "C" int farscape_shared_buffer_DeviceTensorTileBuffer_memory_space_kind(int*, void*) noexcept;
 
+extern "C" void* farscape_shared_buffer_FileTensorTileBuffer_map(int) noexcept;
+extern "C" int farscape_shared_buffer_FileTensorTileBuffer_unmap(void*) noexcept;
+extern "C" int farscape_shared_buffer_FileTensorTileBuffer_memory_space_kind(int*, void*) noexcept;
+extern "C" int farscape_shared_buffer_FileTensorTileBuffer_clef_write_sequence(void*, int, std::uint32_t) noexcept;
+extern "C" int farscape_shared_buffer_FileTensorTileBuffer_clef_read_sequence(std::uint32_t*, void*, int) noexcept;
+extern "C" int farscape_shared_buffer_FileTensorTileBuffer_clef_read_accumulator(std::int64_t*, void*, int) noexcept;
+extern "C" int farscape_shared_buffer_FileTensorTileBuffer_share_to_library(void*, int, int) noexcept;
+extern "C" int farscape_shared_buffer_FileTensorTileBuffer_unshare_from_library(void*) noexcept;
+extern "C" int farscape_shared_buffer_FileTensorTileBuffer_clef_address_identity(std::uintptr_t*, void*) noexcept;
+extern "C" int farscape_shared_buffer_FileTensorTileBuffer_library_address_identity(std::uintptr_t*, void*) noexcept;
+extern "C" int farscape_shared_buffer_FileTensorTileBuffer_copy_count(int*, void*) noexcept;
+
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "check failed at %d: %s\n", __LINE__, #x); return 1; } } while (false)
 
 int main() {
@@ -2286,6 +2046,59 @@ int main() {
     int dev_space_kind = 0;
     CHECK(farscape_shared_buffer_DeviceTensorTileBuffer_memory_space_kind(&dev_space_kind, dev_h) == 0 && dev_space_kind == 2);
     CHECK(farscape_shared_buffer_DeviceTensorTileBuffer_unmap(dev_h) == 0);
+
+    // FileMapped requires a real file descriptor whose fstat size covers RegionByteExtent (4 * sizeof(SharedTensorTile)).
+    CHECK(farscape_shared_buffer_FileTensorTileBuffer_map(-1) == nullptr);
+    {
+        int short_wfd = ::open("__SHORT_BACKING__", O_CREAT | O_TRUNC | O_WRONLY, 0600);
+        CHECK(short_wfd >= 0);
+        std::uint32_t tiny = 7u;
+        CHECK(::write(short_wfd, &tiny, sizeof(tiny)) == static_cast<ssize_t>(sizeof(tiny)));
+        ::close(short_wfd);
+        int short_rfd = ::open("__SHORT_BACKING__", O_RDONLY);
+        CHECK(short_rfd >= 0);
+        CHECK(farscape_shared_buffer_FileTensorTileBuffer_map(short_rfd) == nullptr);
+        ::close(short_rfd);
+    }
+    {
+        SharedTensorTile backing_tiles[4];
+        std::memset(backing_tiles, 0, sizeof(backing_tiles));
+        backing_tiles[0].sequence = 4242u;
+        backing_tiles[0].accumulator = 9001LL;
+        backing_tiles[1].sequence = 8484u;
+        backing_tiles[1].accumulator = -333LL;
+        int valid_wfd = ::open("__VALID_BACKING__", O_CREAT | O_TRUNC | O_WRONLY, 0600);
+        CHECK(valid_wfd >= 0);
+        CHECK(::write(valid_wfd, backing_tiles, sizeof(backing_tiles)) == static_cast<ssize_t>(sizeof(backing_tiles)));
+        ::close(valid_wfd);
+
+        int valid_rfd = ::open("__VALID_BACKING__", O_RDONLY);
+        CHECK(valid_rfd >= 0);
+        void* file_h = farscape_shared_buffer_FileTensorTileBuffer_map(valid_rfd);
+        CHECK(file_h != nullptr);
+        int file_space_kind = 0;
+        std::uint32_t file_seq0 = 0u;
+        std::uint32_t file_seq1 = 0u;
+        std::int64_t file_acc0 = 0LL;
+        CHECK(farscape_shared_buffer_FileTensorTileBuffer_memory_space_kind(&file_space_kind, file_h) == 0 && file_space_kind == 3);
+        CHECK(farscape_shared_buffer_FileTensorTileBuffer_clef_write_sequence(file_h, 0, 1u) == 6);
+        CHECK(farscape_shared_buffer_FileTensorTileBuffer_clef_read_sequence(&file_seq0, file_h, 0) == 0 && file_seq0 == 4242u);
+        CHECK(farscape_shared_buffer_FileTensorTileBuffer_clef_read_accumulator(&file_acc0, file_h, 0) == 0 && file_acc0 == 9001LL);
+        CHECK(farscape_shared_buffer_FileTensorTileBuffer_clef_read_sequence(&file_seq1, file_h, 1) == 0 && file_seq1 == 8484u);
+        CHECK(farscape_shared_buffer_FileTensorTileBuffer_share_to_library(file_h, 1, 4) == 0);
+        std::uintptr_t fileClefAddr = 0, fileLibAddr = 0;
+        int fileCopies = -1;
+        CHECK(farscape_shared_buffer_FileTensorTileBuffer_clef_address_identity(&fileClefAddr, file_h) == 0);
+        CHECK(farscape_shared_buffer_FileTensorTileBuffer_library_address_identity(&fileLibAddr, file_h) == 0);
+        CHECK(farscape_shared_buffer_FileTensorTileBuffer_copy_count(&fileCopies, file_h) == 0);
+        CHECK(fileClefAddr == fileLibAddr);
+        CHECK(fileClefAddr != 0);
+        CHECK(fileCopies == 0);
+        CHECK(farscape_shared_buffer_FileTensorTileBuffer_unshare_from_library(file_h) == 0);
+        CHECK(farscape_shared_buffer_FileTensorTileBuffer_unmap(file_h) == 0);
+        ::close(valid_rfd);
+    }""").Replace("__SHORT_BACKING__", shortBackingPath).Replace("__VALID_BACKING__", validBackingPath)
+    File.WriteAllText(path "runner.cpp", runnerSource + """
 
     // 1. Clef writes initial values into tile 0 and tile 1 in the HostShared region.
     CHECK(farscape_shared_buffer_SharedTensorTileBuffer_clef_write_sequence(h, 0, 100u) == 0);
@@ -2357,7 +2170,7 @@ int main() {
     CHECK(farscape_shared_buffer_SharedTensorTileBuffer_unmap(h) == 5);
     CHECK(farscape_shared_buffer_SharedTensorTileBuffer_clef_read_sequence(&seq0, h, 0) == 5);
 
-    std::printf("shared-buffer-native-ok size=%zu align=%zu seq0=%u acc0=%lld seq1=%u acc1=%lld copies=%d same_addr=%d\n",
+    std::printf("shared-buffer-native-ok size=%zu align=%zu seq0=%u acc0=%lld seq1=%u acc1=%lld copies=%d same_addr=%d spaces=1,2,3\n",
         sizeof(SharedTensorTile), alignof(SharedTensorTile),
         seq0, static_cast<long long>(acc0), seq1, static_cast<long long>(acc1),
         copies, clef_addr == lib_addr ? 1 : 0);
@@ -2367,8 +2180,8 @@ int main() {
     let runner = path "runner"
     run "/usr/bin/clang++" [ "-std=c++17"; path "runner.cpp"; "-L" + directory; "-lsharedtile"; "-Wl,-rpath,$ORIGIN"; "-o"; runner ] |> ignore
     let result = run runner []
-    File.WriteAllText(path "native-result.txt", result + "\n" + clefExecResult)
-    Assert.Contains("shared-buffer-native-ok size=24 align=8 seq0=107 acc0=1070 seq1=204 acc1=5100 copies=0 same_addr=1", result)
+    File.WriteAllText(path "native-result.txt", result)
+    Assert.Contains("shared-buffer-native-ok size=24 align=8 seq0=107 acc0=1070 seq1=204 acc1=5100 copies=0 same_addr=1 spaces=1,2,3", result)
 
 // #115: real installed declarations must retain their actual exception and layout facts.
 let private installedXrtSurface =
