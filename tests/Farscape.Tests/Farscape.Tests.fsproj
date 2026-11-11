@@ -52,6 +52,7 @@
     <Compile Include="BorrowedResultTests.fs" />
     <Compile Include="ArchiveInspectionTests.fs" />
     <Compile Include="NativeCallbackRunnerTests.fs" />
+    <Compile Include="SubstantiationTests.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

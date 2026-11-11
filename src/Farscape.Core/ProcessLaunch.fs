@@ -3,6 +3,75 @@ namespace Farscape.Core
 open System
 open System.Diagnostics
 
+/// Foreign-tool scratch belongs to the caller's output tree, never the system temporary directory.
+module ScratchDirectory =
+    let private current = System.Threading.AsyncLocal<string option>()
+
+    let private pathFailure path message =
+        Diagnostics.diagnostic Diagnostics.SubstantiationOutputFailure message (Diagnostics.inFile path "substantiation evidence path")
+        |> Diagnostics.refuse
+
+    /// Resolve every segment, including links in the parents of a nonexistent leaf.
+    /// Expand relative link targets before processing '..', preserving filesystem semantics.
+    let canonicalPath (path: string) =
+        let rooted = if IO.Path.IsPathRooted path then path else IO.Path.Combine(Environment.CurrentDirectory, path)
+        let root = IO.Path.GetPathRoot rooted
+        let segments (value: string) = value.Split(IO.Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries) |> Array.toList
+        let rec resolve active (parent: string) remaining =
+            match remaining with
+            | [] -> parent
+            | "." :: rest -> resolve active parent rest
+            | ".." :: rest ->
+                let enclosing = IO.Path.GetDirectoryName parent
+                resolve active (if isNull enclosing then root else enclosing) rest
+            | segment :: rest ->
+                let candidate = IO.Path.Combine(parent, segment)
+                let info: IO.FileSystemInfo = IO.FileInfo candidate
+                let target =
+                    try info.LinkTarget
+                    with :? IO.IOException -> pathFailure path "A path segment has an unresolved symbolic link."
+                if isNull target then resolve active candidate rest
+                else
+                    if Set.contains candidate active then pathFailure path "A path contains a symbolic-link cycle."
+                    let targetRoot = if IO.Path.IsPathRooted target then IO.Path.GetPathRoot target else parent
+                    let targetParts = if IO.Path.IsPathRooted target then segments (target.Substring(targetRoot.Length)) else segments target
+                    let resolved = resolve (Set.add candidate active) targetRoot targetParts
+                    resolve active resolved rest
+        resolve Set.empty root (segments (rooted.Substring(root.Length)))
+
+    /// Tool executables use canonicalPath; all substantiation evidence uses this policy.
+    let canonicalEvidencePath (path: string) =
+        if String.IsNullOrWhiteSpace path then pathFailure path "Substantiation evidence paths must be explicit and nonempty."
+        let canonical = canonicalPath path
+        let lexical = canonicalPath (IO.Path.GetFullPath path)
+        let prohibited (value: string) = value = "/tmp" || value.StartsWith("/tmp/", StringComparison.Ordinal)
+        // File APIs may normalize '..' before opening; neither interpretation may
+        // enter system temporary storage, even when callers retain the original spelling.
+        if prohibited canonical || prohibited lexical then
+            pathFailure path "System temporary storage is not substantiation evidence or output storage."
+        canonical
+
+    let tryCheckoutDirectory () =
+        let rec locate (directory: IO.DirectoryInfo) =
+            if IO.File.Exists(IO.Path.Combine(directory.FullName, "Farscape.sln")) then Some directory.FullName
+            elif isNull directory.Parent then None
+            else locate directory.Parent
+        locate (IO.DirectoryInfo Environment.CurrentDirectory)
+
+    let root () =
+        match current.Value with
+        | Some directory -> directory
+        | None ->
+            let project = tryCheckoutDirectory () |> Option.defaultValue Environment.CurrentDirectory
+            IO.Path.Combine(project, "test-results", "scratch", "farscape")
+
+    let within (directory: string) (action: unit -> 'T) : 'T =
+        if String.IsNullOrWhiteSpace directory then invalidArg "directory" "Scratch directory must be explicit."
+        let previous = current.Value
+        current.Value <- Some (IO.Path.GetFullPath directory)
+        try action ()
+        finally current.Value <- previous
+
 /// Start external tools without a shell and preserve each argument as one argument.
 module ProcessLaunch =
     let startInfo (program: string) (args: string seq) : ProcessStartInfo =
@@ -13,6 +82,9 @@ module ProcessLaunch =
         info.RedirectStandardError <- true
         info.UseShellExecute <- false
         info.CreateNoWindow <- true
+        let scratch = ScratchDirectory.root ()
+        IO.Directory.CreateDirectory scratch |> ignore
+        for variable in [ "TMPDIR"; "TMP"; "TEMP" ] do info.Environment[variable] <- scratch
         info
 
     /// The arguments as a shell would need them, for verbose output only.

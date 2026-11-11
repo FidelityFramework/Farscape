@@ -137,6 +137,21 @@ namespace Farscape.Core
 /// | FS9229 | a symbol has strong global definitions in two or more static archive members    |
 /// | FS9230 | a static archive has an LLVM bitcode member and llvm-nm is unresolved or exits nonzero |
 /// | FS9231 | an emitted .clef module carries a forbidden CLR or raw-pointer token (obj, box, null, nativeint, nativeptr) outside comments and string literals |
+/// | FS9232 | a substantiation project is missing or has an invalid project contract |
+/// | FS9233 | an exported source is missing or has no unambiguous module declaration |
+/// | FS9234 | a substantiation input or retained evidence digest has changed |
+/// | FS9235 | whole-library compilation reports an error or a reachability-demoted diagnostic |
+/// | FS9236 | a substantiation manifest is malformed or internally inconsistent |
+/// | FS9237 | a retained Composer proof receipt is missing or does not bind its obligations and query |
+/// | FS9238 | a library proof obligation is pending, refuted, or not discharged UNSAT |
+/// | FS9239 | an obligation query cannot be separated into exact premise-only blocks |
+/// | FS9240 | an obligation premise is not solver-certified SAT |
+/// | FS9241 | a required substantiation tool is unavailable, changed, or failed |
+/// | FS9242 | library link provenance is missing, malformed, or mismatched |
+/// | FS9243 | an exported foreign symbol has no matching provenance binding |
+/// | FS9244 | pilot/header layout provenance is missing or mismatched |
+/// | FS9245 | substantiation output or scratch storage cannot be safely written |
+/// | FS9246 | an exported callable has no compiler-owned universal activation for substantiation |
 ///
 /// Allocation continues past FS9199 as FS92xx: the codes are sequential, four digits after FS.
 /// Each refusal reason has exactly one code and each code one reason.
@@ -541,6 +556,37 @@ module Diagnostics =
 
     [<Literal>]
     let EmittedClefImpure = "FS9231"
+
+    [<Literal>]
+    let SubstantiationProjectInvalid = "FS9232"
+    [<Literal>]
+    let SubstantiationSourceInvalid = "FS9233"
+    [<Literal>]
+    let SubstantiationDigestMismatch = "FS9234"
+    [<Literal>]
+    let SubstantiationCompilerDiagnostics = "FS9235"
+    [<Literal>]
+    let SubstantiationManifestMalformed = "FS9236"
+    [<Literal>]
+    let SubstantiationProofInvalid = "FS9237"
+    [<Literal>]
+    let SubstantiationUndischarged = "FS9238"
+    [<Literal>]
+    let SubstantiationPremisesMalformed = "FS9239"
+    [<Literal>]
+    let SubstantiationPremisesUnsat = "FS9240"
+    [<Literal>]
+    let SubstantiationToolFailure = "FS9241"
+    [<Literal>]
+    let SubstantiationLinkInvalid = "FS9242"
+    [<Literal>]
+    let SubstantiationExternUnresolved = "FS9243"
+    [<Literal>]
+    let SubstantiationLayoutInvalid = "FS9244"
+    [<Literal>]
+    let SubstantiationOutputFailure = "FS9245"
+    [<Literal>]
+    let SubstantiationActivationUnavailable = "FS9246"
 
     // =========================================================================
     // Structured diagnostics (#184)

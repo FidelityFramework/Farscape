@@ -524,6 +524,50 @@ let projectGenerateCommand =
         setAction action
     }
 
+let substantiateCommand =
+    let fidproj = Input.option<FileInfo> "--fidproj" |> desc "Library .fidproj whose entire exported surface is substantiated" |> required
+    let pilot = Input.option<FileInfo> "--pilot" |> desc "Pilot TOML providing measured foreign boundary contracts"
+    let provenance = Input.option<FileInfo> "--link-provenance" |> desc "Exact library link-provenance TOML"
+    let output = Input.option<DirectoryInfo> "--output" |> desc "Manifest output directory (default: library project directory)"
+    let work = Input.option<DirectoryInfo> "--work-dir" |> desc "Retained harness and proof evidence directory (default: test-results/scratch/substantiation)"
+    let verbose = Input.option<bool> "--verbose" |> desc "Print retained Composer diagnostics" |> def false
+    let allowWarnings = Input.option<bool> "--allow-warnings" |> desc "Permit advisory warnings; required substantiation diagnostic codes remain errors" |> def false
+    let action (fidproj: FileInfo, pilot: FileInfo, provenance: FileInfo, output: DirectoryInfo, work: DirectoryInfo, verbose, allowWarnings) =
+        let request: Substantiation.Request =
+            { FidprojPath = fidproj.FullName
+              PilotPath = Option.ofObj pilot |> Option.map _.FullName
+              LinkProvenancePath = Option.ofObj provenance |> Option.map _.FullName
+              OutputDirectory = Option.ofObj output |> Option.map _.FullName
+              WorkDirectory = Option.ofObj work |> Option.map _.FullName
+              Verbose = verbose
+              AllowWarnings = allowWarnings }
+        match Substantiation.evaluate request with
+        | Error refusal ->
+            Console.Error.WriteLine refusal.Text
+            for diagnostic in refusal.Diagnostics do
+                for location in Diagnostics.renderLocation diagnostic do Console.Error.WriteLine location
+            1
+        | Ok manifest ->
+            printLine $"Package: {manifest.Package}"
+            printLine $"Exported modules: {manifest.Sources.Length}"
+            printLine $"Library obligations: {manifest.Proof.LibraryObligations}; UNSAT(H and not C): {manifest.Proof.LibraryDischargedUnsatCount}; SAT(H): {manifest.Proof.LibraryPremisesSatCount}"
+            printLine $"Total obligations: {manifest.Proof.TotalObligations}; harness: {manifest.Proof.HarnessObligations}; UNSAT(H and not C): {manifest.Proof.DischargedUnsatCount}; SAT(H): {manifest.Proof.PremisesSatCount}"
+            printLine $"Compiler premise receipts: {manifest.Proof.CompilerPremiseReceiptsCount}; non-vacuity receipts: {manifest.Proof.CompilerNonVacuityReceiptsCount}"
+            printLine $"Pending: {manifest.Proof.PendingOpenCount}; refuted: {manifest.Proof.RefutedCount}"
+            printLine $"Link mode: {manifest.Boundary.LinkMode}"
+            printLine $"RestsOn: {manifest.Boundary.RestsOn.Length}"
+            printLine ("Required seam checks: " + String.concat ", " manifest.Boundary.RequiredSeamChecks)
+            printLine $"Evidence: {manifest.ArtifactsDirectory}"
+            let destination = request.OutputDirectory |> Option.defaultValue (Path.GetDirectoryName manifest.FidprojPath)
+            printLine (Path.Combine(destination, manifest.Package + ".substantiation.toml"))
+            printLine (Path.Combine(destination, manifest.Package + ".substantiation.json"))
+            0
+    command "substantiate" {
+        description "Substantiate every library module, proof premise and foreign boundary contract"
+        inputs (fidproj, pilot, provenance, output, work, verbose, allowWarnings)
+        setAction action
+    }
+
 [<EntryPoint>]
 let main argv =
     rootCommand argv {
@@ -532,4 +576,5 @@ let main argv =
         addCommand generateCommand
         addCommand pilotCommand
         addCommand projectGenerateCommand
+        addCommand substantiateCommand
     }

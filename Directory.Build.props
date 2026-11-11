@@ -5,12 +5,13 @@
     <Copyright>Copyright © SpeakEZ Technologies, Inc. 2025</Copyright>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <PackageProjectUrl>https://github.com/FidelityFramework/Farscape</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/FidelityFramework/Farscape</RepositoryUrl>
+    <PackageProjectUrl>https://forge.spkez.dev/FidelityFramework/Farscape</PackageProjectUrl>
+    <RepositoryUrl>https://forge.spkez.dev/FidelityFramework/Farscape</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
 
     <!-- Build quality -->
     <Deterministic>true</Deterministic>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
 
     <!-- SourceLink -->
@@ -34,9 +35,13 @@
     <PackageReference Include="FSharp.Core" Version="10.1.400" />
   </ItemGroup>
 
-  <!-- SourceLink for GitHub -->
+  <!-- SourceLink for Gitea/Forgejo -->
   <ItemGroup>
-    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
+    <PackageReference Include="Microsoft.SourceLink.Gitea" Version="10.0.401" PrivateAssets="All" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <SourceLinkGiteaHost Include="forge.spkez.dev" />
   </ItemGroup>
 
   <!-- Include LICENSE and README at repo root for all packages -->

@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -19,10 +19,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="EluciusFTW.SpectreCoff" Version="0.50.7" />
     <PackageReference Include="FSharp.SystemCommandLine" Version="2.1.0" />
-    <!-- Pin to fix GHSA-rxmq-m78w-7wmc (transitive from SpectreCoff) -->
-    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.11" />
   </ItemGroup>
 
 </Project>

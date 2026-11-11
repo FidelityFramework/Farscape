@@ -2034,7 +2034,7 @@ module CppParser =
         if structNames.IsEmpty then Ok Map.empty
         else
 
-        let tempDir = Path.Combine(Path.GetTempPath(), "farscape-layout")
+        let tempDir = Path.Combine(ScratchDirectory.root (), "farscape-layout")
         Directory.CreateDirectory(tempDir) |> ignore
         // Each clang invocation must measure its own header, including concurrent probes.
         let tempFile = Path.Combine(tempDir, "_farscape_layout_probe_" + System.Guid.NewGuid().ToString("N") + ".c")
@@ -2151,7 +2151,7 @@ module CppParser =
             |> List.distinct
         if spellings.IsEmpty then declarations
         else
-        let tempDir = Path.Combine(Path.GetTempPath(), "farscape-enum")
+        let tempDir = Path.Combine(ScratchDirectory.root (), "farscape-enum")
         Directory.CreateDirectory(tempDir) |> ignore
         let probe (batch: (int * string) list) : Result<Map<string, EnumRepresentation>, string> =
             let tempFile = Path.Combine(tempDir, "_farscape_enum_probe_" + Guid.NewGuid().ToString("N") + ".c")
@@ -2239,7 +2239,7 @@ module CppParser =
     /// `(__INTPTR_TYPE__)(NAME)` whose value is a constant pointer's address. Each declaration is
     /// on its own line, so clang's errors (with `-ferror-limit=0`) are read back by line.
     let private probeObjectMacros (options: HeaderParserOptions) (indexed: (int * string) list) : Result<MacroFacts, string> =
-        let tempDir = Path.Combine(Path.GetTempPath(), "farscape-macro")
+        let tempDir = Path.Combine(ScratchDirectory.root (), "farscape-macro")
         Directory.CreateDirectory(tempDir) |> ignore
         let tempFile = Path.Combine(tempDir, "_farscape_macro_probe_" + Guid.NewGuid().ToString("N") + (if options.CppMode then ".cpp" else ".c"))
         try
@@ -2513,7 +2513,7 @@ module CppParser =
         else
         let spellings = sites |> List.collect (fun (_, spelling, _, unattributed) -> [spelling; unattributed]) |> List.distinct |> List.indexed
         let alignOf = if options.CppMode then "alignof" else "_Alignof"
-        let tempDir = Path.Combine(Path.GetTempPath(), "farscape-byvalue")
+        let tempDir = Path.Combine(ScratchDirectory.root (), "farscape-byvalue")
         Directory.CreateDirectory(tempDir) |> ignore
         let probe (batch: (int * string) list) : Map<string, TypeExtent> =
             let tempFile = Path.Combine(tempDir, "_farscape_byvalue_probe_" + Guid.NewGuid().ToString("N") + ".c")
@@ -2657,7 +2657,7 @@ module CppParser =
                     let names = s.Name :: (s.Fields |> List.map _.Name)
                     s, Ok (ordinal, $"{tag} {copyName ordinal} {{ {members} }}; char _fs_copy_{ordinal}[sizeof({tag} {copyName ordinal})];", names))
         let synthesized = copies |> List.choose (fun (_, copy) -> match copy with Ok c -> Some c | Error _ -> None)
-        let tempDir = Path.Combine(Path.GetTempPath(), "farscape-layout")
+        let tempDir = Path.Combine(ScratchDirectory.root (), "farscape-layout")
         Directory.CreateDirectory(tempDir) |> ignore
         let probe (batch: string list) (copyBatch: (int * string * string list) list) : Result<StructLayoutInfo list, string> =
             let tempFile = Path.Combine(tempDir, "_farscape_record_probe_" + Guid.NewGuid().ToString("N") + ".c")
@@ -2831,7 +2831,7 @@ module CppParser =
             |> List.distinctBy (fun (_, f) -> f.Name)
         if candidates.IsEmpty then []
         else
-        let tempDir = Path.Combine(Path.GetTempPath(), "farscape-alias")
+        let tempDir = Path.Combine(ScratchDirectory.root (), "farscape-alias")
         Directory.CreateDirectory(tempDir) |> ignore
         let call (f: FunctionDecl) =
             let args = f.Parameters |> List.map (fun (_, t) -> $"*(__typeof__({t}) *)0") |> String.concat ", "

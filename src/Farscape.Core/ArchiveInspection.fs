@@ -431,7 +431,9 @@ module ArchiveInspection =
     /// The member's bytes are written to a temporary file that is deleted whether or not the
     /// tool succeeds. A tool that cannot be started or exits nonzero is FS9230.
     let private bitcodeDefinedSymbols (archive: string) (memberName: string) (tool: ToolIdentity) (bytes: byte[]) (start: int) (count: int) : (string * SymbolBinding) list =
-        let tempFile = IO.Path.Combine(IO.Path.GetTempPath(), "farscape-archive-member-" + Guid.NewGuid().ToString("N") + ".bc")
+        let directory = ScratchDirectory.root ()
+        IO.Directory.CreateDirectory directory |> ignore
+        let tempFile = IO.Path.Combine(directory, "farscape-archive-member-" + Guid.NewGuid().ToString("N") + ".bc")
         try
             writeSlice tempFile bytes start count
             let info = ProcessLaunch.startInfo tool.Path [ "--extern-only"; "--defined-only"; "--format=posix"; tempFile ]
