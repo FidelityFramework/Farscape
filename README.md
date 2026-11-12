@@ -1,153 +1,89 @@
 # Farscape
 
-Clef bindings generator for C libraries, part of the Fidelity native compilation ecosystem.
+Clef binding generator and boundary substantiation tool for C and C++ libraries in the Fidelity Framework.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![License: Commercial](https://img.shields.io/badge/License-Commercial-orange.svg)](Commercial.md)
 
-<p align="center">
-Under Active Development<br>
-<em>This project is in early development and the API may undergo breaking changes.</em>
-</p>
-
 ## Overview
 
-Farscape automatically generates Clef bindings from C header files. It uses **clang** for robust header parsing and **XParsec** parser combinators for post-processing C type declarations and preprocessor macro values, producing type-safe Clef code that integrates with the Fidelity native compilation toolchain.
+Farscape reads C and C++ headers, static archives, pkg-config metadata, and protocol specifications (Wayland and D-Bus XML) to emit `[<FidelityExtern>]` Clef binding declarations, BAREWire companion ABI descriptors, optional Layer 2 Clef wrappers, C ABI shims for C++ surfaces, and library substantiation manifests and dossiers.
 
-Design documents, the definition of done and the decision ledger live on the
-[project wiki](https://forge.spkez.dev/FidelityFramework/Farscape/wiki); every work item is an
-[issue](https://forge.spkez.dev/FidelityFramework/Farscape/issues) on a milestone.
+Foreign idioms do not cross past Layer 2. Native widths, signedness, calling conventions, parameter passing modes, and ownership rules are recorded in companion BAREWire descriptors rather than leaked into Clef source types. Unsupported boundary shapes fail closed with coded `FS91xx` diagnostics naming the declaration and source location.
 
-The [2026-10-03 FFI checkpoint](https://forge.spkez.dev/FidelityFramework/Farscape/wiki/History-20261003-ffi-boundary-checkpoint)
-records the completed pointer-surface correction, **649/649** source tests and
-**17/17** generator/compiler conformance gates. Generation uses nominal
-`CHandle` carriers, conservative nullability and typed `FnPtr` declarations.
-Native callback ABI publication and general foreign resource lifetimes remain
-incomplete; unsupported contracts are refused. Existing desktop libraries have
-not been regenerated or accepted wholesale by this checkpoint.
-
-The codebase is structured around four functional programming patterns that compose cleanly:
-
-- **XParsec Parser Combinators** (`CTypeParser.fs`): Monadic parsers decompose C type declarations (`const char *` → `{ BaseType = "char"; PointerDepth = 1 }`), classify preprocessor macro values, and parse numeric literals, replacing all Regex usage
-- **Active Patterns** (`ActivePatterns.fs`): XParsec-backed active patterns (`ParsedCType`, `CharPointer|VoidPointer|TypedPointer|ValueType`, `CompilerBuiltin|InternalMacro|UserMacro`, `IntegerLiteral`) provide structural decomposition at match sites
-- **Catamorphism** (`DeclarationAlgebra.fs`): A fold algebra over the Declaration DU; one traversal function serves typedef extraction, function collection, and full code generation through composable algebras
-- **Typed Code AST** (`CodeAST.fs` → `CodeRenderer.fs`): Generation produces `FsDecl` values (typed, inspectable, testable AST nodes), not strings. The ONLY `StringBuilder` in the codebase is the final `CodeRenderer.render`
-
-Farscape is a key tool for the [Fidelity Framework](https://github.com/FidelityFramework) native Clef compilation ecosystem.
+Project authority, specifications, and acceptance criteria live on the [Farscape wiki](https://forge.spkez.dev/FidelityFramework/Farscape/wiki) ([Definition of Done](https://forge.spkez.dev/FidelityFramework/Farscape/wiki/Definition-of-Done), [Architectural Decision Ledger](https://forge.spkez.dev/FidelityFramework/Farscape/wiki/Architectural-Decision-Ledger), and [FFI Working Agreements](https://forge.spkez.dev/FidelityFramework/Farscape/wiki/FFI-Working-Agreements)); work items are tracked as [issues](https://forge.spkez.dev/FidelityFramework/Farscape/issues) on milestones.
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-    A["C Header<br/>(stdlib.h, unistd.h)"] --> B["Clang Two-Pass<br/>(CppParser.fs)"]
-    B --> C["Declaration AST<br/>(functions, structs, enums,<br/>typedefs, macros)"]
-    C --> D["XParsec Post-Processing<br/>(CTypeParser.fs)"]
-    C --> E["TypeMapper.fs<br/>(type dictionary)"]
-    D --> F["Active Patterns<br/>(ActivePatterns.fs)"]
-    F --> G["Catamorphism<br/>(DeclarationAlgebra.fs)"]
-    E --> G
-    G --> H["FidelityCodeGenerator.fs<br/>Declaration list → FsDecl AST"]
-    H --> I["CodeRenderer.fs<br/>FsDecl → F# source string<br/>(the ONLY StringBuilder)"]
+    A["Inputs<br/>C/C++ headers, .pilot.toml,<br/>pkg-config, protocol XML, archives"] --> B["Clang AST & Macro Extraction<br/>(CppParser.fs, ArchiveInspection.fs)"]
+    B --> C["Type & Class Analysis<br/>(CTypeParser.fs, ActivePatterns.fs,<br/>TypeMapper.fs, CppClassAnalysis.fs)"]
+    C --> D["Declaration Fold & Wrapper Analysis<br/>(DeclarationAlgebra.fs, WrapperPatternAnalyzer.fs)"]
+    D --> E["Typed Code & Descriptor AST<br/>(CodeAST.fs, DescriptorGenerator.fs,<br/>FidelityCodeGenerator.fs, WrapperCodeGenerator.fs)"]
+    E --> F["Source Emission<br/>(CodeRenderer.fs -> .clef / C shim sources)"]
+    F --> G["Library Substantiation & Dossier<br/>(Substantiation.fs, SubstantiationDossier.fs)"]
 ```
 
-### Functional Patterns in Action
+### Core Modules (`src/Farscape.Core`)
 
-**XParsec parser** decomposes a C type declaration:
+| Module | Responsibility |
+|--------|----------------|
+| `Diagnostics.fs` | Coded `FS91xx` refusal diagnostics and source-location formatting |
+| `AttributeContracts.fs` | Clang attribute and annotation contract extraction |
+| `ArchiveInspection.fs` | Symbol and archive inspection for static library provenance |
+| `Types.fs` | Core domain model, `OutputMode`, and `PlatformABI` (`LP64`, `LLP64`, `ILP32`, `IP16`) |
+| `CppParser.fs` | Clang AST and preprocessor macro extraction |
+| `PkgConfig.fs` | Validated `pkg-config` include-path (`-I`, `-isystem`) and define (`-D`) resolution |
+| `CTypeParser.fs` / `ActivePatterns.fs` | XParsec parsers and active patterns for C type spellings, qualifiers, macros, and literals |
+| `TypeMapper.fs` | `PlatformABI`-parameterized C-to-Clef type mapping |
+| `CppClassAnalysis.fs` | C++ class layout, method, constructor/destructor, and C ABI shim analysis |
+| `DeclarationAlgebra.fs` | Fold algebra over parsed declarations |
+| `PilotTypes.fs` / `PilotDiscovery.fs` / `PilotAnalyzer.fs` / `PilotSerializer.fs` | `.pilot.toml` schema, source-tree asset discovery, prefix scoping, and TOML serialization |
+| `ProtocolParser.fs` / `IntrospectionParser.fs` / `TypedProtocolGenerator.fs` / `TypedSignalGenerator.fs` | Wayland/D-Bus XML protocol and signal parsing and typed binding generation |
+| `WrapperPatternAnalyzer.fs` / `WrapperCodeGenerator.fs` / `CallbackWrapperGenerator.fs` | Layer 2 result/option wrappers, `ErrnoModuleGenerator.fs`, `EnumErrorModuleGenerator.fs`, and typed callback adapters |
+| `CodeAST.fs` / `DescriptorGenerator.fs` / `FidelityCodeGenerator.fs` / `CodeRenderer.fs` | Typed Clef declaration AST, BAREWire `FunctionDescriptor` quotation generation, and source rendering |
+| `BindingGenerator.fs` | Single-header and `.pilot.toml` generation orchestration |
+| `SubstantiationProof.fs` / `SubstantiationBoundary.fs` / `Substantiation.fs` / `SubstantiationDossier.fs` | Whole-library compiler/proof/seam substantiation and JSON/Markdown/HTML dossier emission |
 
-```fsharp
-// CTypeParser.fs: monadic parser for C types
-static let pCType =
-    parser {
-        do! skipMany pQualifier          // strip const, restrict, volatile
-        let! firstWord = pTypeWord       // "unsigned"
-        let! restWords = many (spaces1 >>. pTypeWord)  // "long", "int"
-        let! stars = many (skipChar '*') // pointer depth
-        return { BaseType = baseType; PointerDepth = stars.Length }
-    }
-```
-
-**Active patterns** classify native spellings. Generation then resolves typedef
-identity and nullability before selecting a sanctioned Clef carrier. A native
-data pointer becomes `CHandle<T>` or `option<CHandle<T>>`; a declared text
-projection can expose Clef `string`. Native widths remain descriptor facts.
-
-**Catamorphism** folds an algebra over all declarations in one pass:
-
-```fsharp
-// DeclarationAlgebra.fs: single traversal, composable algebras
-let groups = cataDeclarations (generationAlgebra typedefMap) declarations
-// One pass produces: enums, structs, functions, macros, all categorized
-```
-
-**Typed AST** separates generation from rendering:
-
-```fsharp
-// CodeAST.fs: typed nodes, not strings
-LetBinding("abs",
-    [{ Name = "value"; Type = Named "int" }],
-    Named "int",
-    NativeZeroed,
-    ["FidelityExtern(\"c\", \"abs\")"])
-// CodeRenderer.fs renders to Clef source (the ONLY StringBuilder)
-```
-
-### Core Modules
-
-| Module | Purpose |
-|--------|---------|
-| `Types.fs` | Shared types: `OutputMode`, `PlatformABI` (LP64/LLP64/ILP32/IP16) |
-| `CppParser.fs` | Clang two-pass parsing: JSON AST + macro extraction |
-| `TypeMapper.fs` | NTU type dictionary: C types → Clef types, PlatformABI-parameterized |
-| `CTypeParser.fs` | XParsec parsers for C type strings, macro values, numeric literals |
-| `ActivePatterns.fs` | Type classification, macro filtering, keyword quoting via active patterns |
-| `DeclarationAlgebra.fs` | Catamorphism: fold algebra over Declaration DU |
-| `CodeAST.fs` | Typed code AST: `FsType`, `FsExpr`, `FsDecl` discriminated unions |
-| `CodeRenderer.fs` | Single renderer: `FsDecl → string` (only StringBuilder in the codebase) |
-| `FidelityCodeGenerator.fs` | Fidelity mode: catamorphism → FsDecl tree → rendered source |
-| `WrapperPatternAnalyzer.fs` | Layer 2: clang attribute analysis → return semantic + parameter role classification |
-| `WrapperCodeGenerator.fs` | Layer 2: idiomatic Clef wrapper generation with Result types |
-| `ErrnoModuleGenerator.fs` | Header error constants/descriptions and opaque errno-cell declaration; dereference wrappers are refused |
-| `PilotAnalyzer.fs` | Namespace filtering and declaration scoping from project files |
-| `PilotSerializer.fs` | TOML project file parsing (`.pilot.toml`) |
-| `BindingGenerator.fs` | Pipeline orchestration for single-header and project-based generation |
-
-## Usage
+## CLI Reference
 
 ```bash
-# Generate from a curated Linux C pilot (the output path is relative to the pilot)
-farscape project --project path/to/library.pilot.toml --verbose
+# Generate bindings from a .pilot.toml manifest
+farscape project --project path/to/library.pilot.toml [--wrappers] [--verbose]
 
-# Generate declarations from a header containing: int abs(int value);
+# Generate bindings from a single header
 farscape generate \
     --header ./scalar-only.h \
-    -l c \
-    -m fidelity \
-    -n Fidelity.libc.Scalar \
-    -o ./output/
+    --library c \
+    --namespace Fidelity.libc.Scalar \
+    --output ./output \
+    --output-mode fidelity
 
-Options:
-      --header <header>         Path to C header file (required)
-  -l, --library <library>       Name of native library (required)
-  -o, --output <output>         Output directory [default: ./output]
-  -n, --namespace <namespace>   Namespace for generated code [default: NativeBindings]
-  -i, --include-paths <paths>   Additional include paths
-  -d, --defines <defines>       Preprocessor definitions
-  -m, --output-mode <mode>      Output mode: fidelity | fidelity-wrappers [default: fidelity]
-  -v, --verbose                 Verbose output
+# Discover headers/protocols or scaffold a .pilot.toml manifest
+farscape pilot discover --directory /path/to/library/source [--library name] [--output ./dir]
+farscape pilot analyze --header /usr/include/foo.h --library foo [--pkg-config foo] [--output ./foo]
+farscape pilot init --library foo [--header /usr/include/foo.h] [--output ./foo]
+
+# Substantiate an exported library .fidproj and emit a dossier
+farscape substantiate \
+    --fidproj path/to/Library.fidproj \
+    [--pilot path/to/library.pilot.toml] \
+    [--link-provenance path/to/link-provenance.toml] \
+    [--output ./out]
+
+farscape dossier \
+    --manifest path/to/Package.substantiation.json \
+    [--seam-checks path/to/seam-checks.json] \
+    [--refusal-controls path/to/refusal-controls.json] \
+    [--rocq-project path/to/_CoqProject] \
+    [--rocq-facts path/to/facts.json] \
+    [--output ./out]
 ```
 
-The `project` command accepts `--project`, `--verbose` (`-v`) and optional
-`--wrappers` (`-w`). The CLI currently selects LP64 and project manifests declare
-Linux x86_64; there is no CLI `--data-model` option. Wrapper selection can be
-refused when errno access, native error text, a callback adapter or another
-required contract is missing. See the checkpoint for regeneration and validation.
+## Generated Surface and Type Mapping
 
-## Output Modes
-
-### Fidelity Mode (`--output-mode fidelity`)
-
-Generates `[<FidelityExtern>]` declarations with companion ABI descriptors. The
-accepted scalar example uses ordinary Clef integers while declaring C's width:
+In `fidelity` mode, Farscape emits `[<FidelityExtern>]` declarations paired with BAREWire `FunctionDescriptor` quotations:
 
 ```fsharp
 module Fidelity.libc.Scalar
@@ -167,67 +103,36 @@ let absDescriptor : Expr<FunctionDescriptor> =
          OwnershipTransfer = Borrowed } @>
 ```
 
-## Type Mapping
+Source signatures use Clef types while physical ABI width, signedness, layout, and calling convention are carried in descriptors:
 
-Source signatures use Clef `int` and `float`. Native signedness, storage width,
-pointer width and calling convention belong to descriptors resolved from the
-selected ABI model. Analysis supports LP64, LLP64, ILP32 and IP16; current project
-generation accepts Linux x86_64 LP64 and refuses a different model before writes.
+| Foreign Surface | Clef Surface | Boundary Rule |
+|-----------------|--------------|---------------|
+| C integer scalars and enums | `int` | Signedness and bit width recorded in `FunctionDescriptor` |
+| `float` / `double` | `float` | IEEE width recorded in `FunctionDescriptor` |
+| Unannotated `T *` or opaque pointer typedef | `option<CHandle<T>>` | Nominal typedef identity preserved; no raw address arithmetic |
+| Explicitly nonnull `T *` | `CHandle<T>` | Nonnull contract recorded; does not imply lifetime ownership |
+| `void *` | `option<CHandle<unit>>` | User-data and release contracts remain explicit at the boundary |
+| `char *` with declared text projection | `option<string>` or `string` | Requires an explicit text-encoding/ownership contract |
+| Declared callback pointer | `FnPtr<F>` | Requires complete native signature and supported ABI realization |
+| Single-cell out/in-out pointer projection | Clef array with descriptor | Bounds, access mode, and copyback remain explicit obligations |
+| Unsupported pointer/callback/variadic contract | None (refused) | Emits coded `FS91xx` refusal diagnostic prior to writing output |
 
-| C Type | Clef Type | Notes |
-|--------|-----------|-------|
-| C integer scalars and enums | `int` | Signedness and native width come from the descriptor |
-| `float` / `double` | `float` | Native floating representation comes from the descriptor |
-| Unannotated `T *` or opaque pointer typedef | `option<CHandle<T>>` | Nominal typedef identity is preserved; no pointer operations |
-| Explicitly nonnull data pointer | `CHandle<T>` | Nonnull is not a lifetime or validity proof |
-| `void *` | `option<CHandle<unit>>` by default | Typed user-data and release obligations remain at the boundary |
-| `char *` with a text-input projection | `option<string>` or `string` | Requires the declared text conversion contract |
-| Declared callback | `FnPtr<F>` in a typed entry record | Complete native signature and supported ABI realization required |
-| Nullable foreign callback result or nested slot | Refused when its adapter is unsupported | Absence must not be changed into a nonnull assertion |
-| Declared single-cell reference projection | Clef array with descriptor | Native representation, bounds, access and copyback remain obligations |
+## Build and Test
 
-Type mapping uses XParsec-backed active patterns and typedef chain resolution.
-It does not expose a source integer address or an alternate raw pointer surface.
-
-## Validated Output
-
-The final source suite passed **649/649**. The durable
-[BoundaryConformance driver](tests/BoundaryConformance/README.md) passed **17/17**
-gates using actual parsed headers and current-source Clef. It checks reachable
-scalar admission, nominal/nullable generated contracts and exact unsupported
-boundary diagnostics. It performs no native execution. Accepted hashes and local
-evidence paths are recorded in the checkpoint.
-
-## Testing
+Run builds and test suites under Bozzetto work leases:
 
 ```bash
-# Run the test suite
-cd tests/Farscape.Tests && dotnet test
+dotnet fsi ../Bozzetto/tools/build/lease.fsx full_build \
+    dotnet build Farscape.sln -c Release --no-incremental
 
-# Tests cover:
-#   - CTypeParser: XParsec parsers for C types, macros, integers, arrays
-#   - ActivePatterns: Type decomposition, macro classification, keyword quoting
-#   - DeclarationAlgebra: Catamorphism, typedef/struct extraction, order preservation
-#   - CodeRenderer: FsDecl → Clef source for all declaration types
-#   - FidelityCodeGenerator: End-to-end declaration → source generation
-#   - WrapperCodeGenerator: Layer 2 wrapper pattern generation
-#   - ErrnoModuleGenerator: Header descriptions and opaque errno contract
-#   - PilotAnalyzer/PilotSerializer: Namespace analysis and TOML project round-trip
-#   - Platform ABI: LP64/LLP64/ILP32/IP16 type width resolution
+dotnet fsi ../Bozzetto/tools/build/lease.fsx test_suite_run \
+    dotnet test tests/Farscape.Tests/Farscape.Tests.fsproj -c Release --no-build
 ```
 
 ## License
 
-Farscape is dual-licensed under both the Apache License 2.0 and a Commercial License.
+Farscape is dual-licensed under the Apache License 2.0 and a Commercial License:
 
-### Open Source License
-
-For open source projects, academic use, non-commercial applications, and internal tools, use Farscape under the **Apache License 2.0**.
-
-### Commercial License
-
-A Commercial License is required for incorporating Farscape into commercial products or services. See [Commercial.md](Commercial.md) for details.
-
-### Patent Notice
-
-Farscape generates BAREWire peripheral descriptors, which utilize technology covered by U.S. Patent Application No. 63/786,247 "System and Method for Zero-Copy Inter-Process Communication Using BARE Protocol". See BAREWire's [PATENTS.md](https://github.com/speakeztech/barewire/blob/main/PATENTS.md) for licensing details.
+- **Open Source**: Apache License 2.0 ([LICENSE](LICENSE)) for open-source, academic, non-commercial, and internal use.
+- **Commercial**: A commercial license is required for incorporating Farscape into commercial products or services; see [Commercial.md](Commercial.md).
+- **Patents**: Farscape generates BAREWire descriptors covered by U.S. Provisional Patent Application No. 63/786,247; see [PATENTS.md](PATENTS.md).
