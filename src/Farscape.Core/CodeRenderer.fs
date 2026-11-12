@@ -152,9 +152,9 @@ module CodeRenderer =
             sb.AppendLine() |> ignore
             sb.AppendLine() |> ignore
 
-        | LiteralBinding (name, value) ->
+        | LiteralBinding (name, type', value) ->
             sb.AppendLine($"{prefix}[<Literal>]") |> ignore
-            sb.AppendLine($"{prefix}let {quoteIdentifier name} = {sourceSyntax false value}") |> ignore
+            sb.AppendLine($"{prefix}let {quoteIdentifier name} : {renderType type'} = {sourceSyntax false value}") |> ignore
 
         | ValueBinding (name, type', body) ->
             sb.AppendLine($"{prefix}let {quoteIdentifier name} : {renderType type'} =") |> ignore

@@ -22,8 +22,8 @@ let ``a define and an include path containing whitespace each reach clang as one
         | Error error -> failwithf "The pilot was refused: %s" error
         | Ok _ ->
             let outer = recordModule (allTypesOf output) "fx_tagged_outer"
-            Assert.Contains("let Size = 4\n", outer)
-            Assert.Contains("let yOffset = 0\n", outer)
+            Assert.Contains("let Size : int = 4\n", outer)
+            Assert.Contains("let yOffset : int = 0\n", outer)
             Assert.DoesNotContain("anonymous", outer)
             // Clang in C mode, without the extension, agrees.
             clangConfirms header [ "sizeof(struct fx_tagged_outer) == 4"; "offsetof(struct fx_tagged_outer, y) == 0" ])

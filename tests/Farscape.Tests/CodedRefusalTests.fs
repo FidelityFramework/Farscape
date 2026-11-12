@@ -321,7 +321,7 @@ let ``admitted C++ class emits marshaled bindings and its storage adapter runs n
         let code = FidelityCodeGenerator.generateModule ctx Set.empty [ CppParser.Declaration.Class counter ] "Test.Cpp" "counter" "C++ fixture" []
         Assert.DoesNotContain("nativeint", code)
         Assert.DoesNotContain("nativeptr", code)
-        for expected in [ "type demo_Counter"; "module demo_Counter ="; "let Size = 4"; "let Alignment = 4"
+        for expected in [ "type demo_Counter"; "module demo_Counter ="; "let Size : int = 4"; "let Alignment : int = 4"
                           "let demo_Counter_ctor (v: int) : option<CHandle<demo_Counter>>"
                           "let demo_Counter_ctorResourceDescriptor : Expr<ResourceDescriptor>"
                           "OwnedNullableReturn"; "Binding = \"Test.Cpp.demo_Counter_dtor\""; "Parameter = 0"
@@ -520,7 +520,7 @@ let ``shimmed C++ class binds virtual dispatch base casts and throwing methods t
         Assert.DoesNotContain("nativeint", code)
         Assert.DoesNotContain("nativeptr", code)
         for expected in [ "type demo_Processor"; "type demo_Processor_Error"; "type demo_ScaledProcessor"
-                          "let StatusOk = 0"; "let StatusNullHandle = -1"; "let StatusStdException = 1"; "let StatusUnknownException = 2"; "let StatusAllocationFailed = 3"
+                          "let StatusOk : int = 0"; "let StatusNullHandle : int = -1"; "let StatusStdException : int = 1"; "let StatusUnknownException : int = 2"; "let StatusAllocationFailed : int = 3"
                           "let demo_Processor_error_dtor (err: CHandle<demo_Processor_Error>) : unit"
                           "let demo_Processor_take_error () : option<CHandle<demo_Processor_Error>>"
                           "let demo_Processor_take_errorResourceDescriptor : Expr<ResourceDescriptor>"
@@ -1489,7 +1489,7 @@ let containerDeclsDescribeOpaqueOwnershipAndOperationAbi () =
     for forbidden in [ "nativeint"; "nativeptr"; "_M_start"; "_M_finish"; "_M_end_of_storage" ] do
         Assert.DoesNotContain(forbidden, source)
     for expected in [ "OwnedNullableReturn"; "Test.Containers.IntVector_release"; "CalleeOwns"; "CallerOwns"; "Borrowed"
-                      "StatusOutOfRange = 4"; "IntVector_size"; "IntVector_get"; "IntVector_iter_next"
+                      "StatusOutOfRange : int = 4"; "IntVector_size"; "IntVector_get"; "IntVector_iter_next"
                       "option<CHandle<IntVector>>"; "outElem: CHandle<int>"; "inoutIndex: CHandle<int>" ] do
         Assert.Contains(expected, source)
     for elementType in [ "float"; "UnknownElement" ] do
@@ -1943,10 +1943,10 @@ extern "C" std::uintptr_t shared_tile_library_last_address() noexcept {
         "StructDescriptor"
         "Count = 1"
         "BitFields = [||]"
-        "sequenceOffset = 0"
-        "accumulatorOffset = 8"
-        "scaleOffset = 16"
-        "checksumOffset = 20"
+        "sequenceOffset : int = 0"
+        "accumulatorOffset : int = 8"
+        "scaleOffset : int = 16"
+        "checksumOffset : int = 20"
         "OwnedNullableReturn"
         "Test.SharedBuffers.SharedTensorTileBuffer_unmap"
         "SharedTensorTileBuffer_share_to_library"
@@ -2237,7 +2237,7 @@ let ``XRT surface selection retains measured layouts exported symbols and throwi
     for stdName, stdSize in ["std_string_view", 16; "std_string", 32; "std_chrono_milliseconds", 8] do
         Assert.Contains("type " + stdName, code)
         Assert.Contains("module " + stdName + " =", code)
-        Assert.Contains("let Size = " + string stdSize, code)
+        Assert.Contains("let Size : int = " + string stdSize, code)
         Assert.Contains("CHandle<" + stdName + ">", code)
     Assert.Contains("let xrt_device_register_xclbin (retStorage: CHandle<xrt_uuid>) (self: CHandle<xrt_device>) (xclbin: CHandle<xrt_xclbin>) : unit", code)
     Assert.Contains("FidelityExtern(\"xrt_coreutil\", \"_ZN3xrt6device15register_xclbinERKNS_6xclbinE\")", code)
@@ -2303,7 +2303,7 @@ let ``stdlib reference contracts emit opaque storage and refuse absent disabled 
     for name, size in ["std_string_view", 16; "std_string", 32; "std_chrono_milliseconds", 8] do
         Assert.Contains("CHandle<" + name + ">", code)
         Assert.Contains("module " + name + " =", code)
-        Assert.Contains("let Size = " + string size, code)
+        Assert.Contains("let Size : int = " + string size, code)
     Assert.Contains("other: CHandle<Widget>", code)
     Assert.Contains("mode: mode", code)
     let stringContract = contracts["std::string"]

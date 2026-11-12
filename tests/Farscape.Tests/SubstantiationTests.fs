@@ -172,6 +172,18 @@ let ``every listed source must exist even without an open`` () =
 [<InlineData("let rec first () : int = 7\nand second (value: int) : int = value")>]
 [<InlineData("type Box<'a> = { value: 'a }\nlet hidden (value: int) : int = value")>]
 [<InlineData("let seven' : int = 7\nlet hidden (value: int) : int = value")>]
+[<InlineData("[<Literal>] let Size = 8")>]
+[<InlineData("[<Literal>]\nlet Size = 8")>]
+[<InlineData("[<Literal>] let computed : int = seven ()\nlet seven () : int = 7")>]
+[<InlineData("[<Literal>] let unitLiteral : unit = ()")>]
+[<InlineData("[<Literal>] let inline inlineLiteral : int = 8")>]
+[<InlineData("[<Literal>] let rec recLiteral : int = 8")>]
+[<InlineData("let rec first () : int = 1\n[<Literal>] and andLiteral : int = 8")>]
+[<InlineData("let mutable state : int = 0")>]
+[<InlineData("type Pair = { left: int; right: int }\nlet zeroPair : Pair = { left = 0; right = 0 }")>]
+[<InlineData("type Pair = { left: int; right: int }\nlet makePair () : Pair = { left = 0; right = 0 }")>]
+[<InlineData("open BAREWire.Hardware\nlet Descriptor : StructDescriptor = { Name = \"Pair\"; Layout = { Size = 8; Alignment = 4; Fields = [||] }; MayAlias = false; FlexibleArray = None; Documentation = None }")>]
+[<InlineData("open BAREWire.Hardware\nlet inline Descriptor : Expr<StructDescriptor> = <@ { Name = \"Pair\"; Layout = { Size = 8; Alignment = 4; Fields = [||] }; MayAlias = false; FlexibleArray = None; Documentation = None } @>")>]
 let ``parameterized authored bodies refuse unavailable universal activation`` declaration =
     let work = scratch "unavailable-activation"
     let source = Path.Combine(work, "Parameterized.clef")
@@ -205,6 +217,7 @@ let ``unclassified module statements and dangling attributes fail closed`` decla
 [<InlineData("[<Measure>]\ntype distance\ntype Choice = | A | B\ntype Code = | Zero = 0 | One = 1\ntype Alias = int\nlet seven : int = 7")>]
 [<InlineData("type Box<'a> = { value: 'a }\nlet seven' : int = 7")>]
 [<InlineData("open System\nopen type System.Math\n[<Literal>] let seven : int = 7")>]
+[<InlineData("open BAREWire.Hardware\ntype Pair = { left: int; right: int }\nmodule Pair =\n    [<Literal>]\n    let Size : int = 8\n    [<Literal>]\n    let Alignment : int = 4\n    [<Literal>]\n    let Tag : string = \"pair\"\n    let Descriptor : Expr<StructDescriptor> = <@ { Name = \"Pair\"; Layout = { Size = 8; Alignment = 4; Fields = [||] }; MayAlias = false; FlexibleArray = None; Documentation = None } @>")>]
 [<InlineData("let text : string = @\"first \"\"quoted\"\"\nlet hidden (value:int) = value\nlast\"\nlet seven : int = 7")>]
 [<InlineData("let text : string = \"\"\"first \"quote\"\nlet hidden (value:int) = value\nlast\"\"\"\nlet seven : int = 7")>]
 [<InlineData("(* outer (* nested *)\nlet hidden (value:int) = value\n*)\n// let omitted (value:int) = value\nlet seven : int = 7")>]

@@ -30,8 +30,8 @@ let ``pthread handle storage is derived from its scalar typedef`` () =
     let ctx = { FidelityCodeGenerator.buildGenerationContext decls Types.LP64 Map.empty with Bindings = Map.ofList [createDecl.Name, binding] }
     let source = FidelityCodeGenerator.generateModule ctx Set.empty [List.head decls] "Test.Types" "pthread" "test" []
     Assert.Contains("module pthread_t =", source)
-    Assert.Contains("let Size = 8", source)
-    Assert.Contains("let Alignment = 8", source)
+    Assert.Contains("let Size : int = 8", source)
+    Assert.Contains("let Alignment : int = 8", source)
     Assert.Contains("width declared", source)
 
 [<Fact>]
@@ -145,9 +145,9 @@ let ``Linux x64 pthread storage comes from actual header unions and measured lay
         let contracts = declarations |> List.filter (function CppParser.Declaration.Struct s -> layouts.ContainsKey s.Name | _ -> false)
         let source = FidelityCodeGenerator.generateModule ctx Set.empty contracts "Test.Types" "pthread" "storage" []
         Assert.Contains("module pthread_mutex_t =", source)
-        Assert.Contains("let Size = 40", source)
-        Assert.Contains("let Size = 48", source)
-        Assert.Contains("let Alignment = 8", source)
+        Assert.Contains("let Size : int = 40", source)
+        Assert.Contains("let Size : int = 48", source)
+        Assert.Contains("let Alignment : int = 8", source)
         Assert.Contains("Count = 48", source)
         Assert.DoesNotContain("type pthread_mutex_t =", source)
 

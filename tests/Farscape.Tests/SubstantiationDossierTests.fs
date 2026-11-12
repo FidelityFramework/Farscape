@@ -41,6 +41,7 @@ type private Library =
       ManifestToml: string
       Archive: string
       Provenance: string
+      Types: string
       Scalar: string }
 
 let private library =
@@ -80,12 +81,7 @@ let private library =
          let loading = Path.Combine(work, "Loading.clef")
          (File.ReadAllText(Path.Combine(repository, "tests", "native-callbacks", "Loading.clef"))).Replace("landingprobe", "dossier_probe")
          |> fun text -> File.WriteAllText(loading, text)
-         // The generated type module of a measured value struct carries unannotated literal
-         // constants and an unquoted StructDescriptor value, which the #208 source classifier
-         // refuses (FS9246). The record type is therefore authored here; the boundary module,
-         // its FidelityExtern declarations and its FunctionDescriptors are generator output.
-         let types = Path.Combine(work, "Types.clef")
-         writeLines types [ "module Dossier.Probe.Boundary.Types"; "type DossierPair = { left: int; right: int }" ]
+         let types = Path.Combine(work, "generated", "Types.clef")
          let boundary = Path.Combine(work, "generated", "Boundary", "Boundary.clef")
          File.AppendAllText(boundary,
              "\nlet identityResultContract : Expr<ResultRangeDescriptor> = <@ {\n    Binding = \"Dossier.Probe.Boundary.dossier_identity\"\n    Role = ReturnValue\n    Lower = Argument 0\n    Upper = Argument 0\n    Hypothesis = ({ Identity = \"Dossier.identity-returns-input\"; Version = \"1\"; Source = \"fixture:probe.c\" } : ExternalExecutionHypothesis)\n} @>\n")
@@ -126,6 +122,7 @@ let private library =
            ManifestToml = requiredFile "TOML manifest" (Path.Combine(output, "DossierProbe.substantiation.toml"))
            Archive = archive
            Provenance = provenance
+           Types = types
            Scalar = scalar })
 
 // ---------------------------------------------------------------------------
@@ -494,7 +491,7 @@ let ``dossier API and CLI write one reconciled report for a real library with Ro
     let check = Assert.Single dossier.Checks.RocqChecks
     Assert.Equal("DossierProofs.Limits.seven_is_admitted", check.Symbol)
     // Section 4.
-    let trust = "Depends on external C/OS contract (Rests on: H-ABI-1, H-Link-1)"
+    let trust = "Depends on external C/OS contract (Rests on: H-ABI-1, H-Link-1, H-Contract-1)"
     Assert.Equal(trust, dossier.Guarantees.TrustScope)
     Assert.Equal(proof.LibraryObligations, dossier.Guarantees.LibraryObligations.Length)
     Assert.All(dossier.Guarantees.LibraryObligations, fun obligation ->
@@ -532,11 +529,12 @@ let ``dossier API and CLI write one reconciled report for a real library with Ro
     // A Lemma is an internal helper: it is in no group and in no document.
     for document in [ json; markdown; html ] do Assert.DoesNotContain("add_zero_helper", document)
     // Section 5.
-    Assert.Equal<string[]>([| "H-ABI-1"; "H-Link-1" |], dossier.Assumptions.Hypotheses |> Array.map (fun hypothesis -> hypothesis.Id))
+    Assert.Equal<string[]>([| "H-ABI-1"; "H-Link-1"; "H-Contract-1" |], dossier.Assumptions.Hypotheses |> Array.map (fun hypothesis -> hypothesis.Id))
     Assert.Equal("Binary Layout and Calling Convention (H-ABI)", dossier.Assumptions.Hypotheses[0].Category)
     Assert.Equal<string[]>([| "scalar-handle-link-and-call"; "measured-record-abi" |], dossier.Assumptions.Hypotheses[0].TestedBy)
     Assert.Equal("Linked Library Binary Identity (H-Link)", dossier.Assumptions.Hypotheses[1].Category)
     Assert.Equal<string[]>([| "scalar-handle-link-and-call"; "static-dynamic-link-elision" |], dossier.Assumptions.Hypotheses[1].TestedBy)
+    Assert.Equal("barewire-zero-copy", Assert.Single dossier.Assumptions.Hypotheses[2].TestedBy)
     Assert.Equal<string[]>([| "H_c_abi" |], dossier.Assumptions.RocqAxioms)
     // Section 6: every exported declaration is one row, traced through the PSG and the witness.
     let exported =
@@ -569,6 +567,22 @@ let ``dossier API and CLI write one reconciled report for a real library with Ro
     let measured = row "Dossier.Probe.Boundary.dossier_pair_sum"
     Assert.Equal<string[]>([| "DossierPair" |], measured.MeasuredTypes)
     Assert.Equal("dossier_pair_sum", (Assert.Single measured.ForeignLinks).Symbol)
+    let typesSource = lib.Manifest.Sources |> Array.find (fun source -> source.Path = Path.GetFullPath lib.Types)
+    Assert.Empty typesSource.RuntimeDeclarations
+    Assert.Empty typesSource.ForeignDeclarations
+    let expectedTypesDescriptors =
+        [| "Dossier.Probe.Boundary.Types.DossierPair.Size"
+           "Dossier.Probe.Boundary.Types.DossierPair.Alignment"
+           "Dossier.Probe.Boundary.Types.DossierPair.leftOffset"
+           "Dossier.Probe.Boundary.Types.DossierPair.rightOffset"
+           "Dossier.Probe.Boundary.Types.DossierPair.Descriptor" |]
+    Assert.Equal<string[]>(expectedTypesDescriptors, typesSource.CompileTimeDeclarations)
+    for name in expectedTypesDescriptors do
+        let typesRow = row name
+        Assert.Equal("descriptor", typesRow.Kind)
+        Assert.Empty typesRow.ForeignLinks
+        Assert.Empty typesRow.MlirSymbols
+        Assert.StartsWith(Path.GetFullPath lib.Types + ":", typesRow.Source)
     let seven = row "Dossier.Probe.Scalar.seven"
     Assert.Equal("runtime", seven.Kind)
     Assert.Equal<string[]>([| "Dossier.Probe.Scalar.seven" |], seven.MlirSymbols)
@@ -1271,3 +1285,208 @@ let ``the dossier CLI reports a refusal on stderr and exits 1`` () =
     Assert.StartsWith("FS9247: ", stderr.Result)
     Assert.Contains("FS9247 declared in " + fixture.Project, stderr.Result)
     Assert.Empty(Directory.GetFiles(output, "*.dossier.*"))
+
+[<Fact>]
+let ``generated measured value_structs and abi_critical_structs Types.clef substantiates end-to-end via CLI and refuses unsubstantiated callables with FS9246`` () =
+    let work = scratch "generated-types-e2e"
+    let header = Path.Combine(work, "measured_probe.h")
+    let source = Path.Combine(work, "measured_probe.c")
+    let objectFile = Path.Combine(work, "measured_probe.o")
+    let archive = Path.Combine(work, "libmeasured_probe.a")
+    writeLines header
+        [ "typedef struct MeasuredPair { int left; int right; } MeasuredPair;"
+          "struct CriticalFrame { unsigned int tag; long payload; };"
+          "int measured_identity(int value);"
+          "int measured_pair_sum(MeasuredPair pair);"
+          "MeasuredPair measured_make_pair(int left, int right);" ]
+    writeLines source
+        [ "#include \"measured_probe.h\""
+          "int measured_identity(int value) { return value; }"
+          "int measured_pair_sum(MeasuredPair pair) { return pair.left + pair.right; }"
+          "MeasuredPair measured_make_pair(int left, int right) { MeasuredPair p = { left, right }; return p; }" ]
+    run work "measured-object" (ClangToolchain.startInfo [ "-c"; "-fPIC"; "-Wall"; "-Wextra"; "-Werror"; source; "-o"; objectFile ]) |> ignore
+    run work "measured-archive" (ClangToolchain.arStartInfo [ "rcs"; archive; objectFile ]) |> ignore
+    let pilot = Path.Combine(work, "Measured.pilot.toml")
+    writeLines pilot
+        [ "[library]"; "name = \"measured_probe\""; "headers = [" + quote header + "]"
+          "include_paths = [" + quote work + "]"
+          "[library.artifact]"; "kind = \"static-archive\""; "path = " + quote archive
+          "sha256 = " + quote (ClangToolchain.sha256 archive)
+          "[output]"; "mode = \"fidelity\""; "directory = \"generated\""
+          "[options]"; "c_header_mode = true"; "descriptor_only_dependencies = true"; "link_libraries = true"
+          "value_structs = [\"MeasuredPair\"]"
+          "abi_critical_structs = [\"MeasuredPair\", \"struct CriticalFrame\"]"
+          "[[namespace]]"; "name = \"Measured.Probe.Boundary\""; "library = \"measured_probe\""
+          "description = \"Measured value and ABI-critical struct probe\""
+          "functions = [\"measured_identity\", \"measured_pair_sum\", \"measured_make_pair\"]" ]
+    let cli = requiredFile "built Farscape CLI" (Path.Combine(repository, "src", "Farscape.Cli", "bin", "Debug", "net10.0", "Farscape.Cli.dll"))
+    run work "farscape-project-cli" (ProcessLaunch.startInfo "dotnet" [ cli; "project"; "--project"; pilot ]) |> ignore
+    let provenance =
+        match Directory.GetFiles(work, "*.link-provenance.toml", SearchOption.AllDirectories) with
+        | [| path |] -> path
+        | paths -> failwithf "expected one generated link provenance manifest, got %A" paths
+    let types = requiredFile "generated Types.clef" (Path.Combine(work, "generated", "Types.clef"))
+    let boundary = requiredFile "generated Boundary.clef" (Path.Combine(work, "generated", "Boundary", "Boundary.clef"))
+    let typesText = File.ReadAllText types
+    Assert.Contains("type MeasuredPair = {", typesText)
+    Assert.Contains("module MeasuredPair =\n", typesText)
+    Assert.Contains("    [<Literal>]\n    let Size : int = 8\n", typesText)
+    Assert.Contains("    [<Literal>]\n    let Alignment : int = 4\n", typesText)
+    Assert.Contains("    [<Literal>]\n    let leftOffset : int = 0\n", typesText)
+    Assert.Contains("    [<Literal>]\n    let rightOffset : int = 4\n", typesText)
+    Assert.Contains("    let Descriptor : Expr<StructDescriptor> =\n        <@\n            { Name = \"MeasuredPair\"", typesText)
+    Assert.Contains("module CriticalFrame =\n", typesText)
+    Assert.Contains("    [<Literal>]\n    let Size : int = 16\n", typesText)
+    Assert.Contains("    [<Literal>]\n    let Alignment : int = 8\n", typesText)
+    Assert.Contains("    [<Literal>]\n    let tagOffset : int = 0\n", typesText)
+    Assert.Contains("    [<Literal>]\n    let payloadOffset : int = 8\n", typesText)
+    Assert.Contains("    let Descriptor : Expr<StructDescriptor> =\n        <@\n            { Name = \"CriticalFrame\"", typesText)
+    let loading = Path.Combine(work, "Loading.clef")
+    (File.ReadAllText(Path.Combine(repository, "tests", "native-callbacks", "Loading.clef"))).Replace("landingprobe", "measured_probe")
+    |> fun text -> File.WriteAllText(loading, text)
+    let caller = Path.Combine(work, "Caller.clef")
+    writeLines caller
+        [ "module Measured.Probe.Caller"
+          "open Measured.Probe.Boundary.Types"
+          "let identitySample () : int ="
+          "    match Measured.Probe.Boundary.measured_identity 42 with"
+          "    | 42 -> 42"
+          "    | _ -> 0"
+          "let layoutSample () : int ="
+          "    MeasuredPair.Size + MeasuredPair.rightOffset + CriticalFrame.Size + CriticalFrame.payloadOffset" ]
+    let dependencies, platform = platformTables ()
+    let metadata = sibling "BAREWIRE_METADATA_PROJECT" "BAREWire/src/BAREWire.BindingMetadata.fidproj"
+    let writeFidproj projectPath (sources: string list) =
+        writeLines projectPath
+            [ "[package]"; "name = \"MeasuredProbe\""; "version = \"1.0.0\""
+              "[compilation]"; "target = \"cpu\""
+              "[build]"; "output_kind = \"library\""
+              "sources = [" + (sources |> List.map quote |> String.concat ", ") + "]"
+              "[dependencies]"; yield! dependencies
+              "metadata = { path = " + quote metadata + " }"
+              "[platform]"; yield! platform
+              "loading = \"Landing.Acceptance.Loading.contract\""
+              "[link]"; "libraries = [\"measured_probe\"]" ]
+    let project = Path.Combine(work, "MeasuredProbe.fidproj")
+    writeFidproj project [ loading; types; boundary; caller ]
+    let composerDll = sibling "COMPOSER_DLL" "Composer/src/bin/Debug/net10.0/Composer.dll"
+    let manifestOutput = Path.Combine(work, "manifest")
+    let substantiateLaunch =
+        ProcessLaunch.startInfo "dotnet"
+            [ cli; "substantiate"; "--fidproj"; project; "--pilot"; pilot
+              "--link-provenance"; provenance; "--output"; manifestOutput
+              "--work-dir"; Path.Combine(work, "substantiation") ]
+    substantiateLaunch.Environment["COMPOSER_DLL"] <- composerDll
+    let substantiateSummary = run work "farscape-substantiate-cli" substantiateLaunch
+    Assert.Contains("Package: MeasuredProbe", substantiateSummary)
+    let manifestJson = requiredFile "substantiation JSON manifest" (Path.Combine(manifestOutput, "MeasuredProbe.substantiation.json"))
+    let manifest = Substantiation.parseJson (File.ReadAllText manifestJson) |> accepted
+    Substantiation.validateManifest manifest |> accepted
+    let typesDigest = manifest.Sources |> Array.find (fun entry -> entry.Path = Path.GetFullPath types)
+    Assert.Empty typesDigest.RuntimeDeclarations
+    Assert.Empty typesDigest.ForeignDeclarations
+    let expectedCompileTime =
+        [| "Measured.Probe.Boundary.Types.MeasuredPair.Size"
+           "Measured.Probe.Boundary.Types.MeasuredPair.Alignment"
+           "Measured.Probe.Boundary.Types.MeasuredPair.leftOffset"
+           "Measured.Probe.Boundary.Types.MeasuredPair.rightOffset"
+           "Measured.Probe.Boundary.Types.MeasuredPair.Descriptor"
+           "Measured.Probe.Boundary.Types.CriticalFrame.Size"
+           "Measured.Probe.Boundary.Types.CriticalFrame.Alignment"
+           "Measured.Probe.Boundary.Types.CriticalFrame.tagOffset"
+           "Measured.Probe.Boundary.Types.CriticalFrame.payloadOffset"
+           "Measured.Probe.Boundary.Types.CriticalFrame.Descriptor" |]
+    Assert.Equal<string[]>(expectedCompileTime, typesDigest.CompileTimeDeclarations)
+    let dossierOutput = Path.Combine(work, "dossier")
+    run work "farscape-dossier-cli" (ProcessLaunch.startInfo "dotnet" [ cli; "dossier"; "--manifest"; manifestJson; "--output"; dossierOutput ]) |> ignore
+    let dossier = SubstantiationDossier.parseDossierJson (File.ReadAllText(Path.Combine(dossierOutput, "MeasuredProbe.dossier.json"))) |> accepted
+    Assert.Equal<string[]>([| "CriticalFrame"; "MeasuredPair" |], dossier.Traceability.Layouts |> Array.map (fun layout -> layout.Name) |> Array.sort)
+    for expected in expectedCompileTime do
+        Assert.Contains(dossier.Traceability.Declarations, fun row -> row.Declaration = expected && row.Kind = "descriptor")
+    // Exact-code FS9246 refusal controls: generated wrapper callables, authored parameterized
+    // callables, unannotated literals, unquoted descriptors, mutable bindings, and record values.
+    let wrapperWork = Path.Combine(work, "wrappers")
+    Directory.CreateDirectory wrapperWork |> ignore
+    let wrapperPilot = Path.Combine(wrapperWork, "MeasuredWrappers.pilot.toml")
+    File.WriteAllText(wrapperPilot, (File.ReadAllText pilot).Replace("directory = \"generated\"", "directory = \"generated-wrappers\""))
+    ScratchDirectory.within wrapperWork (fun () -> BindingGenerator.generateFromProjectDiagnosed wrapperPilot false true Types.LP64)
+    |> accepted |> ignore
+    let generatedApi =
+        Directory.GetFiles(Path.Combine(wrapperWork, "generated-wrappers"), "*Api.clef", SearchOption.AllDirectories)
+        |> Assert.Single
+    let evaluateSources label (sources: string list) =
+        let refusalDir = Path.Combine(work, "refusal-" + label)
+        Directory.CreateDirectory refusalDir |> ignore
+        let refusalProj = Path.Combine(refusalDir, "MeasuredProbe.fidproj")
+        writeFidproj refusalProj sources
+        Substantiation.evaluate
+            { FidprojPath = refusalProj
+              PilotPath = Some pilot
+              LinkProvenancePath = Some provenance
+              OutputDirectory = Some(Path.Combine(refusalDir, "out"))
+              WorkDirectory = Some(Path.Combine(refusalDir, "work"))
+              AllowWarnings = false
+              Verbose = false }
+    evaluateSources "generated-wrapper-api" [ loading; types; boundary; caller; generatedApi ] |> refused "FS9246"
+    let cliRefusalDir = Path.Combine(work, "cli-fs9246")
+    Directory.CreateDirectory cliRefusalDir |> ignore
+    let cliRefusalProj = Path.Combine(cliRefusalDir, "MeasuredProbe.fidproj")
+    writeFidproj cliRefusalProj [ loading; types; boundary; caller; generatedApi ]
+    let cliLaunch =
+        ProcessLaunch.startInfo "dotnet"
+            [ cli; "substantiate"; "--fidproj"; cliRefusalProj; "--pilot"; pilot
+              "--link-provenance"; provenance; "--output"; Path.Combine(cliRefusalDir, "out")
+              "--work-dir"; Path.Combine(cliRefusalDir, "work") ]
+    cliLaunch.WorkingDirectory <- cliRefusalDir
+    cliLaunch.Environment["TMPDIR"] <- cliRefusalDir
+    cliLaunch.Environment["COMPOSER_DLL"] <- composerDll
+    use cliChild = new Process(StartInfo = cliLaunch)
+    Assert.True(cliChild.Start(), "the Farscape CLI did not start")
+    let cliStdout = cliChild.StandardOutput.ReadToEndAsync()
+    let cliStderr = cliChild.StandardError.ReadToEndAsync()
+    Assert.True(cliChild.WaitForExit 120000, "the Farscape CLI did not exit")
+    cliChild.WaitForExit()
+    Assert.Equal(1, cliChild.ExitCode)
+    Assert.Equal("", cliStdout.Result)
+    Assert.StartsWith("FS9246: ", cliStderr.Result)
+    let writeExtraSource label (lines: string list) =
+        let extraPath = Path.Combine(work, label + ".clef")
+        writeLines extraPath lines
+        extraPath
+    let writeModifiedTypes label (transform: string -> string) =
+        let modifiedPath = Path.Combine(work, label + ".Types.clef")
+        let updated = transform typesText
+        Assert.NotEqual<string>(typesText, updated)
+        File.WriteAllText(modifiedPath, updated)
+        modifiedPath
+    evaluateSources "parameterized-callable"
+        [ loading; types; boundary
+          writeExtraSource "Callable"
+              [ "module Measured.Probe.Callable"
+                "open Measured.Probe.Boundary.Types"
+                "let callPairSum (pair: MeasuredPair) : int = Measured.Probe.Boundary.measured_pair_sum pair" ] ]
+    |> refused "FS9246"
+    evaluateSources "mutable-binding"
+        [ loading; types; boundary
+          writeExtraSource "MutableState"
+              [ "module Measured.Probe.MutableState"
+                "let mutable state : int = 0" ] ]
+    |> refused "FS9246"
+    evaluateSources "record-runtime-value"
+        [ loading; types; boundary
+          writeExtraSource "RecordValue"
+              [ "module Measured.Probe.RecordValue"
+                "open Measured.Probe.Boundary.Types"
+                "let zeroPair : MeasuredPair = { left = 0; right = 0 }" ] ]
+    |> refused "FS9246"
+    evaluateSources "unannotated-literal"
+        [ loading
+          writeModifiedTypes "unannotated" (fun text -> text.Replace("let Size : int = 8", "let Size = 8"))
+          boundary ]
+    |> refused "FS9246"
+    evaluateSources "unquoted-descriptor"
+        [ loading
+          writeModifiedTypes "unquoted" (fun text ->
+              text.Replace("let Descriptor : Expr<StructDescriptor> =\n        <@\n", "let Descriptor : StructDescriptor =\n").Replace("\n        @>", ""))
+          boundary ]
+    |> refused "FS9246"

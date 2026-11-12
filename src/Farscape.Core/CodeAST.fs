@@ -78,8 +78,8 @@ module CodeAST =
         /// let binding: let name (p1: t1) (p2: t2) : retType = body
         /// Attributes are rendered as [<Attr>] lines before the let.
         | LetBinding of name: string * params': FsParam list * returnType: FsType * body: FsExpr * attributes: string list
-        /// [<Literal>] let name = value
-        | LiteralBinding of name: string * value: string
+        /// [<Literal>] let name : type = value
+        | LiteralBinding of name: string * type': FsType * value: string
         /// let name : type = body — a value, not a function (a descriptor, a quotation)
         | ValueBinding of name: string * type': FsType * body: FsExpr
         /// A nominal phantom marker, carrying no native address or source storage.

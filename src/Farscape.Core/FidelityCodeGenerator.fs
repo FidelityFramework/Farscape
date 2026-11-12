@@ -859,15 +859,20 @@ module FidelityCodeGenerator =
         | CompilerBuiltin | InternalMacro | PredefinedMacro -> unemitted UnemittedMacroKind.ReservedName
         | UserMacro when m.Name.StartsWith "_" -> unemitted UnemittedMacroKind.ReservedName
         | UserMacro ->
+            let integerMacroLiteral (value: int64) =
+                if value >= int64 System.Int32.MinValue && value <= int64 System.Int32.MaxValue then
+                    LiteralBinding(m.Name, Named "int", string value)
+                else
+                    LiteralBinding(m.Name, Named "int64", string value + "L")
             match m.Kind with
             | CppParser.SimpleValue "" -> unemitted UnemittedMacroKind.EmptyDefinition
-            | CppParser.SimpleValue (IntegerLiteral n) -> EmittedConstant [ LiteralBinding(m.Name, string n) ]
+            | CppParser.SimpleValue (IntegerLiteral n) -> EmittedConstant [ integerMacroLiteral n ]
             | CppParser.Expression v ->
                 match v.Trim().TrimStart('(').TrimEnd(')') with
-                | IntegerLiteral n -> EmittedConstant [ LiteralBinding(m.Name, string n) ]
+                | IntegerLiteral n -> EmittedConstant [ integerMacroLiteral n ]
                 | _ -> unemitted (UnemittedMacroKind.NotIntegerConstant "clang has not evaluated it")
             | CppParser.SimpleValue _ -> unemitted (UnemittedMacroKind.NotIntegerConstant "its definition is no integer literal clang has evaluated")
-            | CppParser.IntegerConstant (_, value) -> EmittedConstant [ LiteralBinding(m.Name, string value) ]
+            | CppParser.IntegerConstant (_, value) -> EmittedConstant [ integerMacroLiteral value ]
             | CppParser.FunctionLike _ -> unemitted UnemittedMacroKind.FunctionLike
             | CppParser.TypeCast (typeName, _) -> unemitted (UnemittedMacroKind.PointerCast (typeName + "*"))
             | CppParser.FunctionPointerSentinel (_, pointerType, _, value) -> unemitted (UnemittedMacroKind.FunctionPointerSentinel (pointerType, value))
@@ -2025,12 +2030,12 @@ module FidelityCodeGenerator =
                   BlankLine ]
         [ OpaqueMarker spec.SafeName
           SubModule(spec.SafeName, [
-              LiteralBinding("StatusOk", "0")
-              LiteralBinding("StatusNullHandle", "-1")
-              LiteralBinding("StatusStdException", "1")
-              LiteralBinding("StatusUnknownException", "2")
-              LiteralBinding("StatusAllocationFailed", "3")
-              LiteralBinding("StatusOutOfRange", "4") ])
+              LiteralBinding("StatusOk", Named "int", "0")
+              LiteralBinding("StatusNullHandle", Named "int", "-1")
+              LiteralBinding("StatusStdException", Named "int", "1")
+              LiteralBinding("StatusUnknownException", Named "int", "2")
+              LiteralBinding("StatusAllocationFailed", Named "int", "3")
+              LiteralBinding("StatusOutOfRange", Named "int", "4") ])
           BlankLine ] @
         binding "_release" "CalleeOwns" [ self ] (Named "unit") "Void" @ acquisition @
         binding "_size" "Borrowed" [ output "outSize" "int"; self ] (Named "int") intRef @
@@ -2105,22 +2110,24 @@ module FidelityCodeGenerator =
                     "BitFields", Literal "[||]"
                     "Documentation", Literal ($"Some {quoteString doc}") ])
         let structDoc = $"measured from targeted library {spec.LibraryName} for {spaceName} zero-copy placement"
-        let structDescriptor =
+        let sharedLayoutBlock =
             RecordBlock [
+                "Size", Literal (string spec.MeasuredSize)
+                "Alignment", Literal (string spec.MeasuredAlignment)
+                "Fields", ArrayBlock barewireFieldDescriptors ]
+        let structDescriptor =
+            Quoted(RecordBlock [
                 "Name", Literal (quoteString spec.StructName)
-                "Layout", RecordBlock [
-                    "Size", Literal (string spec.MeasuredSize)
-                    "Alignment", Literal (string spec.MeasuredAlignment)
-                    "Fields", ArrayBlock barewireFieldDescriptors ]
+                "Layout", sharedLayoutBlock
                 "MayAlias", Literal "false"
                 "FlexibleArray", Literal "None"
-                "Documentation", Literal ($"Some {quoteString structDoc}") ]
+                "Documentation", Literal ($"Some {quoteString structDoc}") ])
         let peripheralDescriptor =
-            RecordBlock [
+            Quoted(RecordBlock [
                 "Name", Literal (quoteString spec.SafeName)
                 "Instances", Literal "[||]"
-                "Layout", Identifier "Descriptor.Layout"
-                "MemoryRegion", Literal memoryRegionSource ]
+                "Layout", sharedLayoutBlock
+                "MemoryRegion", Literal memoryRegionSource ])
         let memorySpaceDescriptor =
             Quoted(RecordBlock [
                 "Space", Literal (quoteString spaceName)
@@ -2134,7 +2141,7 @@ module FidelityCodeGenerator =
                 "RegionLifetimeDepth", Literal (string spec.RegionLifetimeDepth)
                 "LibraryRetentionDepth", Literal (string spec.LibraryRetentionDepth) ])
         let offsetLiterals =
-            spec.Fields |> List.map (fun field -> LiteralBinding(field.Name + "Offset", string field.ByteOffset))
+            spec.Fields |> List.map (fun field -> LiteralBinding(field.Name + "Offset", Named "int", string field.ByteOffset))
         let fieldBindings =
             resolvedFields |> List.collect (fun (field, _, fieldRepr, _) ->
                 binding ("_clef_read_" + field.Name) "Borrowed"
@@ -2150,22 +2157,22 @@ module FidelityCodeGenerator =
             | CppClassAnalysis.DeviceUnified -> []
         [ OpaqueMarker spec.SafeName
           SubModule(spec.SafeName,
-              [ LiteralBinding("Size", string spec.MeasuredSize)
-                LiteralBinding("Alignment", string spec.MeasuredAlignment)
-                LiteralBinding("ElementCount", string spec.ElementCount)
-                LiteralBinding("RegionByteExtent", string spec.RegionByteExtent)
-                LiteralBinding("RegionAlignment", string spec.RegionAlignment)
-                LiteralBinding("MemorySpace", quoteString spaceName)
-                LiteralBinding("SpaceAccess", quoteString accessName)
-                LiteralBinding("ByteOrder", quoteString spec.ByteOrder) ]
+              [ LiteralBinding("Size", Named "int", string spec.MeasuredSize)
+                LiteralBinding("Alignment", Named "int", string spec.MeasuredAlignment)
+                LiteralBinding("ElementCount", Named "int", string spec.ElementCount)
+                LiteralBinding("RegionByteExtent", Named "int", string spec.RegionByteExtent)
+                LiteralBinding("RegionAlignment", Named "int", string spec.RegionAlignment)
+                LiteralBinding("MemorySpace", Named "string", quoteString spaceName)
+                LiteralBinding("SpaceAccess", Named "string", quoteString accessName)
+                LiteralBinding("ByteOrder", Named "string", quoteString spec.ByteOrder) ]
               @ offsetLiterals
-              @ [ LiteralBinding("StatusOk", "0")
-                  LiteralBinding("StatusNullHandle", "-1")
-                  LiteralBinding("StatusOutOfRange", "4")
-                  LiteralBinding("StatusLifetimeError", "5")
-                  LiteralBinding("StatusAccessConflict", "6")
-                  ValueBinding("Descriptor", Named "StructDescriptor", structDescriptor)
-                  ValueBinding("PeripheralDescriptor", Named "PeripheralDescriptor", peripheralDescriptor)
+              @ [ LiteralBinding("StatusOk", Named "int", "0")
+                  LiteralBinding("StatusNullHandle", Named "int", "-1")
+                  LiteralBinding("StatusOutOfRange", Named "int", "4")
+                  LiteralBinding("StatusLifetimeError", Named "int", "5")
+                  LiteralBinding("StatusAccessConflict", Named "int", "6")
+                  ValueBinding("Descriptor", Generic("Expr", Named "StructDescriptor"), structDescriptor)
+                  ValueBinding("PeripheralDescriptor", Generic("Expr", Named "PeripheralDescriptor"), peripheralDescriptor)
                   ValueBinding("MemorySpaceDescriptor", Generic("Expr", Named "MemorySpaceDescriptor"), memorySpaceDescriptor) ])
           BlankLine ]
         @ binding "_unmap" "CalleeOwns" [ self ] (Named "int") intRef
@@ -2398,18 +2405,18 @@ module FidelityCodeGenerator =
                 else
                     extra @ binding name symbol "Borrowed" (receivers @ args) retType returnRef) |> List.concat
         let moduleConstants =
-            [ LiteralBinding("Size", string size); LiteralBinding("Alignment", string align) ] @
+            [ LiteralBinding("Size", Named "int", string size); LiteralBinding("Alignment", Named "int", string align) ] @
             (if shimmed then
-                [ LiteralBinding("StatusOk", "0")
-                  LiteralBinding("StatusNullHandle", "-1")
-                  LiteralBinding("StatusStdException", "1")
-                  LiteralBinding("StatusUnknownException", "2")
-                  LiteralBinding("StatusAllocationFailed", "3") ]
+                [ LiteralBinding("StatusOk", Named "int", "0")
+                  LiteralBinding("StatusNullHandle", Named "int", "-1")
+                  LiteralBinding("StatusStdException", Named "int", "1")
+                  LiteralBinding("StatusUnknownException", Named "int", "2")
+                  LiteralBinding("StatusAllocationFailed", Named "int", "3") ]
              else [])
         [ OpaqueMarker safeName
           SubModule(safeName, moduleConstants) ]
         @ (stdlibHandles |> Map.toList |> List.collect (fun (name, (size, align)) ->
-            [ OpaqueMarker name; SubModule(name, [LiteralBinding("Size", string size); LiteralBinding("Alignment", string align)]) ]))
+            [ OpaqueMarker name; SubModule(name, [LiteralBinding("Size", Named "int", string size); LiteralBinding("Alignment", Named "int", string align)]) ]))
         @ dtors @ errorDecls @ ctors @ upcastDecls @ methodDecls
 
     // =========================================================================
@@ -2454,7 +2461,7 @@ module FidelityCodeGenerator =
                     let size = if r.Family = TypeMapper.Float && r.Bits = 80 then 16 else (r.Bits + 7) / 8
                     GStruct [
                         Comment $"/// Storage for C typedef `{td.Name}`; {DescriptorGenerator.widthProvenance ctx.DataModel r}."
-                        SubModule(td.Name, [LiteralBinding("Size", string size); LiteralBinding("Alignment", string size)])
+                        SubModule(td.Name, [LiteralBinding("Size", Named "int", string size); LiteralBinding("Alignment", Named "int", string size)])
                         BlankLine ]
                 | _ -> GNone
         OnNamespace = fun _ -> GNone

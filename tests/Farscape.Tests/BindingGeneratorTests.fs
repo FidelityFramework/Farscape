@@ -200,8 +200,8 @@ let ``measured layout uses the header's actual parse language`` forceC expectedS
             | true, Ok _ ->
                 let text = typesOf output |> String.concat "\n"
                 Assert.Contains("layout measured", text)
-                Assert.Contains($"let Size = {expectedSize}", text)
-                Assert.Contains($"let valueOffset = {expectedOffset}", text))
+                Assert.Contains($"let Size : int = {expectedSize}", text)
+                Assert.Contains($"let valueOffset : int = {expectedOffset}", text))
     finally
         System.IO.Directory.Delete(directory, true)
 
@@ -223,8 +223,8 @@ let ``a unit declaring dev_t as the profile does generates the measured 64-bit f
         | Ok _ ->
             let types = typesOf output
             Assert.Contains("/// C struct `fx_rec`: layout measured (clang record layout dump).", types)
-            Assert.Contains("let Size = 24", types)
-            Assert.Contains("let flagsOffset = 8", types)
+            Assert.Contains("let Size : int = 24", types)
+            Assert.Contains("let flagsOffset : int = 8", types)
             let text = String.concat "\n" types
             Assert.Contains("{ Name = \"device\"; Offset = 0; Repr = Repr.U64; Count = 1;", text)
             Assert.Contains("repr declared: dev_t under LP64", text))
@@ -293,8 +293,8 @@ let ``a packed enum field in a measured record is one byte`` () =
         | Error error -> failwithf "The packed enum record was refused: %s" error
         | Ok _ ->
             let text = typesOf output |> String.concat "\n"
-            Assert.Contains("let Size = 4", text)
-            Assert.Contains("let tailOffset = 1", text)
+            Assert.Contains("let Size : int = 4", text)
+            Assert.Contains("let tailOffset : int = 1", text)
             Assert.Contains("{ Name = \"kind\"; Offset = 0; Repr = Repr.U8; Count = 1;", text)
             Assert.Contains("repr measured: enum fx_packed under LP64", text))
 
@@ -305,7 +305,7 @@ let ``a wide enum field in a measured record is eight bytes`` () =
         | Error error -> failwithf "The wide enum record was refused: %s" error
         | Ok _ ->
             let text = typesOf output |> String.concat "\n"
-            Assert.Contains("let Size = 16", text)
+            Assert.Contains("let Size : int = 16", text)
             Assert.Contains("{ Name = \"kind\"; Offset = 0; Repr = Repr.U64; Count = 1;", text)
             Assert.Contains("repr measured: enum fx_wide under LP64", text))
 
@@ -477,17 +477,17 @@ let ``an anonymous field record is emitted with its own clang-measured layout`` 
             Assert.Contains("/// C union `fx_wide_counter`: layout measured (clang record layout dump).", types)
             Assert.Contains("/// C struct `fx_wide_counter___value32`: layout measured (clang record layout dump).", types)
             let counter = recordModule types "fx_wide_counter"
-            Assert.Contains("let Size = 8", counter)
-            Assert.Contains("let Alignment = 8", counter)
-            Assert.Contains("let __value64Offset = 0", counter)
-            Assert.Contains("let __value32Offset = 0", counter)
+            Assert.Contains("let Size : int = 8", counter)
+            Assert.Contains("let Alignment : int = 8", counter)
+            Assert.Contains("let __value64Offset : int = 0", counter)
+            Assert.Contains("let __value32Offset : int = 0", counter)
             Assert.Contains("{ Name = \"__value32\"; Offset = 0; Repr = Repr.U8; Count = 8;", counter)
             Assert.Contains("nested struct fx_wide_counter___value32 by value, as bytes; see fx_wide_counter___value32.Descriptor", counter)
             let halves = recordModule types "fx_wide_counter___value32"
-            Assert.Contains("let Size = 8", halves)
-            Assert.Contains("let Alignment = 4", halves)
-            Assert.Contains("let __lowOffset = 0", halves)
-            Assert.Contains("let __highOffset = 4", halves)
+            Assert.Contains("let Size : int = 8", halves)
+            Assert.Contains("let Alignment : int = 4", halves)
+            Assert.Contains("let __lowOffset : int = 0", halves)
+            Assert.Contains("let __highOffset : int = 4", halves)
             Assert.Contains("{ Name = \"__high\"; Offset = 4; Repr = Repr.U32; Count = 1;", halves)
             Assert.DoesNotContain("layout declared", counter + halves)
             // The emitted numbers are clang's: its own sizeof, _Alignof and offsetof agree.
@@ -506,14 +506,14 @@ let ``nested anonymous records are emitted at clang's offsets`` () =
         | Ok _ ->
             let types = allTypesOf output
             let outer = recordModule types "fx_outer"
-            Assert.Contains("let Size = 24", outer)
-            Assert.Contains("let slotsOffset = 4", outer)
-            Assert.Contains("let fixedOffset = 16", outer)
+            Assert.Contains("let Size : int = 24", outer)
+            Assert.Contains("let slotsOffset : int = 4", outer)
+            Assert.Contains("let fixedOffset : int = 16", outer)
             Assert.Contains("{ Name = \"slots\"; Offset = 4; Repr = Repr.U8; Count = 8;", outer)
             Assert.Contains("{ Name = \"fixed\"; Offset = 16; Repr = Repr.U8; Count = 8; Access = AccessKind.ReadOnly;", outer)
-            Assert.Contains("let hiOffset = 2", recordModule types "fx_outer_slots_parts")
-            Assert.Contains("let Alignment = 2", recordModule types "fx_outer_slots_parts")
-            Assert.Contains("let Size = 4", recordModule types "fx_outer_slots"))
+            Assert.Contains("let hiOffset : int = 2", recordModule types "fx_outer_slots_parts")
+            Assert.Contains("let Alignment : int = 2", recordModule types "fx_outer_slots_parts")
+            Assert.Contains("let Size : int = 4", recordModule types "fx_outer_slots"))
 
 [<Fact>]
 let ``an anonymous record clang cannot attribute a layout to is refused before output`` () =
@@ -548,8 +548,8 @@ let ``anonymous members are emitted inside their record's measured layout, their
             let types = allTypesOf output
             Assert.Contains("/// C struct `fx_am`: layout measured (clang record layout dump).", types)
             let am = recordModule types "fx_am"
-            for literal in [ "Size = 24"; "Alignment = 8"; "tagOffset = 0"; "anonymous1Offset = 4"; "iOffset = 4"; "fOffset = 4"
-                             "anonymous2Offset = 8"; "loOffset = 8"; "hiOffset = 10"; "tailOffset = 16" ] do
+            for literal in [ "Size : int = 24"; "Alignment : int = 8"; "tagOffset : int = 0"; "anonymous1Offset : int = 4"; "iOffset : int = 4"; "fOffset : int = 4"
+                             "anonymous2Offset : int = 8"; "loOffset : int = 8"; "hiOffset : int = 10"; "tailOffset : int = 16" ] do
                 Assert.Contains($"let {literal}\n", am)
             Assert.Contains("/// Offset of `i` in bytes (measured), a member of `fx_am` reached through its anonymous member `anonymous1`.", am)
             Assert.Contains("{ Name = \"anonymous1\"; Offset = 4; Repr = Repr.U8; Count = 4;", am)
@@ -557,13 +557,13 @@ let ``anonymous members are emitted inside their record's measured layout, their
             Assert.Contains("{ Name = \"tail\"; Offset = 16; Repr = Repr.I64; Count = 1;", am)
             // Each anonymous member's record is emitted with its own measured layout.
             Assert.Contains("/// C union `fx_am_anonymous1`: layout measured (clang record layout dump).", types)
-            Assert.Contains("let fOffset = 0\n", recordModule types "fx_am_anonymous1")
-            Assert.Contains("let hiOffset = 2\n", recordModule types "fx_am_anonymous2")
+            Assert.Contains("let fOffset : int = 0\n", recordModule types "fx_am_anonymous1")
+            Assert.Contains("let hiOffset : int = 2\n", recordModule types "fx_am_anonymous2")
             // Through two levels of anonymous members, under a record named only by a typedef.
             let td = recordModule types "fx_am_td"
-            for literal in [ "Size = 8"; "Alignment = 4"; "headOffset = 0"; "anonymous1Offset = 4"; "wordOffset = 4"; "lowOffset = 4"; "highOffset = 6" ] do
+            for literal in [ "Size : int = 8"; "Alignment : int = 4"; "headOffset : int = 0"; "anonymous1Offset : int = 4"; "wordOffset : int = 4"; "lowOffset : int = 4"; "highOffset : int = 6" ] do
                 Assert.Contains($"let {literal}\n", td)
-            Assert.Contains("let highOffset = 2\n", recordModule types "fx_am_td_anonymous1_anonymous1")
+            Assert.Contains("let highOffset : int = 2\n", recordModule types "fx_am_td_anonymous1_anonymous1")
             Assert.DoesNotContain("layout declared", types)
             clangConfirms header [
                 "sizeof(struct fx_am) == 24"; "_Alignof(struct fx_am) == 8"; "offsetof(struct fx_am, i) == 4"
@@ -658,9 +658,10 @@ let private citedRecordsConsistent (output: string) : (string * string) list =
         Assert.Equal<string list>(typeFields |> List.map fst, descriptorFields |> List.map (fun (n, _, _) -> n))
         for (field, clef), (_, offset, repr) in List.zip typeFields descriptorFields do
             Assert.True(compatible repr clef, $"{record}.{field} is emitted as '{clef}' but its descriptor representation is {repr}")
-            Assert.Contains($"let {field}Offset = {offset}", layout)
-        let size = rx(@"^let Size = (\d+)").Match(layout).Groups.[1].Value
+            Assert.Contains($"let {field}Offset : int = {offset}", layout)
+        let size = rx(@"^let Size : int = (\d+)").Match(layout).Groups.[1].Value
         Assert.Contains($"{{ Size = {size}", layout)
+        Assert.Contains("let Descriptor : Expr<StructDescriptor> =", layout)
     let sites = ResizeArray<string * string>()
     // Function descriptors: each one follows the extern it describes.
     for m in rx(@"^let (?:private )?(\w+) (.*) : (\S+) =\n(?:.*\n)*?let \1Descriptor[\s\S]*?@>").Matches(bindings) do
@@ -851,8 +852,8 @@ let ``a field typed by a typedef of a tagged record is that record by value`` ()
         | Error error -> failwithf "The typedef'd record field was refused: %s" error
         | Ok _ ->
             let holder = recordModule (allTypesOf output) "fx_holder"
-            Assert.Contains("let Size = 24", holder)
-            Assert.Contains("let listOffset = 8", holder)
+            Assert.Contains("let Size : int = 24", holder)
+            Assert.Contains("let listOffset : int = 8", holder)
             Assert.Contains("{ Name = \"list\"; Offset = 8; Repr = Repr.U8; Count = 16;", holder)
             Assert.Contains("nested struct fx_node by value, as bytes; see fx_node.Descriptor", holder)
             citedDescriptorsExist output |> ignore
@@ -950,7 +951,7 @@ let ``a field typed through two typedef links takes the tagged record's measured
             Assert.Contains("/// C struct `fx_link`: layout measured (clang record layout dump).", types)
             let holder = recordModule types "fx_chain_holder"
             Assert.Contains("layout measured", types.Substring(types.IndexOf("C struct `fx_chain_holder`")))
-            Assert.Contains("let linkOffset = 8", holder)
+            Assert.Contains("let linkOffset : int = 8", holder)
             Assert.Contains("{ Name = \"link\"; Offset = 8; Repr = Repr.U8; Count = 16;", holder)
             Assert.Contains("nested struct fx_link by value, as bytes; see fx_link.Descriptor", holder)
             citedDescriptorsExist output |> ignore
@@ -1003,9 +1004,9 @@ let ``a field typed through a qualified typedef link to a tagged union takes its
         | Ok _ ->
             let types = allTypesOf output
             Assert.Contains("/// C union `fx_ulink`: layout measured (clang record layout dump).", types)
-            Assert.Contains("let Size = 8", recordModule types "fx_ulink")
+            Assert.Contains("let Size : int = 8", recordModule types "fx_ulink")
             let holder = recordModule types "fx_uchain_holder"
-            Assert.Contains("let linkOffset = 8", holder)
+            Assert.Contains("let linkOffset : int = 8", holder)
             Assert.Contains("{ Name = \"link\"; Offset = 8; Repr = Repr.U8; Count = 8;", holder)
             Assert.Contains("nested struct fx_ulink by value, as bytes; see fx_ulink.Descriptor", holder)
             citedDescriptorsExist output |> ignore

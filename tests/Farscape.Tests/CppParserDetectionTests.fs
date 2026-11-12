@@ -80,7 +80,7 @@ module DetectCppModeTests =
         let selected = declarations |> List.filter (function CppParser.Struct s -> s.Name = record.Name | CppParser.Typedef _ -> true | _ -> false)
         let output = FidelityCodeGenerator.generate selected "Test" "test" Types.LP64 Map.empty
         let value name =
-            let m = System.Text.RegularExpressions.Regex.Match(output, @"\blet " + name + @" = (\d+)")
+            let m = System.Text.RegularExpressions.Regex.Match(output, @"\blet " + name + @" : int = (\d+)")
             Assert.True(m.Success, $"Missing {name} in generated record")
             m.Groups.[1].Value
         withTempHeader ".h" "#define _GNU_SOURCE\n#include <dlfcn.h>\n" (fun wrapper ->

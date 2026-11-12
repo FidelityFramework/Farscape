@@ -254,8 +254,8 @@ let ``generate emits numeric macro constants`` () =
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
     Assert.Contains("[<Literal>]", result)
-    Assert.Contains("let EXIT_SUCCESS = 0", result)
-    Assert.Contains("let EXIT_FAILURE = 1", result)
+    Assert.Contains("let EXIT_SUCCESS : int = 0", result)
+    Assert.Contains("let EXIT_FAILURE : int = 1", result)
 
 [<Fact>]
 let ``generate filters compiler builtin macros`` () =
@@ -267,7 +267,7 @@ let ``generate filters compiler builtin macros`` () =
     // A builtin is emitted as no constant, and reported as such rather than dropped (#193).
     Assert.DoesNotContain("let __STDC__", result)
     Assert.Contains("//   __STDC__: predefined or reserved name", result)
-    Assert.Contains("let FOO = 42", result)
+    Assert.Contains("let FOO : int = 42", result)
 
 [<Fact>]
 let ``generate deduplicates functions by name`` () =
@@ -348,10 +348,10 @@ let ``generate emits struct as layout module plus StructDescriptor, never a reco
     let result = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
     Assert.DoesNotContain("type Point", result)
     Assert.Contains("module Point =", result)
-    Assert.Contains("let Size = 8", result)
-    Assert.Contains("let xOffset = 0", result)
-    Assert.Contains("let yOffset = 4", result)
-    Assert.Contains("let Descriptor : StructDescriptor =", result)
+    Assert.Contains("let Size : int = 8", result)
+    Assert.Contains("let xOffset : int = 0", result)
+    Assert.Contains("let yOffset : int = 4", result)
+    Assert.Contains("let Descriptor : Expr<StructDescriptor> =", result)
     Assert.Contains("layout declared", result)
 
 [<Fact>]
@@ -545,7 +545,7 @@ let ``delegate-typed struct fields are pointers in the descriptor`` () =
         CppParser.Declaration.Struct (mkStruct "wl_listener" [mkField "notify" "wl_display_error_func_t"] None)
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty
-    Assert.Contains("let notifyOffset = 0", result)
+    Assert.Contains("let notifyOffset : int = 0", result)
     Assert.Contains("Repr = Repr.Pointer", result)
     Assert.DoesNotContain("delegate of", result)
 
@@ -555,9 +555,9 @@ let ``struct fields with C int are I32 at measured-or-declared offsets`` () =
         CppParser.Declaration.Struct (mkStruct "Rect" [mkField "x" "int"; mkField "y" "int"; mkField "w" "int"; mkField "h" "int"] None)
     ]
     let result = FidelityCodeGenerator.generate decls "Test" "lib" Types.LP64 Map.empty
-    Assert.Contains("let xOffset = 0", result)
-    Assert.Contains("let hOffset = 12", result)
-    Assert.Contains("let Size = 16", result)
+    Assert.Contains("let xOffset : int = 0", result)
+    Assert.Contains("let hOffset : int = 12", result)
+    Assert.Contains("let Size : int = 16", result)
     Assert.Contains("Repr = Repr.I32", result)
     Assert.DoesNotContain("int32", result)
 
@@ -1471,7 +1471,7 @@ let ``ABI critical layout probe must succeed before generation`` shape =
             let types = System.IO.File.ReadAllLines(System.IO.Path.Combine(output, "Types.clef")) |> Array.map (fun line -> line.Trim())
             Assert.Contains("module Later =", types)
             Assert.Contains("/// C struct `Later`: layout measured (clang record layout dump).", types)
-            Assert.Contains("let Size = 4", types)
+            Assert.Contains("let Size : int = 4", types)
         | Ok _ -> failwith "An unsuccessful required layout probe was admitted"
         | Error error when shape = "record" || shape = "scalar" || shape = "later" -> failwithf "The valid required layout probe was refused: %s" error
         | Error error ->
@@ -1626,38 +1626,38 @@ let ``ABI critical layouts are measured in the declaring header's translation un
             | "nested-shared" ->
                 // `Inner` is declared by the measuring header with the merged shape: 8 bytes by value.
                 Assert.Contains("module X =", types)
-                Assert.Contains("let Size = 8", types)
+                Assert.Contains("let Size : int = 8", types)
                 Assert.Contains("Repr = Repr.U8; Count = 8", String.concat "\n" types)
             | "field-typedef-shared" | "chain-typedef-shared" ->
                 // `T` (and `Base` behind it) is declared by the measuring header with the merged spelling:
                 // a 4-byte signed field at offset 0, emitted with its resolved representation.
                 Assert.Contains("module X =", types)
-                Assert.Contains("let Size = 4", types)
-                Assert.Contains("let valueOffset = 0", types)
+                Assert.Contains("let Size : int = 4", types)
+                Assert.Contains("let valueOffset : int = 0", types)
                 Assert.Contains("{ Name = \"value\"; Offset = 0; Repr = Repr.I32; Count = 1;", String.concat "\n" types)
             | "tag-typedef-unrelated" ->
                 // `struct T` names a tag; the typedef `T` header A also declares is not a dependency,
                 // so header B, which lacks it, still declares and measures the same record.
                 Assert.Contains("module X =", types)
-                Assert.Contains("let Size = 8", types)
-                Assert.Contains("let Alignment = 8", types)
-                Assert.Contains("let ptrOffset = 0", types)
+                Assert.Contains("let Size : int = 8", types)
+                Assert.Contains("let Alignment : int = 8", types)
+                Assert.Contains("let ptrOffset : int = 0", types)
                 Assert.Contains("{ Name = \"ptr\"; Offset = 0; Repr = Repr.Pointer; Count = 1;", String.concat "\n" types)
             | "pack-shared" ->
                 // Both declaring units measure the packed record identically.
                 Assert.Contains("module X =", types)
                 Assert.Contains("/// C struct `X`: layout measured (clang record layout dump).", types)
-                Assert.Contains("let Size = 5", types)
-                Assert.Contains("let Alignment = 1", types)
-                Assert.Contains("let iOffset = 1", types)
+                Assert.Contains("let Size : int = 5", types)
+                Assert.Contains("let Alignment : int = 1", types)
+                Assert.Contains("let iOffset : int = 1", types)
             | _ ->
                 // B's `X` is 8 bytes with `b` at 4. E's `X`, which only header A's unit reaches,
                 // is 16 bytes with `b` at 8; pairing that measurement with B's declaration is the defect.
                 Assert.Contains("module X =", types)
                 Assert.Contains("/// C struct `X`: layout measured (clang record layout dump).", types)
-                Assert.Contains("let Size = 8", types)
-                Assert.Contains("let Alignment = 4", types)
-                Assert.Contains("let bOffset = 4", types)
+                Assert.Contains("let Size : int = 8", types)
+                Assert.Contains("let Alignment : int = 4", types)
+                Assert.Contains("let bOffset : int = 4", types)
     finally
         System.IO.Directory.Delete(dir, true)
 

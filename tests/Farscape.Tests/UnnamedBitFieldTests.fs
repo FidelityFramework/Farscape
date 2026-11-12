@@ -72,11 +72,11 @@ let ``unnamed bit-fields are kept as padding and their records emitted at clang'
                                          "fx_member_pad", 6, ["a", 0; "anonymous1", 2; "d", 4] ] do
                 let record = recordModule types name
                 Assert.Contains($"/// C struct `{name}`: layout measured (clang record layout dump).", types)
-                Assert.Contains($"let Size = {size}\n", record)
+                Assert.Contains($"let Size : int = {size}\n", record)
                 let alignment = if name = "fx_member_pad" then 2 else 1
-                Assert.Contains($"let Alignment = {alignment}\n", record)
+                Assert.Contains($"let Alignment : int = {alignment}\n", record)
                 for field, offset in offsets do
-                    Assert.Contains($"let {field}Offset = {offset}\n", record)
+                    Assert.Contains($"let {field}Offset : int = {offset}\n", record)
                 // Padding is no field of the descriptor.
                 Assert.Equal(offsets.Length, record.Split("\"; Offset = ").Length - 1))
     clangConfirms header [
@@ -162,21 +162,21 @@ let ``a record whose only member is an unnamed bit-field is emitted at clang's s
             let types = allTypesOf output
             let record = recordModule types "fx_only"
             Assert.Contains("/// C struct `fx_only`: layout measured (clang record layout dump).", types)
-            Assert.Contains("let Size = 1\n", record)
-            Assert.Contains("let Alignment = 1\n", record)
+            Assert.Contains("let Size : int = 1\n", record)
+            Assert.Contains("let Alignment : int = 1\n", record)
             // No descriptor field: its one member is padding.
             Assert.Equal(0, record.Split("\"; Offset = ").Length - 1)
             // A record holding it by value places it by clang's layout of it.
             let holder = recordModule types "fx_only_holder"
-            Assert.Contains("let Size = 3\n", holder)
-            Assert.Contains("let padOffset = 1\n", holder)
-            Assert.Contains("let bOffset = 2\n", holder)
+            Assert.Contains("let Size : int = 3\n", holder)
+            Assert.Contains("let padOffset : int = 1\n", holder)
+            Assert.Contains("let bOffset : int = 2\n", holder)
             Assert.Contains("nested struct fx_only by value, as bytes; see fx_only.Descriptor", holder)
             let named = recordModule types "fx_only_named"
-            Assert.Contains("let Size = 3\n", named)
-            Assert.Contains("let padOffset = 1\n", named)
-            Assert.Contains("let bOffset = 2\n", named)
-            Assert.Contains("let Size = 1\n", recordModule types "fx_only_named_pad"))
+            Assert.Contains("let Size : int = 3\n", named)
+            Assert.Contains("let padOffset : int = 1\n", named)
+            Assert.Contains("let bOffset : int = 2\n", named)
+            Assert.Contains("let Size : int = 1\n", recordModule types "fx_only_named_pad"))
     clangConfirms header [
         "sizeof(struct fx_only) == 1"; "_Alignof(struct fx_only) == 1"
         "sizeof(struct fx_only_holder) == 3"; "offsetof(struct fx_only_holder, pad) == 1"; "offsetof(struct fx_only_holder, b) == 2"

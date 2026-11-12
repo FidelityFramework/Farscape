@@ -424,6 +424,9 @@ module SubstantiationBoundary =
 
     let hasFidelityExtern (attribute: AttributeItem) = attribute.Head = "FidelityExtern"
 
+    let isLiteralAttribute (attribute: AttributeItem) =
+        attribute.Head = "Literal" && Regex.IsMatch(attribute.Arguments, @"^\s*(?:\(\s*\))?\s*$")
+
     let parseFidelityExtern path (source: LexedSource) =
         let attributes = source.Attributes |> Array.filter hasFidelityExtern
         let unresolved message = fail Diagnostics.SubstantiationExternUnresolved path message
@@ -794,6 +797,11 @@ module SubstantiationBoundary =
         match TomlTable.tryFind "arch" platform, TomlTable.tryFind "os" platform with
         | Some (TomlValue.String "x86_64"), Some (TomlValue.String "linux") when System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture = System.Runtime.InteropServices.Architecture.X64 -> ()
         | _ -> layoutFailure request.FidprojPath "This Clang measurement route requires the declared Linux x86_64 LP64 target on an x86_64 host."
+        let bareRecordName (name: string) =
+            if name.StartsWith("typedef ", StringComparison.Ordinal) then name.Substring(8).Trim()
+            elif name.StartsWith("struct ", StringComparison.Ordinal) then name.Substring(7).Trim()
+            elif name.StartsWith("union ", StringComparison.Ordinal) then name.Substring(6).Trim()
+            else name
         let selected = pilot.Options |> Option.map (fun options -> options.AbiCriticalStructs @ options.ValueStructs) |> Option.toList |> List.concat |> Set.ofList
         let found = Collections.Generic.HashSet<string>()
         let layouts = ResizeArray<LayoutSummary>()
@@ -810,12 +818,29 @@ module SubstantiationBoundary =
             let parsed = match CppParser.parseHeaderFullDiagnosed options with Ok value -> value | Error e -> layoutFailure header e.Text
             units.Add(header, parsed.Declarations)
             included.Add(header, parsed.Included)
+            let typedefs =
+                (Map.empty, parsed.Declarations) ||> List.fold (fun acc decl ->
+                    match decl with
+                    | CppParser.Typedef t when not (acc.ContainsKey t.Name) -> acc.Add(t.Name, t.UnderlyingType)
+                    | _ -> acc)
+            let matchesSelected (s: CppParser.StructDecl) (entry: string) =
+                let bare = bareRecordName entry
+                if entry.StartsWith("struct ", StringComparison.Ordinal) then not s.IsUnion && s.Name = bare
+                elif entry.StartsWith("union ", StringComparison.Ordinal) then s.IsUnion && s.Name = bare
+                elif entry.StartsWith("typedef ", StringComparison.Ordinal) then
+                    (s.Name = bare && typedefs.ContainsKey bare)
+                    || (match typedefs.TryFind bare with Some underlying -> bareRecordName underlying = s.Name | None -> false)
+                else
+                    s.Name = bare
+                    || (match typedefs.TryFind bare with Some underlying -> bareRecordName underlying = s.Name | None -> false)
             let records = parsed.Declarations |> List.choose (function CppParser.Struct s when CppParser.isDefinedRecord s -> Some s | _ -> None)
-            let required = records |> List.filter (fun s -> selected.Contains s.Name || s.Measured.IsSome)
+            let required = records |> List.filter (fun s -> s.Measured.IsSome || (selected |> Set.exists (matchesSelected s)))
             let named = required |> List.filter (fun s -> s.Anonymous.IsNone)
             let spellings = named |> List.map (fun s ->
-                if parsed.Declarations |> List.exists (function CppParser.Typedef t when t.Name = s.Name -> true | _ -> false) then "typedef " + s.Name
-                elif s.IsUnion then "union " + s.Name else s.Name)
+                if typedefs.ContainsKey s.Name then "typedef " + s.Name
+                elif s.IsUnion then "union " + s.Name
+                elif not cppMode then "struct " + s.Name
+                else s.Name)
             let measured =
                 match CppParser.extractStructLayoutsForModeDiagnosed header includes systemIncludes pilot.Library.Defines spellings cppMode false with
                 | Ok value -> value
@@ -826,7 +851,8 @@ module SubstantiationBoundary =
                     match record.Anonymous, measured.TryFind record.Name, record.Measured with
                     | None, Some value, _ | Some _, _, Some value -> value
                     | _ -> layoutFailure header $"No per-unit measured layout for '{record.Name}'."
-                found.Add record.Name |> ignore
+                for entry in selected do
+                    if matchesSelected record entry then found.Add entry |> ignore
                 layouts.Add { Header = header; Name = record.Name; Kind = "record"; SizeBits = layout.SizeBits
                               AlignmentBits = layout.AlignmentBits; FieldOffsetsBits = Array.ofList layout.FieldOffsetsBits }
             for declaration in parsed.Declarations do

@@ -48,10 +48,10 @@ let ``render LetBinding with nativeptr param`` () =
 [<Fact>]
 let ``render LiteralBinding produces Literal attribute`` () =
     let decl = Module("Test.Module", "test",
-        [ LiteralBinding("EXIT_SUCCESS", "0") ])
+        [ LiteralBinding("EXIT_SUCCESS", Named "int", "0") ])
     let result = render decl
     Assert.Contains("[<Literal>]", result)
-    Assert.Contains("let EXIT_SUCCESS = 0", result)
+    Assert.Contains("let EXIT_SUCCESS : int = 0", result)
 
 [<Fact>]
 let ``render EnumType produces F# enum`` () =
@@ -125,11 +125,11 @@ let ``render LetBinding with attributes produces attribute lines`` () =
 let ``module scope resumes after nested module at consistent indentation`` () =
     let source = render (Module("Test", "test", [
         LetBinding("before", [], Unit, NativeZeroed, [])
-        SubModule("Storage", [LiteralBinding("Size", "40")])
-        LiteralBinding("AFTER", "1") ]))
+        SubModule("Storage", [LiteralBinding("Size", Named "int", "40")])
+        LiteralBinding("AFTER", Named "int", "1") ]))
     Assert.Contains("\nlet before", source)
-    Assert.Contains("\nmodule Storage =\n    [<Literal>]\n    let Size", source)
-    Assert.Contains("\n[<Literal>]\nlet AFTER", source)
+    Assert.Contains("\nmodule Storage =\n    [<Literal>]\n    let Size : int = 40", source)
+    Assert.Contains("\n[<Literal>]\nlet AFTER : int = 1", source)
 
 [<Fact>]
 let ``C keyword symbols are quoted in declarations and calls`` () =
@@ -207,7 +207,7 @@ let ``source boundary rendering preserves quoted dialect data comments and quali
 let ``source boundary rendering refuses LLVM in conversion and literal declaration positions`` () =
     let conversion = Assert.Throws<System.InvalidOperationException>(fun () -> renderExpr "" (TypeConversion("!llvm.ptr", Identifier "p")) |> ignore)
     Assert.Contains("forbids LLVM dialect type", conversion.Message)
-    let literal = Assert.Throws<System.InvalidOperationException>(fun () -> render (LiteralBinding("invalid", "llvm.call @foreign() : () -> ()")) |> ignore)
+    let literal = Assert.Throws<System.InvalidOperationException>(fun () -> render (LiteralBinding("invalid", Named "int", "llvm.call @foreign() : () -> ()")) |> ignore)
     Assert.Contains("forbids LLVM dialect operation or type fragment", literal.Message)
 
 [<Theory>]

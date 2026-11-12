@@ -22,7 +22,7 @@ let private parseMacros (header: string) (prefixes: string list) : CppParser.Mac
 /// The constants generation emits for `macros`, by name, read from the generated source.
 let private emitted (macros: CppParser.MacroDecl list) : Map<string, string> * string =
     let source = FidelityCodeGenerator.generate (macros |> List.map CppParser.Declaration.Macro) "Test.Macros" "test" Types.LP64 Map.empty
-    let literal = System.Text.RegularExpressions.Regex(@"^\s*let (\w+) = (.+)$")
+    let literal = System.Text.RegularExpressions.Regex(@"^\s*let (\w+) : (?:int|int64) = (.+)$")
     let lines = source.Split('\n')
     let constants =
         lines |> Array.indexed |> Array.choose (fun (i, line) ->
@@ -106,7 +106,7 @@ let ``sqlite3.h extended result codes are emitted with clang's values and no SQL
     let constants, source = emitted macros
     // (SQLITE_IOERR | (1<<8)), (SQLITE_CONSTRAINT | (8<<8)) and an alias of another macro.
     Assert.Equal("266", constants.["SQLITE_IOERR_READ"])
-    Assert.Contains("let SQLITE_IOERR_READ = 266\n", source)
+    Assert.Contains("let SQLITE_IOERR_READ : int = 266\n", source)
     Assert.Equal("2067", constants.["SQLITE_CONSTRAINT_UNIQUE"])
     Assert.Equal(constants.["SQLITE_FCNTL_LAST_ERRNO"], constants.["SQLITE_LAST_ERRNO"])
     let unemitted = FidelityCodeGenerator.unemittedMacros (macros |> List.map CppParser.Declaration.Macro)

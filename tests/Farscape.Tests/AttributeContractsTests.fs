@@ -98,10 +98,10 @@ let ``glibc's may_alias socket addresses are measured and emitted at clang's lay
     let output = FidelityCodeGenerator.generate selected "Test" "test" Types.LP64 Map.empty |> trimmed
     let address = recordModule output "sockaddr"
     Assert.Contains("/// C struct `sockaddr`: layout measured (clang record layout dump).", output)
-    Assert.Contains("let Size = 16\n", address)
-    Assert.Contains("let Alignment = 2\n", address)
-    Assert.Contains("let sa_familyOffset = 0\n", address)
-    Assert.Contains("let sa_dataOffset = 2\n", address)
+    Assert.Contains("let Size : int = 16\n", address)
+    Assert.Contains("let Alignment : int = 2\n", address)
+    Assert.Contains("let sa_familyOffset : int = 0\n", address)
+    Assert.Contains("let sa_dataOffset : int = 2\n", address)
     Assert.Contains("{ Name = \"sa_data\"; Offset = 2; Repr = Repr.I8; Count = 14;", address)
     if addressAlias then Assert.Contains($"Documentation = Some \"{mayAliasContract}\"", address)
     else Assert.DoesNotContain(mayAliasContract, address)
@@ -111,11 +111,11 @@ let ``glibc's may_alias socket addresses are measured and emitted at clang's lay
     let storageModule = recordModule output "sockaddr_storage"
     Assert.Contains((if storageAlias then "MayAlias = true\n" else "MayAlias = false\n"), storageModule)
     Assert.Contains("/// C struct `sockaddr_storage`: layout measured (clang record layout dump).", output)
-    Assert.Contains("let Size = 128\n", storageModule)
-    Assert.Contains("let Alignment = 8\n", storageModule)
-    Assert.Contains("let ss_familyOffset = 0\n", storageModule)
-    Assert.Contains("let __ss_paddingOffset = 2\n", storageModule)
-    Assert.Contains("let __ss_alignOffset = 120\n", storageModule)
+    Assert.Contains("let Size : int = 128\n", storageModule)
+    Assert.Contains("let Alignment : int = 8\n", storageModule)
+    Assert.Contains("let ss_familyOffset : int = 0\n", storageModule)
+    Assert.Contains("let __ss_paddingOffset : int = 2\n", storageModule)
+    Assert.Contains("let __ss_alignOffset : int = 120\n", storageModule)
     if storageAlias then Assert.Contains($"Documentation = Some \"{mayAliasContract}\"", storageModule)
     else Assert.DoesNotContain(mayAliasContract, storageModule)
     // Clang's own sizeof, _Alignof and offsetof: the emitted numbers, and the same layout for
@@ -143,17 +143,17 @@ let ``a may_alias record is generated with clang's layout and the aliasing fact 
             let types = allTypesOf output
             let aliased = recordModule types "fx_addr"
             Assert.Contains("/// C struct `fx_addr`: layout measured (clang record layout dump).", types)
-            Assert.Contains("let Size = 16", aliased)
-            Assert.Contains("let Alignment = 2", aliased)
-            Assert.Contains("let dataOffset = 2", aliased)
+            Assert.Contains("let Size : int = 16", aliased)
+            Assert.Contains("let Alignment : int = 2", aliased)
+            Assert.Contains("let dataOffset : int = 2", aliased)
             // The contract comes first; the header's own comment on the record follows it.
             Assert.Contains($"Documentation = Some \"{mayAliasContract} A may_alias record (glibc's struct sockaddr shape", aliased)
             Assert.Contains("MayAlias = true\n", aliased)
             // The unattributed record is laid out from its fields, with no aliasing fact.
             let plain = recordModule types "fx_addr_plain"
             Assert.Contains("/// C struct `fx_addr_plain`: layout declared", types)
-            Assert.Contains("let Size = 16", plain)
-            Assert.Contains("let dataOffset = 2", plain)
+            Assert.Contains("let Size : int = 16", plain)
+            Assert.Contains("let dataOffset : int = 2", plain)
             Assert.DoesNotContain("may_alias", plain)
             Assert.Contains("MayAlias = false\n", plain)
             clangConfirms header [
@@ -175,9 +175,9 @@ let ``a may_alias record whose field type is an aligned typedef is confirmed by 
             let types = allTypesOf output
             let record = recordModule types "fx_skewed"
             Assert.Contains("/// C struct `fx_skewed`: layout measured (clang record layout dump).", types)
-            Assert.Contains("let Size = 16\n", record)
-            Assert.Contains("let Alignment = 8\n", record)
-            Assert.Contains("let valueOffset = 8\n", record)
+            Assert.Contains("let Size : int = 16\n", record)
+            Assert.Contains("let Alignment : int = 8\n", record)
+            Assert.Contains("let valueOffset : int = 8\n", record)
             Assert.Contains($"Documentation = Some \"{mayAliasContract}\" }}", record))
     clangConfirms header [
         "sizeof(struct fx_skewed) == 16"; "_Alignof(struct fx_skewed) == 8"; "offsetof(struct fx_skewed, value) == 8"

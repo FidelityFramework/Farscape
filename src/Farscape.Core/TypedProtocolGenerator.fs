@@ -27,16 +27,20 @@ module TypedProtocolGenerator =
     let private recordDecl name size alignment (fields: (string * string * int * string) list) =
         [ "type " + name + " = { " + (fields |> List.map (fun(n,t,_,_)->n+": "+t) |> String.concat "; ") + " }"
           "module " + name + " ="
-          $"    let Size = {size}"
-          $"    let Alignment = {alignment}"
-          "    let Descriptor: StructDescriptor ="
-          "        { Name = " + q name
-          $"          Layout = {{ Size = {size}; Alignment = {alignment}; Fields = [|"
-          ] @ (fields |> List.map (fun(n,_,o,r)-> $"              {{ Name = {q n}; Offset = {o}; Repr = {r}; Count = 1; Access = AccessKind.ReadWrite; BitFields = [||]; Documentation = Some \"XML field projected through measured native layout\" }}")) @ [
-          "          |] }"
-          "          MayAlias = false"
-          "          FlexibleArray = None"
-          "          Documentation = Some \"Generated from installed Wayland XML and measured header layouts\" }"
+          "    [<Literal>]"
+          $"    let Size : int = {size}"
+          "    [<Literal>]"
+          $"    let Alignment : int = {alignment}"
+          "    let Descriptor : Expr<StructDescriptor> ="
+          "        <@"
+          "            { Name = " + q name
+          $"              Layout = {{ Size = {size}; Alignment = {alignment}; Fields = [|"
+          ] @ (fields |> List.map (fun(n,_,o,r)-> $"                  {{ Name = {q n}; Offset = {o}; Repr = {r}; Count = 1; Access = AccessKind.ReadWrite; BitFields = [||]; Documentation = Some \"XML field projected through measured native layout\" }}")) @ [
+          "              |] }"
+          "              MayAlias = false"
+          "              FlexibleArray = None"
+          "              Documentation = Some \"Generated from installed Wayland XML and measured header layouts\" }"
+          "        @>"
           "" ]
     let private argRef arg = match arg.Type with Int|Fixed|Fd -> integer | Uint|NewId -> unsigned | _ -> pointer
     let private argRepr arg = match arg.Type with Int|Fixed|Fd -> "Repr.I32" | Uint|NewId -> "Repr.U32" | _ -> "Repr.Pointer"

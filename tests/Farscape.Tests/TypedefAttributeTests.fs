@@ -64,18 +64,18 @@ let ``a record whose field type reaches an aligned typedef is measured and emitt
             for name in ["fx_wide"; "fx_chained"] do
                 let record = recordModule types name
                 Assert.Contains($"/// C struct `{name}`: layout measured (clang record layout dump).", types)
-                Assert.Contains("let Size = 16\n", record)
-                Assert.Contains("let Alignment = 8\n", record)
-                Assert.Contains("let valueOffset = 8\n", record)
+                Assert.Contains("let Size : int = 16\n", record)
+                Assert.Contains("let Alignment : int = 8\n", record)
+                Assert.Contains("let valueOffset : int = 8\n", record)
             let pointed = recordModule types "fx_pointed"
             Assert.Contains("/// C struct `fx_pointed`: layout declared", types)
-            Assert.Contains("let Size = 16\n", pointed)
-            Assert.Contains("let valueOffset = 8\n", pointed)
+            Assert.Contains("let Size : int = 16\n", pointed)
+            Assert.Contains("let valueOffset : int = 8\n", pointed)
             let ignored = recordModule types "fx_ignored"
             Assert.Contains("/// C struct `fx_ignored`: layout declared", types)
-            Assert.Contains("let Size = 8\n", ignored)
-            Assert.Contains("let Alignment = 4\n", ignored)
-            Assert.Contains("let valueOffset = 4\n", ignored))
+            Assert.Contains("let Size : int = 8\n", ignored)
+            Assert.Contains("let Alignment : int = 4\n", ignored)
+            Assert.Contains("let valueOffset : int = 4\n", ignored))
     clangConfirms header [
         "sizeof(struct fx_wide) == 16"; "_Alignof(struct fx_wide) == 8"; "offsetof(struct fx_wide, value) == 8"
         "sizeof(struct fx_chained) == 16"; "_Alignof(struct fx_chained) == 8"; "offsetof(struct fx_chained, value) == 8"
@@ -124,8 +124,8 @@ let ``a field whose typedef carries may_alias is laid out by clang and records t
             let types = allTypesOf output
             let aliased = recordModule types "fx_aliased"
             Assert.Contains("/// C struct `fx_aliased`: layout measured (clang record layout dump).", types)
-            Assert.Contains("let Size = 8\n", aliased)
-            Assert.Contains("let valueOffset = 4\n", aliased)
+            Assert.Contains("let Size : int = 8\n", aliased)
+            Assert.Contains("let valueOffset : int = 4\n", aliased)
             Assert.Contains(
                 $"Documentation = Some \"offset measured; repr declared: int under LP64; type reaches typedef 'fx_alias_int' carrying MayAliasAttr (laid out by clang's measurement of this record): {AttributeContracts.MayAliasFact}\" }}",
                 aliased)

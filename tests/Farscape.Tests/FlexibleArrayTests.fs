@@ -45,12 +45,12 @@ let private records (names: string list) (declarations: CppParser.Declaration li
 let ``glibc's cmsghdr is emitted at clang's layout with a trailing flexible array counted by cmsg_len`` () =
     let output = generateWith (records ["cmsghdr"] (glibcSocket ())) [cmsgCount]
     let header = recordModule output "cmsghdr"
-    Assert.Contains("let Size = 16\n", header)
-    Assert.Contains("let Alignment = 8\n", header)
-    Assert.Contains("let cmsg_lenOffset = 0\n", header)
-    Assert.Contains("let cmsg_levelOffset = 8\n", header)
-    Assert.Contains("let cmsg_typeOffset = 12\n", header)
-    Assert.Contains("let __cmsg_dataOffset = 16\n", header)
+    Assert.Contains("let Size : int = 16\n", header)
+    Assert.Contains("let Alignment : int = 8\n", header)
+    Assert.Contains("let cmsg_lenOffset : int = 0\n", header)
+    Assert.Contains("let cmsg_levelOffset : int = 8\n", header)
+    Assert.Contains("let cmsg_typeOffset : int = 12\n", header)
+    Assert.Contains("let __cmsg_dataOffset : int = 16\n", header)
     // Three fixed fields; the flexible array member is none of them.
     Assert.Contains("{ Name = \"cmsg_len\"; Offset = 0; Repr = Repr.U64; Count = 1;", header)
     Assert.Contains("{ Name = \"cmsg_type\"; Offset = 12; Repr = Repr.I32; Count = 1;", header)
@@ -92,21 +92,21 @@ let ``a pilot's declared count sources emit each flexible array at clang's offse
         | Ok _ ->
             let types = allTypesOf output
             let cmsg = recordModule types "fx_cmsghdr"
-            Assert.Contains("let Size = 16\n", cmsg)
-            Assert.Contains("let Alignment = 8\n", cmsg)
-            Assert.Contains("let cmsg_dataOffset = 16\n", cmsg)
+            Assert.Contains("let Size : int = 16\n", cmsg)
+            Assert.Contains("let Alignment : int = 8\n", cmsg)
+            Assert.Contains("let cmsg_dataOffset : int = 16\n", cmsg)
             Assert.Contains("FlexibleArray = Some ({ Name = \"cmsg_data\"; Offset = 16; Repr = Repr.U8; Access = AccessKind.ReadWrite; CountField = \"cmsg_len\"; CountRule = CountRule.RecordBytes;", cmsg)
             // Placed before the rounded size: 8 bytes, data at 5.
             let short = recordModule types "fx_short"
-            Assert.Contains("let Size = 8\n", short)
-            Assert.Contains("let Alignment = 4\n", short)
-            Assert.Contains("let dataOffset = 5\n", short)
+            Assert.Contains("let Size : int = 8\n", short)
+            Assert.Contains("let Alignment : int = 4\n", short)
+            Assert.Contains("let dataOffset : int = 5\n", short)
             Assert.Contains("FlexibleArray = Some ({ Name = \"data\"; Offset = 5; Repr = Repr.I8; Access = AccessKind.ReadWrite; CountField = \"count\"; CountRule = CountRule.ElementCount;", short)
             // The element alignment joins the record's: 4 bytes at 4, data at 4.
             let wide = recordModule types "fx_wide"
-            Assert.Contains("let Size = 4\n", wide)
-            Assert.Contains("let Alignment = 4\n", wide)
-            Assert.Contains("let dataOffset = 4\n", wide)
+            Assert.Contains("let Size : int = 4\n", wide)
+            Assert.Contains("let Alignment : int = 4\n", wide)
+            Assert.Contains("let dataOffset : int = 4\n", wide)
             Assert.Contains("FlexibleArray = Some ({ Name = \"data\"; Offset = 4; Repr = Repr.U32; Access = AccessKind.ReadWrite; CountField = \"count\"; CountRule = CountRule.ElementCount;", wide))
     clangConfirms cmsgHeader [
         "sizeof(struct fx_cmsghdr) == 16"; "_Alignof(struct fx_cmsghdr) == 8"; "offsetof(struct fx_cmsghdr, cmsg_data) == 16"

@@ -47,7 +47,7 @@ module ErrnoModuleGenerator =
                 match c.Description with
                 | Some d -> [ XmlDoc d ]
                 | None -> []
-            doc @ [ LiteralBinding(c.Name, string c.Value) ])
+            doc @ [ LiteralBinding(c.Name, Named "int", string c.Value) ])
 
     /// Generate the describe function body as a MatchExpr.
     /// match code with | 1 -> "Operation not permitted" | 2 -> "No such file..." | _ -> "Unknown error"

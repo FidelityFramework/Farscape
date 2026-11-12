@@ -525,31 +525,60 @@ module Substantiation =
                             | None -> ()
                             if foreign || (not parentPrivate && not (modifiers.Contains "private")) then
                                 let qualified = parent + "." + declaration.Groups[3].Value
+                                let exportedName = parent + "." + bindingName
                                 let tail = content.Substring(declaration.Length)
                                 let quoteType = Regex.Match(tail, @"^\s*:\s*Expr\s*<\s*([A-Za-z_][A-Za-z0-9_.]*)\s*>\s*=\s*(.*)$")
                                 let loadingType = Regex.Match(tail, @"^\s*:\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)*ProcessLinkContract\s*=\s*(.*)$")
+                                let hasLiteral = attached |> Array.exists (fun item -> item.Head = "Literal")
                                 if foreign then
+                                    if modifiers.Contains "mutable" then
+                                        invalidOp $"Foreign declaration {qualified} carries unsupported modifiers."
                                     let signatureAndBody = Array.append [| tail |] lines[index + 1 .. blockEnd - 1] |> String.concat " "
                                     let equals = signatureAndBody.IndexOf('=')
                                     if equals < 0 then invalidOp $"Foreign declaration {qualified} has no generated placeholder."
                                     let body = signatureAndBody.Substring(equals + 1)
                                     if not (Regex.IsMatch(body, @"^\s*NativeDefault\.zeroed\s*\(\s*\)\s*$")) then
                                         invalidOp $"Foreign declaration {qualified} has an authored or unrecognized body; it cannot be omitted from source checking."
-                                    foreignDeclarations.Add(parent + "." + bindingName)
+                                    foreignDeclarations.Add exportedName
                                     match (attached |> Array.find SubstantiationBoundary.hasFidelityExtern).Literals with
                                     | [| { IsString = true; Value = Some library }; { IsString = true; Value = Some symbol } |] ->
-                                        foreignSymbols.Add(parent + "." + bindingName, (library, symbol))
+                                        foreignSymbols.Add(exportedName, (library, symbol))
                                     | _ -> invalidOp $"Foreign declaration {qualified} has no library and symbol literal pair."
+                                elif modifiers.Contains "mutable" then
+                                    unavailable qualified
+                                elif hasLiteral then
+                                    if attached.Length <> 1 || not (SubstantiationBoundary.isLiteralAttribute attached[0]) then
+                                        invalidOp $"Literal declaration {qualified} has unsupported attributes or arguments."
+                                    if declaration.Groups[1].Value <> "let" || modifiers.Contains "rec" || modifiers.Contains "inline" then
+                                        unavailable qualified
+                                    let literalDecl = Regex.Match(tail, @"^\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
+                                    let literalBody =
+                                        if not literalDecl.Success then ""
+                                        else (Array.append [| literalDecl.Groups[2].Value |] lines[index + 1 .. blockEnd - 1] |> String.concat " ").Trim()
+                                    let isConstantLiteral (typeName: string) (body: string) =
+                                        match typeName with
+                                        | "char" | "string" -> body = "?"
+                                        | "bool" -> body = "true" || body = "false"
+                                        | "int" | "int32" | "int64" | "uint" | "uint32" | "uint64" | "float" | "float32" | "decimal" ->
+                                            Regex.IsMatch(body, @"^[+-]?(?:0[xX][0-9A-Fa-f_]+|0[bB][01_]+|0[oO][0-7_]+|[0-9][0-9_]*(?:\.[0-9_]+)?(?:[eE][+-]?[0-9_]+)?)(?:UL|uL|ul|Lu|lU|u|U|L|f|F|M|m)?$")
+                                        | _ -> false
+                                    if not literalDecl.Success || not (isConstantLiteral literalDecl.Groups[1].Value literalBody) then
+                                        unavailable qualified
+                                    descriptors.Add exportedName
                                 elif loadingType.Success && selectedMetadata.Contains qualified then
+                                    if attached.Length <> 0 || declaration.Groups[1].Value <> "let" || modifiers.Contains "rec" || modifiers.Contains "inline" then
+                                        unavailable qualified
                                     if not ((initialBody loadingType.Groups[1].Value).StartsWith("{", StringComparison.Ordinal)) then
                                         invalidOp $"Selected loading declaration {qualified} must have a literal contract body."
-                                    descriptors.Add qualified
+                                    descriptors.Add exportedName
                                 elif quoteType.Success then
+                                    if attached.Length <> 0 || declaration.Groups[1].Value <> "let" || modifiers.Contains "rec" || modifiers.Contains "inline" then
+                                        unavailable qualified
                                     let typeName = quoteType.Groups[1].Value.Split('.') |> Array.last
                                     if not (descriptorTypes.Contains typeName) || not ((initialBody quoteType.Groups[2].Value).StartsWith("<@", StringComparison.Ordinal)) then
                                         invalidOp $"Compile-time declaration {qualified} has no admitted descriptor-reading owner."
-                                    descriptors.Add qualified
-                                    if typeName = "FunctionDescriptor" then functionDescriptors.Add(parent + "." + bindingName)
+                                    descriptors.Add exportedName
+                                    if typeName = "FunctionDescriptor" then functionDescriptors.Add exportedName
                                 elif Regex.IsMatch(tail, @"^\s*=\s*<@") then
                                     invalidOp $"Quotation {qualified} needs an explicit supported descriptor type."
                                 else
@@ -557,7 +586,7 @@ module Substantiation =
                                     match activation.Success, scalarPatterns.TryFind activation.Groups[2].Value with
                                     | true, Some pattern ->
                                         let operand = if activation.Groups[1].Success then qualified + " ()" else qualified
-                                        exports.Add qualified
+                                        exports.Add exportedName
                                         references.Add($"(match {operand} with | {pattern} -> () | _ -> ())")
                                     | _ -> unavailable qualified
                         else invalidOp $"Unrecognized module statement at line {index + 1}; every source declaration must be classified."

@@ -214,13 +214,13 @@ module LayoutModuleRendering =
     [<Fact>]
     let ``render SubModule of literal offsets aligns literals with the descriptor`` () =
         let decl = SubModule("drm_mode_create_dumb", [
-            LiteralBinding("Size", "32")
-            LiteralBinding("heightOffset", "0")
-            ValueBinding("Descriptor", Named "StructDescriptor", RecordBlock [ "Name", Literal "\"drm_mode_create_dumb\"" ]) ])
+            LiteralBinding("Size", Named "int", "32")
+            LiteralBinding("heightOffset", Named "int", "0")
+            ValueBinding("Descriptor", Generic("Expr", Named "StructDescriptor"), Quoted(RecordBlock [ "Name", Literal "\"drm_mode_create_dumb\"" ])) ])
         let output = CodeRenderer.render (Module("Test", "test", [decl]))
-        Assert.Contains("module drm_mode_create_dumb =\n    [<Literal>]\n    let Size = 32\n", output)
-        Assert.Contains("    let heightOffset = 0\n", output)
-        Assert.Contains("    let Descriptor : StructDescriptor =", output)
+        Assert.Contains("module drm_mode_create_dumb =\n    [<Literal>]\n    let Size : int = 32\n", output)
+        Assert.Contains("    let heightOffset : int = 0\n", output)
+        Assert.Contains("    let Descriptor : Expr<StructDescriptor> =", output)
 
 // =========================================================================
 // FidelityCodeGenerator Tests (ABI-critical dispatch)
@@ -300,8 +300,8 @@ module GeneratorDispatch =
             else
                 if scenario <> 2 then Assert.Equal(measured.[name], layouts.[name])
                 let output = generate ()
-                Assert.Contains($"let Size = {size / 8}\n", output)
-                Assert.Contains($"let {field}Offset = {List.last offsets / 8}\n", output)
+                Assert.Contains($"let Size : int = {size / 8}\n", output)
+                Assert.Contains($"let {field}Offset : int = {List.last offsets / 8}\n", output)
                 Assert.Contains((if scenario = 1 then "Count = 2" else "Count = 1"), output))
 
     [<Fact>]
@@ -309,15 +309,15 @@ module GeneratorDispatch =
         withLayoutHeader "struct __attribute__((packed)) Packed { char a; int b; };" ["Packed"] (fun declarations measured ->
             Assert.Equal(mkLayout "Packed" 40 8 [0; 8], measured.["Packed"])
             let output = FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 measured
-            Assert.Contains("let Size = 5\n", output)
-            Assert.Contains("let bOffset = 1\n", output)
+            Assert.Contains("let Size : int = 5\n", output)
+            Assert.Contains("let bOffset : int = 1\n", output)
             Assert.Contains("Repr = Repr.I32; Count = 1", output))
 
     [<Fact>]
     let ``declared field extents retain natural layout and tail padding`` () =
         withLayoutHeader "struct Natural { char a; int b; char c; };" ["Natural"] (fun declarations _ ->
             let output = FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty
-            for literal in ["let Size = 12\n"; "let aOffset = 0\n"; "let bOffset = 4\n"; "let cOffset = 8\n"] do
+            for literal in ["let Size : int = 12\n"; "let aOffset : int = 0\n"; "let bOffset : int = 4\n"; "let cOffset : int = 8\n"] do
                 Assert.Contains(literal, output))
 
     [<Theory>]
@@ -355,7 +355,7 @@ module GeneratorDispatch =
                 for run in [emit; generate] do
                     let output = run ()
                     Assert.Contains((if scenario = 1 then "Repr = Repr.U8; Count = 8" else "Repr = Repr.U8; Count = 4"), output)
-                    Assert.Contains((if scenario = 1 then "let tailOffset = 8\n" else "let tailOffset = 4\n"), output))
+                    Assert.Contains((if scenario = 1 then "let tailOffset : int = 8\n" else "let tailOffset : int = 4\n"), output))
 
     [<Theory>]
     [<InlineData(0)>]
@@ -412,9 +412,9 @@ module GeneratorDispatch =
             let layout = mkLayout "Holder" sizeBits alignmentBits [0; secondOffset]
             Assert.Equal(layout, measured.["Holder"])
             let output = FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 (Map.ofList ["Holder", layout])
-            Assert.Contains($"let Size = {sizeBits / 8}\n", output)
-            Assert.Contains($"let Alignment = {alignmentBits / 8}\n", output)
-            Assert.Contains($"let secondOffset = {secondOffset / 8}\n", output)
+            Assert.Contains($"let Size : int = {sizeBits / 8}\n", output)
+            Assert.Contains($"let Alignment : int = {alignmentBits / 8}\n", output)
+            Assert.Contains($"let secondOffset : int = {secondOffset / 8}\n", output)
             Assert.Contains("layout measured (clang record layout dump)", output))
 
     [<Theory>]
@@ -428,7 +428,7 @@ module GeneratorDispatch =
             let generate () = FidelityCodeGenerator.generate [CppParser.Declaration.Struct record] "Test" "test" Types.LP64 layouts
             if sizeBits = 32 then
                 let output = generate ()
-                Assert.Contains("let Size = 4", output)
+                Assert.Contains("let Size : int = 4", output)
                 Assert.Contains("Repr = Repr.U8; Count = 4", output)
                 Assert.DoesNotContain("let firstOffset", output)
                 Assert.DoesNotContain("let secondOffset", output)
@@ -460,7 +460,7 @@ module GeneratorDispatch =
             else
                 let output = DescriptorGenerator.structDecls source outer |> fun decls -> CodeRenderer.render (Module("Test", "test", decls))
                 Assert.Contains("Repr = Repr.U8; Count = 4", output)
-                Assert.Contains("let tailOffset = 4", output))
+                Assert.Contains("let tailOffset : int = 4", output))
 
     [<Theory>]
     [<InlineData(0)>]
@@ -528,9 +528,9 @@ module GeneratorDispatch =
                 Assert.Equal(TypeMapper.Measured, stratum)
                 DescriptorGenerator.structDecls source record |> ignore
                 let output = FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts
-                Assert.Contains($"let Size = {size}\n", output)
-                Assert.Contains($"let Alignment = {alignment}\n", output)
-                List.zip record.Fields offsets |> List.iter (fun (field, offset) -> Assert.Contains($"let {field.Name}Offset = {offset}\n", output))
+                Assert.Contains($"let Size : int = {size}\n", output)
+                Assert.Contains($"let Alignment : int = {alignment}\n", output)
+                List.zip record.Fields offsets |> List.iter (fun (field, offset) -> Assert.Contains($"let {field.Name}Offset : int = {offset}\n", output))
             else
                 let subject = if fieldAttribute then $"Struct '{name}' field 'payload'" else $"Struct '{name}'"
                 let expected =
@@ -559,7 +559,7 @@ module GeneratorDispatch =
             Assert.Equal((if measured then TypeMapper.Measured else TypeMapper.Declared), stratum)
             DescriptorGenerator.structDecls source ordinary |> ignore
             let output = FidelityCodeGenerator.generate [CppParser.Declaration.Struct ordinary] "Test" "test" Types.LP64 measurements
-            Assert.Contains("let payloadOffset = 4", output)
+            Assert.Contains("let payloadOffset : int = 4", output)
             let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore)
             Assert.Equal("Struct 'P' carries layout attribute 'PackedAttr' that natural alignment cannot represent; a measured layout is required.", error.Message))
 
@@ -650,8 +650,8 @@ module GeneratorDispatch =
         let output = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 layouts
         Assert.Contains("layout measured (clang record layout dump)", output)
         Assert.Contains("module Point =", output)
-        Assert.Contains("let xOffset = 0", output)
-        Assert.Contains("let yOffset = 4", output)
+        Assert.Contains("let xOffset : int = 0", output)
+        Assert.Contains("let yOffset : int = 4", output)
         Assert.Contains("offset measured; repr declared: int under LP64", output)
         Assert.DoesNotContain("type Point", output)
 
@@ -669,7 +669,7 @@ module GeneratorDispatch =
         let union = {mkStruct "Value" [mkField "a" "int"; mkField "b" "int"] None with IsUnion = true}
         let layouts = Map.ofList ["Value", mkLayout "Value" 32 32 [0; 0]]
         let output = FidelityCodeGenerator.generate [CppParser.Declaration.Struct union] "Test" "test" Types.LP64 layouts
-        Assert.Contains("let StorageOffset = 0", output)
+        Assert.Contains("let StorageOffset : int = 0", output)
         Assert.DoesNotContain("let aOffset", output)
         let malformed = Map.ofList ["Value", mkLayout "Value" 32 32 [0]]
         let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate [CppParser.Declaration.Struct union] "Test" "test" Types.LP64 malformed |> ignore)
@@ -682,9 +682,9 @@ module GeneratorDispatch =
         ]
         let output = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 Map.empty
         Assert.Contains("layout declared (natural alignment under LP64", output)
-        Assert.Contains("let Size = 8", output)
-        Assert.Contains("let Alignment = 4", output)
-        Assert.Contains("let yOffset = 4", output)
+        Assert.Contains("let Size : int = 8", output)
+        Assert.Contains("let Alignment : int = 4", output)
+        Assert.Contains("let yOffset : int = 4", output)
         Assert.DoesNotContain("type Point", output)
 
     [<Fact>]
@@ -718,7 +718,7 @@ module GeneratorDispatch =
         let union = {mkStruct "Bits" [mkBitField "flag" "unsigned int" 1; mkBitField "mode" "unsigned int" 3; mkField "word" "unsigned int"] None with IsUnion = true}
         let layouts = Map.ofList ["Bits", mkLayout "Bits" 32 32 [0; 0; 0]]
         let output = FidelityCodeGenerator.generate [CppParser.Declaration.Struct union] "Test" "test" Types.LP64 layouts
-        Assert.Contains("let StorageOffset = 0", output)
+        Assert.Contains("let StorageOffset : int = 0", output)
         Assert.Contains("Repr = Repr.U8; Count = 4", output)
         Assert.DoesNotContain("let flagOffset", output)
         Assert.DoesNotContain("let modeOffset", output)
@@ -733,7 +733,7 @@ module GeneratorDispatch =
         let decls = [CppParser.Declaration.Struct (mkStruct "Buffer" [array; mkField "tag" "unsigned int"] None)]
         let layouts = if measured then Map.ofList ["Buffer", mkLayout "Buffer" 64 32 [0; 32]] else Map.empty
         let output = FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 layouts
-        Assert.Contains("let tagOffset = 4", output)
+        Assert.Contains("let tagOffset : int = 4", output)
         Assert.Contains("Repr = Repr.U8; Count = 4", output)
 
     [<Fact>]
@@ -786,7 +786,7 @@ module GeneratorDispatch =
         let layouts = if measured then Map.ofList ["Mystery", mkLayout "Mystery" 64 8 [0]; "Holder", mkLayout "Holder" 96 32 [0; 64]] else Map.empty
         let output = FidelityCodeGenerator.generate [CppParser.Declaration.Struct nested; CppParser.Declaration.Struct holder] "Test" "test" Types.LP64 layouts
         Assert.Contains("Repr = Repr.U8; Count = 8", output)
-        Assert.Contains("let tailOffset = 8", output)
+        Assert.Contains("let tailOffset : int = 8", output)
         Assert.DoesNotContain("Count = 0", output)
 
     [<Theory>]
@@ -797,7 +797,7 @@ module GeneratorDispatch =
         let layouts = if measured then Map.ofList ["Holder", mkLayout "Holder" 128 64 [0; 64]] else Map.empty
         let output = FidelityCodeGenerator.generate [CppParser.Declaration.Struct holder] "Test" "test" Types.LP64 layouts
         Assert.Contains("Repr = Repr.Pointer; Count = 1", output)
-        Assert.Contains("let tailOffset = 8", output)
+        Assert.Contains("let tailOffset : int = 8", output)
 
     [<Theory>]
     [<InlineData(false)>]
@@ -808,7 +808,7 @@ module GeneratorDispatch =
         if measured then
             let layouts = Map.ofList ["Variant", mkLayout "Variant" 64 32 [0; 0]]
             let output = FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts
-            Assert.Contains("let StorageOffset = 0", output)
+            Assert.Contains("let StorageOffset : int = 0", output)
             Assert.Contains("Repr = Repr.U8; Count = 8", output)
             Assert.DoesNotContain("let payloadOffset", output)
         else
@@ -912,7 +912,7 @@ module GeneratorDispatch =
         let layouts = if measured then Map.ofList ["Mystery", mkLayout "Mystery" 64 8 [0]; "Holder", mkLayout "Holder" 224 32 [0; 192]] else Map.empty
         let output = FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts
         Assert.Contains("Repr = Repr.U8; Count = 24", output)
-        Assert.Contains("let tailOffset = 24", output)
+        Assert.Contains("let tailOffset : int = 24", output)
         Assert.DoesNotContain("Count = 0", output)
 
     [<Fact>]
@@ -929,7 +929,7 @@ module GeneratorDispatch =
             let layouts = match CppParser.extractStructLayouts header [] [] ["struct S"; "struct H"] false with Ok value -> value | Error reason -> failwith reason
             let output = FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts
             Assert.Contains("Repr = Repr.U8; Count = 4", output)
-            Assert.Contains("let tailOffset = 4", output)
+            Assert.Contains("let tailOffset : int = 4", output)
             Assert.DoesNotContain("Count = 0", output)
         finally
             System.IO.Directory.Delete(directory, true)
@@ -955,8 +955,8 @@ module GeneratorDispatch =
             | Some 3 ->
                 let output = generate ()
                 Assert.Contains("Repr = Repr.U8; Count = 3", output)
-                Assert.Contains("let Size = 8", output)
-                Assert.Contains("let dataOffset = 4", output)
+                Assert.Contains("let Size : int = 8", output)
+                Assert.Contains("let dataOffset : int = 4", output)
             | _ ->
                 let error = Assert.Throws<System.InvalidOperationException>(fun () -> generate () |> ignore)
                 let expected =
@@ -1029,7 +1029,7 @@ module GeneratorDispatch =
             Assert.Single(holder) |> ignore
             let output = FidelityCodeGenerator.generate holder "Test" "test" Types.LP64 (if measured then layouts else Map.empty)
             Assert.Contains("Repr = Repr.Pointer; Count = 1", output)
-            Assert.Contains("let tailOffset = 8", output))
+            Assert.Contains("let tailOffset : int = 8", output))
 
     [<Theory>]
     [<InlineData("int payload[2][3]", "int[2][3]", false)>]
@@ -1121,7 +1121,7 @@ module GeneratorDispatch =
             let output = FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 (if measured then layouts else Map.empty)
             let access = if readOnly then "AccessKind.ReadOnly" else "AccessKind.ReadWrite"
             Assert.Contains($"Repr = {repr}; Count = {count}; Access = {access}", output)
-            Assert.Contains($"let Size = {size}", output))
+            Assert.Contains($"let Size : int = {size}", output))
 
     [<Theory>]
     [<InlineData(false)>]
@@ -1171,7 +1171,7 @@ module GeneratorDispatch =
         Assert.Equal(4, alignment)
         Assert.Equal(TypeMapper.Declared, stratum)
         let output = CodeRenderer.render (Module("Test", "", DescriptorGenerator.structDecls source root))
-        Assert.Contains($"let Size = {expected}", output)
+        Assert.Contains($"let Size : int = {expected}", output)
         let declarations = source.Structs |> Map.toList |> List.map (snd >> CppParser.Declaration.Struct)
         FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore
 
@@ -1197,7 +1197,7 @@ module GeneratorDispatch =
         Assert.Equal(TypeMapper.Measured, stratum)
         let declarations = source.Structs |> Map.toList |> List.map (snd >> CppParser.Declaration.Struct)
         let output = FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts
-        Assert.Contains("let Size = 84", output)
+        Assert.Contains("let Size : int = 84", output)
 
     [<Theory>]
     [<InlineData(16, false)>]
@@ -1328,7 +1328,7 @@ module GeneratorDispatch =
             let direct = CodeRenderer.render (Module("Test", "", DescriptorGenerator.structDecls source root))
             let generated = FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty
             for output in [direct; generated] do
-                Assert.Contains($"let Size = {expected}", output)
+                Assert.Contains($"let Size : int = {expected}", output)
                 if fields.StartsWith("struct Inner") then Assert.Contains("Repr = Repr.U8; Count = 2147483644", output)
                 elif fields = "char bytes[2147483647];" then Assert.Contains("Count = 2147483647", output)
                 elif fields = "int values[536870911];" then Assert.Contains("Count = 536870911", output))
@@ -1618,7 +1618,7 @@ module DescriptorGen =
         let output = FidelityCodeGenerator.generate decls "Fidelity.Test.Types" "test" Types.LP64 layouts
         Assert.Contains("module Fidelity.Test.Types", output)
         Assert.Contains("open BAREWire.Hardware", output)
-        Assert.Contains("let Descriptor : StructDescriptor", output)
+        Assert.Contains("let Descriptor : Expr<StructDescriptor>", output)
         Assert.Contains("Name = \"Point\"", output)
         Assert.Contains("Size = 8", output)
         Assert.Contains("Alignment = 4", output)

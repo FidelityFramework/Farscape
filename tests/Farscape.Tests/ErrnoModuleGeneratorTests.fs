@@ -56,10 +56,10 @@ let ``generateErrnoDecls wraps constants and describe in Errno SubModule`` () =
     match decls.[0] with
     | SubModule (name, innerDecls) ->
         Assert.Equal("Errno", name)
-        let literals = innerDecls |> List.choose (function LiteralBinding (n, v) -> Some (n, v) | _ -> None)
+        let literals = innerDecls |> List.choose (function LiteralBinding (n, t, v) -> Some (n, t, v) | _ -> None)
         Assert.Equal(2, literals.Length)
-        Assert.Equal(("EPERM", "1"), literals.[0])
-        Assert.Equal(("ENOENT", "2"), literals.[1])
+        Assert.Equal(("EPERM", Named "int", "1"), literals.[0])
+        Assert.Equal(("ENOENT", Named "int", "2"), literals.[1])
         let letBindings = innerDecls |> List.choose (function LetBinding (n, _, _, _, _) -> Some n | _ -> None)
         Assert.Contains("describe", letBindings)
     | _ -> Assert.Fail "Expected SubModule"
@@ -87,8 +87,8 @@ let ``generate renders complete errno module with extern and SubModule`` () =
     // Errno submodule with constants and describe
     Assert.Contains("module Errno =", output)
     Assert.Contains("[<Literal>]", output)
-    Assert.Contains("let EPERM = 1", output)
-    Assert.Contains("let ENOENT = 2", output)
+    Assert.Contains("let EPERM : int = 1", output)
+    Assert.Contains("let ENOENT : int = 2", output)
     Assert.Contains("/// Operation not permitted", output)
     Assert.Contains("let describe (code: int) : string =", output)
     Assert.Contains("| EPERM -> \"Operation not permitted\"", output)
@@ -126,9 +126,9 @@ let ``generate with live errno.h produces complete module`` () =
         Assert.Contains("module Errno =", rendered)
         Assert.Contains("let describe (code: int) : string =", rendered)
         // Verify specific constants with descriptions
-        Assert.Contains("let EPERM = 1", rendered)
+        Assert.Contains("let EPERM : int = 1", rendered)
         Assert.Contains("| EPERM -> \"Operation not permitted\"", rendered)
-        Assert.Contains("let ENOENT = 2", rendered)
+        Assert.Contains("let ENOENT : int = 2", rendered)
         Assert.Contains("| ENOENT -> \"No such file or directory\"", rendered)
 
 [<Theory>]

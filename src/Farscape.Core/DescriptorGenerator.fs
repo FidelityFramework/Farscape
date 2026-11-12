@@ -480,12 +480,12 @@ module DescriptorGenerator =
             fieldPairs
             |> List.collect (fun (f, offset) ->
                 [ XmlDoc $"Offset of `{f.Name}` in bytes ({strat})."
-                  LiteralBinding($"{f.Name}Offset", string offset) ]
+                  LiteralBinding($"{f.Name}Offset", Named "int", string offset) ]
                 @ (match memberRecordOf s.Name f with
                    | Some record ->
                        reachable record offset |> List.collect (fun (name, at) ->
                            [ XmlDoc $"Offset of `{name}` in bytes ({strat}), a member of `{s.Name}` reached through its anonymous member `{f.Name}`."
-                             LiteralBinding($"{name}Offset", string at) ])
+                             LiteralBinding($"{name}Offset", Named "int", string at) ])
                    | None -> []))
         // Each confirmed layout-neutral attribute's fact (`may_alias`), first in the descriptor's
         // Documentation, which is the record's contract with Layer 2 (#174).
@@ -521,10 +521,10 @@ module DescriptorGenerator =
         [ Comment headline ] @ docLine @
         [ SubModule(s.Name,
             [ XmlDoc $"Size in bytes ({strat})."
-              LiteralBinding("Size", string size)
+              LiteralBinding("Size", Named "int", string size)
               XmlDoc $"Alignment in bytes ({strat})."
-              LiteralBinding("Alignment", string align) ]
+              LiteralBinding("Alignment", Named "int", string align) ]
             @ offsetLiterals
             @ [ XmlDoc "BAREWire layout contract; each field's Documentation names the strata of its offset and representation."
-                ValueBinding("Descriptor", Named "StructDescriptor", descriptor) ])
+                ValueBinding("Descriptor", Generic("Expr", Named "StructDescriptor"), Quoted descriptor) ])
           BlankLine ]
