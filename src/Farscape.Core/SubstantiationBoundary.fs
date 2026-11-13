@@ -551,7 +551,7 @@ module SubstantiationBoundary =
     let private parseForeignType path (annotation: string) =
         if annotation.Contains("*") || annotation.Contains("{|") || annotation.Contains("|}") || Regex.IsMatch(annotation, @"\bstruct\b") then
             layoutFailure path "Tuple, anonymous-record and inline struct types are not admitted in FidelityExtern signatures."
-        let tokens = Regex.Matches(annotation, @"\s*(->|[<>,()]|'[A-Za-z_][A-Za-z0-9_']*|" + sourceIdentifier + @"(?:\s*\.\s*" + sourceIdentifier + @")*|\S)") |> Seq.cast<Match> |> Seq.map (fun item -> item.Groups[1].Value) |> Seq.toArray
+        let tokens = Regex.Matches(annotation, @"\s*(\[\]|->|[<>,()]|'[A-Za-z_][A-Za-z0-9_']*|" + sourceIdentifier + @"(?:\s*\.\s*" + sourceIdentifier + @")*|\S)") |> Seq.cast<Match> |> Seq.map (fun item -> item.Groups[1].Value) |> Seq.toArray
         let mutable index = 0
         let malformed () = layoutFailure path $"Unsupported or incomplete FidelityExtern type '{annotation.Trim()}'."
         let rec arrow () =
@@ -561,6 +561,12 @@ module SubstantiationBoundary =
                 FunctionType(left, arrow ())
             else left
         and atom () =
+            let mutable current = primary ()
+            while index < tokens.Length && (tokens[index] = "array" || tokens[index] = "[]") do
+                index <- index + 1
+                current <- NamedType("array", [current])
+            current
+        and primary () =
             if index >= tokens.Length then malformed ()
             let token = tokens[index]
             index <- index + 1
@@ -591,7 +597,7 @@ module SubstantiationBoundary =
         let declarations = classifyTypes sources
         let required = Collections.Generic.HashSet<string>()
         let scalars = Set.ofList [ "unit"; "bool"; "byte"; "uint8"; "sbyte"; "int8"; "int16"; "uint16"; "int"; "int32"; "uint"; "uint32"; "int64"; "uint64"; "nativeint"; "unativeint"; "usize"; "isize"; "float"; "float32"; "double"; "single"; "decimal"; "char"; "string"; "voidptr" ]
-        let carriers = Set.ofList [ "CHandle"; "FnPtr"; "Nullable"; "CNullable"; "NonNull"; "option"; "voption"; "byref"; "inref"; "outref"; "nativeptr"; "BorrowedView"; "MappedRegion" ]
+        let carriers = Set.ofList [ "CHandle"; "FnPtr"; "array"; "ReadOnlyView"; "Nullable"; "CNullable"; "NonNull"; "option"; "voption"; "byref"; "inref"; "outref"; "nativeptr"; "BorrowedView"; "MappedRegion" ]
         let phantomCarriers = Set.ofList [ "CHandle"; "BorrowedView"; "MappedRegion" ]
         let measuredRecord name = layouts |> Array.exists (fun layout -> layout.Kind = "record" && layout.Name = name)
         let measuredEnum name = enums |> Array.exists (fun item -> item.Name = name)

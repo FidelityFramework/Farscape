@@ -27,38 +27,10 @@ module SubstantiationDossier =
           SeamChecksReceiptPath: string option
           RefusalControlsReceiptPath: string option }
 
-    [<CLIMutable>]
-    type SeamCheckEntry =
-        { Id: string
-          Category: string
-          Summary: string
-          BinarySha256: string
-          Passed: bool
-          Command: string }
-
-    [<CLIMutable>]
-    type SeamChecksReceipt =
-        { SchemaVersion: int
-          Package: string
-          ManifestIntegritySha256: string
-          TargetTriple: string
-          Checks: SeamCheckEntry[] }
-
-    [<CLIMutable>]
-    type RefusalControlEntry =
-        { Id: string
-          ExpectedCode: string
-          ObservedCode: string
-          MisuseSummary: string
-          ProtectionSummary: string
-          Passed: bool }
-
-    [<CLIMutable>]
-    type RefusalControlsReceipt =
-        { SchemaVersion: int
-          Package: string
-          ManifestIntegritySha256: string
-          Controls: RefusalControlEntry[] }
+    type SeamCheckEntry = SubstantiationSeams.SeamCheckEntry
+    type SeamChecksReceipt = SubstantiationSeams.SeamChecksReceipt
+    type RefusalControlEntry = SubstantiationSeams.RefusalControlEntry
+    type RefusalControlsReceipt = SubstantiationSeams.RefusalControlsReceipt
 
     [<CLIMutable>]
     type RocqCorrespondenceEntry =
@@ -581,43 +553,8 @@ module SubstantiationDossier =
     // Seam check and refusal control receipts
     // =====================================================================
 
-    let private isSha256 (value: string) = not (isNull value) && Regex.IsMatch(value, @"\A[a-fA-F0-9]{64}\z")
-
-    let private requireSeamChecks (manifest: Substantiation.Manifest) (path: string) (receipt: SeamChecksReceipt) =
-        let invalid message = fail Diagnostics.DossierCheckReceiptInvalid path message
-        if receipt.SchemaVersion <> 1 then invalid "Unsupported seam checks receipt schema version."
-        if receipt.Package <> manifest.Package then invalid ("The seam checks receipt names package '" + receipt.Package + "', not '" + manifest.Package + "'.")
-        if String.IsNullOrWhiteSpace receipt.TargetTriple then invalid "The seam checks receipt names no target triple."
-        if not (String.Equals(receipt.ManifestIntegritySha256, manifest.IntegritySha256, StringComparison.OrdinalIgnoreCase)) then
-            fail Diagnostics.DossierDigestMismatch path "The seam checks receipt records the integrity digest of a different substantiation manifest."
-        let identities = HashSet<string>(StringComparer.Ordinal)
-        for check in receipt.Checks do
-            if String.IsNullOrWhiteSpace check.Id then invalid "A seam check has an empty Id."
-            if not (identities.Add check.Id) then invalid ("Seam check Id '" + check.Id + "' occurs more than once.")
-            if check.Category = refusalControlsCategory || not (Array.contains check.Category manifest.Boundary.RequiredSeamChecks) then
-                invalid ("Seam check '" + check.Id + "' names category '" + check.Category + "', which is no physical seam category this library requires.")
-            if not (isSha256 check.BinarySha256) then invalid ("Seam check '" + check.Id + "' has no 64-digit hexadecimal BinarySha256.")
-            if String.IsNullOrWhiteSpace check.Summary || String.IsNullOrWhiteSpace check.Command then
-                invalid ("Seam check '" + check.Id + "' requires a nonempty Summary and Command.")
-            if not check.Passed then invalid ("Seam check '" + check.Id + "' records Passed = false.")
-
-    let private requireRefusalControls (manifest: Substantiation.Manifest) (path: string) (receipt: RefusalControlsReceipt) =
-        let invalid message = fail Diagnostics.DossierCheckReceiptInvalid path message
-        if receipt.SchemaVersion <> 1 then invalid "Unsupported refusal controls receipt schema version."
-        if receipt.Package <> manifest.Package then invalid ("The refusal controls receipt names package '" + receipt.Package + "', not '" + manifest.Package + "'.")
-        if not (String.Equals(receipt.ManifestIntegritySha256, manifest.IntegritySha256, StringComparison.OrdinalIgnoreCase)) then
-            fail Diagnostics.DossierDigestMismatch path "The refusal controls receipt records the integrity digest of a different substantiation manifest."
-        let identities = HashSet<string>(StringComparer.Ordinal)
-        for control in receipt.Controls do
-            if String.IsNullOrWhiteSpace control.Id then invalid "A refusal control has an empty Id."
-            if not (identities.Add control.Id) then invalid ("Refusal control Id '" + control.Id + "' occurs more than once.")
-            if not (Regex.IsMatch(control.ExpectedCode, @"\A[A-Z]+[0-9]+\z", RegexOptions.CultureInvariant)) then
-                invalid ("Refusal control '" + control.Id + "' has no valid ExpectedCode.")
-            if control.ExpectedCode <> control.ObservedCode then
-                invalid ("Refusal control '" + control.Id + "' expected " + control.ExpectedCode + " and observed " + control.ObservedCode + ".")
-            if String.IsNullOrWhiteSpace control.MisuseSummary || String.IsNullOrWhiteSpace control.ProtectionSummary then
-                invalid ("Refusal control '" + control.Id + "' requires a nonempty MisuseSummary and ProtectionSummary.")
-            if not control.Passed then invalid ("Refusal control '" + control.Id + "' records Passed = false.")
+    let readSeamReceipt = SubstantiationSeams.readSeamReceipt
+    let readRefusalReceipt = SubstantiationSeams.readRefusalReceipt
 
     // =====================================================================
     // Compiler correspondence
@@ -1220,17 +1157,60 @@ module SubstantiationDossier =
         let manifest = loadManifest manifestPath
         let config = rocqConfigPath |> Option.map loadConfig |> Option.defaultValue defaultConfig
         let facts = rocqFactsPath |> Option.map (fun path -> path, loadFacts path)
-        let seam = seamPath |> Option.map (fun path -> path, parseStrict<SeamChecksReceipt> "The seam checks receipt" path)
-        let refusals = refusalPath |> Option.map (fun path -> path, parseStrict<RefusalControlsReceipt> "The refusal controls receipt" path)
+        let seam = seamPath |> Option.map (fun path -> path, (readSeamReceipt manifest path |> function Ok receipt -> receipt | Error refusal -> Diagnostics.raiseRefusal refusal))
+        let refusals = refusalPath |> Option.map (fun path -> path, (readRefusalReceipt manifest path |> function Ok receipt -> receipt | Error refusal -> Diagnostics.raiseRefusal refusal))
         // 3. Live digests, then the complete manifest revalidation.
         requireLiveDigests manifest
         let correspondence =
             match Substantiation.validateManifestCorrespondence manifest with
             | Ok correspondence -> correspondence
             | Error refusal -> Diagnostics.raiseRefusal (recoded manifestCode refusal)
-        // 4. Seam check and refusal control receipts.
-        seam |> Option.iter (fun (path, receipt) -> requireSeamChecks manifest path receipt)
-        refusals |> Option.iter (fun (path, receipt) -> requireRefusalControls manifest path receipt)
+        // 4. Seam check, refusal control, and mandatory co-located seams ledger receipts.
+        let seamsLedger =
+            let suppliedReceiptPaths =
+                [ seam |> Option.map fst; refusals |> Option.map fst ]
+                |> List.choose id
+            match suppliedReceiptPaths with
+            | [] -> None
+            | receiptPaths ->
+                let candidates =
+                    receiptPaths
+                    |> List.map (fun receiptPath ->
+                        let dir = Path.GetDirectoryName receiptPath
+                        if String.IsNullOrWhiteSpace dir then
+                            fail Diagnostics.DossierCheckReceiptInvalid receiptPath "Supplied seam or refusal receipt path has no parent directory for its co-located seams ledger."
+                        receiptPath, Path.Combine(dir, manifest.Package + ".seams-ledger.json"))
+                    |> List.distinctBy (fun (_, ledgerPath) -> Path.GetFullPath ledgerPath)
+                match candidates with
+                | [ (originReceiptPath, candidate) ] ->
+                    let resolvedLedger = evidencePath candidate
+                    if not (File.Exists resolvedLedger) then
+                        fail Diagnostics.DossierCheckReceiptInvalid originReceiptPath
+                            $"Supplied seam or refusal receipt lacks its required co-located {manifest.Package}.seams-ledger.json receipt."
+                    let ledger =
+                        match SubstantiationSeams.readLedgerReceipt manifest resolvedLedger with
+                        | Ok receipt -> receipt
+                        | Error refusal ->
+                            let mapLedgerCode (code: string) =
+                                if code = Diagnostics.DossierOutputFailure then Diagnostics.DossierOutputFailure
+                                else Diagnostics.DossierCheckReceiptInvalid
+                            Diagnostics.raiseRefusal (recoded mapLedgerCode refusal)
+                    match seam with
+                    | Some(path, _) ->
+                        if Path.GetFullPath path <> Path.GetFullPath ledger.SeamChecksPath
+                           || not (String.Equals(ClangToolchain.sha256 path, ledger.SeamChecksSha256, StringComparison.OrdinalIgnoreCase)) then
+                            fail Diagnostics.DossierCheckReceiptInvalid path "Supplied seam-checks receipt disagrees with the co-located seams ledger."
+                    | None -> ()
+                    match refusals with
+                    | Some(path, _) ->
+                        if Path.GetFullPath path <> Path.GetFullPath ledger.RefusalControlsPath
+                           || not (String.Equals(ClangToolchain.sha256 path, ledger.RefusalControlsSha256, StringComparison.OrdinalIgnoreCase)) then
+                            fail Diagnostics.DossierCheckReceiptInvalid path "Supplied refusal-controls receipt disagrees with the co-located seams ledger."
+                    | None -> ()
+                    Some(resolvedLedger, ledger)
+                | (firstOrigin, _) :: _ ->
+                    fail Diagnostics.DossierCheckReceiptInvalid firstOrigin "Seam check and refusal control receipts resolve to distinct seams ledgers."
+                | [] -> None
         // 5. PSG, obligation, witness and link provenance correspondence.
         let compilerOnly = reconcileCompiler manifest correspondence
         // 6. Companion Rocq mechanization.
@@ -1306,6 +1286,15 @@ module SubstantiationDossier =
                yield digest "Clang Identity and Target" "" (boundary.ClangIdentity + "; " + boundary.ClangTarget)
                yield digest "Link Mode" "" boundary.LinkMode
                for file in boundary.Files do yield digest file.Kind file.Path file.Sha256
+               match seam with
+               | Some(path, _) -> yield digest "Seam Checks Receipt SHA-256" path (ClangToolchain.sha256 path)
+               | None -> ()
+               match refusals with
+               | Some(path, _) -> yield digest "Refusal Controls Receipt SHA-256" path (ClangToolchain.sha256 path)
+               | None -> ()
+               match seamsLedger with
+               | Some(path, _) -> yield digest "Seams Ledger SHA-256" path (ClangToolchain.sha256 path)
+               | None -> ()
                match rocq with
                | Some evidence ->
                    yield digest "Rocq Version" "" evidence.Version

@@ -568,6 +568,42 @@ let substantiateCommand =
         setAction action
     }
 
+let seamsCommand =
+    let manifest = Input.option<FileInfo> "--manifest" |> desc "Path to <Package>.substantiation.json or <Package>.substantiation.toml" |> required
+    let spec = Input.option<FileInfo> "--spec" |> desc "Path to the seam suite specification .seams.toml" |> required
+    let output = Input.option<DirectoryInfo> "--output" |> desc "Receipt output directory (default: manifest directory)"
+    let work = Input.option<DirectoryInfo> "--work-dir" |> desc "Retained seam probe and refusal control evidence directory (default: <output>/<Package>.seams.evidence)"
+    let verbose = Input.option<bool> "--verbose" |> desc "Print retained Composer diagnostics" |> def false
+    let action (manifest: FileInfo, spec: FileInfo, output: DirectoryInfo, work: DirectoryInfo, verbose) =
+        let request: SubstantiationSeams.Request =
+            { ManifestPath = manifest.FullName
+              SpecPath = spec.FullName
+              OutputDirectory = Option.ofObj output |> Option.map _.FullName
+              WorkDirectory = Option.ofObj work |> Option.map _.FullName
+              Verbose = verbose }
+        match SubstantiationSeams.evaluate request with
+        | Error refusal ->
+            Console.Error.WriteLine refusal.Text
+            for diagnostic in refusal.Diagnostics do
+                for location in Diagnostics.renderLocation diagnostic do Console.Error.WriteLine location
+            1
+        | Ok generated ->
+            printLine $"Package: {generated.Manifest.Package}"
+            printLine $"Target triple: {generated.SeamChecks.TargetTriple}"
+            printLine $"Library obligations: {generated.Discharge.LibraryObligations}; UNSAT(H and not C): {generated.Discharge.LibraryDischargedUnsatCount}; SAT(H): {generated.Discharge.LibraryPremisesSatCount}"
+            printLine $"Total obligations: {generated.Discharge.TotalObligations}; UNSAT(H and not C): {generated.Discharge.DischargedUnsatCount}; SAT(H): {generated.Discharge.PremisesSatCount}"
+            printLine $"Physical seam checks passed: {generated.SeamChecks.Checks.Length}"
+            printLine $"Refusal controls passed: {generated.RefusalControls.Controls.Length}"
+            printLine generated.SeamChecksPath
+            printLine generated.RefusalControlsPath
+            printLine generated.LedgerPath
+            0
+    command "seams" {
+        description "Run physical ABI, link, lifecycle and refusal-control seam suites for a substantiated library"
+        inputs (manifest, spec, output, work, verbose)
+        setAction action
+    }
+
 let dossierCommand =
     let manifest = Input.option<FileInfo> "--manifest" |> desc "Path to <Package>.substantiation.json or <Package>.substantiation.toml" |> required
     let output = Input.option<DirectoryInfo> "--output" |> desc "Output directory for <Package>.dossier.{json,md,html} (default: manifest directory)"
@@ -619,5 +655,6 @@ let main argv =
         addCommand pilotCommand
         addCommand projectGenerateCommand
         addCommand substantiateCommand
+        addCommand seamsCommand
         addCommand dossierCommand
     }

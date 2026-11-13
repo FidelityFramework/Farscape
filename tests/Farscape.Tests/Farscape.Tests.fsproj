@@ -55,6 +55,7 @@
     <Compile Include="NativeCallbackRunnerTests.fs" />
     <Compile Include="SubstantiationTests.fs" />
     <Compile Include="SubstantiationDossierTests.fs" />
+    <Compile Include="SubstantiationSeamSuiteTests.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

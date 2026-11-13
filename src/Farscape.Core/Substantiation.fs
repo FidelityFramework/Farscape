@@ -320,6 +320,7 @@ module Substantiation =
         { Digest: SourceDigest
           Text: string
           Activations: string[]
+          CallbackAdapters: Set<string>
           AllBindings: Set<string>
           BindingSpans: Map<string, (int * int) * (int * int) * bool>
           BindingExtents: Map<string, int * int>
@@ -396,9 +397,14 @@ module Substantiation =
             let functionDescriptors = ResizeArray<string>()
             let bindingDocumentation = ResizeArray<string * Set<int * int>>()
             let allTypes = ResizeArray<string>()
+            let callbackEntryRecords = Collections.Generic.HashSet<string>(StringComparer.Ordinal)
+            let callbackAdapters = ResizeArray<string>()
             let descriptorTypes =
                 set [ "StructDescriptor"; "PeripheralDescriptor"; "FunctionDescriptor"; "ResultRangeDescriptor"
-                      "ResourceDescriptor"; "WritableBufferDescriptor"; "CallbackInvocationContract" ]
+                      "ResourceDescriptor"; "WritableBufferDescriptor"; "CallbackInvocationContract"
+                      "CallbackDescriptor"; "ScopedCallbackDescriptor"; "RetainedCallbackDescriptor"; "ProcessExitCallbackDescriptor"
+                      "CallbackAbsenceContract"; "CallbackContextDescriptor"; "CountedEntryArrayDescriptor"
+                      "BorrowedResultDescriptor"; "FlexibleArrayDescriptor"; "MappedReturnDescriptor" ]
             // Literal patterns make CCS verify the actual scalar kind, including
             // an imported abbreviation that shadows an annotation's spelling.
             let scalarPatterns =
@@ -497,6 +503,9 @@ module Substantiation =
                                 let tail = content.Substring(declaration.Length)
                                 if Regex.IsMatch(tail, @"^\s*(?:<[^>]*>\s*)?(?:(?:public|internal)\s+)?\(") then unavailable (parent + "." + spelling + ".new")
                                 let typeBody = Array.append [| tail |] lines[index + 1 .. blockEnd - 1]
+                                let compactBody = (String.concat " " typeBody).Trim()
+                                if Regex.IsMatch(compactBody, @"^=\s*\{\s*Invoke\s*:\s*FnPtr\s*<.+>\s*;?\s*\}\s*$") then
+                                    callbackEntryRecords.Add spelling |> ignore
                                 for bodyLine in typeBody do
                                     let memberLine = bodyLine.Trim()
                                     let members = Regex.Matches(memberLine, @"(?:^|\bwith\s+|\bclass\s+|;\s*)(?:(private|internal|public)\s+)?(?:static\s+)?(member|new|abstract|override|default)\b\s*(?:member\s+)?(?:(private|internal|public)\s+)?")
@@ -588,7 +597,47 @@ module Substantiation =
                                         let operand = if activation.Groups[1].Success then qualified + " ()" else qualified
                                         exports.Add exportedName
                                         references.Add($"(match {operand} with | {pattern} -> () | _ -> ())")
-                                    | _ -> unavailable qualified
+                                    | _ ->
+                                        let nativeSymbol = bindingName + "Native"
+                                        let nativeQualified = parent + "." + nativeSymbol
+                                        let hasPrivateNativeExtern =
+                                            foreignSymbols |> Seq.exists (fun (declName, _) -> declName = nativeQualified)
+                                        let isCallbackEntryAdapter =
+                                            if not hasPrivateNativeExtern || modifiers.Contains "inline" || modifiers.Contains "rec" || declaration.Groups[1].Value <> "let" then false
+                                            else
+                                                let signatureAndBody = Array.append [| tail |] lines[index + 1 .. blockEnd - 1] |> String.concat " "
+                                                let eqIdx = signatureAndBody.IndexOf('=')
+                                                if eqIdx < 0 then false
+                                                else
+                                                    let sigPart = signatureAndBody.Substring(0, eqIdx).Trim()
+                                                    let bodyPart = Regex.Replace(signatureAndBody.Substring(eqIdx + 1).Trim(), @"\s+", " ")
+                                                    let colonIdx = sigPart.LastIndexOf(':')
+                                                    if colonIdx < 0 then false
+                                                    else
+                                                        let paramPart = sigPart.Substring(0, colonIdx).Trim()
+                                                        let paramMatches =
+                                                            Regex.Matches(paramPart, @"\(\s*(``[^`]+``|[A-Za-z_][A-Za-z0-9_']*)\s*:\s*([^()]+?)\s*\)")
+                                                            |> Seq.cast<Match> |> Seq.toArray
+                                                        if paramMatches.Length = 0 then false
+                                                        else
+                                                            let reconstructedParams =
+                                                                paramMatches |> Array.map _.Value |> String.concat " "
+                                                            if Regex.Replace(paramPart, @"\s+", " ") <> Regex.Replace(reconstructedParams, @"\s+", " ") then false
+                                                            else
+                                                                let parsedParams =
+                                                                    paramMatches |> Array.map (fun m -> m.Groups[1].Value, m.Groups[2].Value.Trim())
+                                                                let hasEntryParam =
+                                                                    parsedParams |> Array.exists (fun (_, ty) -> callbackEntryRecords.Contains ty)
+                                                                let expectedArgs =
+                                                                    parsedParams
+                                                                    |> Array.map (fun (pName, ty) ->
+                                                                        if callbackEntryRecords.Contains ty then pName + ".Invoke" else pName)
+                                                                    |> String.concat " "
+                                                                hasEntryParam && bodyPart = (nativeSymbol + " " + expectedArgs)
+                                        if isCallbackEntryAdapter then
+                                            exports.Add exportedName
+                                            callbackAdapters.Add exportedName
+                                        else unavailable qualified
                         else invalidOp $"Unrecognized module statement at line {index + 1}; every source declaration must be classified."
                         index <- blockEnd
             scope (first + 1) lines.Length 0 name false
@@ -598,7 +647,7 @@ module Substantiation =
                 { Path = Path.GetFullPath path; Sha256 = sourceHash; ModuleName = name
                   RuntimeDeclarations = exports.ToArray(); CompileTimeDeclarations = descriptors.ToArray()
                   ForeignDeclarations = foreignDeclarations.ToArray() }
-              Text = text; Activations = references.ToArray()
+              Text = text; Activations = references.ToArray(); CallbackAdapters = Set.ofSeq callbackAdapters
               AllBindings = Set.ofSeq allBindings; BindingSpans = Map.ofSeq bindingSpans
               BindingExtents = Map.ofSeq bindingExtents; ForeignSymbols = Map.ofSeq foreignSymbols
               FunctionDescriptors = Set.ofSeq functionDescriptors
@@ -1002,6 +1051,13 @@ module Substantiation =
                         |> Seq.toArray |> Some
                     | _ -> None
                 | _ -> None
+            for source in sources do
+                for adapter in source.CallbackAdapters do
+                    let witnessed =
+                        definitions |> Seq.exists (fun d -> d.Declaration = Some adapter)
+                    if not witnessed then
+                        refuse Diagnostics.SubstantiationActivationUnavailable source.Digest.Path
+                            $"Exported callback-entry adapter '{adapter}' was not reached by any activated zero-argument library export during substantiation."
             { Declarations = psg.Declarations; Definitions = definitions.ToArray(); Imports = imports.ToArray()
               Obligations = obligations; SourceProof = sourceProof })
 

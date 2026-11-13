@@ -605,6 +605,8 @@ module Diagnostics =
     let DossierCheckReceiptInvalid = "FS9251" // seam check or refusal control receipt invalid or failed (#209)
     [<Literal>]
     let DossierOutputFailure = "FS9252" // refused dossier path (empty, broken or cyclic link) or dossier write failure (#209)
+    [<Literal>]
+    let SeamSuiteFailure = "FS9253" // seam suite input, probe compilation, native execution, ELF symbol check, refusal control, coverage or output failure (#219)
 
     // =========================================================================
     // Structured diagnostics (#184)

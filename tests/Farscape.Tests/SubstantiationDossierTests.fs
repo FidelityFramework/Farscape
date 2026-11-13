@@ -40,6 +40,8 @@ type private Library =
       ManifestJson: string
       ManifestToml: string
       Archive: string
+      SharedLib: string
+      Header: string
       Provenance: string
       Types: string
       Scalar: string }
@@ -49,8 +51,13 @@ let private library =
         (let work = scratch "library"
          let header = Path.Combine(work, "probe.h")
          let source = Path.Combine(work, "probe.c")
+         let deadSource = Path.Combine(work, "dead.c")
          let objectFile = Path.Combine(work, "probe.o")
+         let deadObjectFile = Path.Combine(work, "dead.o")
          let archive = Path.Combine(work, "libdossier_probe.a")
+         let sharedDir = Path.Combine(work, "shared-lib")
+         Directory.CreateDirectory sharedDir |> ignore
+         let sharedLib = Path.Combine(sharedDir, "libdossier_probe.so")
          writeLines header
              [ "typedef struct DossierPair { int left; int right; } DossierPair;"
                "int dossier_identity(int value);"
@@ -59,8 +66,12 @@ let private library =
              [ "#include \"probe.h\""
                "int dossier_identity(int value) { return value; }"
                "int dossier_pair_sum(DossierPair pair) { return pair.left + pair.right; }" ]
+         writeLines deadSource
+             [ "int dossier_unused_dead(int value) { return value * 13 + 5; }" ]
          run work "foreign-object" (ClangToolchain.startInfo [ "-c"; "-fPIC"; "-Wall"; "-Wextra"; "-Werror"; source; "-o"; objectFile ]) |> ignore
-         run work "foreign-archive" (ClangToolchain.arStartInfo [ "rcs"; archive; objectFile ]) |> ignore
+         run work "foreign-dead-object" (ClangToolchain.startInfo [ "-c"; "-fPIC"; "-Wall"; "-Wextra"; "-Werror"; deadSource; "-o"; deadObjectFile ]) |> ignore
+         run work "foreign-archive" (ClangToolchain.arStartInfo [ "rcs"; archive; objectFile; deadObjectFile ]) |> ignore
+         run work "foreign-shared" (ClangToolchain.startInfo [ "-shared"; "-fPIC"; objectFile; deadObjectFile; "-o"; sharedLib ]) |> ignore
          let pilot = Path.Combine(work, "Probe.pilot.toml")
          writeLines pilot
              [ "[library]"; "name = \"dossier_probe\""; "headers = [" + quote header + "]"
@@ -121,6 +132,8 @@ let private library =
            ManifestJson = requiredFile "JSON manifest" (Path.Combine(output, "DossierProbe.substantiation.json"))
            ManifestToml = requiredFile "TOML manifest" (Path.Combine(output, "DossierProbe.substantiation.toml"))
            Archive = archive
+           SharedLib = sharedLib
+           Header = header
            Provenance = provenance
            Types = types
            Scalar = scalar })
@@ -317,7 +330,7 @@ let private seamReceipt (lib: Library) : SubstantiationDossier.SeamChecksReceipt
     { SchemaVersion = 1
       Package = lib.Manifest.Package
       ManifestIntegritySha256 = lib.Manifest.IntegritySha256
-      TargetTriple = "x86_64-unknown-linux-gnu"
+      TargetTriple = lib.Manifest.Boundary.ClangTarget
       Checks =
         lib.Manifest.Boundary.RequiredSeamChecks
         |> Array.filter (fun category -> category <> "falsification-refusal-controls")
@@ -339,6 +352,154 @@ let private writeJson (label: string) (value: 'T) =
     let path = Path.Combine(scratch label, label + ".json")
     File.WriteAllText(path, JsonSerializer.Serialize value)
     path
+
+let private realSeams =
+    lazy
+        (let lib = library.Value
+         let work = scratch "real-seams"
+         let probesDir = Path.Combine(work, "probes")
+         let controlsDir = Path.Combine(work, "controls")
+         let outDir = Path.Combine(work, "out")
+         Directory.CreateDirectory probesDir |> ignore
+         Directory.CreateDirectory controlsDir |> ignore
+         let probeScalar = Path.Combine(probesDir, "ProbeScalar.clef")
+         writeLines probeScalar
+             [ "module Dossier.Probe.RunScalar"
+               "[<EntryPoint>]"
+               "let main _ : int ="
+               "    if Dossier.Probe.Boundary.dossier_identity 7 = 7 then"
+               "        Console.writeln \"dossier:scalar:ok\""
+               "        0"
+               "    else 1" ]
+         let probeRecord = Path.Combine(probesDir, "ProbeRecord.clef")
+         writeLines probeRecord
+             [ "module Dossier.Probe.RunRecord"
+               "open Dossier.Probe.Boundary.Types"
+               "[<EntryPoint>]"
+               "let main _ : int ="
+               "    if DossierPair.Size = 8 && DossierPair.Alignment = 4 && DossierPair.leftOffset = 0 && DossierPair.rightOffset = 4 && Dossier.Probe.Boundary.dossier_identity 8 = 8 then"
+               "        Console.writeln \"dossier:record:ok\""
+               "        0"
+               "    else 2" ]
+         let probeLink = Path.Combine(probesDir, "ProbeLink.clef")
+         writeLines probeLink
+             [ "module Dossier.Probe.RunLink"
+               "[<EntryPoint>]"
+               "let main _ : int ="
+               "    if Dossier.Probe.Boundary.dossier_identity 9 = 9 then"
+               "        Console.writeln \"dossier:link:ok\""
+               "        0"
+               "    else 3" ]
+         let dynProbeC = Path.Combine(probesDir, "dynamic_probe.c")
+         writeLines dynProbeC
+             [ "#include " + quote lib.Header
+               "int main(void) { return dossier_identity(9) == 9 ? 0 : 1; }" ]
+         let probeZeroCopy = Path.Combine(probesDir, "ProbeZeroCopy.clef")
+         writeLines probeZeroCopy
+             [ "module Dossier.Probe.RunZeroCopy"
+               "open Dossier.Probe.Boundary.Types"
+               "[<EntryPoint>]"
+               "let main _ : int ="
+               "    if DossierPair.Size = 8 && Dossier.Probe.Boundary.dossier_identity 7 = 7 then"
+               "        Console.writeln \"dossier:zerocopy:ok\""
+               "        0"
+               "    else 4" ]
+         let missingHeader = Path.Combine(controlsDir, "missing.h")
+         writeLines missingHeader [ "int dossier_missing_symbol(int value);" ]
+         let missingPilot = Path.Combine(controlsDir, "Missing.pilot.toml")
+         writeLines missingPilot
+             [ "[library]"; "name = \"dossier_probe\""; "headers = [" + quote missingHeader + "]"
+               "include_paths = [" + quote controlsDir + "]"
+               "[library.artifact]"; "kind = \"static-archive\""; "path = " + quote lib.Archive
+               "sha256 = " + quote (ClangToolchain.sha256 lib.Archive)
+               "[output]"; "mode = \"fidelity\""; "directory = \"generated-missing\""
+               "[options]"; "c_header_mode = true"
+               "[[namespace]]"; "name = \"Dossier.Refusal\""; "library = \"dossier_probe\""
+               "description = \"Missing symbol control\""; "functions = [\"dossier_missing_symbol\"]" ]
+         let dependencies, platform = platformTables ()
+         let rawAddrClef = Path.Combine(controlsDir, "RawAddr.clef")
+         writeLines rawAddrClef
+             [ "module Dossier.Refusal.RawAddr"
+               "[<EntryPoint>]"
+               "let main _ : int ="
+               "    let mutable cell = 7"
+               "    let p = &&cell"
+               "    if p = p then 0 else 1" ]
+         let rawAddrProj = Path.Combine(controlsDir, "RawAddr.fidproj")
+         writeLines rawAddrProj
+             [ "[package]"; "name = \"RawAddr\""; "version = \"0.1.0\""
+               "[compilation]"; "target = \"cpu\""
+               "[dependencies]"; yield! dependencies
+               "[build]"; "output_kind = \"console\""; "sources = [" + quote rawAddrClef + "]"
+               "[platform]"; yield! platform ]
+         let specPath = Path.Combine(work, "DossierProbe.seams.toml")
+         writeLines specPath
+             [ "schema_version = 1"
+               "target_triple = " + quote lib.Manifest.Boundary.ClangTarget
+               "loading_contract = \"Landing.Acceptance.Loading.contract\""
+               ""
+               "[[checks]]"
+               "id = \"seam-scalar-handle-link-and-call\""
+               "category = \"scalar-handle-link-and-call\""
+               "summary = \"Scalar call across dossier_probe static archive.\""
+               "entry_source = " + quote probeScalar
+               "required_symbols = [\"dossier_identity\"]"
+               "expected_stdout = \"dossier:scalar:ok\""
+               ""
+               "[[checks]]"
+               "id = \"seam-measured-record-abi\""
+               "category = \"measured-record-abi\""
+               "summary = \"Measured DossierPair layout constants verified in linked probe.\""
+               "entry_source = " + quote probeRecord
+               "required_symbols = [\"dossier_identity\"]"
+               "expected_stdout = \"dossier:record:ok\""
+               ""
+               "[[checks]]"
+               "id = \"seam-static-dynamic-link-elision\""
+               "category = \"static-dynamic-link-elision\""
+               "summary = \"Dead symbol dossier_unused_dead elided statically while exported in shared library.\""
+               "entry_source = " + quote probeLink
+               "required_symbols = [\"dossier_identity\"]"
+               "expected_stdout = \"dossier:link:ok\""
+               "[checks.elf]"
+               "elided_symbols = [\"dossier_unused_dead\"]"
+               "retained_static_symbols = [\"dossier_identity\"]"
+               "forbidden_needed_libraries = [\"libdossier_probe.so\"]"
+               "shared_library = " + quote lib.SharedLib
+               "shared_library_sha256 = " + quote (ClangToolchain.sha256 lib.SharedLib)
+               "dynamic_probe_source = " + quote dynProbeC
+               "retained_dynamic_imports = [\"dossier_identity\"]"
+               ""
+               "[[checks]]"
+               "id = \"seam-barewire-zero-copy\""
+               "category = \"barewire-zero-copy\""
+               "summary = \"StructDescriptor layout and result range boundary exercised in linked probe.\""
+               "entry_source = " + quote probeZeroCopy
+               "required_symbols = [\"dossier_identity\"]"
+               "expected_stdout = \"dossier:zerocopy:ok\""
+               ""
+               "[[refusal_controls]]"
+               "id = \"unlinked-extern\""
+               "kind = \"pilot\""
+               "target = " + quote missingPilot
+               "expected_code = \"FS9228\""
+               "misuse_summary = \"A pilot names a symbol that no archive member defines.\""
+               "protection_summary = \"Static archive provenance refuses binding generation with FS9228.\""
+               ""
+               "[[refusal_controls]]"
+               "id = \"raw-address-boundary\""
+               "kind = \"composer\""
+               "target = " + quote rawAddrProj
+               "expected_code = \"CCS8401\""
+               "misuse_summary = \"Authored Clef code takes a raw address-of operator outside safe descriptors.\""
+               "protection_summary = \"Composer boundary admission refuses raw address-of with CCS8401.\"" ]
+         SubstantiationSeams.evaluate
+             { ManifestPath = lib.ManifestJson
+               SpecPath = specPath
+               OutputDirectory = Some outDir
+               WorkDirectory = Some(Path.Combine(work, "seams-work"))
+               Verbose = false }
+         |> accepted)
 
 let private writeText (label: string) (text: string) =
     let path = Path.Combine(scratch label, label + ".json")
@@ -398,9 +559,10 @@ let private sections =
 [<Fact>]
 let ``dossier API and CLI write one reconciled report for a real library with Rocq and receipts`` () =
     let lib = library.Value
+    let seams = realSeams.Value
     let fixture = rocq ()
-    let seam = writeJson "seam-checks" (seamReceipt lib)
-    let refusals = writeJson "refusal-controls" (refusalReceipt lib)
+    let seam = seams.SeamChecksPath
+    let refusals = seams.RefusalControlsPath
     let request =
         { (requestFor lib.ManifestJson |> withRocq fixture) with
             SeamChecksReceiptPath = Some seam
@@ -464,7 +626,9 @@ let ``dossier API and CLI write one reconciled report for a real library with Ro
     Assert.True(dossier.Falsified.CompilerNonVacuityReceipts > 0, "the result range contract must produce non-vacuity receipts")
     Assert.Contains($"{dossier.Falsified.CompilerNonVacuityReceipts} verified clause witness(es) confirming each safety conclusion can fail if its precondition is violated.", markdown)
     Assert.True(dossier.Falsified.RefusalControlsAttached)
-    Assert.Equal("unlinked-extern", (Assert.Single dossier.Falsified.RefusalControls).Id)
+    Assert.Equal<string[]>(
+        [| "unlinked-extern"; "raw-address-boundary" |],
+        dossier.Falsified.RefusalControls |> Array.map _.Id)
     Assert.Contains("| Id | ExpectedCode | MisuseSummary | ProtectionSummary |", markdown)
     Assert.DoesNotContain("No external compile-time refusal receipt was attached", markdown)
     let falsified = Assert.Single dossier.Falsified.RocqFalsified
@@ -483,10 +647,11 @@ let ``dossier API and CLI write one reconciled report for a real library with Ro
         Assert.Equal("VERIFIED", category.Status)
         Assert.NotEmpty category.Evidence)
     let measuredSeam = dossier.Checks.SeamCategories |> Array.find (fun category -> category.Category = "measured-record-abi")
+    let measuredCheck = seams.SeamChecks.Checks |> Array.find (fun c -> c.Id = "seam-measured-record-abi")
     Assert.Equal("Pass and return by-value C structs matching probed byte size, alignment, and field offsets", measuredSeam.Description)
-    Assert.Equal<string[]>([| $"seam-measured-record-abi (binary sha256:{ClangToolchain.sha256 lib.Archive}; target x86_64-unknown-linux-gnu)" |], measuredSeam.Evidence)
+    Assert.Equal<string[]>([| $"seam-measured-record-abi (binary sha256:{measuredCheck.BinarySha256}; target {lib.Manifest.Boundary.ClangTarget})" |], measuredSeam.Evidence)
     let controlsSeam = dossier.Checks.SeamCategories |> Array.find (fun category -> category.Category = "falsification-refusal-controls")
-    Assert.Equal<string[]>([| "unlinked-extern (FS9243)" |], controlsSeam.Evidence)
+    Assert.Equal<string[]>([| "unlinked-extern (FS9228)"; "raw-address-boundary (CCS8401)" |], controlsSeam.Evidence)
     Assert.Equal(0, dossier.Counts.PendingSeamCategories)
     let check = Assert.Single dossier.Checks.RocqChecks
     Assert.Equal("DossierProofs.Limits.seven_is_admitted", check.Symbol)
@@ -607,7 +772,7 @@ let ``dossier API and CLI write one reconciled report for a real library with Ro
     Assert.Equal(md5 (File.ReadAllBytes fixture.LawsGlob), dossier.Traceability.RocqUnits[0].GlobMd5)
     let digestItems = dossier.Traceability.Digests |> Array.map (fun digest -> digest.Item)
     for item in [ "Package"; "Manifest Integrity SHA-256"; "Fidproj SHA-256"; "Composer SHA-256"; "cvc5 Version and SHA-256"; "Clang Identity and Target"; "Link Mode"
-                  "link-provenance"; "static-archive"; "pilot"; "header"; "Rocq Version"; "Rocq Unit DossierProofs.Laws"; "Rocq Unit DossierProofs.Limits" ] do
+                  "link-provenance"; "static-archive"; "pilot"; "header"; "Seams Ledger SHA-256"; "Rocq Version"; "Rocq Unit DossierProofs.Laws"; "Rocq Unit DossierProofs.Limits" ] do
         Assert.Contains(item, digestItems)
     Assert.Contains(dossier.Traceability.Digests, fun digest -> digest.Item = "static-archive" && digest.Path = lib.Archive && digest.Value = ClangToolchain.sha256 lib.Archive)
     // Rocq documentation is data: markup characters never reach either document unescaped.
@@ -617,7 +782,7 @@ let ``dossier API and CLI write one reconciled report for a real library with Ro
     Assert.DoesNotContain("<script", markdown)
     // The counts the CLI prints.
     Assert.Equal(0, dossier.Counts.Open)
-    Assert.Equal(proof.CompilerNonVacuityReceiptsCount + 2, dossier.Counts.Falsified)
+    Assert.Equal(proof.CompilerNonVacuityReceiptsCount + 3, dossier.Counts.Falsified)
     Assert.Equal(proof.PremisesSatCount + (lib.Manifest.Boundary.RequiredSeamChecks.Length - 1) + 1, dossier.Counts.Checks)
     Assert.Equal(proof.DischargedUnsatCount + 2, dossier.Counts.Guarantees)
 
@@ -760,10 +925,29 @@ let ``a dossier without Rocq or receipts reports pending seam runs and the fixed
     let fromToml = requestFor lib.ManifestToml |> SubstantiationDossier.generate |> accepted
     Assert.Equal<SubstantiationDossier.Dossier>({ dossier with ManifestPath = lib.ManifestToml; Traceability = fromToml.Dossier.Traceability }, fromToml.Dossier)
     Assert.Equal<SubstantiationDossier.DossierDeclaration[]>(dossier.Traceability.Declarations, fromToml.Dossier.Traceability.Declarations)
-    // A partial receipt set leaves exactly the unrecorded categories pending.
-    let partial = { seamReceipt lib with Checks = (seamReceipt lib).Checks |> Array.take 1 }
+    // A partial receipt set leaves exactly the unrecorded categories pending, while still
+    // requiring a co-located seams ledger binding the recorded probe binary on disk.
+    let seams = realSeams.Value
+    let partialDir = scratch "partial-seams-receipts"
+    let firstRealCheck = seams.SeamChecks.Checks[0]
+    let partialSeamReceipt = { seams.SeamChecks with Checks = [| firstRealCheck |] }
+    let partialSeamPath = Path.Combine(partialDir, "DossierProbe.seam-checks.json")
+    let partialRefusalPath = Path.Combine(partialDir, "DossierProbe.refusal-controls.json")
+    let partialLedgerPath = Path.Combine(partialDir, "DossierProbe.seams-ledger.json")
+    File.WriteAllText(partialSeamPath, JsonSerializer.Serialize(partialSeamReceipt, JsonSerializerOptions(WriteIndented = true)))
+    File.Copy(seams.RefusalControlsPath, partialRefusalPath, true)
+    let partialLedger =
+        { seams.Ledger with
+            VerifiedPhysicalCategories = [| firstRealCheck.Category |]
+            RetainedBinaries = seams.Ledger.RetainedBinaries |> Array.filter (fun b -> b.CheckId = firstRealCheck.Id)
+            SharedLibraries = [||]
+            SeamChecksPath = partialSeamPath
+            SeamChecksSha256 = ClangToolchain.sha256 partialSeamPath
+            RefusalControlsPath = partialRefusalPath
+            RefusalControlsSha256 = ClangToolchain.sha256 partialRefusalPath }
+    File.WriteAllText(partialLedgerPath, JsonSerializer.Serialize(partialLedger, JsonSerializerOptions(WriteIndented = true)))
     let partly =
-        { requestFor lib.ManifestJson with SeamChecksReceiptPath = Some(writeJson "seam-checks" partial) }
+        { requestFor lib.ManifestJson with SeamChecksReceiptPath = Some partialSeamPath }
         |> SubstantiationDossier.generate |> accepted
     Assert.Equal(pending, partly.Dossier.OverallStatus)
     Assert.Equal(lib.Manifest.Boundary.RequiredSeamChecks.Length - 1, partly.Dossier.Counts.PendingSeamCategories)
@@ -1105,6 +1289,8 @@ let ``invalid seam and refusal receipts refuse with FS9251`` () =
         [ { seam with SchemaVersion = 2 }
           { seam with Package = "OtherPackage" }
           { seam with TargetTriple = " " }
+          { seam with TargetTriple = "not-measured" }
+          { seam with TargetTriple = "aarch64-unknown-linux-gnu" }
           seamWith { first with Category = "unknown-category" }
           seamWith { first with Category = "falsification-refusal-controls" }
           seamWith { first with Category = "callback-registration-invocation" }
@@ -1129,6 +1315,21 @@ let ``invalid seam and refusal receipts refuse with FS9251`` () =
           { refusals with Controls = [| { control with MisuseSummary = "" } |] }
           { refusals with Controls = [| { control with ProtectionSummary = "" } |] } ] do
         { requestFor lib.ManifestJson with RefusalControlsReceiptPath = Some(writeJson "refusal-controls" receipt) } |> refusedWith "FS9251"
+    // Schema-valid seam-checks or refusal-controls receipts supplied WITHOUT their mandatory
+    // co-located <Package>.seams-ledger.json receipt fail closed with FS9251 (#219 B3).
+    { requestFor lib.ManifestJson with SeamChecksReceiptPath = Some(writeJson "orphan-seam-checks" seam) }
+    |> refusedWithText "FS9251" "lacks its required co-located DossierProbe.seams-ledger.json"
+    { requestFor lib.ManifestJson with RefusalControlsReceiptPath = Some(writeJson "orphan-refusal-controls" refusals) }
+    |> refusedWithText "FS9251" "lacks its required co-located DossierProbe.seams-ledger.json"
+    // Valid receipts placed in two distinct directories resolve to distinct ledgers -> FS9251.
+    let seams = realSeams.Value
+    let splitDir = scratch "split-ledger-dir"
+    let splitRefusalPath = Path.Combine(splitDir, "DossierProbe.refusal-controls.json")
+    File.Copy(seams.RefusalControlsPath, splitRefusalPath, true)
+    { requestFor lib.ManifestJson with
+        SeamChecksReceiptPath = Some seams.SeamChecksPath
+        RefusalControlsReceiptPath = Some splitRefusalPath }
+    |> refusedWithText "FS9251" "distinct seams ledgers"
 
 [<Fact>]
 let ``a dossier is generated from and into OS temporary storage outside the checkout`` () =

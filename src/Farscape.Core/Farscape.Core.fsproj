@@ -50,6 +50,7 @@
     <Compile Include="SubstantiationProof.fs" />
     <Compile Include="SubstantiationBoundary.fs" />
     <Compile Include="Substantiation.fs" />
+    <Compile Include="SubstantiationSeams.fs" />
     <Compile Include="SubstantiationDossier.fs" />
   </ItemGroup>
 
