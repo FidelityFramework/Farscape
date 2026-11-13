@@ -1159,16 +1159,40 @@ module CppParser =
             | Some root -> printfn "[CppParser] Include root scoping: %s" root
             | None -> printfn "[CppParser] No include root — using filename matching for: %s" targetFile
 
-        /// Update file tracking from a node's location.
-        /// Clang's JSON AST uses "loc.file" to indicate a change in source file.
-        /// When "file" is absent, the node is in the same file as the previous node.
-        let updateFileTracking (node: JsonValue) =
+        /// Walk a Clang JSON AST value in dump order and update currentFile for any
+        /// emitted "file" property that advances Clang's LastLocFilename state.
+        /// Excludes "includedFrom" (Clang's IncludedLoc preserves LastLocFilename)
+        /// and "inner" (traversed recursively by processNode).
+        let rec updateFileFromValue (value: JsonValue) =
+            match value with
+            | JsonValue.Record props ->
+                for k, v in props do
+                    if k = "file" then
+                        match v with
+                        | JsonValue.String f -> currentFile <- Some f
+                        | _ -> ()
+                    elif k <> "includedFrom" && k <> "inner" then
+                        updateFileFromValue v
+            | JsonValue.Array items ->
+                for item in items do
+                    updateFileFromValue item
+            | _ -> ()
+
+        /// Update file tracking from a node's "loc" field (including macro spellingLoc/expansionLoc).
+        let updateFileFromLoc (node: JsonValue) =
             match getObject node "loc" with
-            | Some loc ->
-                match getString loc "file" with
-                | Some f -> currentFile <- Some f
-                | None -> ()
+            | Some loc -> updateFileFromValue loc
             | None -> ()
+
+        /// Update file tracking from non-"loc", non-"inner" node fields (notably "range")
+        /// before recursing into "inner" or advancing to the next sibling node.
+        let updateFileFromNodeTail (node: JsonValue) =
+            match node with
+            | JsonValue.Record props ->
+                for k, v in props do
+                    if k <> "loc" && k <> "includedFrom" && k <> "inner" then
+                        updateFileFromValue v
+            | _ -> ()
 
         /// Check if current node belongs to this library.
         /// With includeRoot: any file under that directory tree belongs to the library.
@@ -1183,7 +1207,7 @@ module CppParser =
 
         /// Process a single node
         let rec processNode scope (node: JsonValue) =
-            updateFileTracking node
+            updateFileFromLoc node
 
             let isImplicit = getBool node "isImplicit"
             let kind = getStringOr node "kind" ""
@@ -1211,6 +1235,7 @@ module CppParser =
             // (it only emits file on the first source-file change). The library
             // boundary check applies to leaf declarations inside the namespace.
             if kind = "NamespaceDecl" then
+                updateFileFromNodeTail node
                 match getString node "name" with
                 | Some name when not (System.String.IsNullOrEmpty(name)) ->
                     for inner in getArray node "inner" do
@@ -1421,7 +1446,8 @@ module CppParser =
 
                 | _ -> ()
 
-                // Recurse into children for non-namespace declarations
+                // Advance LastLocFilename from range/attributes before recursing into children
+                updateFileFromNodeTail node
                 for inner in getArray node "inner" do
                     processNode childScope inner
 
@@ -1444,6 +1470,8 @@ module CppParser =
                         | Some typedef -> included.Add(Typedef typedef)
                         | None -> ()
                     | _ -> ()
+                // Advance LastLocFilename from range/attributes before recursing into children
+                updateFileFromNodeTail node
                 // Outside the target file: still recurse to find target-file
                 // declarations that may appear deeper in the AST (e.g. in
                 // TranslationUnitDecl or LinkageSpecDecl wrappers).

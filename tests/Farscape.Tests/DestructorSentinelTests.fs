@@ -143,3 +143,86 @@ let ``a function's sentinel is its declaring unit's macro, never another unit's`
     let _, d, _ = refused [ unitFirst; unitSecond ] "LOCAL_" (sentinelBinding "unit_bind" 0 1 "LOCAL_FIRST_ONLY") [ "unit_bind" ]
     Assert.Equal(Diagnostics.SentinelProjectionInvalid, d.Code)
     Assert.Equal("unit_bind parameter 1: constant 'LOCAL_FIRST_ONLY' on function-pointer parameter 'destroy' names no parsed macro; a function-pointer parameter is fixed only to a sentinel macro the pilot's macro_prefixes select", d.Message)
+
+[<Fact>]
+let ``SQLite SQLITE_STATIC zero-copy borrow lifetime is admitted with RetainedUntil and types string and ReadOnlyView`` () =
+    Assert.True(File.Exists sqliteHeader, $"{sqliteHeader} is required: the SQLite development header is the #192 input")
+    let bindings =
+        [ "[[options.bindings]]"
+          "name = \"sqlite3_bind_text\""
+          "constant_parameters = [\"\", \"\", \"\", \"\", \"SQLITE_STATIC\"]"
+          "read_only_buffers = [{ parameter = 2, content = \"text\", extent = { count_parameter = 3 }, retention = { kind = \"retained_until\", owner_parameter = 0, redefined_by = [0, 1], releases = [{ binding = \"Test.Fixture.sqlite3_clear_bindings\", parameter = 0 }, { binding = \"Test.Fixture.sqlite3_finalize\", parameter = 0 }] }, hypothesis = { identity = \"sqlite.bind.text.static\", version = \"1\", source = \"sqlite3.h\" } }]"
+          "[[options.bindings]]"
+          "name = \"sqlite3_bind_blob\""
+          "constant_parameters = [\"\", \"\", \"\", \"\", \"SQLITE_STATIC\"]"
+          "read_only_buffers = [{ parameter = 2, content = \"bytes\", extent = { count_parameter = 3 }, retention = { kind = \"retained_until\", owner_parameter = 0, redefined_by = [0, 1], releases = [{ binding = \"Test.Fixture.sqlite3_clear_bindings\", parameter = 0 }, { binding = \"Test.Fixture.sqlite3_finalize\", parameter = 0 }] }, hypothesis = { identity = \"sqlite.bind.blob.static\", version = \"1\", source = \"sqlite3.h\" } }]" ]
+    let text = generated [ sqliteHeader ] "SQLITE_" bindings [ "sqlite3_bind_text"; "sqlite3_bind_blob"; "sqlite3_clear_bindings"; "sqlite3_finalize" ]
+    Assert.Contains("let sqlite3_bind_text (arg0: option<CHandle<sqlite3_stmt>>) (arg1: int) (arg2: string) (arg3: int) : int =", text)
+    Assert.Contains("let sqlite3_bind_blob (arg0: option<CHandle<sqlite3_stmt>>) (arg1: int) (arg2: ReadOnlyView<byte>) (n: int) : int =", text)
+    Assert.Contains("PassBy = Fixed (EntrySentinel (\"SQLITE_STATIC\", 0)) }", text)
+    Assert.Contains("Retention = RetainedUntil (0, [| Redefinition [| 0; 1 |]; OwnerRelease { Binding = \"Test.Fixture.sqlite3_clear_bindings\"; Parameter = 0 }; OwnerRelease { Binding = \"Test.Fixture.sqlite3_finalize\"; Parameter = 0 } |])", text)
+
+[<Fact>]
+let ``SQLite SQLITE_STATIC paired with during_call retention is still refused with FS9180`` () =
+    Assert.True(File.Exists sqliteHeader, $"{sqliteHeader} is required: the SQLite development header is the #192 input")
+    let bindings =
+        [ "[[options.bindings]]"
+          "name = \"sqlite3_bind_text\""
+          "constant_parameters = [\"\", \"\", \"\", \"\", \"SQLITE_STATIC\"]"
+          "read_only_buffers = [{ parameter = 2, content = \"text\", extent = { count_parameter = 3 }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"sqlite.bind.text.bad\", version = \"1\", source = \"sqlite3.h\" } }]" ]
+    let _, d, _ = refused [ sqliteHeader ] "SQLITE_" bindings [ "sqlite3_bind_text" ]
+    Assert.Equal(Diagnostics.SentinelBorrowUndeclared, d.Code)
+
+[<Fact>]
+let ``Phase B real libc and sqlite3 headers generate zero-copy ReadOnlyBuffer, BufferAbsence, SQLITE_STATIC and status Resource contracts`` () =
+    Assert.True(File.Exists sqliteHeader, $"{sqliteHeader} is required")
+    let sqliteBindings =
+        [ "[[options.bindings]]"; "name = \"sqlite3_open_v2\""; "reference_parameters = [1]"
+          "read_only_buffers = [{ parameter = 0, content = \"text\", extent = { nul_terminated = true }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"sqlite.open.filename\", version = \"1\", source = \"sqlite3.h\" } }, { parameter = 3, content = \"text\", extent = { nul_terminated = true }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"sqlite.open.zvfs\", version = \"1\", source = \"sqlite3.h\" } }]"
+          "buffer_absences = [{ parameter = 3, hypothesis = { identity = \"sqlite.open.zvfs.absent\", version = \"1\", source = \"sqlite3.h\" } }]"
+          "[[options.bindings]]"; "name = \"sqlite3_prepare_v2\""; "reference_parameters = [3, 4]"
+          "read_only_buffers = [{ parameter = 1, content = \"text\", extent = { count_parameter = 2 }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"sqlite.prepare_v2.sql\", version = \"1\", source = \"sqlite3.h\" } }]"
+          "[[options.bindings]]"; "name = \"sqlite3_prepare_v3\""; "reference_parameters = [4, 5]"
+          "read_only_buffers = [{ parameter = 1, content = \"text\", extent = { count_parameter = 2 }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"sqlite.prepare_v3.sql\", version = \"1\", source = \"sqlite3.h\" } }]"
+          "[[options.bindings]]"; "name = \"sqlite3_bind_text\""; "constant_parameters = [\"\", \"\", \"\", \"\", \"SQLITE_STATIC\"]"
+          "read_only_buffers = [{ parameter = 2, content = \"text\", extent = { count_parameter = 3 }, retention = { kind = \"retained_until\", owner_parameter = 0, redefined_by = [0, 1], releases = [{ binding = \"Test.Fixture.sqlite3_clear_bindings\", parameter = 0 }, { binding = \"Test.Fixture.sqlite3_finalize\", parameter = 0 }] }, hypothesis = { identity = \"sqlite.bind.text.static\", version = \"1\", source = \"sqlite3.h\" } }]"
+          "[[options.bindings]]"; "name = \"sqlite3_bind_blob\""; "constant_parameters = [\"\", \"\", \"\", \"\", \"SQLITE_STATIC\"]"
+          "read_only_buffers = [{ parameter = 2, content = \"bytes\", extent = { count_parameter = 3 }, retention = { kind = \"retained_until\", owner_parameter = 0, redefined_by = [0, 1], releases = [{ binding = \"Test.Fixture.sqlite3_clear_bindings\", parameter = 0 }, { binding = \"Test.Fixture.sqlite3_finalize\", parameter = 0 }] }, hypothesis = { identity = \"sqlite.bind.blob.static\", version = \"1\", source = \"sqlite3.h\" } }]"
+          "[[options.bindings]]"; "name = \"sqlite3_result_text\""; "constant_parameters = [\"\", \"\", \"\", \"SQLITE_STATIC\"]"
+          "read_only_buffers = [{ parameter = 1, content = \"text\", extent = { count_parameter = 2 }, retention = { kind = \"retained_until\", owner_parameter = 0, redefined_by = [0], releases = [] }, hypothesis = { identity = \"sqlite.result.text.static\", version = \"1\", source = \"sqlite3.h\" } }]"
+          "[[options.bindings]]"; "name = \"sqlite3_result_blob\""; "constant_parameters = [\"\", \"\", \"\", \"SQLITE_STATIC\"]"
+          "read_only_buffers = [{ parameter = 1, content = \"bytes\", extent = { count_parameter = 2 }, retention = { kind = \"retained_until\", owner_parameter = 0, redefined_by = [0], releases = [] }, hypothesis = { identity = \"sqlite.result.blob.static\", version = \"1\", source = \"sqlite3.h\" } }]"
+          "[[options.bindings]]"; "name = \"sqlite3_bind_parameter_index\""
+          "read_only_buffers = [{ parameter = 1, content = \"text\", extent = { nul_terminated = true }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"sqlite.bind_param_index.zname\", version = \"1\", source = \"sqlite3.h\" } }]" ]
+    let sqliteSource =
+        generated [ sqliteHeader ] "SQLITE_" sqliteBindings
+            [ "sqlite3_open_v2"; "sqlite3_close_v2"; "sqlite3_prepare_v2"; "sqlite3_prepare_v3"
+              "sqlite3_bind_text"; "sqlite3_bind_blob"; "sqlite3_result_text"; "sqlite3_result_blob"
+              "sqlite3_bind_parameter_index"; "sqlite3_clear_bindings"; "sqlite3_finalize" ]
+    Assert.Contains("let sqlite3_open_v2 (filename: string) (ppDb: option<CHandle<sqlite3>> array) (flags: int) (zVfs: option<string>) : int =", sqliteSource)
+    Assert.Contains("let sqlite3_prepare_v2 (db: option<CHandle<sqlite3>>) (zSql: string) (nByte: int)", sqliteSource)
+    Assert.Contains("let sqlite3_prepare_v3 (db: option<CHandle<sqlite3>>) (zSql: string) (nByte: int)", sqliteSource)
+    Assert.Contains("let sqlite3_result_text (arg0: option<CHandle<sqlite3_context>>) (arg1: string) (arg2: int) : unit =", sqliteSource)
+    Assert.Contains("let sqlite3_result_blob (arg0: option<CHandle<sqlite3_context>>) (arg1: ReadOnlyView<byte>) (arg2: int) : unit =", sqliteSource)
+    Assert.Contains("let sqlite3_bind_parameter_index (arg0: option<CHandle<sqlite3_stmt>>) (zName: string) : int =", sqliteSource)
+    Assert.Contains("Expr<BufferAbsenceContract>", sqliteSource)
+
+    let libcBindings =
+        [ "[[options.bindings]]"; "name = \"fopen\""; "return_handle = \"FILE\""
+          "resource = { kind = \"owned_nullable_return\", release_binding = \"Test.Fixture.fclose\", release_parameter = 0, hypothesis = { identity = \"libc.file.owned\", version = \"1\", source = \"stdio.h\" } }"
+          "read_only_buffers = [{ parameter = 0, content = \"text\", extent = { nul_terminated = true }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"libc.fopen.path\", version = \"1\", source = \"stdio.h\" } }, { parameter = 1, content = \"text\", extent = { nul_terminated = true }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"libc.fopen.mode\", version = \"1\", source = \"stdio.h\" } }]"
+          "[[options.bindings]]"; "name = \"fclose\""; "parameter_handles = [\"FILE\"]"
+          "[[options.bindings]]"; "name = \"write\""
+          "read_only_buffers = [{ parameter = 1, content = \"bytes\", extent = { count_parameter = 2 }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"posix.write.buf\", version = \"1\", source = \"unistd.h\" } }]"
+          "[[options.bindings]]"; "name = \"send\""
+          "read_only_buffers = [{ parameter = 1, content = \"bytes\", extent = { count_parameter = 2 }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"posix.send.buf\", version = \"1\", source = \"sys/socket.h\" } }]"
+          "[[options.bindings]]"; "name = \"sendto\""
+          "read_only_buffers = [{ parameter = 1, content = \"bytes\", extent = { count_parameter = 2 }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"posix.sendto.buf\", version = \"1\", source = \"sys/socket.h\" } }]" ]
+    let libcSource =
+        generated [ "/usr/include/stdio.h"; "/usr/include/unistd.h"; "/usr/include/sys/socket.h" ] "O_" libcBindings
+            [ "fopen"; "fclose"; "write"; "send"; "sendto" ]
+    Assert.Contains("let fopenDescriptor : Expr<FunctionDescriptor>", libcSource)
+    Assert.Contains("let fopenResourceDescriptor : Expr<ResourceDescriptor>", libcSource)
+    Assert.Contains("let fclose (stream: CHandle<FILE>) : int =", libcSource)
+    Assert.Contains("(buf: ReadOnlyView<byte>)", libcSource)
+    Assert.DoesNotContain("(buf: option<CHandle<unit>>)", libcSource)

@@ -1429,7 +1429,12 @@ module FidelityCodeGenerator =
                     match ctx.Macros.TryFind value |> Option.map _.Kind with
                     | Some (CppParser.FunctionPointerSentinel (_, spelled, canonical, address))
                         when parameterType = canonicalOf spelled || parameterType = compact canonical ->
-                        if address = 0L then
+                        let hasRetainedBorrow =
+                            projection
+                            |> Option.exists (fun b ->
+                                b.ReadOnlyBuffers
+                                |> List.exists (fun rb -> match rb.Retention with BindingBufferRetention.RetainedUntil _ -> true | _ -> false))
+                        if address = 0L && not hasRetainedBorrow then
                             refuse Diagnostics.SentinelBorrowUndeclared
                                 $"constant '{value}' fixes function-pointer parameter '{name}' to the null sentinel ({spelled})0, under which the library uses the bound value after the call without copying it; no pilot key declares a borrow lifetime for that value, so the null sentinel is not admitted. Fix a copying sentinel (SQLite's SQLITE_TRANSIENT) instead."
                         Some (idx, (value, address))
@@ -1461,6 +1466,8 @@ module FidelityCodeGenerator =
                 let stringParameter = projection |> Option.exists (fun b -> List.contains idx b.StringParameters)
                 let callbackNonnull = projection |> Option.exists (fun b -> List.contains idx b.NonnullCallbacks)
                 let handle = projection |> Option.bind (fun b -> List.tryItem idx b.ParameterHandles) |> Option.filter ((<>) "")
+                let readOnlyBuffer = projection |> Option.bind (fun b -> b.ReadOnlyBuffers |> List.tryFind (fun rb -> rb.Parameter = idx))
+                let bufferAbsence = projection |> Option.bind (fun b -> b.BufferAbsences |> List.tryFind (fun ab -> ab.Parameter = idx))
                 let provenNonnull = nonnullIndices.Contains idx || outerNullabilityIn ctx "_Nonnull" cType || callbackNonnull
                 // Pilot nonnull evidence names its key; clang's attribute and _Nonnull are header evidence.
                 let nonnullKey =
@@ -1472,6 +1479,8 @@ module FidelityCodeGenerator =
                 if provenNonnull && (projection |> Option.exists (fun binding ->
                     binding.CallbackInvocations |> List.exists (fun contract -> contract.Parameter = idx && contract.AbsenceHypothesis.IsSome))) then
                     refuse Diagnostics.NonnullContradiction (Some (bindingKey func.Name "callback_invocations")) "absence_hypothesis conflicts with a nonnull contract"
+                if provenNonnull && bufferAbsence.IsSome then
+                    refuse Diagnostics.NonnullContradiction (nonnullKey |> Option.orElse (Some (bindingKey func.Name "buffer_absences"))) "buffer_absences conflicts with a nonnull contract"
                 let nullableCallback =
                     match resolveIn ctx cType with
                     | FunctionPointer _ when not provenNonnull ->
@@ -1487,37 +1496,59 @@ module FidelityCodeGenerator =
                     | _ -> false
                 let referenceKey =
                     keyHolding idx [ "reference_parameters", _.ReferenceParameters; "read_only_reference_parameters", _.ReadOnlyReferenceParameters ]
-                let fsType =
-                    if reference then
-                        match cType with
-                        | ParsedCType info when info.PointerDepth = 1 ->
-                            match resolveIn ctx (element |> Option.defaultValue info.BaseType) with
-                            | Scalar r when r.Family = TypeMapper.Signed || r.Family = TypeMapper.Unsigned || r.Family = TypeMapper.Float -> Named (TypeMapper.clefSpelling r.Family + " array")
-                            | (OpaqueHandle _ | DataPointer _) as pointee ->
-                                Named (CodeRenderer.renderType (wrapOption (clefTypeOf pointee)) + " array")
-                            | Scalar r when r.Family = TypeMapper.Pointer ->
-                                Named (CodeRenderer.renderType (wrapOption (clefTypeOf (Scalar r))) + " array")
-                            | _ -> refuse Diagnostics.ReferenceCellUnsupported referenceKey "Reference requires a scalar or opaque pointer cell"
-                        | ParsedCType info when info.PointerDepth = 2 ->
-                            let pointerType = cType.Substring(0, cType.LastIndexOf('*')).Trim()
-                            let element = resolveIn ctx pointerType |> clefTypeOf |> wrapOption
-                            Named (CodeRenderer.renderType element + " array")
-                        | _ -> refuse Diagnostics.ReferenceCellUnsupported referenceKey "Reference requires a scalar cell or one opaque pointer cell"
-                    elif stringParameter then
-                        if isCharPointerIn ctx cType then Named "string"
-                        else refuse Diagnostics.StringProjectionNotCharPointer (Some (bindingKey func.Name "string_parameters")) "string projection requires char pointer"
-                    elif handle.IsSome then
-                        if not (isDataPointerIn ctx cType) then refuse Diagnostics.HandleProjectionNotDataPointer (Some (bindingKey func.Name "parameter_handles")) "handle projection requires a C data pointer"
-                        Generic("CHandle", Named handle.Value)
-                    elif callbackNonnull then
-                        match callbackParameterType ctx func idx cType with
-                        | Generic("FnPtr", _) as ty -> ty
-                        | _ -> refuse Diagnostics.CallbackNotFunctionPointer (Some (bindingKey func.Name "nonnull_callbacks")) "nonnull_callbacks requires a C function pointer"
-                    else
-                        match resolveIn ctx cType with
-                        | FunctionPointer _ -> callbackParameterType ctx func idx cType
-                        | _ -> mapType cType
-                let isNullable = nullableCallback || (not reference && isDataPointerIn ctx cType && not provenNonnull)
+                let fsType, isNullable =
+                    match readOnlyBuffer with
+                    | Some bufferContract ->
+                        let roKey = Some (bindingKey func.Name "read_only_buffers")
+                        if projection |> Option.exists (fun b -> List.contains idx b.ReferenceParameters) then
+                            refuse Diagnostics.ReadOnlyBufferShape roKey "read_only_buffers parameter conflicts with writable reference_parameters"
+                        if stringParameter then
+                            refuse Diagnostics.ReadOnlyBufferShape roKey "read_only_buffers parameter conflicts with legacy string_parameters"
+                        if handle.IsSome then
+                            refuse Diagnostics.ReadOnlyBufferShape roKey "read_only_buffers parameter conflicts with parameter_handles"
+                        let bufferFsType =
+                            match borrowedPointeeIn ctx cType, bufferContract.Content with
+                            | Some true, BorrowedContent.Text -> Named "string"
+                            | Some _, BorrowedContent.Bytes -> Generic("ReadOnlyView", Named "byte")
+                            | _, BorrowedContent.Text ->
+                                refuse Diagnostics.ReadOnlyBufferShape roKey $"text read-only buffer requires a single-level pointer to an 8-bit character, not '{cType}'"
+                            | None, BorrowedContent.Bytes ->
+                                refuse Diagnostics.ReadOnlyBufferShape roKey $"bytes read-only buffer requires a single-level pointer to an 8-bit character or void, not '{cType}'"
+                        if bufferAbsence.IsNone && outerNullabilityIn ctx "_Nullable" cType then
+                            refuse Diagnostics.NonnullContradiction roKey "nullable native parameter without buffer_absences conflicts with non-optional read_only_buffers contract"
+                        bufferFsType, bufferAbsence.IsSome
+                    | None ->
+                        let ty =
+                            if reference then
+                                match cType with
+                                | ParsedCType info when info.PointerDepth = 1 ->
+                                    match resolveIn ctx (element |> Option.defaultValue info.BaseType) with
+                                    | Scalar r when r.Family = TypeMapper.Signed || r.Family = TypeMapper.Unsigned || r.Family = TypeMapper.Float -> Named (TypeMapper.clefSpelling r.Family + " array")
+                                    | (OpaqueHandle _ | DataPointer _) as pointee ->
+                                        Named (CodeRenderer.renderType (wrapOption (clefTypeOf pointee)) + " array")
+                                    | Scalar r when r.Family = TypeMapper.Pointer ->
+                                        Named (CodeRenderer.renderType (wrapOption (clefTypeOf (Scalar r))) + " array")
+                                    | _ -> refuse Diagnostics.ReferenceCellUnsupported referenceKey "Reference requires a scalar or opaque pointer cell"
+                                | ParsedCType info when info.PointerDepth = 2 ->
+                                    let pointerType = cType.Substring(0, cType.LastIndexOf('*')).Trim()
+                                    let element = resolveIn ctx pointerType |> clefTypeOf |> wrapOption
+                                    Named (CodeRenderer.renderType element + " array")
+                                | _ -> refuse Diagnostics.ReferenceCellUnsupported referenceKey "Reference requires a scalar cell or one opaque pointer cell"
+                            elif stringParameter then
+                                if isCharPointerIn ctx cType then Named "string"
+                                else refuse Diagnostics.StringProjectionNotCharPointer (Some (bindingKey func.Name "string_parameters")) "string projection requires char pointer"
+                            elif handle.IsSome then
+                                if not (isDataPointerIn ctx cType) then refuse Diagnostics.HandleProjectionNotDataPointer (Some (bindingKey func.Name "parameter_handles")) "handle projection requires a C data pointer"
+                                Generic("CHandle", Named handle.Value)
+                            elif callbackNonnull then
+                                match callbackParameterType ctx func idx cType with
+                                | Generic("FnPtr", _) as ty -> ty
+                                | _ -> refuse Diagnostics.CallbackNotFunctionPointer (Some (bindingKey func.Name "nonnull_callbacks")) "nonnull_callbacks requires a C function pointer"
+                            else
+                                match resolveIn ctx cType with
+                                | FunctionPointer _ -> callbackParameterType ctx func idx cType
+                                | _ -> mapType cType
+                        ty, (nullableCallback || (not reference && isDataPointerIn ctx cType && not provenNonnull))
                 let finalType = if isNullable then wrapOption fsType else fsType
                 { FsParam.Name = parameterName func.Parameters idx; Type = finalType })))
         let parameters = slots |> List.choose snd
@@ -1698,11 +1729,16 @@ module FidelityCodeGenerator =
             let parameters, result = signature releaseRaw
             // The release declaration's return and parameter resolve in its own unit.
             let releaseCtx = inFunctionUnit ctx release
-            match release.Parameters, parameters, result, resolveIn releaseCtx release.ReturnType with
-            | [_, typ], [parameter], Named "unit", Scalar repr
-                when repr.Family = TypeMapper.Void && isDataPointerIn releaseCtx typ
+            let validReleaseReturn =
+                match result, resolveIn releaseCtx release.ReturnType with
+                | Named "unit", Scalar repr when repr.Family = TypeMapper.Void -> true
+                | Named "int", Scalar repr when repr.Family = TypeMapper.Signed && repr.Bits = 32 -> true
+                | _ -> false
+            match release.Parameters, parameters with
+            | [_, typ], [parameter]
+                when validReleaseReturn && isDataPointerIn releaseCtx typ
                      && parameter.Type = Generic("CHandle", Named marker) -> ()
-            | _ -> refuse Diagnostics.ResourceReleaseShape "release requires unary matching CHandle Value parameter 0 and a raw Void result"
+            | _ -> refuse Diagnostics.ResourceReleaseShape "release requires unary matching CHandle Value parameter 0 and a raw Void or signed32 int result"
             match ctx.Bindings |> Map.tryFind release.Name with
             | Some projection when not projection.ReferenceParameters.IsEmpty || not projection.ReadOnlyReferenceParameters.IsEmpty
                                    || not projection.StringParameters.IsEmpty
@@ -1842,6 +1878,160 @@ module FidelityCodeGenerator =
                           "Version", Literal (quoteString contract.Version)
                           "Source", Literal (quoteString contract.Source) ] ])) ])
 
+    /// Emit ReadOnlyBufferDescriptor quotations for zero-copy input buffer contracts (#57, #206).
+    let private readOnlyBufferDecls (ctx: GenerationContext) namespace' (anchors: Map<string, string * CppParser.FunctionDecl * FsDecl list> option) (func: CppParser.FunctionDecl) nativeName hasAdapter =
+        let ctx = inFunctionUnit ctx func
+        let projection = ctx.Bindings |> Map.tryFind func.Name
+        let contracts = projection |> Option.map _.ReadOnlyBuffers |> Option.defaultValue []
+        let key = bindingKey func.Name "read_only_buffers"
+        let refuseAt code parameter reason = refuseContract func code (Some (key, parameter)) $"{func.Name} read_only_buffers: {reason}"
+        match contracts |> List.countBy _.Parameter |> List.tryFind (fun (_, count) -> count > 1) with
+        | Some (duplicate, _) -> refuseAt Diagnostics.ContractDuplicateParameter (Some duplicate) "duplicate parameter indices"
+        | None -> ()
+        contracts |> List.collect (fun contract ->
+            let refuse code reason = refuseAt code (Some contract.Parameter) reason
+            for fieldName, value in ["identity", contract.Identity; "version", contract.Version; "source", contract.Source] do
+                if System.String.IsNullOrWhiteSpace value then refuse Diagnostics.HypothesisFieldEmpty $"requires nonempty {fieldName}"
+            let projection = projection.Value
+            let nonSentinelConstant =
+                projection.ConstantParameters
+                |> List.indexed
+                |> List.exists (fun (idx, value) -> not (System.String.IsNullOrWhiteSpace value) && (fixedSentinelOf ctx func idx).IsNone)
+            if hasAdapter || nonSentinelConstant then
+                refuse Diagnostics.ContractRequiresUntranslated "requires an untranslated native parameter list"
+            let arity = func.Parameters.Length
+            if contract.Parameter < 0 || contract.Parameter >= arity then
+                refuseAt Diagnostics.ContractParameterOutOfRange (Some contract.Parameter) $"parameter {contract.Parameter} is outside native arity {arity}"
+            let constantAt idx =
+                projection.ConstantParameters |> List.tryItem idx |> Option.exists (System.String.IsNullOrWhiteSpace >> not)
+            if constantAt contract.Parameter then
+                refuse Diagnostics.ReadOnlyBufferShape "buffer parameter cannot be fixed via constant_parameters"
+            if projection.WritableBuffers |> List.exists (fun w -> w.Parameter = contract.Parameter) then
+                refuse Diagnostics.ReadOnlyBufferShape "parameter cannot declare both writable_buffers and read_only_buffers"
+            if List.contains contract.Parameter projection.ReferenceParameters then
+                refuse Diagnostics.ReadOnlyBufferShape "parameter cannot declare writable reference_parameters with read_only_buffers"
+            if List.contains contract.Parameter projection.StringParameters then
+                refuse Diagnostics.ReadOnlyBufferShape "parameter cannot declare string_parameters with read_only_buffers"
+            if List.tryItem contract.Parameter projection.ParameterHandles |> Option.exists (System.String.IsNullOrWhiteSpace >> not) then
+                refuse Diagnostics.ReadOnlyBufferShape "parameter cannot declare parameter_handles with read_only_buffers"
+            let bufferType = snd func.Parameters[contract.Parameter]
+            match borrowedPointeeIn ctx bufferType, contract.Content with
+            | Some true, BorrowedContent.Text -> ()
+            | Some _, BorrowedContent.Bytes -> ()
+            | _, BorrowedContent.Text ->
+                refuse Diagnostics.ReadOnlyBufferShape $"text read-only buffer requires a single-level pointer to an 8-bit character, not '{bufferType}'"
+            | None, BorrowedContent.Bytes ->
+                refuse Diagnostics.ReadOnlyBufferShape $"bytes read-only buffer requires a single-level pointer to an 8-bit character or void, not '{bufferType}'"
+            let extentAst =
+                match contract.Extent with
+                | BindingReadOnlyBufferExtent.UncountedNulTerminated ->
+                    if contract.Content <> BorrowedContent.Text then
+                        refuse Diagnostics.ReadOnlyBufferShape "nul_terminated requires text content: bytes may hold a NUL before their end"
+                    Identifier "UncountedNulTerminated"
+                | BindingReadOnlyBufferExtent.ExplicitCount countParam ->
+                    if countParam < 0 || countParam >= arity then
+                        refuseAt Diagnostics.ContractParameterOutOfRange (Some countParam) $"count_parameter {countParam} is outside native arity {arity}"
+                    if countParam = contract.Parameter then
+                        refuse Diagnostics.ReadOnlyBufferCountInvalid "requires distinct buffer and count parameters"
+                    if constantAt countParam then
+                        refuseAt Diagnostics.ReadOnlyBufferCountInvalid (Some countParam) "count parameter cannot be fixed via constant_parameters"
+                    let countType = snd func.Parameters[countParam]
+                    let countRef, _ = referencePassing (Some projection) countParam countType
+                    match resolveIn ctx countType with
+                    | Scalar scalar when not countRef && (scalar.Family = TypeMapper.Signed || scalar.Family = TypeMapper.Unsigned) -> ()
+                    | _ -> refuseAt Diagnostics.ReadOnlyBufferCountInvalid (Some countParam) "count parameter requires scalar integer Value passing"
+                    Literal ($"ExplicitCount {countParam}")
+            let retentionAst =
+                match contract.Retention with
+                | BindingBufferRetention.DuringCall -> Identifier "DuringCall"
+                | BindingBufferRetention.RetainedUntil (owner, redefinedBy, releases) ->
+                    let refuseRetention reason = refuse Diagnostics.ReadOnlyBufferRetentionInvalid $"retention {reason}"
+                    if owner < 0 || owner >= arity then
+                        refuseAt Diagnostics.ContractParameterOutOfRange (Some owner) $"retention owner_parameter {owner} is outside native arity {arity}"
+                    if owner = contract.Parameter then
+                        refuseRetention $"owner_parameter {owner} is the buffer parameter itself"
+                    let ownerType = snd func.Parameters[owner]
+                    if (opaqueMarkerOf ctx ownerType).IsNone then
+                        refuseRetention $"owner_parameter {owner} ('{ownerType}') is no opaque handle that could retain the buffer"
+                    for idx in redefinedBy do
+                        if idx < 0 || idx >= arity then
+                            refuseAt Diagnostics.ContractParameterOutOfRange (Some idx) $"retention redefined_by {idx} is outside native arity {arity}"
+                        if idx = contract.Parameter then
+                            refuseRetention $"redefined_by {idx} is the buffer parameter itself"
+                    if not redefinedBy.IsEmpty && not (List.contains owner redefinedBy) then
+                        refuseRetention $"redefined_by must include owner_parameter {owner}: a later call replaces a slot only on its own owner"
+                    if redefinedBy.IsEmpty && releases.IsEmpty then
+                        refuseRetention "names neither redefined_by nor a release; a buffer nothing retires has no bounded retention"
+                    let releaseEntries =
+                        releases |> List.map (fun release ->
+                            let call binding =
+                                $"OwnerRelease {{ Binding = {quoteString binding}; Parameter = {release.Parameter} }}"
+                            match anchors with
+                            | None -> call release.Binding
+                            | Some anchors ->
+                                match Map.tryFind release.Binding anchors with
+                                | None -> refuse Diagnostics.ContractBindingUnselected $"retention release '{release.Binding}' must name a selected qualified generated declaration"
+                                | Some (actual, releaseFunc, _) ->
+                                    if release.Parameter < 0 || release.Parameter >= releaseFunc.Parameters.Length then
+                                        refuseRetention $"release '{release.Binding}' parameter {release.Parameter} is outside its native arity {releaseFunc.Parameters.Length}"
+                                    let received = resolveIn (inFunctionUnit ctx releaseFunc) (snd releaseFunc.Parameters[release.Parameter]) |> clefTypeOf
+                                    let owned = resolveIn ctx ownerType |> clefTypeOf
+                                    if received <> owned then
+                                        refuseRetention $"release '{release.Binding}' parameter {release.Parameter} receives {CodeRenderer.renderType received}, not the owner's {CodeRenderer.renderType owned}"
+                                    call actual)
+                    let redefinitionEntries =
+                        if redefinedBy.IsEmpty then []
+                        else [ "Redefinition [| " + (redefinedBy |> List.map string |> String.concat "; ") + " |]" ]
+                    let allEntries = (redefinitionEntries @ releaseEntries) |> String.concat "; "
+                    Literal ($"RetainedUntil ({owner}, [| {allEntries} |])")
+            let contentId = match contract.Content with BorrowedContent.Text -> "Utf8Text" | BorrowedContent.Bytes -> "RawBytes"
+            [ XmlDoc "Read-only input buffer contract: call-bounded or owner-retained borrow over uncopied caller storage; requires independent source and discharge evidence."
+              ValueBinding(nativeName + "ReadOnlyBuffer" + string contract.Parameter + "Descriptor", Generic("Expr", Named "ReadOnlyBufferDescriptor"),
+                  Quoted(RecordBlock [
+                      "BAREWire.Descriptors.ReadOnlyBufferDescriptor.Binding", Literal (quoteString (namespace' + "." + nativeName))
+                      "Parameter", Literal (string contract.Parameter)
+                      "Extent", extentAst
+                      "Content", Identifier contentId
+                      "Retention", retentionAst
+                      "Hypothesis", RecordBlock [
+                          "Identity", Literal (quoteString contract.Identity)
+                          "Version", Literal (quoteString contract.Version)
+                          "Source", Literal (quoteString contract.Source) ] ])) ])
+
+    /// Emit BufferAbsenceContract quotations for optional input buffer parameters (#57).
+    let private bufferAbsenceDecls (ctx: GenerationContext) namespace' (func: CppParser.FunctionDecl) nativeName hasAdapter =
+        let ctx = inFunctionUnit ctx func
+        let projection = ctx.Bindings |> Map.tryFind func.Name
+        let absences = projection |> Option.map _.BufferAbsences |> Option.defaultValue []
+        let buffers = projection |> Option.map _.ReadOnlyBuffers |> Option.defaultValue []
+        let key = bindingKey func.Name "buffer_absences"
+        let refuseAt code parameter reason = refuseContract func code (Some (key, parameter)) $"{func.Name} buffer_absences: {reason}"
+        match absences |> List.countBy _.Parameter |> List.tryFind (fun (_, count) -> count > 1) with
+        | Some (duplicate, _) -> refuseAt Diagnostics.ContractDuplicateParameter (Some duplicate) "duplicate parameter indices"
+        | None -> ()
+        absences |> List.collect (fun absence ->
+            let refuse code reason = refuseAt code (Some absence.Parameter) reason
+            for fieldName, value in ["identity", absence.Identity; "version", absence.Version; "source", absence.Source] do
+                if System.String.IsNullOrWhiteSpace value then refuse Diagnostics.HypothesisFieldEmpty $"requires nonempty {fieldName}"
+            if hasAdapter then
+                refuse Diagnostics.ContractRequiresUntranslated "requires an untranslated native parameter list"
+            if absence.Parameter < 0 || absence.Parameter >= func.Parameters.Length then
+                refuseAt Diagnostics.ContractParameterOutOfRange (Some absence.Parameter) $"parameter {absence.Parameter} is outside native arity {func.Parameters.Length}"
+            match buffers |> List.tryFind (fun b -> b.Parameter = absence.Parameter) with
+            | None -> refuse Diagnostics.BufferAbsenceInvalid "buffer_absences requires a matching read_only_buffers contract on the same parameter"
+            | Some matchingBuffer ->
+                if absence.Identity = matchingBuffer.Identity then
+                    refuse Diagnostics.AbsenceIdentityReused "buffer_absences hypothesis identity must differ from read_only_buffers hypothesis identity"
+            [ XmlDoc "Optional input buffer absence contract: NULL/None is an explicit admitted absence case."
+              ValueBinding(nativeName + "BufferAbsence" + string absence.Parameter + "Contract", Generic("Expr", Named "BufferAbsenceContract"),
+                  Quoted(RecordBlock [
+                      "BAREWire.Descriptors.BufferAbsenceContract.Binding", Literal (quoteString (namespace' + "." + nativeName))
+                      "Parameter", Literal (string absence.Parameter)
+                      "Hypothesis", RecordBlock [
+                          "Identity", Literal (quoteString absence.Identity)
+                          "Version", Literal (quoteString absence.Version)
+                          "Source", Literal (quoteString absence.Source) ] ])) ])
+
     /// `anchors` is None where only the public binding is kept (wrappers): no contract
     /// declaration is emitted there, so no exit or release binding is resolved.
     let private declaredFunctionDecls (ctx: GenerationContext) namespace' (anchors: Map<string, string * CppParser.FunctionDecl * FsDecl list> option) (func: CppParser.FunctionDecl) (entries: (int * string * FsDecl list) list) (raw: FsDecl list) =
@@ -1856,6 +2046,8 @@ module FidelityCodeGenerator =
             let nativeName = raw |> List.pick (function LetBinding(name, _, _, _, attrs) when not attrs.IsEmpty -> Some name | _ -> None)
             callbackInvocationDecls ctx namespace' anchors func nativeName |> ignore
             raw @ resultRangeDecls ctx namespace' func nativeName false @ resourceDecls ctx namespace' resourceAnchors func nativeName raw @ writableBufferDecls ctx namespace' func nativeName false
+            @ readOnlyBufferDecls ctx namespace' anchors func nativeName false
+            @ bufferAbsenceDecls ctx namespace' func nativeName false
             @ borrowedDecls nativeName
         else
         resultRangeDecls ctx namespace' func func.Name true |> ignore
@@ -1887,7 +2079,7 @@ module FidelityCodeGenerator =
             | LetBinding(name, _, _, _, []) when name = func.Name -> None
             | declaration -> Some declaration)
         let adapter = if needsAdapter then [LetBinding(func.Name, publicParameters, returnType, FunctionCall("", emittedName, callArguments), [])] else []
-        declarations @ invocationDeclarations @ resourceDecls ctx namespace' resourceAnchors func emittedName raw @ borrowedDecls emittedName @ adapter
+        declarations @ invocationDeclarations @ resourceDecls ctx namespace' resourceAnchors func emittedName raw @ readOnlyBufferDecls ctx namespace' anchors func emittedName needsAdapter @ bufferAbsenceDecls ctx namespace' func emittedName needsAdapter @ borrowedDecls emittedName @ adapter
 
     let generateDeclaredFunctionDecls (ctx: GenerationContext) libraryName namespace' (func: CppParser.FunctionDecl) =
         let ctx = inFunctionUnit ctx func

@@ -264,6 +264,41 @@ module PilotTypes =
         Source: string
     }
 
+    /// How a read-only input buffer's byte/character extent is bounded (#57, #206).
+    [<RequireQualifiedAccess>]
+    type BindingReadOnlyBufferExtent =
+        /// `{ count_parameter = N }`: zero-based native parameter ordinal holding element/byte count.
+        | ExplicitCount of countParameter: int
+        /// `{ nul_terminated = true }`: uncounted legacy NUL-terminated character string input.
+        | UncountedNulTerminated
+
+    /// How long the native library may read a borrowed input buffer (#57, #206).
+    [<RequireQualifiedAccess>]
+    type BindingBufferRetention =
+        /// `{ kind = "during_call" }`: borrowed only for the duration of the native call.
+        | DuringCall
+        /// `{ kind = "retained_until", owner_parameter = O, redefined_by = [...], releases = [...] }`.
+        | RetainedUntil of owner: int * redefinedBy: int list * releases: BindingRetentionRelease list
+
+    /// Explicit read-only input buffer contract (BAREWire ReadOnlyBufferDescriptor).
+    type BindingReadOnlyBuffer = {
+        Parameter: int
+        Extent: BindingReadOnlyBufferExtent
+        Content: BorrowedContent
+        Retention: BindingBufferRetention
+        Identity: string
+        Version: string
+        Source: string
+    }
+
+    /// Explicit absence contract for an optional input buffer (BAREWire BufferAbsenceContract).
+    type BindingBufferAbsence = {
+        Parameter: int
+        Identity: string
+        Version: string
+        Source: string
+    }
+
     /// Projections of parsed C declarations, including explicit scalar buffer element contracts.
     type BindingProjection = {
         Name: string
@@ -284,6 +319,10 @@ module PilotTypes =
         CallbackInvocations: BindingCallbackInvocation list
         /// The result read as a borrowed view with its extent and validity (#196).
         BorrowedResult: BindingBorrowedResult option
+        /// Read-only input buffer contracts (#57, #206).
+        ReadOnlyBuffers: BindingReadOnlyBuffer list
+        /// Absence hypotheses paired with optional read-only buffer parameters (#57).
+        BufferAbsences: BindingBufferAbsence list
     }
 
     /// A scoped projection of an actual native mapped-pointer result. Parameter

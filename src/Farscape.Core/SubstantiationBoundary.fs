@@ -1002,7 +1002,7 @@ module SubstantiationBoundary =
                     { ForeignCalls = externPairs.Length > 0; MeasuredRecords = (layouts |> Array.exists (fun l -> l.Kind = "record" && emitted l.Name)) || not requiredMeasuredRecords.IsEmpty
                       StaticArchive = hasStatic; ErrorConventions = errors
                       Ownership = (bindings |> List.exists (fun b -> b.Resource.IsSome || b.Ownership = Some PilotTypes.CallerOwns || b.Ownership = Some PilotTypes.CalleeOwns)) || Regex.IsMatch(sourceCode, @"\bOwnershipTransfer\s*=\s*(CallerOwns|CalleeOwns)\b")
-                      ZeroCopy = not mappedReturns.IsEmpty || not flexibleArrays.IsEmpty || (bindings |> List.exists (fun b -> b.BorrowedResult.IsSome || not b.WritableBuffers.IsEmpty)) || Regex.IsMatch(sourceCode, @"\b(StructDescriptor|BorrowedView|MappedRegion)\b")
+                      ZeroCopy = not mappedReturns.IsEmpty || not flexibleArrays.IsEmpty || (bindings |> List.exists (fun b -> b.BorrowedResult.IsSome || not b.WritableBuffers.IsEmpty || not b.ReadOnlyBuffers.IsEmpty)) || Regex.IsMatch(sourceCode, @"\b(StructDescriptor|BorrowedView|MappedRegion)\b")
                       Callbacks = callbacks
                       Nullability = (pilot |> Option.bind _.Nonnull |> Option.exists (fun n -> (n.Parameters |> Map.exists (fun name _ -> usedSymbol name)) || (n.Returns |> Set.exists usedSymbol))) || Regex.IsMatch(sourceCode, @"\b(Nullable|CNullable|NonNull)\b") }
                 let origin = String.concat ";" (Array.append [|request.FidprojPath|] (layoutFiles |> Array.filter (fun f -> f.Kind = "pilot" || f.Kind = "header") |> Array.map _.Path))
@@ -1025,6 +1025,10 @@ module SubstantiationBoundary =
                         | None -> ()
                         for buffer in b.WritableBuffers do
                             yield $"{b.Name} buffer[{buffer.Parameter}]={buffer.Identity}@{buffer.Version}; countParameter={buffer.CountParameter}; source={buffer.Source}"
+                        for buffer in b.ReadOnlyBuffers do
+                            yield sprintf "%s readOnlyBuffer[%d]=%s@%s; extent=%A; content=%A; retention=%A; source=%s" b.Name buffer.Parameter buffer.Identity buffer.Version buffer.Extent buffer.Content buffer.Retention buffer.Source
+                        for absence in b.BufferAbsences do
+                            yield $"{b.Name} bufferAbsence[{absence.Parameter}]={absence.Identity}@{absence.Version}; source={absence.Source}"
                     match pilot |> Option.bind _.Nonnull with
                     | Some n when strata.Nullability ->
                         yield sprintf "nonnull parameters=%A; returns=%A" (n.Parameters |> Map.filter (fun name _ -> usedSymbol name)) (n.Returns |> Set.filter usedSymbol)

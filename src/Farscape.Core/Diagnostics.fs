@@ -59,7 +59,7 @@ namespace Farscape.Core
 /// | FS9151 | a result range bounds a non-integer result or by a non-integer argument       |
 /// | FS9152 | a result range's constant bounds are contradictory                            |
 /// | FS9153 | an owned nullable return is no option<CHandle> released through parameter 0   |
-/// | FS9154 | a release binding is no unary matching CHandle Value parameter, void result   |
+/// | FS9154 | a release binding is no unary matching CHandle Value parameter with void or signed32 result |
 /// | FS9155 | a writable buffer names one parameter as both buffer and count                |
 /// | FS9156 | a writable buffer is no writable unsigned8 byte reference                     |
 /// | FS9157 | a writable buffer's count is no scalar integer Value parameter                |
@@ -158,6 +158,11 @@ namespace Farscape.Core
 /// | FS9250 | a Clef declaration, PSG node, obligation anchor, witnessed MLIR symbol, foreign symbol, measured layout or Rocq correspondence target fails exact reconciliation |
 /// | FS9251 | a seam check or refusal control receipt has an invalid schema, package, category, entry identity, refusal code or a failed entry |
 /// | FS9252 | a dossier input or output path is empty or crosses a broken or cyclic symbolic link, or a dossier file cannot be written |
+/// | FS9253 | a seam suite input, probe compilation, native execution, ELF symbol check, refusal control, coverage or output validation fails |
+/// | FS9254 | a read-only buffer contract names an incompatible pointer type, extent, or conflicting projection on that parameter |
+/// | FS9255 | a read-only buffer count parameter duplicates the buffer parameter, is fixed, or is no scalar integer Value parameter |
+/// | FS9256 | a read-only buffer retention contract has an invalid owner, redefinition key, or release target |
+/// | FS9257 | a buffer absence contract lacks a matching read-only buffer contract on the same parameter |
 ///
 /// Allocation continues past FS9199 as FS92xx: the codes are sequential, four digits after FS.
 /// Each refusal reason has exactly one code and each code one reason.
@@ -330,7 +335,7 @@ module Diagnostics =
     let ResourceReturnShape = "FS9153" // owned nullable return not option<CHandle> released through parameter 0 (#195)
 
     [<Literal>]
-    let ResourceReleaseShape = "FS9154" // release binding not a unary matching CHandle Value parameter with a void result (#195)
+    let ResourceReleaseShape = "FS9154" // release binding not a unary matching CHandle Value parameter with a void or signed32 result (#195, #164)
 
     [<Literal>]
     let WritableBufferSameParameter = "FS9155" // writable buffer naming one parameter as buffer and count (#195)
@@ -607,6 +612,14 @@ module Diagnostics =
     let DossierOutputFailure = "FS9252" // refused dossier path (empty, broken or cyclic link) or dossier write failure (#209)
     [<Literal>]
     let SeamSuiteFailure = "FS9253" // seam suite input, probe compilation, native execution, ELF symbol check, refusal control, coverage or output failure (#219)
+    [<Literal>]
+    let ReadOnlyBufferShape = "FS9254" // read-only buffer parameter incompatible pointer, content/extent, or conflicting projection (#57, #206)
+    [<Literal>]
+    let ReadOnlyBufferCountInvalid = "FS9255" // read-only buffer count parameter invalid, fixed, or equal to buffer parameter (#57, #206)
+    [<Literal>]
+    let ReadOnlyBufferRetentionInvalid = "FS9256" // read-only buffer retention owner, redefinition key, or release mismatch (#57, #206)
+    [<Literal>]
+    let BufferAbsenceInvalid = "FS9257" // buffer absence contract without matching read_only_buffers entry (#57)
 
     // =========================================================================
     // Structured diagnostics (#184)

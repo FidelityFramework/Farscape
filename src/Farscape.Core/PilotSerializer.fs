@@ -216,6 +216,46 @@ module PilotSerializer =
                 "version", TomlValue.String contract.Version
                 "source", TomlValue.String contract.Source ]) ])
 
+    let private serializeReadOnlyBuffer (contract: BindingReadOnlyBuffer) =
+        let extent =
+            match contract.Extent with
+            | BindingReadOnlyBufferExtent.ExplicitCount count ->
+                TomlValue.InlineTable (Map.ofList [ "count_parameter", TomlValue.Integer (int64 count) ])
+            | BindingReadOnlyBufferExtent.UncountedNulTerminated ->
+                TomlValue.InlineTable (Map.ofList [ "nul_terminated", TomlValue.Boolean true ])
+        let retention =
+            match contract.Retention with
+            | BindingBufferRetention.DuringCall ->
+                TomlValue.InlineTable (Map.ofList [ "kind", TomlValue.String "during_call" ])
+            | BindingBufferRetention.RetainedUntil (owner, redefinedBy, releases) ->
+                TomlValue.InlineTable (Map.ofList [
+                    "kind", TomlValue.String "retained_until"
+                    "owner_parameter", TomlValue.Integer (int64 owner)
+                    if not redefinedBy.IsEmpty then
+                        "redefined_by", TomlValue.Array (redefinedBy |> List.map (int64 >> TomlValue.Integer))
+                    if not releases.IsEmpty then
+                        "releases", TomlValue.Array (releases |> List.map (fun release ->
+                            TomlValue.InlineTable (Map.ofList [
+                                "binding", TomlValue.String release.Binding
+                                "parameter", TomlValue.Integer (int64 release.Parameter) ]))) ])
+        TomlValue.InlineTable (Map.ofList [
+            "parameter", TomlValue.Integer (int64 contract.Parameter)
+            "content", TomlValue.String (match contract.Content with BorrowedContent.Text -> "text" | BorrowedContent.Bytes -> "bytes")
+            "extent", extent
+            "retention", retention
+            "hypothesis", TomlValue.InlineTable (Map.ofList [
+                "identity", TomlValue.String contract.Identity
+                "version", TomlValue.String contract.Version
+                "source", TomlValue.String contract.Source ]) ])
+
+    let private serializeBufferAbsence (absence: BindingBufferAbsence) =
+        TomlValue.InlineTable (Map.ofList [
+            "parameter", TomlValue.Integer (int64 absence.Parameter)
+            "hypothesis", TomlValue.InlineTable (Map.ofList [
+                "identity", TomlValue.String absence.Identity
+                "version", TomlValue.String absence.Version
+                "source", TomlValue.String absence.Source ]) ])
+
     let private serializeOptions (opts: ProjectOptions) : TomlValue =
         let table = TomlTable.empty
         let table =
@@ -252,6 +292,8 @@ module PilotSerializer =
             |> (fun t -> match binding.ResultRange with Some range -> TomlTable.add "result_range" (serializeResultRange range) t | None -> t)
             |> (fun t -> match binding.Resource with Some resource -> TomlTable.add "resource" (serializeResource resource) t | None -> t)
             |> (fun t -> if binding.WritableBuffers.IsEmpty then t else TomlTable.add "writable_buffers" (TomlValue.Array (binding.WritableBuffers |> List.map serializeWritableBuffer)) t)
+            |> (fun t -> if binding.ReadOnlyBuffers.IsEmpty then t else TomlTable.add "read_only_buffers" (TomlValue.Array (binding.ReadOnlyBuffers |> List.map serializeReadOnlyBuffer)) t)
+            |> (fun t -> if binding.BufferAbsences.IsEmpty then t else TomlTable.add "buffer_absences" (TomlValue.Array (binding.BufferAbsences |> List.map serializeBufferAbsence)) t)
             |> (fun t -> if binding.CallbackInvocations.IsEmpty then t else TomlTable.add "callback_invocations" (TomlValue.Array (binding.CallbackInvocations |> List.map serializeCallbackInvocation)) t)
             |> (fun t -> match binding.BorrowedResult with Some borrowed -> TomlTable.add "borrowed_result" (serializeBorrowedResult borrowed) t | None -> t)
             |> TomlValue.Table)
@@ -692,6 +734,112 @@ module PilotSerializer =
             contracts
         | Some _ -> refuse Diagnostics.PilotValueType key "writable_buffers requires an array"
 
+    let private deserializeReadOnlyBuffers (bindingKey: string) binding =
+        let key = bindingKey + ".read_only_buffers"
+        match TomlTable.tryFind "read_only_buffers" binding with
+        | None -> []
+        | Some (TomlValue.Array values) ->
+            let contracts = values |> List.map (fun value ->
+                let contract = tableAt key "read_only_buffers contract requires a table" value
+                onlyKeys key "read_only_buffers contract has unknown fields" ["parameter"; "content"; "extent"; "retention"; "hypothesis"] contract
+                let parameter = indexAt key "read_only_buffers requires nonnegative parameter within int range" "parameter" contract
+                let content =
+                    match nonemptyText key "read_only_buffers requires nonempty content" "content" contract with
+                    | "text" -> BorrowedContent.Text
+                    | "bytes" -> BorrowedContent.Bytes
+                    | _ -> refuse Diagnostics.PilotValueUnadmitted $"{key}.content" "read_only_buffers content must be text or bytes"
+                let extentKey = key + ".extent"
+                let extent =
+                    let fields =
+                        TomlTable.tryFind "extent" contract
+                        |> Option.map (tableAt extentKey "read_only_buffers extent requires a table")
+                        |> Option.defaultWith (fun () -> refuse Diagnostics.PilotKeyMissing extentKey "read_only_buffers requires extent")
+                    match TomlTable.tryFind "nul_terminated" fields with
+                    | Some value ->
+                        onlyKeys extentKey "read_only_buffers extent is either { count_parameter } or { nul_terminated = true }" ["nul_terminated"] fields
+                        match value with
+                        | TomlValue.Boolean true -> BindingReadOnlyBufferExtent.UncountedNulTerminated
+                        | TomlValue.Boolean false -> refuse Diagnostics.PilotValueUnadmitted $"{extentKey}.nul_terminated" "read_only_buffers extent nul_terminated admits only true"
+                        | _ -> refuse Diagnostics.PilotValueType $"{extentKey}.nul_terminated" "read_only_buffers extent nul_terminated requires a boolean"
+                    | None ->
+                        onlyKeys extentKey "read_only_buffers extent is either { count_parameter } or { nul_terminated = true }" ["count_parameter"] fields
+                        let count = indexAt extentKey "read_only_buffers extent requires nonnegative count_parameter within int range" "count_parameter" fields
+                        if parameter = count then
+                            refuse Diagnostics.ReadOnlyBufferCountInvalid $"{extentKey}.count_parameter" "read_only_buffers requires distinct buffer and count parameters"
+                        BindingReadOnlyBufferExtent.ExplicitCount count
+                let retentionKey = key + ".retention"
+                let retention =
+                    let fields =
+                        TomlTable.tryFind "retention" contract
+                        |> Option.map (tableAt retentionKey "read_only_buffers retention requires a table")
+                        |> Option.defaultWith (fun () -> refuse Diagnostics.PilotKeyMissing retentionKey "read_only_buffers requires retention")
+                    match nonemptyText retentionKey "read_only_buffers retention requires nonempty kind" "kind" fields with
+                    | "during_call" ->
+                        onlyKeys retentionKey "read_only_buffers during_call retention has unknown fields" ["kind"] fields
+                        BindingBufferRetention.DuringCall
+                    | "retained_until" ->
+                        onlyKeys retentionKey "read_only_buffers retained_until retention has unknown fields" ["kind"; "owner_parameter"; "redefined_by"; "releases"] fields
+                        let owner = indexAt retentionKey "read_only_buffers retention requires a nonnegative owner_parameter within int range" "owner_parameter" fields
+                        let redefinedBy =
+                            match TomlTable.tryFind "redefined_by" fields with
+                            | None -> []
+                            | Some (TomlValue.Array items) ->
+                                items |> List.map (function
+                                    | TomlValue.Integer v when v >= 0L && v <= int64 System.Int32.MaxValue -> int v
+                                    | TomlValue.Integer _ -> refuse Diagnostics.PilotValueUnadmitted $"{retentionKey}.redefined_by" "read_only_buffers retention redefined_by requires nonnegative parameter indices within int range"
+                                    | _ -> refuse Diagnostics.PilotValueType $"{retentionKey}.redefined_by" "read_only_buffers retention redefined_by requires parameter indices")
+                            | Some _ -> refuse Diagnostics.PilotValueType $"{retentionKey}.redefined_by" "read_only_buffers retention redefined_by requires an array"
+                        if (Set.ofList redefinedBy).Count <> redefinedBy.Length then
+                            refuse Diagnostics.PilotEntryRepeated $"{retentionKey}.redefined_by" "read_only_buffers retention redefined_by names one parameter more than once"
+                        let releasesKey = retentionKey + ".releases"
+                        let releases =
+                            match TomlTable.tryFind "releases" fields with
+                            | None -> []
+                            | Some (TomlValue.Array items) ->
+                                items |> List.map (fun item ->
+                                    let release = tableAt releasesKey "read_only_buffers retention releases requires tables" item
+                                    onlyKeys releasesKey "read_only_buffers retention releases has unknown fields" ["binding"; "parameter"] release
+                                    { BindingRetentionRelease.Binding = nonemptyText releasesKey "read_only_buffers retention releases requires nonempty binding" "binding" release
+                                      Parameter = indexAt releasesKey "read_only_buffers retention releases requires a nonnegative parameter within int range" "parameter" release })
+                            | Some _ -> refuse Diagnostics.PilotValueType releasesKey "read_only_buffers retention releases requires an array"
+                        BindingBufferRetention.RetainedUntil (owner, redefinedBy, releases)
+                    | other -> refuse Diagnostics.PilotValueUnadmitted $"{retentionKey}.kind" $"read_only_buffers retention kind '{other}' must be during_call or retained_until"
+                let hypothesisKey = key + ".hypothesis"
+                let hypothesis =
+                    TomlTable.tryFind "hypothesis" contract
+                    |> Option.map (tableAt hypothesisKey "read_only_buffers hypothesis requires a table")
+                    |> Option.defaultWith (fun () -> refuse Diagnostics.PilotKeyMissing hypothesisKey "read_only_buffers requires hypothesis")
+                onlyKeys hypothesisKey "read_only_buffers hypothesis has unknown fields" ["identity"; "version"; "source"] hypothesis
+                let text name = hypothesisText hypothesisKey $"read_only_buffers requires nonempty {name}" name hypothesis
+                { Parameter = parameter; Extent = extent; Content = content; Retention = retention
+                  Identity = text "identity"; Version = text "version"; Source = text "source" })
+            if (contracts |> List.map _.Parameter |> Set.ofList).Count <> contracts.Length then
+                refuse Diagnostics.ContractDuplicateParameter key "read_only_buffers has duplicate parameter indices"
+            contracts
+        | Some _ -> refuse Diagnostics.PilotValueType key "read_only_buffers requires an array"
+
+    let private deserializeBufferAbsences (bindingKey: string) binding =
+        let key = bindingKey + ".buffer_absences"
+        match TomlTable.tryFind "buffer_absences" binding with
+        | None -> []
+        | Some (TomlValue.Array values) ->
+            let contracts = values |> List.map (fun value ->
+                let contract = tableAt key "buffer_absences contract requires a table" value
+                onlyKeys key "buffer_absences contract has unknown fields" ["parameter"; "hypothesis"] contract
+                let parameter = indexAt key "buffer_absences requires nonnegative parameter within int range" "parameter" contract
+                let hypothesisKey = key + ".hypothesis"
+                let hypothesis =
+                    TomlTable.tryFind "hypothesis" contract
+                    |> Option.map (tableAt hypothesisKey "buffer_absences hypothesis requires a table")
+                    |> Option.defaultWith (fun () -> refuse Diagnostics.PilotKeyMissing hypothesisKey "buffer_absences requires hypothesis")
+                onlyKeys hypothesisKey "buffer_absences hypothesis has unknown fields" ["identity"; "version"; "source"] hypothesis
+                let text name = hypothesisText hypothesisKey $"buffer_absences requires nonempty {name}" name hypothesis
+                { Parameter = parameter; Identity = text "identity"; Version = text "version"; Source = text "source" })
+            if (contracts |> List.map _.Parameter |> Set.ofList).Count <> contracts.Length then
+                refuse Diagnostics.ContractDuplicateParameter key "buffer_absences has duplicate parameter indices"
+            contracts
+        | Some _ -> refuse Diagnostics.PilotValueType key "buffer_absences requires an array"
+
     /// A pointer result read as a borrowed view (#196): its content, owner, extent, the events
     /// that end its validity and the hypothesis stating them.
     let private deserializeBorrowedResult (bindingKey: string) binding =
@@ -958,6 +1106,8 @@ module PilotSerializer =
                           WritableBuffers = deserializeWritableBuffers bindingKey binding
                           CallbackInvocations = deserializeCallbackInvocations bindingKey binding
                           BorrowedResult = deserializeBorrowedResult bindingKey binding
+                          ReadOnlyBuffers = deserializeReadOnlyBuffers bindingKey binding
+                          BufferAbsences = deserializeBufferAbsences bindingKey binding
                           Ownership = optionalString "ownership" binding |> Option.map (function
                               | "caller_owns" -> CallerOwns | "callee_owns" -> CalleeOwns | "borrowed" -> Borrowed
                               | other -> refuse Diagnostics.PilotValueUnadmitted $"{bindingKey}.ownership" $"Unknown binding ownership '{other}'") }

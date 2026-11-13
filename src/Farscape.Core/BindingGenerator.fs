@@ -1422,10 +1422,15 @@ module BindingGenerator =
                     | _ -> ()
                     // An external contract must survive neither duplicate-map collapse
                     // nor namespace filtering. Refuse before any generation effects.
-                    let resultBindings = project.Options |> Option.map _.Bindings |> Option.defaultValue [] |> List.filter (fun binding -> binding.ResultRange.IsSome || not binding.CallbackInvocations.IsEmpty || not binding.WritableBuffers.IsEmpty)
+                    let resultBindings = project.Options |> Option.map _.Bindings |> Option.defaultValue [] |> List.filter (fun binding -> binding.ResultRange.IsSome || not binding.CallbackInvocations.IsEmpty || not binding.WritableBuffers.IsEmpty || not binding.ReadOnlyBuffers.IsEmpty || not binding.BufferAbsences.IsEmpty)
                     let bindings = project.Options |> Option.map _.Bindings |> Option.defaultValue []
                     for binding in resultBindings do
-                        let contract = if not binding.WritableBuffers.IsEmpty then "writable_buffers" elif binding.ResultRange.IsSome then "result_range" else "callback_invocations"
+                        let contract =
+                            if not binding.WritableBuffers.IsEmpty then "writable_buffers"
+                            elif not binding.ReadOnlyBuffers.IsEmpty then "read_only_buffers"
+                            elif not binding.BufferAbsences.IsEmpty then "buffer_absences"
+                            elif binding.ResultRange.IsSome then "result_range"
+                            else "callback_invocations"
                         // Located at the binding's declaration when the headers declare it.
                         let refuse code message =
                             let source =

@@ -249,7 +249,7 @@ let ``a retained callback registered with a captured environment is refused with
     let projection : PilotTypes.BindingProjection =
         { Name = "fx_set_handler"; Symbol = "fx_set_handler"; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
           ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None
-          ResultRange = None; Resource = None; WritableBuffers = []; CallbackInvocations = [ contract ]; BorrowedResult = None }
+          ResultRange = None; Resource = None; WritableBuffers = []; CallbackInvocations = [ contract ]; BorrowedResult = None; ReadOnlyBuffers = []; BufferAbsences = [] }
     let context = { FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty with Bindings = Map.ofList [ projection.Name, projection ] }
     let generate (data: string option) =
         let spec : PilotTypes.CallbackSpec =

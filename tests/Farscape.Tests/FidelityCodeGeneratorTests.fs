@@ -55,7 +55,7 @@ let ``each explicit callback nonnull source preserves its hypothesis provenance`
   let declarations = [CppParser.Declaration.Typedef (mkTypedef "Notify" "void (*)(void)"); CppParser.Declaration.Function func]
   let projection : PilotTypes.BindingProjection =
     { Name = func.Name; Symbol = func.Name; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
-      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; WritableBuffers = []; CallbackInvocations = []; BorrowedResult = None }
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; WritableBuffers = []; CallbackInvocations = []; BorrowedResult = None; ReadOnlyBuffers = []; BufferAbsences = [] }
   let ctx = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
   let ctx =
     { ctx with
@@ -77,7 +77,7 @@ let ``pilot callback nonnull cannot override native nullable evidence`` () =
   let declarations = [CppParser.Declaration.Typedef (mkTypedef "Notify" "void (*)(void)"); CppParser.Declaration.Function func]
   let projection : PilotTypes.BindingProjection =
     { Name = func.Name; Symbol = func.Name; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
-      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; WritableBuffers = []; CallbackInvocations = []; BorrowedResult = None }
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = [0]; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; WritableBuffers = []; CallbackInvocations = []; BorrowedResult = None; ReadOnlyBuffers = []; BufferAbsences = [] }
   let ctx = { FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty with Bindings = Map.ofList [func.Name, projection] }
   let error = Assert.ThrowsAny<System.Exception>(fun () -> FidelityCodeGenerator.generateFunctionDecls ctx "test" func |> ignore)
   Assert.Contains("register parameter 0: nullable native type conflicts with a nonnull contract", error.Message)
@@ -100,7 +100,7 @@ let ``explicit ownership hypotheses survive generation and withdrawal removes au
   let ctx = FidelityCodeGenerator.buildGenerationContext [CppParser.Declaration.Function func] Types.LP64 Map.empty
   let projection : PilotTypes.BindingProjection =
     { Name = func.Name; Symbol = "native_acquire"; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
-      ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; WritableBuffers = []; CallbackInvocations = []; BorrowedResult = None }
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None; WritableBuffers = []; CallbackInvocations = []; BorrowedResult = None; ReadOnlyBuffers = []; BufferAbsences = [] }
   let emit ownership =
     let current = { ctx with Bindings = Map.ofList [func.Name, { projection with Ownership = ownership }] }
     FidelityCodeGenerator.generateFunctionDecls current "test" func |> List.map CodeRenderer.render |> String.concat "\n"
@@ -772,7 +772,7 @@ let ``rejects unsupported pimpl struct for xclbin-like inherited pimpl with no d
 
 let private rangeProjection : PilotTypes.BindingProjection =
     { Name = "read"; Symbol = "native_read"; ReferenceParameters = []; ReadOnlyReferenceParameters = []; ReferenceElements = []
-      ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None; Resource = None; WritableBuffers = []; CallbackInvocations = []; BorrowedResult = None
+      ConstantParameters = []; StringParameters = []; NonnullCallbacks = []; ParameterHandles = []; ReturnHandle = None; Ownership = None; Resource = None; WritableBuffers = []; CallbackInvocations = []; BorrowedResult = None; ReadOnlyBuffers = []; BufferAbsences = []
       ResultRange = Some { Identity = "posix.read"; Version = "2024"; Source = "/contracts/read.pilot.toml"
                            Lower = PilotTypes.ResultRangeBound.Constant -1; Upper = PilotTypes.ResultRangeBound.Argument 2 } }
 let private renderResultRange projection func =
@@ -1314,7 +1314,7 @@ let ``owned nullable resource absence emits no inferred companion`` () =
 [<InlineData("unselected", "exact selected qualified generated declaration")>]
 [<InlineData("symbol", "exact selected qualified generated declaration")>]
 [<InlineData("ordinal", "requires release_parameter 0")>]
-[<InlineData("result", "raw Void result")>]
+[<InlineData("result", "raw Void or signed32 int result")>]
 [<InlineData("parameter", "unary matching CHandle")>]
 [<InlineData("nullable", "unary matching CHandle")>]
 [<InlineData("provenance", "requires nonempty source")>]
@@ -1326,7 +1326,7 @@ let ``owned nullable resource generation refuses unsupported release contracts``
         | "ordinal" -> {ownedResource with ReleaseParameter = 1}
         | "provenance" -> {ownedResource with Source = " "}
         | _ -> ownedResource
-    let result = if shape = "result" then "int" else "void"
+    let result = if shape = "result" then "unsigned int" else "void"
     let parameter = if shape = "parameter" then "int" else "void *"
     let error = Assert.ThrowsAny<System.Exception>(fun () -> ownedResourceSource (Some resource) result parameter (shape <> "nullable") false "normal" |> ignore)
     Assert.Contains("resource", error.Message)
@@ -1334,7 +1334,7 @@ let ``owned nullable resource generation refuses unsupported release contracts``
 
 [<Theory>]
 [<InlineData("nonnull", "owned_nullable_return requires a native data pointer returned as option<CHandle<marker>>")>]
-[<InlineData("marker", "release requires unary matching CHandle Value parameter 0 and a raw Void result")>]
+[<InlineData("marker", "release requires unary matching CHandle Value parameter 0 and a raw Void or signed32 int result")>]
 [<InlineData("translated", "freeFirst parameter 0: constant projection requires an integer literal and scalar integer parameter")>]
 let ``owned nullable resource generation refuses nonoptional marker and translated contracts`` profile reason =
     let error = Assert.ThrowsAny<System.Exception>(fun () ->
@@ -1972,7 +1972,7 @@ let private plainProjection name = { rangeProjection with Name = name; Symbol = 
 [<InlineData("range-argument", "FS9151", "read", "result_range", 1, "argument 1 requires a scalar integer Value parameter")>]
 [<InlineData("range-bounds", "FS9152", "read", "result_range", -1, "constant bounds are contradictory")>]
 [<InlineData("resource-ordinal", "FS9153", "mallocFirst", "resource", -1, "owned_nullable_return requires release_parameter 0")>]
-[<InlineData("release-shape", "FS9154", "mallocFirst", "resource", -1, "release requires unary matching CHandle Value parameter 0 and a raw Void result")>]
+[<InlineData("release-shape", "FS9154", "mallocFirst", "resource", -1, "release requires unary matching CHandle Value parameter 0 and a raw Void or signed32 int result")>]
 [<InlineData("buffer-same", "FS9155", "read", "writable_buffers", 1, "requires distinct buffer and count parameters")>]
 [<InlineData("buffer-element", "FS9156", "read", "writable_buffers", 1, "buffer parameter requires an explicit unsigned8 byte reference element contract")>]
 [<InlineData("buffer-count", "FS9157", "read", "writable_buffers", 2, "count parameter requires scalar integer Value passing")>]
@@ -2015,7 +2015,7 @@ let ``each callback and projection refusal carries its code, its declaration's l
         | "range-argument" -> range { rangeProjection with ResultRange = Some { range' with Upper = PilotTypes.ResultRangeBound.Argument 1 } } readFunction
         | "range-bounds" -> range { rangeProjection with ResultRange = Some { range' with Lower = PilotTypes.ResultRangeBound.Constant 5; Upper = PilotTypes.ResultRangeBound.Constant 4 } } readFunction
         | "resource-ordinal" -> owned { ownedResource with ReleaseParameter = 1 } "void"
-        | "release-shape" -> owned ownedResource "int"
+        | "release-shape" -> owned ownedResource "double"
         | "buffer-same" -> range { writableProjection with WritableBuffers = [{ writableContract with CountParameter = 1 }] } readFunction
         | "buffer-element" -> range { writableProjection with ReferenceElements = [""; "int"] } readFunction
         | "buffer-count" -> range { writableProjection with ResultRange = None } { readFunction with Parameters = ["fd", "int"; "buffer", "void *"; "count", "double"] }
@@ -2060,3 +2060,129 @@ let ``a nested nullable callback value type resolution refuses is located at the
     Assert.Equal("Nested native function-pointer value 'void (*)(void)' requires explicit nonnull evidence; nullable callback values require a supported boundary adapter.", d.Message)
     Assert.Equal(func.Location.Location, d.Source)
     Assert.Equal(Some { Diagnostics.PilotLocation.PilotFile = ""; Diagnostics.PilotLocation.Key = "options.bindings[inspect]"; Diagnostics.PilotLocation.Parameter = Some 0 }, d.Pilot)
+
+[<Fact>]
+let ``status-returning signed32 release is admitted for owned nullable resource`` () =
+    let source = ownedResourceSource (Some ownedResource) "int" "void *" true false "normal"
+    Assert.Contains("let mallocFirstResourceDescriptor : Expr<ResourceDescriptor>", source)
+    Assert.Contains("let freeFirst (ptr: CHandle<unit>) : int =", source)
+
+[<Theory>]
+[<InlineData("unsigned int")>]
+[<InlineData("long")>]
+[<InlineData("double")>]
+[<InlineData("_Bool")>]
+[<InlineData("void *")>]
+let ``non-void non-signed32 release return is refused with FS9154`` releaseReturnType =
+    let d = refusedBy (fun () -> ownedResourceSource (Some ownedResource) releaseReturnType "void *" true false "normal" |> ignore)
+    Assert.Equal(Diagnostics.ResourceReleaseShape, d.Code)
+
+[<Fact>]
+let ``read-only buffer explicit-count emits zero-copy ReadOnlyView byte and string without option handle wrappers`` () =
+    let writeFunc = mkFunc "write" "long" [ "fd", "int"; "buf", "const void *"; "count", "unsigned long" ]
+    let prepFunc = mkFunc "prepare" "int" [ "db", "void *"; "sql", "const char *"; "nByte", "int" ]
+    let writeBinding =
+        { plainProjection "write" with
+            ReadOnlyBuffers = [
+                { Parameter = 1; Extent = PilotTypes.BindingReadOnlyBufferExtent.ExplicitCount 2
+                  Content = PilotTypes.BorrowedContent.Bytes; Retention = PilotTypes.BindingBufferRetention.DuringCall
+                  Identity = "posix.write.buf"; Version = "1"; Source = "posix.pilot.toml" } ] }
+    let prepBinding =
+        { plainProjection "prepare" with
+            ParameterHandles = [ "db" ]
+            ReadOnlyBuffers = [
+                { Parameter = 1; Extent = PilotTypes.BindingReadOnlyBufferExtent.ExplicitCount 2
+                  Content = PilotTypes.BorrowedContent.Text; Retention = PilotTypes.BindingBufferRetention.DuringCall
+                  Identity = "sqlite.prepare.sql"; Version = "1"; Source = "sqlite.pilot.toml" } ] }
+    let declarations = [ CppParser.Declaration.Function writeFunc; CppParser.Declaration.Function prepFunc ]
+    let ctx = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
+    let ctx = { ctx with Bindings = Map.ofList [ "write", writeBinding; "prepare", prepBinding ] }
+    let source = FidelityCodeGenerator.generateModule ctx Set.empty declarations "Test.Native" "c" "ro buffers" []
+    Assert.Contains("let write (fd: int) (buf: ReadOnlyView<byte>) (count: int) : int =", source)
+    Assert.Contains("let prepare (db: option<CHandle<db>>) (sql: string) (nByte: int) : int =", source)
+    Assert.DoesNotContain("option<CHandle<unit>>", source)
+    Assert.DoesNotContain("option<ReadOnlyView<byte>>", source)
+    Assert.Contains("Expr<ReadOnlyBufferDescriptor>", source)
+    Assert.Contains("Extent = ExplicitCount 2", source)
+    Assert.Contains("Content = RawBytes", source)
+    Assert.Contains("Content = Utf8Text", source)
+    Assert.Contains("Retention = DuringCall", source)
+
+[<Fact>]
+let ``uncounted nul-terminated read-only buffers emit BufferAbsenceContract only when paired with buffer_absences`` () =
+    let openFunc = mkFunc "open_v2" "int" [ "filename", "const char *"; "ppDb", "void **"; "flags", "int"; "zVfs", "const char *" ]
+    let binding =
+        { plainProjection "open_v2" with
+            ReferenceParameters = [ 1 ]
+            ReadOnlyBuffers = [
+                { Parameter = 0; Extent = PilotTypes.BindingReadOnlyBufferExtent.UncountedNulTerminated
+                  Content = PilotTypes.BorrowedContent.Text; Retention = PilotTypes.BindingBufferRetention.DuringCall
+                  Identity = "sqlite.open.filename"; Version = "1"; Source = "sqlite.pilot.toml" }
+                { Parameter = 3; Extent = PilotTypes.BindingReadOnlyBufferExtent.UncountedNulTerminated
+                  Content = PilotTypes.BorrowedContent.Text; Retention = PilotTypes.BindingBufferRetention.DuringCall
+                  Identity = "sqlite.open.zvfs"; Version = "1"; Source = "sqlite.pilot.toml" } ]
+            BufferAbsences = [
+                { Parameter = 3; Identity = "sqlite.open.zvfs.absent"; Version = "1"; Source = "sqlite.pilot.toml" } ] }
+    let declarations = [ CppParser.Declaration.Function openFunc ]
+    let ctx = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
+    let ctx = { ctx with Bindings = Map.ofList [ "open_v2", binding ] }
+    let source = FidelityCodeGenerator.generateModule ctx Set.empty declarations "Test.SQLite" "sqlite3" "open_v2" []
+    Assert.Contains("(filename: string)", source)
+    Assert.Contains("(zVfs: option<string>)", source)
+    Assert.Contains("Extent = UncountedNulTerminated", source)
+    Assert.Contains("Expr<BufferAbsenceContract>", source)
+    Assert.Contains("BAREWire.Descriptors.BufferAbsenceContract.Binding = \"Test.SQLite.open_v2\"", source)
+
+[<Theory>]
+[<InlineData("bytes-nul", "FS9254")>]
+[<InlineData("text-void", "FS9254")>]
+[<InlineData("writable-conflict", "FS9254")>]
+[<InlineData("count-double", "FS9255")>]
+[<InlineData("count-same", "FS9255")>]
+[<InlineData("ret-no-owner-handle", "FS9256")>]
+[<InlineData("ret-empty-set", "FS9256")>]
+[<InlineData("ret-redef-omits-owner", "FS9256")>]
+[<InlineData("ret-release-mismatch", "FS9256")>]
+[<InlineData("absence-unpaired", "FS9257")>]
+[<InlineData("absence-same-id", "FS9139")>]
+[<InlineData("absence-nonnull", "FS9145")>]
+[<InlineData("nullable-without-absence", "FS9145")>]
+let ``read-only buffer and absence validation refuses invalid contracts cleanly`` shape expectedCode =
+    let dbHandle = CppParser.Declaration.Typedef (mkTypedef "sqlite3" "struct sqlite3")
+    let stmtHandle = CppParser.Declaration.Typedef (mkTypedef "sqlite3_stmt" "struct sqlite3_stmt")
+    let fn =
+        match shape with
+        | "nullable-without-absence" -> mkFunc "take" "int" [ "stmt", "sqlite3_stmt *"; "text", "const char * _Nullable"; "n", "int" ]
+        | "count-double" -> mkFunc "take" "int" [ "stmt", "sqlite3_stmt *"; "text", "const void *"; "n", "double" ]
+        | _ -> mkFunc "take" "int" [ "stmt", "sqlite3_stmt *"; "text", "const char *"; "n", "int" ]
+    let closeWrong = mkFunc "close_db" "int" [ "db", "sqlite3 *" ]
+    let ro : PilotTypes.BindingReadOnlyBuffer =
+        { Parameter = 1; Extent = PilotTypes.BindingReadOnlyBufferExtent.ExplicitCount 2
+          Content = PilotTypes.BorrowedContent.Text; Retention = PilotTypes.BindingBufferRetention.DuringCall
+          Identity = "test.ro"; Version = "1"; Source = "test.toml" }
+    let abs id : PilotTypes.BindingBufferAbsence =
+        { Parameter = 1; Identity = id; Version = "1"; Source = "test.toml" }
+    let binding =
+        match shape with
+        | "bytes-nul" -> { plainProjection "take" with ReadOnlyBuffers = [ { ro with Content = PilotTypes.BorrowedContent.Bytes; Extent = PilotTypes.BindingReadOnlyBufferExtent.UncountedNulTerminated } ] }
+        | "text-void" -> { plainProjection "take" with ReadOnlyBuffers = [ ro ] }
+        | "writable-conflict" -> { plainProjection "take" with ReferenceParameters = [ 1 ]; ReferenceElements = [ ""; "unsigned char" ]; ReadOnlyBuffers = [ ro ] }
+        | "count-double" -> { plainProjection "take" with ReadOnlyBuffers = [ { ro with Content = PilotTypes.BorrowedContent.Bytes } ] }
+        | "count-same" -> { plainProjection "take" with ReadOnlyBuffers = [ { ro with Extent = PilotTypes.BindingReadOnlyBufferExtent.ExplicitCount 1 } ] }
+        | "ret-no-owner-handle" -> { plainProjection "take" with ReadOnlyBuffers = [ { ro with Retention = PilotTypes.BindingBufferRetention.RetainedUntil (2, [ 2 ], []) } ] }
+        | "ret-empty-set" -> { plainProjection "take" with ReadOnlyBuffers = [ { ro with Retention = PilotTypes.BindingBufferRetention.RetainedUntil (0, [], []) } ] }
+        | "ret-redef-omits-owner" -> { plainProjection "take" with ReadOnlyBuffers = [ { ro with Retention = PilotTypes.BindingBufferRetention.RetainedUntil (0, [ 2 ], []) } ] }
+        | "ret-release-mismatch" -> { plainProjection "take" with ReadOnlyBuffers = [ { ro with Retention = PilotTypes.BindingBufferRetention.RetainedUntil (0, [ 0 ], [ { Binding = "Test.Native.close_db"; Parameter = 0 } ]) } ] }
+        | "absence-unpaired" -> { plainProjection "take" with BufferAbsences = [ abs "test.absent" ] }
+        | "absence-same-id" -> { plainProjection "take" with ReadOnlyBuffers = [ ro ]; BufferAbsences = [ abs "test.ro" ] }
+        | "absence-nonnull" -> { plainProjection "take" with ReadOnlyBuffers = [ ro ]; BufferAbsences = [ abs "test.absent" ] }
+        | _ -> { plainProjection "take" with ReadOnlyBuffers = [ ro ] }
+    let fn = if shape = "text-void" then { fn with Parameters = [ "stmt", "sqlite3_stmt *"; "text", "const void *"; "n", "int" ] } else fn
+    let declarations = [ dbHandle; stmtHandle; CppParser.Declaration.Function fn; CppParser.Declaration.Function closeWrong ]
+    let ctx = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
+    let ctx =
+        { ctx with
+            Bindings = Map.ofList [ "take", binding ]
+            NonnullAnnotations = if shape = "absence-nonnull" then Some { Parameters = Map.ofList [ "take", [ 1 ] ]; Returns = Set.empty } else None }
+    let d = refusedBy (fun () -> FidelityCodeGenerator.generateModule ctx Set.empty declarations "Test.Native" "test" "test" [] |> ignore)
+    Assert.Equal(expectedCode, d.Code)

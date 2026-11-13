@@ -401,10 +401,12 @@ module Substantiation =
             let callbackAdapters = ResizeArray<string>()
             let descriptorTypes =
                 set [ "StructDescriptor"; "PeripheralDescriptor"; "FunctionDescriptor"; "ResultRangeDescriptor"
-                      "ResourceDescriptor"; "WritableBufferDescriptor"; "CallbackInvocationContract"
-                      "CallbackDescriptor"; "ScopedCallbackDescriptor"; "RetainedCallbackDescriptor"; "ProcessExitCallbackDescriptor"
+                      "ResourceDescriptor"; "WritableBufferDescriptor"; "ReadOnlyBufferDescriptor"; "BufferAbsenceContract"
+                      "CallbackInvocationContract"; "CallbackDescriptor"; "ScopedCallbackDescriptor"
+                      "RetainedCallbackDescriptor"; "ProcessExitCallbackDescriptor"
                       "CallbackAbsenceContract"; "CallbackContextDescriptor"; "CountedEntryArrayDescriptor"
-                      "BorrowedResultDescriptor"; "FlexibleArrayDescriptor"; "MappedReturnDescriptor" ]
+                      "BorrowedResultDescriptor"; "BorrowedResultViewDescriptor"
+                      "FlexibleArrayDescriptor"; "MappedReturnDescriptor" ]
             // Literal patterns make CCS verify the actual scalar kind, including
             // an imported abbreviation that shadows an annotation's spelling.
             let scalarPatterns =

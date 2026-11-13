@@ -387,3 +387,54 @@ void g(struct parent *value) __attribute__((nonnull(1)));
         let fs = functions declarations
         Assert.Equal(2, fs.Length)
         Assert.Equal<int list list>([[0]; [0]], fs |> List.map positions)
+
+module LastLocFilenameTrackingTests =
+
+    [<Fact>]
+    let ``system stdio.h retains declarations following nested floatn includes`` () =
+        let options =
+            { CppParser.defaultOptions "/usr/include/stdio.h" with
+                IncludePaths = [ "/usr/include" ]
+                IncludeMacros = false }
+        let declarations =
+            match CppParser.parseHeader options with
+            | Ok ds -> ds
+            | Error err -> failwith err
+        let names =
+            declarations
+            |> List.choose (function CppParser.Function f -> Some f.Name | _ -> None)
+            |> Set.ofList
+        for expected in [ "fopen"; "fclose"; "fread"; "fwrite"; "puts"; "putchar" ] do
+            Assert.True(names.Contains expected, $"Expected stdio.h declaration '{expected}' after nested includes")
+        Assert.False(names.Contains "__bswap_16", "Included bits/byteswap helper must remain excluded")
+
+    [<Fact>]
+    let ``declarations resuming after include and macro locations retain target provenance`` () =
+        let directory = TestHelpers.TestScratch.create "lastloc-tracking"
+        try
+            let included = Path.Combine(directory, "included_types.h")
+            let target = Path.Combine(directory, "target_api.h")
+            File.WriteAllText(included, "int included_only_fn(int x);\n")
+            File.WriteAllText(
+                target,
+                "#define DECL_FN(name) int name(int arg)\n" +
+                "#include \"included_types.h\"\n" +
+                "DECL_FN(resumed_via_macro);\n" +
+                "void resumed_following_decl(int value);\n")
+            let options =
+                { CppParser.defaultOptions target with
+                    IncludePaths = [ directory ]
+                    IncludeMacros = false }
+            let declarations =
+                match CppParser.parseHeader options with
+                | Ok ds -> ds
+                | Error err -> failwith err
+            let names =
+                declarations
+                |> List.choose (function CppParser.Function f -> Some f.Name | _ -> None)
+                |> Set.ofList
+            Assert.False(names.Contains "included_only_fn")
+            Assert.True(names.Contains "resumed_via_macro")
+            Assert.True(names.Contains "resumed_following_decl")
+        finally
+            Directory.Delete(directory, true)

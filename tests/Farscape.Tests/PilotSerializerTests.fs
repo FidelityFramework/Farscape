@@ -703,3 +703,66 @@ let ``writable buffer pilot refuses malformed ambiguous and unknown contracts`` 
     match PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail (writablePilot value)) with
     | Error error -> Assert.Contains("writable_buffers", error); Assert.Contains(reason, error)
     | Ok _ -> failwith "Invalid writable buffer contract was admitted"
+
+let private roProfile =
+    "{ parameter = 2, content = \"text\", extent = { count_parameter = 3 }, retention = { kind = \"retained_until\", owner_parameter = 0, redefined_by = [0, 1], releases = [{ binding = \"Test.SQLite.sqlite3_finalize\", parameter = 0 }] }, hypothesis = { identity = \"sqlite.bind.text.static\", version = \"1\", source = \"sqlite.pilot.toml\" } }"
+let private absenceProfile =
+    "{ parameter = 3, hypothesis = { identity = \"sqlite.open.zvfs.absent\", version = \"1\", source = \"sqlite.pilot.toml\" } }"
+let private roPilot roText absenceText =
+    PilotSerializer.toTomlString sampleProject
+    + "\n[[options.bindings]]\nname = \"sqlite3_bind_text\"\n"
+    + (if roText = "absent" then "" else "read_only_buffers = " + roText + "\n")
+    + (if absenceText = "absent" then "" else "buffer_absences = " + absenceText + "\n")
+
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``read-only buffer and buffer absence contracts roundtrip accurately`` absent =
+    let read text = PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail text) |> function Ok value -> value | Error error -> failwith error
+    let project = read (roPilot (if absent then "absent" else "[" + roProfile + "]") (if absent then "absent" else "[" + absenceProfile + "]"))
+    let binding = project.Options.Value.Bindings.Head
+    if absent then
+        Assert.Empty(binding.ReadOnlyBuffers)
+        Assert.Empty(binding.BufferAbsences)
+    else
+        let expectedRo : PilotTypes.BindingReadOnlyBuffer =
+            { Parameter = 2
+              Extent = PilotTypes.BindingReadOnlyBufferExtent.ExplicitCount 3
+              Content = PilotTypes.BorrowedContent.Text
+              Retention = PilotTypes.BindingBufferRetention.RetainedUntil (0, [ 0; 1 ], [ { Binding = "Test.SQLite.sqlite3_finalize"; Parameter = 0 } ])
+              Identity = "sqlite.bind.text.static"; Version = "1"; Source = "sqlite.pilot.toml" }
+        let expectedAbs : PilotTypes.BindingBufferAbsence =
+            { Parameter = 3; Identity = "sqlite.open.zvfs.absent"; Version = "1"; Source = "sqlite.pilot.toml" }
+        Assert.Equal<PilotTypes.BindingReadOnlyBuffer list>([ expectedRo ], binding.ReadOnlyBuffers)
+        Assert.Equal<PilotTypes.BindingBufferAbsence list>([ expectedAbs ], binding.BufferAbsences)
+    Assert.Equal(project, read (PilotSerializer.toTomlString project))
+
+[<Theory>]
+[<InlineData("ro", "same", "distinct buffer and count parameters")>]
+[<InlineData("ro", "nul-false", "nul_terminated admits only true")>]
+[<InlineData("ro", "kind", "during_call or retained_until")>]
+[<InlineData("ro", "content", "text or bytes")>]
+[<InlineData("ro", "extra", "has unknown fields")>]
+[<InlineData("ro", "redef-dup", "names one parameter more than once")>]
+[<InlineData("ro", "dup", "duplicate parameter indices")>]
+[<InlineData("abs", "extra", "has unknown fields")>]
+[<InlineData("abs", "dup", "duplicate parameter indices")>]
+let ``read-only buffer and absence pilot deserialization refuses malformed contracts`` which shape reason =
+    let roVal, absVal =
+        if which = "ro" then
+            let c =
+                match shape with
+                | "same" -> roProfile.Replace("count_parameter = 3", "count_parameter = 2")
+                | "nul-false" -> roProfile.Replace("{ count_parameter = 3 }", "{ nul_terminated = false }")
+                | "kind" -> roProfile.Replace("kind = \"retained_until\"", "kind = \"forever\"")
+                | "content" -> roProfile.Replace("content = \"text\"", "content = \"ints\"")
+                | "extra" -> roProfile.Replace("content =", "extra = true, content =")
+                | "redef-dup" -> roProfile.Replace("[0, 1]", "[0, 0]")
+                | _ -> roProfile
+            (if shape = "dup" then "[" + c + ", " + c + "]" else "[" + c + "]"), "absent"
+        else
+            let c = if shape = "extra" then absenceProfile.Replace("parameter =", "extra = 1, parameter =") else absenceProfile
+            "absent", (if shape = "dup" then "[" + c + ", " + c + "]" else "[" + c + "]")
+    match PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail (roPilot roVal absVal)) with
+    | Error error -> Assert.Contains(reason, error)
+    | Ok _ -> failwith "Invalid read_only_buffers/buffer_absences contract was admitted"

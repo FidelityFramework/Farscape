@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -56,6 +56,7 @@
     <Compile Include="SubstantiationTests.fs" />
     <Compile Include="SubstantiationDossierTests.fs" />
     <Compile Include="SubstantiationSeamSuiteTests.fs" />
+    <Compile Include="LibcNativeJourneysTests.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
