@@ -1170,3 +1170,243 @@ module TargetLibrarySeamScaffoldingTests =
             Assert.True(parentRecordIdx > childModuleIdx, "Types.clef must emit Outer_inner record and Descriptor before type Outer =")
         finally
             Directory.Delete(work, true)
+
+    [<Fact>]
+    let ``SQLite M2 static archive StaticArchiveContract, ProcessLinkSpec, and Static Binding Elision ELF verification`` () =
+        let sqliteHeader = "/usr/include/sqlite3.h"
+        Assert.True(File.Exists sqliteHeader, $"Required system header missing: {sqliteHeader}")
+        let work = TestHelpers.TestScratch.create "m2-sqlite-static-seam"
+        try
+            let refusedWithMessage (expectedCode: string) (expectedFragment: string) = function
+                | Error (refusal: Diagnostics.Refusal) ->
+                    Assert.Equal<string list>([ expectedCode ], refusal.Diagnostics |> List.map (fun d -> d.Code) |> List.distinct)
+                    Assert.Contains(expectedFragment, refusal.Text, StringComparison.Ordinal)
+                | Ok _ -> failwithf "expected %s refusal containing '%s', got success" expectedCode expectedFragment
+
+            let usedC = Path.Combine(work, "sqlite_used.c")
+            let usedObj = Path.Combine(work, "sqlite_used.o")
+            let deadC = Path.Combine(work, "sqlite_dead.c")
+            let deadObj = Path.Combine(work, "sqlite_dead.o")
+            let archivePath = Path.Combine(work, "libsqlite3.a")
+            let sharedPath = Path.Combine(work, "libsqlite3.so")
+
+            let usedBody =
+                [ "int sqlite3_open_v2(const char *f, void **p, int fl, const char *v) { (void)f;(void)p;(void)fl;(void)v; return 0; }"
+                  "int sqlite3_close_v2(void *db) { (void)db; return 0; }"
+                  "int sqlite3_prepare_v2(void *db, const char *s, int n, void **st, const char **t) { (void)db;(void)s;(void)n;(void)st;(void)t; return 0; }"
+                  "int sqlite3_prepare_v3(void *db, const char *s, int n, unsigned p, void **st, const char **t) { (void)db;(void)s;(void)n;(void)p;(void)st;(void)t; return 0; }"
+                  "int sqlite3_step(void *st) { (void)st; return 0; }"
+                  "int sqlite3_reset(void *st) { (void)st; return 0; }"
+                  "int sqlite3_finalize(void *st) { (void)st; return 0; }"
+                  "int sqlite3_clear_bindings(void *st) { (void)st; return 0; }"
+                  "int sqlite3_bind_text(void *st, int i, const char *v, int n, void (*d)(void *)) { (void)st;(void)i;(void)v;(void)n;(void)d; return 0; }"
+                  "int sqlite3_bind_blob(void *st, int i, const void *v, int n, void (*d)(void *)) { (void)st;(void)i;(void)v;(void)n;(void)d; return 0; }"
+                  "const unsigned char *sqlite3_column_text(void *st, int c) { (void)st;(void)c; return 0; }"
+                  "const void *sqlite3_column_blob(void *st, int c) { (void)st;(void)c; return 0; }"
+                  "int sqlite3_column_bytes(void *st, int c) { (void)st;(void)c; return 0; }"
+                  "const char *sqlite3_errmsg(void *db) { (void)db; return 0; }"
+                  "int sqlite3_bind_parameter_index(void *st, const char *z) { (void)st;(void)z; return 0; }" ]
+                |> String.concat "\n"
+            let deadBody = "int sqlite3_unused_dead_symbol(int value) { return value * 17; }\n"
+
+            writeUtf8 usedC usedBody
+            writeUtf8 deadC deadBody
+            run work "compile-sqlite-used" (ClangToolchain.startInfo [ "-c"; "-O2"; "-fPIC"; "-ffunction-sections"; "-fdata-sections"; usedC; "-o"; usedObj ]) |> ignore
+            run work "compile-sqlite-dead" (ClangToolchain.startInfo [ "-c"; "-O2"; "-fPIC"; "-ffunction-sections"; "-fdata-sections"; deadC; "-o"; deadObj ]) |> ignore
+            run work "ar-sqlite-static" (ClangToolchain.arStartInfo [ "rcs"; archivePath; usedObj; deadObj ]) |> ignore
+            run work "compile-sqlite-so" (ClangToolchain.startInfo [ "-O2"; "-shared"; "-fPIC"; "-Wl,-soname,libsqlite3.so.0"; usedC; deadC; "-o"; sharedPath ]) |> ignore
+
+            let archiveSha = ClangToolchain.sha256 archivePath
+            let inspectedArchive = ArchiveInspection.inspect archivePath (Some archiveSha) |> accepted
+            Assert.True(inspectedArchive.Symbols.ContainsKey "sqlite3_open_v2")
+            Assert.True(inspectedArchive.Symbols.ContainsKey "sqlite3_unused_dead_symbol")
+
+            let outDir = Path.Combine(work, "generated")
+            let pilotPath = Path.Combine(work, "StaticSqliteSeam.pilot.toml")
+            writeLines pilotPath
+                (sqlitePilotLines outDir
+                    [ "[library.artifact]"
+                      "kind = \"static-archive\""
+                      "path = " + quote archivePath
+                      "sha256 = " + quote archiveSha ])
+
+            ScratchDirectory.within work (fun () -> BindingGenerator.generateFromProjectDiagnosed pilotPath false false Types.LP64)
+            |> accepted |> ignore
+
+            let provenancePath = Assert.Single(Directory.GetFiles(outDir, "*.link-provenance.toml", SearchOption.AllDirectories))
+            let provenanceText = File.ReadAllText provenancePath
+            Assert.Contains("kind = \"static-archive\"", provenanceText)
+            Assert.Contains(archiveSha.ToLowerInvariant(), provenanceText)
+            Assert.Contains("sqlite_used.o", provenanceText)
+            Assert.Contains("sqlite_dead.o", provenanceText)
+
+            let loadingPath = Path.Combine(work, "Loading.clef")
+            writeLines loadingPath
+                [ "module Fidelity.Sqlite.StaticLoading"
+                  "let archiveContract : BAREWire.Platform.StaticArchiveContract = {"
+                  "    ArchivePath = " + quote archivePath
+                  "    ArchiveSource = \"sqlite3-static-probe\""
+                  "    Sha256 = " + quote archiveSha
+                  "    Format = \"elf64-relocatable\""
+                  "    Visibility = \"default\""
+                  "}"
+                  "let contract : BAREWire.Platform.ProcessLinkSpec = {"
+                  "    Contract = {"
+                  "        Identity = \"sqlite-static-seam\""
+                  "        Version = \"1\""
+                  "        Source = \"sqlite3.h\""
+                  "        Library = \"sqlite3\""
+                  "        Runtime = \"libc\""
+                  "        Os = \"linux\""
+                  "        Arch = \"x86_64\""
+                  "        LoadAt = \"StaticLink\""
+                  "        LiveUntil = \"ProcessTermination\""
+                  "        Unloading = \"Forbidden\""
+                  "        ExportedLibrary = \"Forbidden\""
+                  "    }"
+                  "    LinkKind = \"static-archive\""
+                  "    DynamicSharedObject = \"\""
+                  "    StaticArchive = Some {"
+                  "        ArchivePath = " + quote archivePath
+                  "        ArchiveSource = \"sqlite3-static-probe\""
+                  "        Sha256 = " + quote archiveSha
+                  "        Format = \"elf64-relocatable\""
+                  "        Visibility = \"default\""
+                  "    }"
+                  "}" ]
+
+            let loadingDigest =
+                Substantiation.inspectSource (set [ "Fidelity.Sqlite.StaticLoading.archiveContract"; "Fidelity.Sqlite.StaticLoading.contract" ]) loadingPath
+                |> accepted
+            Assert.Contains("Fidelity.Sqlite.StaticLoading.archiveContract", loadingDigest.CompileTimeDeclarations)
+            Assert.Contains("Fidelity.Sqlite.StaticLoading.contract", loadingDigest.CompileTimeDeclarations)
+
+            let boundaryClef = Path.Combine(outDir, "Boundary", "Boundary.clef")
+            let typesClef = Path.Combine(outDir, "Types.clef")
+            let boundaryFidproj = Path.Combine(outDir, "Fidelity.Sqlite.Boundary.fidproj")
+            Assert.True(File.Exists boundaryClef)
+            Assert.True(File.Exists typesClef)
+            Assert.True(File.Exists boundaryFidproj)
+
+            let boundaryRequest : SubstantiationBoundary.Request =
+                { FidprojPath = boundaryFidproj
+                  PackageName = "Fidelity.Sqlite.Boundary"
+                  LinkLibraries = [| "sqlite3" |]
+                  LinkObjects = [| archivePath |]
+                  PilotPath = Some pilotPath
+                  LinkProvenancePath = Some provenancePath
+                  Sources = [| loadingPath, File.ReadAllText loadingPath; typesClef, File.ReadAllText typesClef; boundaryClef, File.ReadAllText boundaryClef |]
+                  WorkDirectory = Path.Combine(work, "boundary-eval") }
+            let boundaryEvidence = ScratchDirectory.within work (fun () -> SubstantiationBoundary.evaluate boundaryRequest) |> accepted
+            Assert.Equal("static-archive", boundaryEvidence.LinkMode)
+            Assert.True boundaryEvidence.Strata.StaticArchive
+            Assert.Contains("static-dynamic-link-elision", boundaryEvidence.RequiredSeamChecks)
+            Assert.Contains(boundaryEvidence.RestsOn, fun h -> h.Family = "H-Link" && h.Statement.Contains(archivePath, StringComparison.Ordinal))
+
+            let staticProbeC = Path.Combine(work, "sqlite_static_probe.c")
+            let staticBin = Path.Combine(work, "sqlite_static_probe")
+            let dynProbeC = Path.Combine(work, "sqlite_dynamic_probe.c")
+            writeLines staticProbeC
+                [ "int sqlite3_open_v2(const char *f, void **p, int fl, const char *v);"
+                  "int sqlite3_close_v2(void *db);"
+                  "int main(void) {"
+                  "    void *db = 0;"
+                  "    int rc = sqlite3_open_v2(\":memory:\", &db, 0, 0);"
+                  "    return rc + sqlite3_close_v2(db);"
+                  "}" ]
+            writeLines dynProbeC
+                [ "int sqlite3_open_v2(const char *f, void **p, int fl, const char *v);"
+                  "int sqlite3_close_v2(void *db);"
+                  "int main(void) {"
+                  "    void *db = 0;"
+                  "    int rc = sqlite3_open_v2(\":memory:\", &db, 0, 0);"
+                  "    return rc + sqlite3_close_v2(db);"
+                  "}" ]
+            run work "compile-sqlite-static-probe" (ClangToolchain.startInfo [ "-O2"; "-Wl,--gc-sections"; staticProbeC; archivePath; "-o"; staticBin ]) |> ignore
+
+            let staticElf = SubstantiationSeams.inspectElfExecutable staticBin |> accepted
+            let sharedElf = SubstantiationSeams.inspectElfExecutable sharedPath |> accepted
+            Assert.Equal(Some "libsqlite3.so.0", sharedElf.Soname)
+
+            let stubFile name : Substantiation.FileDigest =
+                let p = Path.Combine(work, name)
+                writeUtf8 p name
+                { Substantiation.Path = p; Sha256 = ClangToolchain.sha256 p }
+            let artifactsDir = Path.Combine(work, "artifacts")
+            Directory.CreateDirectory artifactsDir |> ignore
+            let manifest =
+                TargetLibraryCensusFixtures.buildManifest
+                    "Fidelity.Sqlite.Boundary"
+                    artifactsDir
+                    (stubFile "SqliteStatic.fidproj")
+                    (stubFile "Composer.dll")
+                    (stubFile "dotnet")
+                    ({ Substantiation.Path = staticBin; Sha256 = staticElf.Sha256 } : Substantiation.FileDigest)
+                    (stubFile "Harness.fidproj")
+                    (stubFile "compiler.log")
+                    (stubFile "01_psg0.json")
+                    (stubFile "10_witness_units.json")
+                    boundaryEvidence
+                    (TargetLibraryCensusFixtures.buildProof 1 1 "0" "0" "0" "0" "0")
+
+            let seamCheck (id: string) (elided: string[]) (retained: string[]) : SubstantiationSeams.PhysicalCheckSpec =
+                { Id = id
+                  Category = "static-dynamic-link-elision"
+                  Summary = "SQLite M2 static archive vs shared object binding elision check"
+                  EntrySource = boundaryClef
+                  ExtraSources = [||]
+                  IncludeRuntimeSources = false
+                  RequiredSymbols = [||]
+                  LoadingContract = Some "Fidelity.Sqlite.StaticLoading.contract"
+                  ExpectedExitCode = 0
+                  ExpectedStdout = ""
+                  Elf =
+                    Some
+                        { ElidedSymbols = elided
+                          RetainedStaticSymbols = retained
+                          ForbiddenNeededLibraries = [| "libsqlite3.so.0" |]
+                          SharedLibrary = Some sharedPath
+                          SharedLibrarySha256 = Some sharedElf.Sha256
+                          DynamicProbeSource = Some dynProbeC
+                          RetainedDynamicImports = [| "sqlite3_open_v2"; "sqlite3_close_v2" |] } }
+
+            let probeWork = Path.Combine(work, "seam-probe-work")
+            Directory.CreateDirectory probeWork |> ignore
+            let comparison =
+                match SubstantiationSeams.verifyElfExpectationsDiagnosed manifest (seamCheck "sqlite-static-elision" [| "sqlite3_unused_dead_symbol" |] [| "sqlite3_open_v2"; "sqlite3_close_v2" |]) staticElf probeWork |> accepted with
+                | Some cmp -> cmp
+                | None -> failwith "Expected SharedLibraryComparison for SQLite static-dynamic-link-elision seam"
+
+            Assert.True(staticElf.DefinedSymtab.Contains "sqlite3_open_v2")
+            Assert.True(staticElf.DefinedSymtab.Contains "sqlite3_close_v2")
+            Assert.False(staticElf.DefinedSymtab.Contains "sqlite3_unused_dead_symbol")
+            Assert.DoesNotContain("libsqlite3.so.0", staticElf.NeededLibraries)
+
+            let dynElf = SubstantiationSeams.inspectElfExecutable comparison.DynamicProbeBinaryPath |> accepted
+            Assert.Contains("libsqlite3.so.0", dynElf.NeededLibraries)
+            Assert.True(dynElf.UndefinedDynsym.Contains "sqlite3_open_v2")
+            Assert.True(dynElf.UndefinedDynsym.Contains "sqlite3_close_v2")
+            Assert.False(dynElf.UndefinedDynsym.Contains "sqlite3_unused_dead_symbol")
+
+            // Exact negative control 1 (FS9253): dead symbol pulled into static binary refuses elision.
+            let leakyC = Path.Combine(work, "sqlite_leaky_probe.c")
+            let leakyBin = Path.Combine(work, "sqlite_leaky_probe")
+            writeLines leakyC
+                [ "int sqlite3_open_v2(const char *f, void **p, int fl, const char *v);"
+                  "int sqlite3_close_v2(void *db);"
+                  "int sqlite3_unused_dead_symbol(int value);"
+                  "int main(void) { void *db = 0; return sqlite3_open_v2(\":memory:\", &db, 0, 0) + sqlite3_close_v2(db) + sqlite3_unused_dead_symbol(0); }" ]
+            run work "compile-sqlite-leaky" (ClangToolchain.startInfo [ "-O2"; leakyC; archivePath; "-o"; leakyBin ]) |> ignore
+            let leakyElf = SubstantiationSeams.inspectElfExecutable leakyBin |> accepted
+            SubstantiationSeams.verifyElfExpectationsDiagnosed manifest (seamCheck "sqlite-leaky-dead" [| "sqlite3_unused_dead_symbol" |] [| "sqlite3_open_v2"; "sqlite3_close_v2" |]) leakyElf probeWork
+            |> refusedWithMessage "FS9253" "expected dead symbol 'sqlite3_unused_dead_symbol' to be elided"
+
+            // Exact negative control 2 (FS9253): dynamic probe passed as static executable refuses DT_NEEDED libsqlite3.so.0.
+            SubstantiationSeams.verifyElfExpectationsDiagnosed manifest (seamCheck "sqlite-dyn-leaked" [||] [||]) dynElf probeWork
+            |> refusedWithMessage "FS9253" "forbids DT_NEEDED 'libsqlite3.so.0'"
+
+            // Exact negative control 3 (FS9253): declared elided symbol absent from static archive refuses cleanly.
+            SubstantiationSeams.verifyElfExpectationsDiagnosed manifest (seamCheck "sqlite-missing-dead" [| "sqlite3_absent_dead_symbol" |] [| "sqlite3_open_v2" |]) staticElf probeWork
+            |> refusedWithMessage "FS9253" "do not define 'sqlite3_absent_dead_symbol'"
+        finally
+            Directory.Delete(work, true)

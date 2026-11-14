@@ -1173,8 +1173,8 @@ module SubstantiationBoundary =
                             if emitted listener.Name then yield $"listener={formatListener listener}"
                     | None -> ()
                 ]
-                let boundHypotheses = hypotheses |> Array.map (fun hypothesis ->
-                    let details =
+                let bindHypothesis (hypothesis: Hypothesis) =
+                    let detailsResult =
                         match hypothesis.Family with
                         | "H-ABI" ->
                             let records =
@@ -1185,18 +1185,30 @@ module SubstantiationBoundary =
                                     $"{l.Header}:{l.Name} size={l.SizeBits} alignment={l.AlignmentBits} offsets=[{offsetList}] bits")
                                 |> String.concat "; "
                             let enumFacts = enums |> Array.filter (fun e -> emitted e.Name) |> Array.map (fun e -> sprintf "%s:%s width=%d signed=%b" e.Header e.Name e.WidthBits e.Signed) |> String.concat "; "
-                            sprintf "Clang=%s; target=%s; pilot=%s; headers=%s; records=[%s]; enums=[%s]" clang clangTarget (evidenceFiles "pilot") (evidenceFiles "header") records enumFacts
+                            Ok (sprintf "Clang=%s; target=%s; pilot=%s; headers=%s; records=[%s]; enums=[%s]" clang clangTarget (evidenceFiles "pilot") (evidenceFiles "header") records enumFacts)
                         | "H-Link" ->
                             let symbols = externPairs |> Array.map (fun (library, symbol) -> library + ":" + symbol) |> String.concat ", "
-                            sprintf "mode=%s; bindings=[%s]; archive=%s; provenance=%s; sharedContract=%s" mode symbols (evidenceFiles "static-archive") (evidenceFiles "link-provenance") (evidenceFiles "shared-link-contract")
-                        | "H-Contract" -> String.concat "; " contractDetails
-                        | "H-Callback" -> String.concat "; " callbackDetails
-                        | family -> invalidOp $"Unknown hypothesis family '{family}'."
-                    { hypothesis with Statement = hypothesis.Statement + " Evidence: " + details })
-                Ok { Strata = strata; Files = files
-                     LinkMode = mode; Libraries = libraries; ExternSymbols = externPairs |> Array.map snd |> Array.distinct |> Array.sort
-                     ClangIdentity = clang; ClangTarget = clangTarget; TargetDataModel = if pilot.IsSome then "LP64/linux-x86_64" else "not-measured"
-                     Layouts = layouts; Enums = enums; RestsOn = boundHypotheses; RequiredSeamChecks = checks })
+                            Ok (sprintf "mode=%s; bindings=[%s]; archive=%s; provenance=%s; sharedContract=%s" mode symbols (evidenceFiles "static-archive") (evidenceFiles "link-provenance") (evidenceFiles "shared-link-contract"))
+                        | "H-Contract" -> Ok (String.concat "; " contractDetails)
+                        | "H-Callback" -> Ok (String.concat "; " callbackDetails)
+                        | family ->
+                            Diagnostics.diagnostic Diagnostics.SubstantiationLayoutInvalid $"Unknown hypothesis family '{family}'."
+                                (Diagnostics.inFile request.FidprojPath "substantiation boundary evaluation")
+                            |> Diagnostics.refusalOf |> Error
+                    detailsResult |> Result.map (fun details -> { hypothesis with Statement = hypothesis.Statement + " Evidence: " + details })
+                let boundHypothesesResult =
+                    hypotheses
+                    |> Array.fold (fun state hypothesis ->
+                        match state with
+                        | Error refusal -> Error refusal
+                        | Ok acc -> bindHypothesis hypothesis |> Result.map (fun bound -> bound :: acc)) (Ok [])
+                    |> Result.map (List.rev >> Array.ofList)
+                boundHypothesesResult
+                |> Result.map (fun boundHypotheses ->
+                    { Strata = strata; Files = files
+                      LinkMode = mode; Libraries = libraries; ExternSymbols = externPairs |> Array.map snd |> Array.distinct |> Array.sort
+                      ClangIdentity = clang; ClangTarget = clangTarget; TargetDataModel = if pilot.IsSome then "LP64/linux-x86_64" else "not-measured"
+                      Layouts = layouts; Enums = enums; RestsOn = boundHypotheses; RequiredSeamChecks = checks }))
         with
         | :? Diagnostics.RefusalException as refused -> Error refused.Refusal
         | error ->

@@ -1755,15 +1755,16 @@ module SubstantiationDossier =
         | Error refusal -> Error refusal
         | Ok(dossier, output) ->
             try
+                let jsonPath = Path.Combine(output, dossier.Package + ".dossier.json")
+                let markdownPath = Path.Combine(output, dossier.Package + ".dossier.md")
+                let htmlPath = Path.Combine(output, dossier.Package + ".dossier.html")
                 let files =
-                    [ Path.Combine(output, dossier.Package + ".dossier.json"), toJson dossier
-                      Path.Combine(output, dossier.Package + ".dossier.md"), toMarkdown dossier
-                      Path.Combine(output, dossier.Package + ".dossier.html"), toHtml dossier ]
+                    [ jsonPath, toJson dossier
+                      markdownPath, toMarkdown dossier
+                      htmlPath, toHtml dossier ]
                 Directory.CreateDirectory output |> ignore
                 for path, content in files do File.WriteAllText(evidencePath path, content, UTF8Encoding false)
-                match files |> List.map fst with
-                | [ json; markdown; html ] -> Ok { Dossier = dossier; JsonPath = json; MarkdownPath = markdown; HtmlPath = html }
-                | _ -> invalidOp "The dossier has exactly three renderings."
+                Ok { Dossier = dossier; JsonPath = jsonPath; MarkdownPath = markdownPath; HtmlPath = htmlPath }
             with
             | :? Diagnostics.RefusalException as refused -> Error refused.Refusal
             | error ->
