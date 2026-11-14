@@ -13,7 +13,6 @@ open Farscape.Tests.SubstantiationTests
 // controls, and SubstantiationSeams.verifyDischarge obligation-census verification.
 // Runs strictly against Farscape + Clang without Composer.dll.
 module private TargetLibraryCensusFixtures =
-    open Farscape.Core
     open Farscape.Core.Substantiation
     open Farscape.Core.SubstantiationBoundary
     open Farscape.Core.SubstantiationProof
@@ -424,5 +423,39 @@ module TargetLibrarySeamScaffoldingTests =
 
             verifyCensusFor "Fidelity.Libc" 12 8
             verifyCensusFor "Fidelity.Sqlite" 18 14
+        finally
+            Directory.Delete(work, true)
+
+    [<Fact>]
+    let ``descriptor quotation admission accepts all BAREWire descriptors and refuses unknown owners with FS9233`` () =
+        let work = TestHelpers.TestScratch.create "descriptor-quotation-admission"
+        try
+            let admittedPath = Path.Combine(work, "AdmittedDescriptors.clef")
+            writeLines admittedPath
+                [ "module Fidelity.DescriptorAdmission.Test"
+                  "let memSpace : Expr<MemorySpaceDescriptor> = <@ () @>"
+                  "let viewLayout : Expr<ViewLayoutDescriptor> = <@ () @>"
+                  "let closedCb : Expr<ClosedCallbackDescriptor> = <@ () @>"
+                  "let borrowedView : Expr<BorrowedResultViewDescriptor> = <@ () @>"
+                  "let readBuf : Expr<ReadOnlyBufferDescriptor> = <@ () @>"
+                  "let bufAbs : Expr<BufferAbsenceContract> = <@ () @>"
+                  "let countedArr : Expr<CountedEntryArrayDescriptor> = <@ () @>" ]
+            let digest = Substantiation.inspectSource Set.empty admittedPath |> accepted
+            for sym in [ "memSpace"; "viewLayout"; "closedCb"; "borrowedView"; "readBuf"; "bufAbs"; "countedArr" ] do
+                Assert.Contains("Fidelity.DescriptorAdmission.Test." + sym, digest.CompileTimeDeclarations)
+
+            // Stale un-owned descriptor spelling must be refused with FS9233.
+            let stalePath = Path.Combine(work, "StaleBorrowedDescriptor.clef")
+            writeLines stalePath
+                [ "module Fidelity.DescriptorAdmission.Stale"
+                  "let staleView : Expr<BorrowedResultDescriptor> = <@ () @>" ]
+            Substantiation.inspectSource Set.empty stalePath |> refused "FS9233"
+
+            // Unknown descriptor quotation type must be refused with FS9233.
+            let unknownPath = Path.Combine(work, "UnknownDescriptor.clef")
+            writeLines unknownPath
+                [ "module Fidelity.DescriptorAdmission.Unknown"
+                  "let unknownDesc : Expr<BogusDescriptor> = <@ () @>" ]
+            Substantiation.inspectSource Set.empty unknownPath |> refused "FS9233"
         finally
             Directory.Delete(work, true)

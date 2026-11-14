@@ -400,12 +400,13 @@ module Substantiation =
             let callbackEntryRecords = Collections.Generic.HashSet<string>(StringComparer.Ordinal)
             let callbackAdapters = ResizeArray<string>()
             let descriptorTypes =
-                set [ "StructDescriptor"; "PeripheralDescriptor"; "FunctionDescriptor"; "ResultRangeDescriptor"
+                set [ "StructDescriptor"; "PeripheralDescriptor"; "MemorySpaceDescriptor"
+                      "FunctionDescriptor"; "ResultRangeDescriptor"
                       "ResourceDescriptor"; "WritableBufferDescriptor"; "ReadOnlyBufferDescriptor"; "BufferAbsenceContract"
-                      "CallbackInvocationContract"; "CallbackDescriptor"; "ScopedCallbackDescriptor"
-                      "RetainedCallbackDescriptor"; "ProcessExitCallbackDescriptor"
+                      "CallbackInvocationContract"; "CallbackDescriptor"; "ClosedCallbackDescriptor"
+                      "ScopedCallbackDescriptor"; "RetainedCallbackDescriptor"; "ProcessExitCallbackDescriptor"
                       "CallbackAbsenceContract"; "CallbackContextDescriptor"; "CountedEntryArrayDescriptor"
-                      "BorrowedResultViewDescriptor"
+                      "BorrowedResultViewDescriptor"; "ViewLayoutDescriptor"
                       "FlexibleArrayDescriptor"; "MappedReturnDescriptor" ]
             // Literal patterns make CCS verify the actual scalar kind, including
             // an imported abbreviation that shadows an annotation's spelling.
@@ -655,6 +656,9 @@ module Substantiation =
               FunctionDescriptors = Set.ofSeq functionDescriptors
               BindingDocumentation = Map.ofSeq bindingDocumentation
               AllTypes = Set.ofSeq allTypes })
+
+    let internal inspectSource (selectedMetadata: Set<string>) (path: string) : Result<SourceDigest, Diagnostics.Refusal> =
+        readSource selectedMetadata path |> Result.map _.Digest
 
     type private PsgInspection =
         { Declarations: DeclarationNode[]
