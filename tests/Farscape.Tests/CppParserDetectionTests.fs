@@ -438,3 +438,45 @@ module LastLocFilenameTrackingTests =
             Assert.True(names.Contains "resumed_following_decl")
         finally
             Directory.Delete(directory, true)
+
+    [<Fact>]
+    let ``anonymous namespace subtree updates LastLocFilename for following target declarations`` () =
+        let directory = TestHelpers.TestScratch.create "lastloc-anon-ns"
+        try
+            let included = Path.Combine(directory, "included_decls.hpp")
+            let target = Path.Combine(directory, "target_api.hpp")
+            File.WriteAllText(
+                included,
+                "#ifdef INCLUDE_SECOND_FN\n" +
+                "int included_after_anon(int x);\n" +
+                "#else\n" +
+                "int anon_included_fn(int x);\n" +
+                "#endif\n")
+            File.WriteAllText(
+                target,
+                "namespace {}\n" +
+                "int target_before_anon(int value);\n" +
+                "namespace {\n" +
+                "#include \"included_decls.hpp\"\n" +
+                "}\n" +
+                "#define INCLUDE_SECOND_FN\n" +
+                "#include \"included_decls.hpp\"\n" +
+                "int target_after_anon(int value);\n")
+            let options =
+                { CppParser.defaultOptions target with
+                    IncludePaths = [ directory ]
+                    IncludeMacros = false }
+            let declarations =
+                match CppParser.parseHeader options with
+                | Ok ds -> ds
+                | Error err -> failwith err
+            let names =
+                declarations
+                |> List.choose (function CppParser.Function f -> Some f.Name | _ -> None)
+                |> Set.ofList
+            Assert.True(names.Contains "target_before_anon")
+            Assert.False(names.Contains "anon_included_fn")
+            Assert.False(names.Contains "included_after_anon")
+            Assert.True(names.Contains "target_after_anon")
+        finally
+            Directory.Delete(directory, true)

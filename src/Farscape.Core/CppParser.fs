@@ -1194,6 +1194,15 @@ module CppParser =
                         updateFileFromValue v
             | _ -> ()
 
+        /// Advance LastLocFilename across an unemitted AST subtree (e.g., an anonymous
+        /// NamespaceDecl whose internal-linkage declarations are not bound) in Clang's
+        /// pre-order dump sequence (loc, non-inner fields, then inner children).
+        let rec advanceFileThroughSubtree (node: JsonValue) =
+            updateFileFromLoc node
+            updateFileFromNodeTail node
+            for inner in getArray node "inner" do
+                advanceFileThroughSubtree inner
+
         /// Check if current node belongs to this library.
         /// With includeRoot: any file under that directory tree belongs to the library.
         /// Without: fall back to matching the target filename (for simple single-file headers).
@@ -1240,7 +1249,9 @@ module CppParser =
                 | Some name when not (System.String.IsNullOrEmpty(name)) ->
                     for inner in getArray node "inner" do
                         processNode childScope inner
-                | _ -> ()
+                | _ ->
+                    for inner in getArray node "inner" do
+                        advanceFileThroughSubtree inner
 
             elif not isImplicit && isFromTargetFile node then
                 if verbose then

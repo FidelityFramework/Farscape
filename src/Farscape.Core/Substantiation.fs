@@ -405,7 +405,7 @@ module Substantiation =
                       "CallbackInvocationContract"; "CallbackDescriptor"; "ScopedCallbackDescriptor"
                       "RetainedCallbackDescriptor"; "ProcessExitCallbackDescriptor"
                       "CallbackAbsenceContract"; "CallbackContextDescriptor"; "CountedEntryArrayDescriptor"
-                      "BorrowedResultDescriptor"; "BorrowedResultViewDescriptor"
+                      "BorrowedResultViewDescriptor"
                       "FlexibleArrayDescriptor"; "MappedReturnDescriptor" ]
             // Literal patterns make CCS verify the actual scalar kind, including
             // an imported abbreviation that shadows an annotation's spelling.

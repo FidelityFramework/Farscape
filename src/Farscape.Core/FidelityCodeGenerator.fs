@@ -1420,8 +1420,37 @@ module FidelityCodeGenerator =
             let canonicalOf (cType: string) =
                 let bare = stripNullability cType
                 ctx.TypedefMap |> Map.tryFind (TypeMapper.cleanTypeName bare) |> Option.defaultValue bare |> compact
+            let resolvedParams = func.Parameters |> List.map (snd >> resolveIn ctx)
+            let sentinelIndices =
+                resolvedParams
+                |> List.mapi (fun j resolved ->
+                    match projection |> Option.bind (fun b -> List.tryItem j b.ConstantParameters) |> Option.filter (System.String.IsNullOrWhiteSpace >> not), resolved with
+                    | Some _, FunctionPointer _ -> Some j
+                    | _ -> None)
+                |> List.choose id
+            let hasRetainedBorrowForSentinel idx =
+                match projection with
+                | None -> false
+                | Some b ->
+                    match b.ReadOnlyBuffers |> List.filter (fun rb -> rb.Parameter < idx) with
+                    | [] -> false
+                    | preceding ->
+                        let nearest = preceding |> List.maxBy _.Parameter
+                        match nearest.Retention with
+                        | BindingBufferRetention.RetainedUntil (owner, _, _) ->
+                            let hasPriorSentinelAfterBuffer =
+                                sentinelIndices |> List.exists (fun sIdx -> sIdx > nearest.Parameter && sIdx < idx)
+                            let hasInterveningPointer =
+                                [ nearest.Parameter + 1 .. idx - 1 ]
+                                |> List.exists (fun j ->
+                                    j <> owner
+                                    && match resolvedParams[j] with
+                                       | DataPointer _ | OpaqueHandle _ -> true
+                                       | _ -> false)
+                            not hasPriorSentinelAfterBuffer && not hasInterveningPointer
+                        | BindingBufferRetention.DuringCall -> false
             func.Parameters |> List.mapi (fun idx (name, cType) ->
-                match projection |> Option.bind (fun b -> List.tryItem idx b.ConstantParameters) |> Option.filter (System.String.IsNullOrWhiteSpace >> not), resolveIn ctx cType with
+                match projection |> Option.bind (fun b -> List.tryItem idx b.ConstantParameters) |> Option.filter (System.String.IsNullOrWhiteSpace >> not), resolvedParams[idx] with
                 | Some value, FunctionPointer _ ->
                     let key = Some (bindingKey func.Name "constant_parameters")
                     let refuse code reason = refuse code key (Some idx) reason
@@ -1429,12 +1458,7 @@ module FidelityCodeGenerator =
                     match ctx.Macros.TryFind value |> Option.map _.Kind with
                     | Some (CppParser.FunctionPointerSentinel (_, spelled, canonical, address))
                         when parameterType = canonicalOf spelled || parameterType = compact canonical ->
-                        let hasRetainedBorrow =
-                            projection
-                            |> Option.exists (fun b ->
-                                b.ReadOnlyBuffers
-                                |> List.exists (fun rb -> match rb.Retention with BindingBufferRetention.RetainedUntil _ -> true | _ -> false))
-                        if address = 0L && not hasRetainedBorrow then
+                        if address = 0L && not (hasRetainedBorrowForSentinel idx) then
                             refuse Diagnostics.SentinelBorrowUndeclared
                                 $"constant '{value}' fixes function-pointer parameter '{name}' to the null sentinel ({spelled})0, under which the library uses the bound value after the call without copying it; no pilot key declares a borrow lifetime for that value, so the null sentinel is not admitted. Fix a copying sentinel (SQLite's SQLITE_TRANSIENT) instead."
                         Some (idx, (value, address))

@@ -56,6 +56,7 @@
     <Compile Include="SubstantiationTests.fs" />
     <Compile Include="SubstantiationDossierTests.fs" />
     <Compile Include="SubstantiationSeamSuiteTests.fs" />
+    <Compile Include="TargetLibrarySeamTests.fs" />
     <Compile Include="LibcNativeJourneysTests.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>

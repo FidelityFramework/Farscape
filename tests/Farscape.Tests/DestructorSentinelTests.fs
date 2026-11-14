@@ -226,3 +226,50 @@ let ``Phase B real libc and sqlite3 headers generate zero-copy ReadOnlyBuffer, B
     Assert.Contains("let fclose (stream: CHandle<FILE>) : int =", libcSource)
     Assert.Contains("(buf: ReadOnlyView<byte>)", libcSource)
     Assert.DoesNotContain("(buf: option<CHandle<unit>>)", libcSource)
+
+[<Fact>]
+let ``null sentinel admission checks RetainedUntil per sentinel parameter rather than binding-wide`` () =
+    let work = TestHelpers.TestScratch.create "per-param-sentinel"
+    try
+        let header = Path.Combine(work, "multi_buf.h")
+        File.WriteAllText(
+            header,
+            String.concat "\n"
+                [ "typedef struct owner_s owner_t;"
+                  "typedef void (*buf_dtor_t)(void *);"
+                  "#define BUF_STATIC ((buf_dtor_t)0)"
+                  "void owner_release(owner_t *owner);"
+                  "int two_buf_bind(owner_t *owner, const char *first, int first_len, buf_dtor_t dtor_first, const char *second, int second_len, buf_dtor_t dtor_second);"
+                  "int one_buf_two_dtor(owner_t *owner, const char *first, int first_len, buf_dtor_t dtor_first, buf_dtor_t dtor_extra);" ])
+        let bothRetained =
+            [ "[[options.bindings]]"; "name = \"two_buf_bind\""
+              "constant_parameters = [\"\", \"\", \"\", \"BUF_STATIC\", \"\", \"\", \"BUF_STATIC\"]"
+              "read_only_buffers = ["
+              "  { parameter = 1, content = \"text\", extent = { count_parameter = 2 }, retention = { kind = \"retained_until\", owner_parameter = 0, redefined_by = [0], releases = [{ binding = \"Test.Fixture.owner_release\", parameter = 0 }] }, hypothesis = { identity = \"multi.buf.1\", version = \"1\", source = \"multi_buf.h\" } },"
+              "  { parameter = 4, content = \"bytes\", extent = { count_parameter = 5 }, retention = { kind = \"retained_until\", owner_parameter = 0, redefined_by = [0], releases = [{ binding = \"Test.Fixture.owner_release\", parameter = 0 }] }, hypothesis = { identity = \"multi.buf.2\", version = \"1\", source = \"multi_buf.h\" } }"
+              "]" ]
+        let okText = generated [ header ] "BUF_" bothRetained [ "two_buf_bind"; "owner_release" ]
+        Assert.Contains("let two_buf_bind (owner: option<CHandle<owner_t>>) (first: string) (first_len: int) (second: ReadOnlyView<byte>) (second_len: int) : int =", okText)
+
+        let secondDuringCall =
+            [ "[[options.bindings]]"; "name = \"two_buf_bind\""
+              "constant_parameters = [\"\", \"\", \"\", \"BUF_STATIC\", \"\", \"\", \"BUF_STATIC\"]"
+              "read_only_buffers = ["
+              "  { parameter = 1, content = \"text\", extent = { count_parameter = 2 }, retention = { kind = \"retained_until\", owner_parameter = 0, redefined_by = [0], releases = [{ binding = \"Test.Fixture.owner_release\", parameter = 0 }] }, hypothesis = { identity = \"multi.buf.1\", version = \"1\", source = \"multi_buf.h\" } },"
+              "  { parameter = 4, content = \"bytes\", extent = { count_parameter = 5 }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"multi.buf.2\", version = \"1\", source = \"multi_buf.h\" } }"
+              "]" ]
+        let _, dDuring, _ = refused [ header ] "BUF_" secondDuringCall [ "two_buf_bind"; "owner_release" ]
+        Assert.Equal(Diagnostics.SentinelBorrowUndeclared, dDuring.Code)
+        Assert.Equal(Some 6, dDuring.Pilot |> Option.bind _.Parameter)
+
+        let extraNullSentinel =
+            [ "[[options.bindings]]"; "name = \"one_buf_two_dtor\""
+              "constant_parameters = [\"\", \"\", \"\", \"BUF_STATIC\", \"BUF_STATIC\"]"
+              "read_only_buffers = ["
+              "  { parameter = 1, content = \"text\", extent = { count_parameter = 2 }, retention = { kind = \"retained_until\", owner_parameter = 0, redefined_by = [0], releases = [{ binding = \"Test.Fixture.owner_release\", parameter = 0 }] }, hypothesis = { identity = \"multi.buf.1\", version = \"1\", source = \"multi_buf.h\" } }"
+              "]" ]
+        let _, dExtra, _ = refused [ header ] "BUF_" extraNullSentinel [ "one_buf_two_dtor"; "owner_release" ]
+        Assert.Equal(Diagnostics.SentinelBorrowUndeclared, dExtra.Code)
+        Assert.Equal(Some 4, dExtra.Pilot |> Option.bind _.Parameter)
+    finally
+        Directory.Delete(work, true)
