@@ -10,7 +10,7 @@ open TestHelpers
 // keeps valid until the owner's next step, reset or finalize (sqlite3_column_text and
 // sqlite3_column_blob), until the value converts (sqlite3_value_text), or until the connection's
 // next call (sqlite3_errmsg). A pilot's `borrowed_result` projects the result as a read-only
-// view of bytes, `option<ReadOnlyView<byte>>`, with a BorrowedResultViewDescriptor naming the
+// view of bytes, `option<ReadOnlyView<int>>`, with a BorrowedResultViewDescriptor naming the
 // owner, the extent (a companion call on the same arguments, or the terminating NUL) and the
 // calls that end its validity. Undeclared, a character-pointer result stays opaque with its
 // reason recorded; a declaration that does not fit is FS9208, FS9209 or FS9210.
@@ -47,7 +47,7 @@ let private stepResetFinalize =
 let ``sqlite3_column_text is a borrowed text view measured by sqlite3_column_bytes until the statement steps, resets or finalizes`` () =
     requireSqlite ()
     let text = generatedClefWith [ sqliteHeader ] (pilotBinding "sqlite3_column_text" [ borrowed columnText ]) ([ "sqlite3_column_text"; "sqlite3_column_bytes" ] @ statementFunctions) []
-    Assert.Contains("let sqlite3_column_text (arg0: option<CHandle<sqlite3_stmt>>) (iCol: int) : option<ReadOnlyView<byte>> =", text)
+    Assert.Contains("let sqlite3_column_text (arg0: option<CHandle<sqlite3_stmt>>) (iCol: int) : option<ReadOnlyView<int>> =", text)
     // No raw handle text surface remains, and the ABI result is still the native pointer.
     let extern' = declarationText text "sqlite3_column_text"
     Assert.DoesNotContain("CHandle<byte>", extern')
@@ -72,7 +72,7 @@ let ``sqlite3_column_blob is a borrowed byte view of its void result, measured b
           "extent = { binding = \"Test.Fixture.sqlite3_column_bytes\", arguments = [0, 1] }"
           statementEvents; hypothesis "sqlite.column_blob" ]
     let text = generatedClefWith [ sqliteHeader ] (pilotBinding "sqlite3_column_blob" [ borrowed fields ]) ([ "sqlite3_column_blob"; "sqlite3_column_bytes" ] @ statementFunctions) []
-    Assert.Contains("let sqlite3_column_blob (arg0: option<CHandle<sqlite3_stmt>>) (iCol: int) : option<ReadOnlyView<byte>> =", text)
+    Assert.Contains("let sqlite3_column_blob (arg0: option<CHandle<sqlite3_stmt>>) (iCol: int) : option<ReadOnlyView<int>> =", text)
     let descriptor = declarationText text "sqlite3_column_blobBorrowedResult"
     for fact in [ "Content = RawBytes"; "Extent = CompanionCall (\"Test.Fixture.sqlite3_column_bytes\", [|0; 1|])" ] @ stepResetFinalize do
         Assert.Contains(fact, descriptor)
@@ -85,7 +85,7 @@ let ``sqlite3_value_text is borrowed text measured by sqlite3_value_bytes and in
           "extent = { binding = \"Test.Fixture.sqlite3_value_bytes\", arguments = [0] }"
           "invalidated_by = [ { any_owner_call = true } ]"; hypothesis "sqlite.value_text" ]
     let text = generatedClefWith [ sqliteHeader ] (pilotBinding "sqlite3_value_text" [ borrowed fields ]) [ "sqlite3_value_text"; "sqlite3_value_bytes" ] []
-    Assert.Contains("let sqlite3_value_text (arg0: option<CHandle<sqlite3_value>>) : option<ReadOnlyView<byte>> =", text)
+    Assert.Contains("let sqlite3_value_text (arg0: option<CHandle<sqlite3_value>>) : option<ReadOnlyView<int>> =", text)
     let descriptor = declarationText text "sqlite3_value_textBorrowedResult"
     Assert.Contains("Extent = CompanionCall (\"Test.Fixture.sqlite3_value_bytes\", [|0|])", descriptor)
     Assert.Contains("AnyOwnerCall", descriptor)
@@ -95,7 +95,7 @@ let ``sqlite3_errmsg is NUL-terminated borrowed text that the connection's next 
     requireSqlite ()
     let fields = [ "content = \"text\""; "owner_parameter = 0"; "extent = { nul_terminated = true }"; "invalidated_by = [ { any_owner_call = true } ]"; hypothesis "sqlite.errmsg" ]
     let text = generatedClefWith [ sqliteHeader ] (pilotBinding "sqlite3_errmsg" [ borrowed fields ]) [ "sqlite3_errmsg" ] []
-    Assert.Contains("let sqlite3_errmsg (arg0: option<CHandle<sqlite3>>) : option<ReadOnlyView<byte>> =", text)
+    Assert.Contains("let sqlite3_errmsg (arg0: option<CHandle<sqlite3>>) : option<ReadOnlyView<int>> =", text)
     let descriptor = declarationText text "sqlite3_errmsgBorrowedResult"
     for fact in [ "Content = Utf8Text"; "Extent = NulTerminated"; "Owner = 0"; "AnyOwnerCall" ] do
         Assert.Contains(fact, descriptor)

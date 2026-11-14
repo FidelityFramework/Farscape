@@ -158,7 +158,7 @@ let ``SQLite SQLITE_STATIC zero-copy borrow lifetime is admitted with RetainedUn
           "read_only_buffers = [{ parameter = 2, content = \"bytes\", extent = { count_parameter = 3 }, retention = { kind = \"retained_until\", owner_parameter = 0, redefined_by = [0, 1], releases = [{ binding = \"Test.Fixture.sqlite3_clear_bindings\", parameter = 0 }, { binding = \"Test.Fixture.sqlite3_finalize\", parameter = 0 }] }, hypothesis = { identity = \"sqlite.bind.blob.static\", version = \"1\", source = \"sqlite3.h\" } }]" ]
     let text = generated [ sqliteHeader ] "SQLITE_" bindings [ "sqlite3_bind_text"; "sqlite3_bind_blob"; "sqlite3_clear_bindings"; "sqlite3_finalize" ]
     Assert.Contains("let sqlite3_bind_text (arg0: option<CHandle<sqlite3_stmt>>) (arg1: int) (arg2: string) (arg3: int) : int =", text)
-    Assert.Contains("let sqlite3_bind_blob (arg0: option<CHandle<sqlite3_stmt>>) (arg1: int) (arg2: ReadOnlyView<byte>) (n: int) : int =", text)
+    Assert.Contains("let sqlite3_bind_blob (arg0: option<CHandle<sqlite3_stmt>>) (arg1: int) (arg2: ReadOnlyView<int>) (n: int) : int =", text)
     Assert.Contains("PassBy = Fixed (EntrySentinel (\"SQLITE_STATIC\", 0)) }", text)
     Assert.Contains("Retention = RetainedUntil (0, [| Redefinition [| 0; 1 |]; OwnerRelease { Binding = \"Test.Fixture.sqlite3_clear_bindings\"; Parameter = 0 }; OwnerRelease { Binding = \"Test.Fixture.sqlite3_finalize\"; Parameter = 0 } |])", text)
 
@@ -203,7 +203,7 @@ let ``Phase B real libc and sqlite3 headers generate zero-copy ReadOnlyBuffer, B
     Assert.Contains("let sqlite3_prepare_v2 (db: option<CHandle<sqlite3>>) (zSql: string) (nByte: int)", sqliteSource)
     Assert.Contains("let sqlite3_prepare_v3 (db: option<CHandle<sqlite3>>) (zSql: string) (nByte: int)", sqliteSource)
     Assert.Contains("let sqlite3_result_text (arg0: option<CHandle<sqlite3_context>>) (arg1: string) (arg2: int) : unit =", sqliteSource)
-    Assert.Contains("let sqlite3_result_blob (arg0: option<CHandle<sqlite3_context>>) (arg1: ReadOnlyView<byte>) (arg2: int) : unit =", sqliteSource)
+    Assert.Contains("let sqlite3_result_blob (arg0: option<CHandle<sqlite3_context>>) (arg1: ReadOnlyView<int>) (arg2: int) : unit =", sqliteSource)
     Assert.Contains("let sqlite3_bind_parameter_index (arg0: option<CHandle<sqlite3_stmt>>) (zName: string) : int =", sqliteSource)
     Assert.Contains("Expr<BufferAbsenceContract>", sqliteSource)
 
@@ -224,7 +224,7 @@ let ``Phase B real libc and sqlite3 headers generate zero-copy ReadOnlyBuffer, B
     Assert.Contains("let fopenDescriptor : Expr<FunctionDescriptor>", libcSource)
     Assert.Contains("let fopenResourceDescriptor : Expr<ResourceDescriptor>", libcSource)
     Assert.Contains("let fclose (stream: CHandle<FILE>) : int =", libcSource)
-    Assert.Contains("(buf: ReadOnlyView<byte>)", libcSource)
+    Assert.Contains("(buf: ReadOnlyView<int>)", libcSource)
     Assert.DoesNotContain("(buf: option<CHandle<unit>>)", libcSource)
 
 [<Fact>]
@@ -249,7 +249,7 @@ let ``null sentinel admission checks RetainedUntil per sentinel parameter rather
               "  { parameter = 4, content = \"bytes\", extent = { count_parameter = 5 }, retention = { kind = \"retained_until\", owner_parameter = 0, redefined_by = [0], releases = [{ binding = \"Test.Fixture.owner_release\", parameter = 0 }] }, hypothesis = { identity = \"multi.buf.2\", version = \"1\", source = \"multi_buf.h\" } }"
               "]" ]
         let okText = generated [ header ] "BUF_" bothRetained [ "two_buf_bind"; "owner_release" ]
-        Assert.Contains("let two_buf_bind (owner: option<CHandle<owner_t>>) (first: string) (first_len: int) (second: ReadOnlyView<byte>) (second_len: int) : int =", okText)
+        Assert.Contains("let two_buf_bind (owner: option<CHandle<owner_t>>) (first: string) (first_len: int) (second: ReadOnlyView<int>) (second_len: int) : int =", okText)
 
         let secondDuringCall =
             [ "[[options.bindings]]"; "name = \"two_buf_bind\""

@@ -211,7 +211,7 @@ module TargetLibrarySeamScaffoldingTests =
                   "Expr<ReadOnlyBufferDescriptor>"
                   "Expr<ResultRangeDescriptor>"
                   "Expr<ProcessExitCallbackDescriptor>"
-                  "ReadOnlyView<byte>" ] do
+                  "ReadOnlyView<int>" ] do
                 Assert.Contains(expectedFragment, combined)
 
             // Exact refusal control 1: FS9154 mismatched handle release (fopen + free).
@@ -322,7 +322,7 @@ module TargetLibrarySeamScaffoldingTests =
                   "Expr<BufferAbsenceContract>"
                   "Expr<BorrowedResultViewDescriptor>"
                   "EntrySentinel (\"SQLITE_STATIC\", 0)"
-                  "ReadOnlyView<byte>"
+                  "ReadOnlyView<int>"
                   "let sqlite3_open_v2 (filename: string)" ] do
                 Assert.Contains(expectedFragment, combined)
 
@@ -930,9 +930,9 @@ module TargetLibrarySeamScaffoldingTests =
                       "{ Name = \"out_result\"; Type = Named \"duckdb_result\"; PassBy = Reference }"
                       "let duckdb_execute_prepared (prepared_statement: option<CHandle<_duckdb_prepared_statement>>) (out_result: duckdb_result array) : int ="
                       "let duckdb_destroy_result (result: duckdb_result array) : unit ="
-                      "let duckdb_result_error (result: duckdb_result array) : option<ReadOnlyView<byte>> ="
+                      "let duckdb_result_error (result: duckdb_result array) : option<ReadOnlyView<int>> ="
                       "{ Name = \"result\"; Type = Named \"duckdb_result\"; PassBy = ReadOnlyReference }"
-                      "let duckdb_column_name (result: duckdb_result array) (col: int) : option<ReadOnlyView<byte>> ="
+                      "let duckdb_column_name (result: duckdb_result array) (col: int) : option<ReadOnlyView<int>> ="
                       "let duckdb_column_type (result: duckdb_result array) (col: int) : int ="
                       "let duckdb_column_count (result: duckdb_result array) : int ="
                       "let duckdb_row_count (result: duckdb_result array) : int ="

@@ -1533,7 +1533,7 @@ module FidelityCodeGenerator =
                         let bufferFsType =
                             match borrowedPointeeIn ctx cType, bufferContract.Content with
                             | Some true, BorrowedContent.Text -> Named "string"
-                            | Some _, BorrowedContent.Bytes -> Generic("ReadOnlyView", Named "byte")
+                            | Some _, BorrowedContent.Bytes -> Generic("ReadOnlyView", Named "int")
                             | _, BorrowedContent.Text ->
                                 refuse Diagnostics.ReadOnlyBufferShape roKey $"text read-only buffer requires a single-level pointer to an 8-bit character, not '{cType}'"
                             | None, BorrowedContent.Bytes ->
@@ -1610,7 +1610,7 @@ module FidelityCodeGenerator =
                 if projection |> Option.exists (fun b -> b.Resource.IsSome) then
                     refuseResult Diagnostics.BorrowedResultShape key "borrowed_result conflicts with resource: a borrowed view is never owned or released"
                 match borrowedPointeeIn ctx func.ReturnType, borrowedResult.Content with
-                | Some true, _ | Some false, BorrowedContent.Bytes -> Generic("ReadOnlyView", Named "byte")
+                | Some true, _ | Some false, BorrowedContent.Bytes -> Generic("ReadOnlyView", Named "int")
                 | Some false, BorrowedContent.Text ->
                     refuseResult Diagnostics.BorrowedResultShape key $"borrowed_result text requires a pointer to an 8-bit character, not '{func.ReturnType}'"
                 | None, _ ->

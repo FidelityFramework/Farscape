@@ -2078,7 +2078,7 @@ let ``non-void non-signed32 release return is refused with FS9154`` releaseRetur
     Assert.Equal(Diagnostics.ResourceReleaseShape, d.Code)
 
 [<Fact>]
-let ``read-only buffer explicit-count emits zero-copy ReadOnlyView byte and string without option handle wrappers`` () =
+let ``read-only buffer explicit-count emits zero-copy ReadOnlyView int and string without option handle wrappers`` () =
     let writeFunc = mkFunc "write" "long" [ "fd", "int"; "buf", "const void *"; "count", "unsigned long" ]
     let prepFunc = mkFunc "prepare" "int" [ "db", "void *"; "sql", "const char *"; "nByte", "int" ]
     let writeBinding =
@@ -2098,10 +2098,11 @@ let ``read-only buffer explicit-count emits zero-copy ReadOnlyView byte and stri
     let ctx = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
     let ctx = { ctx with Bindings = Map.ofList [ "write", writeBinding; "prepare", prepBinding ] }
     let source = FidelityCodeGenerator.generateModule ctx Set.empty declarations "Test.Native" "c" "ro buffers" []
-    Assert.Contains("let write (fd: int) (buf: ReadOnlyView<byte>) (count: int) : int =", source)
+    Assert.Contains("let write (fd: int) (buf: ReadOnlyView<int>) (count: int) : int =", source)
     Assert.Contains("let prepare (db: option<CHandle<db>>) (sql: string) (nByte: int) : int =", source)
     Assert.DoesNotContain("option<CHandle<unit>>", source)
-    Assert.DoesNotContain("option<ReadOnlyView<byte>>", source)
+    Assert.DoesNotContain("option<ReadOnlyView<int>>", source)
+    Assert.DoesNotContain("ReadOnlyView<byte>", source)
     Assert.Contains("Expr<ReadOnlyBufferDescriptor>", source)
     Assert.Contains("Extent = ExplicitCount 2", source)
     Assert.Contains("Content = RawBytes", source)
