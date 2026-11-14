@@ -417,17 +417,17 @@ module BoundaryGenerationTests =
     [<Fact>]
     let ``missing binding module cannot produce an unowned callback entry`` () =
         let ctx = FidelityCodeGenerator.buildGenerationContext declarations LP64 Map.empty
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> CallbackWrapperGenerator.generateTyped spec declarations "Test.Callbacks" ctx [] |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> CallbackWrapperGenerator.generateTyped spec declarations "Test.Callbacks" ctx [] |> ignore)
         Assert.Contains("requires its source binding module", error.Message)
 
     [<Fact>]
     let ``legacy symbol and managed delegate bridge cannot emit Clef source`` () =
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> CallbackWrapperGenerator.generate spec declarations "Test.Callbacks" LP64 [] "Test.Listener" |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> CallbackWrapperGenerator.generate spec declarations "Test.Callbacks" LP64 [] "Test.Listener" |> ignore)
         Assert.Contains("not admitted Clef source", error.Message)
 
     [<Fact>]
     let ``legacy integer-address callbacks cannot emit Clef source`` () =
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> CallbackWrapperGenerator.generateNative spec declarations "Test.Callbacks" LP64 [] |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> CallbackWrapperGenerator.generateNative spec declarations "Test.Callbacks" LP64 [] |> ignore)
         Assert.Contains("violate the Clef FFI boundary", error.Message)
 
     [<Fact>]

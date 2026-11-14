@@ -26,7 +26,7 @@ module CallbackWrapperGenerator =
         (namespace': string) (ctx: FidelityCodeGenerator.GenerationContext)
         (openModules: string list) (resolveModule: string -> string) : string option =
         if ctx.NativePointerSurface then
-            invalidOp "Integer-address callback wrappers violate the Clef FFI boundary."
+            Diagnostics.raiseRefusal (Diagnostics.uncoded "Integer-address callback wrappers violate the Clef FFI boundary.")
         let wrappers =
             spec.Registrations |> List.collect (fun reg ->
                 // A registration refusal names its [callbacks] registrations entry (#195).
@@ -79,26 +79,45 @@ module CallbackWrapperGenerator =
             Some (CodeRenderer.render (Module(namespace', "Layer 2 callbacks: declared entries and explicit environments",
                 (openModules |> List.map OpenModule) @ wrappers)))
 
+    let tryGenerateTyped spec declarations namespace' ctx openModules : Result<string option, Diagnostics.Refusal> =
+        match openModules |> List.tryLast with
+        | None -> Error (Diagnostics.uncoded "Typed callback forwarding requires its source binding module.")
+        | Some sourceModule ->
+            try Ok (generateTypedWithModules spec declarations namespace' ctx openModules (fun _ -> sourceModule))
+            with :? Diagnostics.RefusalException as refused -> Error refused.Refusal
+
     let generateTyped spec declarations namespace' ctx openModules =
-        let sourceModule =
-            openModules |> List.tryLast
-            |> Option.defaultWith (fun () -> invalidOp "Typed callback forwarding requires its source binding module.")
-        generateTypedWithModules spec declarations namespace' ctx openModules (fun _ -> sourceModule)
+        match tryGenerateTyped spec declarations namespace' ctx openModules with
+        | Ok rendered -> rendered
+        | Error refusal -> Diagnostics.raiseRefusal refusal
 
-    /// Legacy integer-address generation is diagnosed before any source is emitted.
-    let generateNative
+    let tryGenerateNative
         (spec: CallbackSpec) (_declarations: CppParser.Declaration list)
-        (_namespace': string) (_model: Types.PlatformABI) (_openModules: string list) : string option =
-        if spec.Registrations.IsEmpty then None
-        else invalidOp "Integer-address callback wrappers violate the Clef FFI boundary. Use generateTypedWithModules with declared entry and environment contracts."
+        (_namespace': string) (_model: Types.PlatformABI) (_openModules: string list) : Result<string option, Diagnostics.Refusal> =
+        if spec.Registrations.IsEmpty then Ok None
+        else Error (Diagnostics.uncoded "Integer-address callback wrappers violate the Clef FFI boundary. Use generateTypedWithModules with declared entry and environment contracts.")
 
-    /// Legacy symbol/delegate wrappers have no admitted Clef contract.
-    let generate
+    let generateNative
+        (spec: CallbackSpec) (declarations: CppParser.Declaration list)
+        (namespace': string) (model: Types.PlatformABI) (openModules: string list) : string option =
+        match tryGenerateNative spec declarations namespace' model openModules with
+        | Ok rendered -> rendered
+        | Error refusal -> Diagnostics.raiseRefusal refusal
+
+    let tryGenerate
         (spec: CallbackSpec) (_declarations: CppParser.Declaration list)
         (_namespace': string) (_model: Types.PlatformABI)
-        (_openModules: string list) (_l2CallbackModule: string) : string option =
-        if spec.Registrations.IsEmpty && spec.ListenerStructs.IsEmpty then None
-        else invalidOp "Symbol lookup and managed delegate callback wrappers are not admitted Clef source. Use typed entry declarations and explicit environment contracts."
+        (_openModules: string list) (_l2CallbackModule: string) : Result<string option, Diagnostics.Refusal> =
+        if spec.Registrations.IsEmpty && spec.ListenerStructs.IsEmpty then Ok None
+        else Error (Diagnostics.uncoded "Symbol lookup and managed delegate callback wrappers are not admitted Clef source. Use typed entry declarations and explicit environment contracts.")
+
+    let generate
+        (spec: CallbackSpec) (declarations: CppParser.Declaration list)
+        (namespace': string) (model: Types.PlatformABI)
+        (openModules: string list) (l2CallbackModule: string) : string option =
+        match tryGenerate spec declarations namespace' model openModules l2CallbackModule with
+        | Ok rendered -> rendered
+        | Error refusal -> Diagnostics.raiseRefusal refusal
 
     /// Listener construction needs a declared value layout and an entry contract
     /// for every field; an integer-address record builder cannot provide them.

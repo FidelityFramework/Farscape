@@ -763,7 +763,8 @@ module Diagnostics =
             member _.CompareTo(other: obj) =
                 match other with
                 | :? Provenance -> 0
-                | _ -> invalidArg "other" "a Provenance compares only with a Provenance"
+                | null -> 1
+                | _ -> -1
 
     /// The provenance of a declaration no reader located; `reason` says why.
     let unlocated (reason: string) = Provenance (Located.Unknown reason)

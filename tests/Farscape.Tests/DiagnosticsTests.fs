@@ -480,3 +480,43 @@ let ``each refusal reason has its own code, allocated sequentially from FS9101 w
     let numbers = codes |> List.map (snd >> fun code -> int (code.Substring 2)) |> List.sort
     Assert.Equal<int list>([ 9101 .. 9101 + numbers.Length - 1 ], numbers)
     Assert.Equal(9257, List.last numbers)
+
+[<Fact>]
+let ``Farscape #221 enforces zero System.Text.Json in tests and zero raw CLR throws in the 12 migrated Core modules`` () =
+    let repoRoot = Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
+    let migratedCoreFiles =
+        [ "PilotTypes.fs"
+          "Diagnostics.fs"
+          "FidelityCodeGenerator.fs"
+          "CppParser.fs"
+          "ProcessLaunch.fs"
+          "CallbackWrapperGenerator.fs"
+          "TypedSignalGenerator.fs"
+          "WrapperCodeGenerator.fs"
+          "CodeRenderer.fs"
+          "ProtocolParser.fs"
+          "ArchiveInspection.fs"
+          "CppClassAnalysis.fs" ]
+    let rawThrowPattern = System.Text.RegularExpressions.Regex(@"\b(failwith|failwithf|invalidArg|invalidOp|nullArg|reraise)\b")
+    for fileName in migratedCoreFiles do
+        let fullPath = Path.Combine(repoRoot, "src", "Farscape.Core", fileName)
+        let lines = File.ReadAllLines fullPath
+        for idx = 0 to lines.Length - 1 do
+            let line = lines[idx]
+            let trimmed = line.TrimStart()
+            if not (trimmed.StartsWith("/" + "/", System.StringComparison.Ordinal)) then
+                Assert.False(rawThrowPattern.IsMatch line, $"{fileName}:{idx + 1} contains banned CLR throw helper: {line}")
+
+    let stjPattern = System.Text.RegularExpressions.Regex(@"\b(System\.Text\.Json|JsonDocument|JsonNode|JsonElement|JsonValueKind|JsonSerializer)\b")
+    let testFiles =
+        [ yield! Directory.GetFiles(Path.Combine(repoRoot, "tests", "Farscape.Tests"), "*.fs")
+          yield! Directory.GetFiles(Path.Combine(repoRoot, "tests", "BoundaryConformance"), "*.fs") ]
+    for fullPath in testFiles do
+        let fileName = Path.GetFileName fullPath
+        if fileName <> "DiagnosticsTests.fs" then
+            let lines = File.ReadAllLines fullPath
+            for idx = 0 to lines.Length - 1 do
+                let line = lines[idx]
+                let trimmed = line.TrimStart()
+                if not (trimmed.StartsWith("/" + "/", System.StringComparison.Ordinal)) then
+                    Assert.False(stjPattern.IsMatch line, $"{fileName}:{idx + 1} contains banned System.Text.Json reference: {line}")

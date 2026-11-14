@@ -497,7 +497,7 @@ let ``public legacy request projections refuse before returning any AST`` entryP
     let iface = protocol.Interfaces.[1]
     let request = iface.Requests.Head
     let mutable returnedAst = false
-    let error = Assert.Throws<System.InvalidOperationException>(fun () ->
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () ->
         invokeRetiredProjection entryPoint protocol
         returnedAst <- true)
     Assert.False(returnedAst, "A rejected public API must not return any marshal or extern AST")

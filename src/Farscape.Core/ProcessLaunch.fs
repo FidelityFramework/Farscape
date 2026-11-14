@@ -80,12 +80,19 @@ module ScratchDirectory =
         | Some directory -> directory
         | None -> processDefault.Value
 
+    let tryWithin (directory: string) (action: unit -> 'T) : Result<'T, Diagnostics.Refusal> =
+        if String.IsNullOrWhiteSpace directory then
+            Error (Diagnostics.uncoded "Scratch directory must be explicit.")
+        else
+            let previous = current.Value
+            current.Value <- Some (IO.Path.GetFullPath directory)
+            try Ok (action ())
+            finally current.Value <- previous
+
     let within (directory: string) (action: unit -> 'T) : 'T =
-        if String.IsNullOrWhiteSpace directory then invalidArg "directory" "Scratch directory must be explicit."
-        let previous = current.Value
-        current.Value <- Some (IO.Path.GetFullPath directory)
-        try action ()
-        finally current.Value <- previous
+        match tryWithin directory action with
+        | Ok value -> value
+        | Error refusal -> Diagnostics.raiseRefusal refusal
 
 /// Start external tools without a shell and preserve each argument as one argument.
 module ProcessLaunch =
@@ -128,16 +135,21 @@ module ClangToolchain =
 
     /// `FIDELITY_CLANG` selects the compiler file, else `PATH` is searched for `clang`. A
     /// `FIDELITY_CLANG` naming no file is refused without `PATH` being searched.
-    let resolveWith (environment: string -> string option) (_home: string) (exists: string -> bool) : Resolution =
+    let tryResolveWith (environment: string -> string option) (_home: string) (exists: string -> bool) : Result<Resolution, Diagnostics.Refusal> =
         let configured name = environment name |> Option.filter (String.IsNullOrWhiteSpace >> not)
         match configured "FIDELITY_CLANG" with
         | Some path ->
-            if exists path then { Path = path; Origin = Source.Override; ResourceDir = None }
-            else invalidOp $"FIDELITY_CLANG selects '{path}', which does not exist; PATH is not searched."
+            if exists path then Ok { Path = path; Origin = Source.Override; ResourceDir = None }
+            else Error (Diagnostics.uncoded $"FIDELITY_CLANG selects '{path}', which does not exist; PATH is not searched.")
         | None ->
             match onPath configured exists "clang" with
-            | Some path -> { Path = path; Origin = Source.Path; ResourceDir = None }
-            | None -> invalidOp "clang was not found on PATH; set FIDELITY_CLANG."
+            | Some path -> Ok { Path = path; Origin = Source.Path; ResourceDir = None }
+            | None -> Error (Diagnostics.uncoded "clang was not found on PATH; set FIDELITY_CLANG.")
+
+    let resolveWith (environment: string -> string option) (home: string) (exists: string -> bool) : Resolution =
+        match tryResolveWith environment home exists with
+        | Ok resolved -> resolved
+        | Error refusal -> Diagnostics.raiseRefusal refusal
 
     let private resolution =
         lazy (resolveWith
@@ -177,19 +189,24 @@ module ClangToolchain =
     /// selects the archiver file; a `FIDELITY_LLVM_AR` naming no file is refused and no other
     /// location is searched. Without it, the `llvm-ar` in `clangDir` is selected, else `PATH`
     /// is searched for `llvm-ar`. No other archiver name is accepted.
-    let resolveArchiverWith (environment: string -> string option) (clangDir: string option) (exists: string -> bool) : string =
+    let tryResolveArchiverWith (environment: string -> string option) (clangDir: string option) (exists: string -> bool) : Result<string, Diagnostics.Refusal> =
         let configured name = environment name |> Option.filter (String.IsNullOrWhiteSpace >> not)
         match configured "FIDELITY_LLVM_AR" with
         | Some path ->
-            if exists path then path
-            else invalidOp $"FIDELITY_LLVM_AR selects '{path}', which does not exist; no other llvm-ar is searched for."
+            if exists path then Ok path
+            else Error (Diagnostics.uncoded $"FIDELITY_LLVM_AR selects '{path}', which does not exist; no other llvm-ar is searched for.")
         | None ->
             match clangDir |> Option.map (fun directory -> IO.Path.Combine(directory, "llvm-ar")) |> Option.filter exists with
-            | Some beside -> beside
+            | Some beside -> Ok beside
             | None ->
                 match onPath configured exists "llvm-ar" with
-                | Some path -> path
-                | None -> invalidOp "llvm-ar was not found beside clang or on PATH; set FIDELITY_LLVM_AR."
+                | Some path -> Ok path
+                | None -> Error (Diagnostics.uncoded "llvm-ar was not found beside clang or on PATH; set FIDELITY_LLVM_AR.")
+
+    let resolveArchiverWith (environment: string -> string option) (clangDir: string option) (exists: string -> bool) : string =
+        match tryResolveArchiverWith environment clangDir exists with
+        | Ok path -> path
+        | Error refusal -> Diagnostics.raiseRefusal refusal
 
     let private archiver =
         lazy (resolveArchiverWith

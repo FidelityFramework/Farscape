@@ -23,7 +23,7 @@ module CodeRenderer =
             else backendFragment.Matches value |> Seq.cast<Match> |> Seq.exists (fun matched -> matched.Groups["backend"].Success)
         if forbidden then
             let position = if isType then "type" else "operation or type fragment"
-            invalidOp $"Farscape source rendering forbids LLVM dialect {position}; bindings require target-independent source contracts."
+            Diagnostics.raiseRefusal (Diagnostics.uncoded $"Farscape source rendering forbids LLVM dialect {position}; bindings require target-independent source contracts.")
         value
 
     /// Render an FsType to its F# string representation

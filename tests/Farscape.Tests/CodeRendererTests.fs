@@ -175,7 +175,7 @@ let ``source boundary rendering refuses explicit LLVM type syntax`` shape =
         | "outer" -> Generic("!llvm", Named "ptr")
         | "nested" -> Generic("option", Generic("CHandle", Named "!llvm.ptr"))
         | _ -> FunctionType([Named "int"], Named "!llvm.ptr")
-    let error = Assert.Throws<System.InvalidOperationException>(fun () -> renderType typ |> ignore)
+    let error = Assert.Throws<Farscape.Core.Diagnostics.RefusalException>(fun () -> renderType typ |> ignore)
     Assert.Contains("Farscape source rendering forbids LLVM dialect type", error.Message)
 
 [<Theory>]
@@ -189,7 +189,7 @@ let ``source boundary rendering refuses explicit LLVM type syntax`` shape =
 [<InlineData(true, "()\n%p = llvm.inttoptr %value : i64 to !llvm.ptr")>]
 let ``source boundary rendering refuses structural LLVM expression fragments`` literal code =
     let expression = if literal then Literal code else RawExpr code
-    let error = Assert.Throws<System.InvalidOperationException>(fun () -> renderExpr "" expression |> ignore)
+    let error = Assert.Throws<Farscape.Core.Diagnostics.RefusalException>(fun () -> renderExpr "" expression |> ignore)
     Assert.Contains("Farscape source rendering forbids LLVM dialect operation or type fragment", error.Message)
 
 [<Fact>]
@@ -205,9 +205,9 @@ let ``source boundary rendering preserves quoted dialect data comments and quali
 
 [<Fact>]
 let ``source boundary rendering refuses LLVM in conversion and literal declaration positions`` () =
-    let conversion = Assert.Throws<System.InvalidOperationException>(fun () -> renderExpr "" (TypeConversion("!llvm.ptr", Identifier "p")) |> ignore)
+    let conversion = Assert.Throws<Farscape.Core.Diagnostics.RefusalException>(fun () -> renderExpr "" (TypeConversion("!llvm.ptr", Identifier "p")) |> ignore)
     Assert.Contains("forbids LLVM dialect type", conversion.Message)
-    let literal = Assert.Throws<System.InvalidOperationException>(fun () -> render (LiteralBinding("invalid", Named "int", "llvm.call @foreign() : () -> ()")) |> ignore)
+    let literal = Assert.Throws<Farscape.Core.Diagnostics.RefusalException>(fun () -> render (LiteralBinding("invalid", Named "int", "llvm.call @foreign() : () -> ()")) |> ignore)
     Assert.Contains("forbids LLVM dialect operation or type fragment", literal.Message)
 
 [<Theory>]
@@ -226,7 +226,7 @@ let ``source boundary rendering refuses LLVM type declaration names`` shape name
         | "record" -> RecordType(name, [], None, [])
         | "enum" -> EnumType(name, [], None, false)
         | _ -> DelegateType(name, [], Unit, None)
-    let error = Assert.Throws<System.InvalidOperationException>(fun () -> render declaration |> ignore)
+    let error = Assert.Throws<Farscape.Core.Diagnostics.RefusalException>(fun () -> render declaration |> ignore)
     Assert.Contains("Farscape source rendering forbids LLVM dialect type", error.Message)
 
 [<Fact>]
@@ -242,7 +242,7 @@ let ``source boundary rendering preserves legal LLVM type declaration names`` ()
 [<InlineData("!llvm.ptr")>]
 [<InlineData("// x\n%p = llvm.inttoptr %v : i64 to !llvm.ptr")>]
 let ``renderer follow-up refuses raw Comment injection`` code =
-    let error = Assert.Throws<System.InvalidOperationException>(fun () -> render (Comment code) |> ignore)
+    let error = Assert.Throws<Farscape.Core.Diagnostics.RefusalException>(fun () -> render (Comment code) |> ignore)
     Assert.Contains("forbids LLVM dialect operation or type fragment", error.Message)
 
 [<Theory>]
@@ -250,7 +250,7 @@ let ``renderer follow-up refuses raw Comment injection`` code =
 [<InlineData("f !llvm.ptr")>]
 [<InlineData("x |> llvm.inttoptr %v")>]
 let ``renderer follow-up refuses midline backend fragments`` code =
-    let error = Assert.Throws<System.InvalidOperationException>(fun () -> renderExpr "" (RawExpr code) |> ignore)
+    let error = Assert.Throws<Farscape.Core.Diagnostics.RefusalException>(fun () -> renderExpr "" (RawExpr code) |> ignore)
     Assert.Contains("forbids LLVM dialect operation or type fragment", error.Message)
 
 [<Theory>]
@@ -260,7 +260,7 @@ let ``renderer follow-up final output refuses unchecked leaf injection`` doc =
     let declaration =
         if doc then RecordType("Good", [], Some "x\n!llvm.ptr", [])
         else ValueBinding("good", Named "int", MatchExpr(Identifier "value", ["_ ->\n%p = llvm.inttoptr %v", Literal "0"]))
-    let error = Assert.Throws<System.InvalidOperationException>(fun () -> render declaration |> ignore)
+    let error = Assert.Throws<Farscape.Core.Diagnostics.RefusalException>(fun () -> render declaration |> ignore)
     Assert.Contains("forbids LLVM dialect operation or type fragment", error.Message)
 
 [<Theory>]

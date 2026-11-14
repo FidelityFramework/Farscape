@@ -1363,7 +1363,7 @@ let ``the refusals of both entries and of both modules are reported in module an
 /// (`06c_psg_discharge.json`, `09_mlir_discharge.json`) and of the obligations they discharge
 /// (`06a_obligations.json`).
 module DischargeReceipts =
-    open System.Text.Json
+    open Fidelity.Data.JSON
 
     /// One solver or translator a receipt names, with the SHA-256 of its executable.
     type DischargeTool = { Executable: string; ExecutableSha256: string }
@@ -1406,53 +1406,63 @@ module DischargeReceipts =
         /// An outcome's anchor is no retained obligation, or repeats one already discharged.
         | OutcomeWithoutObligation of anchor: string
 
-    let private property (name: string) (owner: JsonElement) : Result<JsonElement, string> =
-        if owner.ValueKind <> JsonValueKind.Object then
-            Error $"`{name}` is read from a JSON {owner.ValueKind}, which is no object"
-        else
-            match owner.TryGetProperty(name) with
-            | true, value -> Ok value
-            | _ -> Error $"`{name}` is absent"
+    let private kindName (value: JsonValue) =
+        match value with
+        | JsonValue.Object _ -> "Object"
+        | JsonValue.Array _ -> "Array"
+        | JsonValue.String _ -> "String"
+        | JsonValue.Number _ | JsonValue.NumberLiteral _ -> "Number"
+        | JsonValue.Bool true -> "True"
+        | JsonValue.Bool false -> "False"
+        | JsonValue.Null -> "Null"
 
-    let private text (name: string) (owner: JsonElement) : Result<string, string> =
+    let private property (name: string) (owner: JsonValue) : Result<JsonValue, string> =
+        match owner with
+        | JsonValue.Object _ ->
+            match Json.prop name owner with
+            | Some value -> Ok value
+            | None -> Error $"`{name}` is absent"
+        | _ ->
+            Error $"`{name}` is read from a JSON {kindName owner}, which is no object"
+
+    let private text (name: string) (owner: JsonValue) : Result<string, string> =
         property name owner
         |> Result.bind (fun value ->
-            if value.ValueKind = JsonValueKind.String then Ok(value.GetString())
-            else Error $"`{name}` is a JSON {value.ValueKind}, which is no string")
+            match value with
+            | JsonValue.String s -> Ok s
+            | _ -> Error $"`{name}` is a JSON {kindName value}, which is no string")
 
-    /// The elements of the array `name` of `owner`, each read by `item`. The first element
-    /// `item` refuses is the refusal.
-    let private items (name: string) (item: JsonElement -> Result<'T, string>) (owner: JsonElement) : Result<'T list, string> =
+    let private items (name: string) (item: JsonValue -> Result<'T, string>) (owner: JsonValue) : Result<'T list, string> =
         property name owner
         |> Result.bind (fun value ->
-            if value.ValueKind <> JsonValueKind.Array then
-                Error $"`{name}` is a JSON {value.ValueKind}, which is no array"
-            else
-                (List.ofSeq (value.EnumerateArray()), Ok [])
+            match value with
+            | JsonValue.Array elements ->
+                (elements, Ok [])
                 ||> List.foldBack (fun element collected ->
                     match item element, collected with
                     | Ok read, Ok rest -> Ok(read :: rest)
                     | Error reason, _ -> Error $"{name}: {reason}"
-                    | _, Error reason -> Error reason))
+                    | _, Error reason -> Error reason)
+            | _ ->
+                Error $"`{name}` is a JSON {kindName value}, which is no array")
 
     let private notJson = ReceiptRefusal.Malformed "the text is no JSON"
 
-    /// The receipt the text `json` states.
     let parse (json: string) : Result<DischargeReceipt, ReceiptRefusal> =
-        let tool (element: JsonElement) : Result<DischargeTool, string> =
+        let tool (element: JsonValue) : Result<DischargeTool, string> =
             match text "Executable" element, text "Sha256" element with
             | Ok executable, Ok digest -> Ok { Executable = executable; ExecutableSha256 = digest }
             | Error reason, _ -> Error reason
             | _, Error reason -> Error reason
-        let outcome (element: JsonElement) : Result<DischargeOutcome, string> =
+        let outcome (element: JsonValue) : Result<DischargeOutcome, string> =
             match text "Anchor" element, text "Source" element, text "Verdict" element with
             | Ok anchor, Ok source, Ok verdict -> Ok { Anchor = anchor; Source = source; Verdict = verdict }
             | Error reason, _, _ -> Error reason
             | _, Error reason, _ -> Error reason
             | _, _, Error reason -> Error reason
-        try
-            use document = JsonDocument.Parse(json)
-            let root = document.RootElement
+        match Json.parse json with
+        | Error _ -> Error notJson
+        | Ok root ->
             match text "Stage" root, text "InputSha256" root, text "QuerySha256" root, items "Tools" tool root, items "Outcomes" outcome root with
             | Ok stage, Ok input, Ok query, Ok tools, Ok outcomes ->
                 Ok { Stage = stage; InputSha256 = input; QuerySha256 = query; Tools = tools; Outcomes = outcomes }
@@ -1461,14 +1471,12 @@ module DischargeReceipts =
             | _, _, Error reason, _, _ -> Error(ReceiptRefusal.Malformed reason)
             | _, _, _, Error reason, _ -> Error(ReceiptRefusal.Malformed reason)
             | _, _, _, _, Error reason -> Error(ReceiptRefusal.Malformed reason)
-        with :? JsonException -> Error notJson
 
-    /// The ids of the obligations the text `json` (Composer's `06a_obligations.json`) lists, in order.
     let obligationIds (json: string) : Result<string list, ReceiptRefusal> =
-        try
-            use document = JsonDocument.Parse(json)
-            items "obligations" (text "id") document.RootElement |> Result.mapError ReceiptRefusal.Malformed
-        with :? JsonException -> Error notJson
+        match Json.parse json with
+        | Error _ -> Error notJson
+        | Ok root ->
+            items "obligations" (text "id") root |> Result.mapError ReceiptRefusal.Malformed
 
     let private isSha256 (digest: string) : bool = digest.Length = 64 && digest |> Seq.forall Char.IsAsciiHexDigit
 

@@ -593,7 +593,7 @@ let ``the link provenance record round-trips through the TOML parser with a bitc
     Assert.Equal(Some archiverTool.Sha256, Toml.getString "archiver.sha256" recipeTable)
     // A binding to a member the provenance does not list is a caller error, not a rendered record.
     let stray = { strong with MemberIndex = 7 }
-    Assert.Throws<System.ArgumentException>(fun () -> ArchiveInspection.renderLinkProvenanceToml "shim" provenance [ stray.Name, stray ] [] |> ignore) |> ignore
+    Assert.Throws<Diagnostics.RefusalException>(fun () -> ArchiveInspection.renderLinkProvenanceToml "shim" provenance [ stray.Name, stray ] [] |> ignore) |> ignore
 
 // ─── FS9224: malformed archives ───
 

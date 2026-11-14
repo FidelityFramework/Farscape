@@ -5,7 +5,7 @@ open System.Diagnostics
 open System.IO
 open System.IO.Pipes
 open System.Text
-open System.Text.Json
+open Fidelity.Data.JSON
 open System.Text.RegularExpressions
 open Xunit
 open Farscape.Core
@@ -220,33 +220,33 @@ let private censusWithReceipt checkPremises (expectedReceiptOpt: (string * strin
             |> Option.map (fun path -> path, None)
     match artifactReceiptInfo with
     | Some(path, expectedBinaryShaOpt) ->
-        use doc = JsonDocument.Parse(File.ReadAllText path)
-        let root = doc.RootElement
-        Assert.Equal("elf-rocq", root.GetProperty("Stage").GetString())
-        Assert.Equal(querySha.ToLowerInvariant(), root.GetProperty("SourceQuerySha256").GetString().ToLowerInvariant())
+        let root = Json.parseOrFail(File.ReadAllText path)
+        let strProp name node = Json.prop name node |> Option.bind Json.asString |> Option.defaultValue ""
+        Assert.Equal("elf-rocq", strProp "Stage" root)
+        Assert.Equal(querySha.ToLowerInvariant(), (strProp "SourceQuerySha256" root).ToLowerInvariant())
         match mlirHashes with
         | Some(mlirInHash, mlirQueryHash) ->
-            Assert.Equal(mlirInHash.ToLowerInvariant(), root.GetProperty("MlirInputSha256").GetString().ToLowerInvariant())
-            Assert.Equal(mlirQueryHash.ToLowerInvariant(), root.GetProperty("MlirQuerySha256").GetString().ToLowerInvariant())
+            Assert.Equal(mlirInHash.ToLowerInvariant(), (strProp "MlirInputSha256" root).ToLowerInvariant())
+            Assert.Equal(mlirQueryHash.ToLowerInvariant(), (strProp "MlirQuerySha256" root).ToLowerInvariant())
         | None ->
             for propName in [ "MlirInputSha256"; "MlirQuerySha256" ] do
-                match root.TryGetProperty propName with
-                | true, prop ->
+                match Json.prop propName root with
+                | Some prop ->
                     Assert.True(
-                        prop.ValueKind = JsonValueKind.Null || String.IsNullOrEmpty(prop.GetString()),
+                        JsonValue.isNull prop || String.IsNullOrEmpty(Json.asString prop |> Option.defaultValue ""),
                         $"artifact-receipt.json sets {propName} without retained 09_mlir_discharge.json")
-                | false, _ -> ()
+                | None -> ()
         match expectedBinaryShaOpt with
         | Some expectedSha ->
-            Assert.Equal(expectedSha.ToLowerInvariant(), root.GetProperty("ArtifactSha256").GetString().ToLowerInvariant())
+            Assert.Equal(expectedSha.ToLowerInvariant(), (strProp "ArtifactSha256" root).ToLowerInvariant())
         | None -> ()
         let idSet = Set.ofList ids
         let claimAnchors =
-            [ for claim in root.GetProperty("Claims").EnumerateArray() do
-                  yield claim.GetProperty("Anchor").GetString() ]
+            [ for claim in Json.prop "Claims" root |> Option.map Json.items |> Option.defaultValue [] do
+                  yield strProp "Anchor" claim ]
         let solverAnchors =
-            [ for anchor in root.GetProperty("SolverOnlyAnchors").EnumerateArray() do
-                  yield anchor.GetString() ]
+            [ for anchor in Json.prop "SolverOnlyAnchors" root |> Option.map Json.items |> Option.defaultValue [] do
+                  yield Json.asString anchor |> Option.defaultValue "" ]
         let claimSet = Set.ofList claimAnchors
         let solverSet = Set.ofList solverAnchors
         Assert.Equal(claimAnchors.Length, claimSet.Count)
@@ -703,10 +703,10 @@ let ``45 46 real libc multi-contract seams census and dossier reconcile with mal
             Assert.NotEmpty hypothesis.TestedBy
         for identity in [ "posix.read.borrow"; "posix.read.range"; "posix.close.range"; "libc.malloc.owned"; "libc.atexit.callback" ] do
             Assert.Contains(identity, source)
-        use json = JsonDocument.Parse(File.ReadAllText(Path.Combine(work, "dossier", fx.Name + ".dossier.json")))
-        Assert.Equal(dossier.Dossier.OverallStatus, json.RootElement.GetProperty("OverallStatus").GetString())
-        Assert.Equal(manifest.Proof.TotalObligations, json.RootElement.GetProperty("Counts").GetProperty("Guarantees").GetInt32())
-        Assert.Equal(manifest.Proof.HarnessObligations, json.RootElement.GetProperty("Guarantees").GetProperty("HarnessObligations").GetInt32()))
+        let json = Json.parseOrFail(File.ReadAllText(Path.Combine(work, "dossier", fx.Name + ".dossier.json")))
+        Assert.Equal(dossier.Dossier.OverallStatus, Json.prop "OverallStatus" json |> Option.bind Json.asString |> Option.defaultValue "")
+        Assert.Equal(manifest.Proof.TotalObligations, Json.prop "Counts" json |> Option.bind (Json.prop "Guarantees") |> Option.bind Json.asInt |> Option.map int |> Option.defaultValue -1)
+        Assert.Equal(manifest.Proof.HarnessObligations, Json.prop "Guarantees" json |> Option.bind (Json.prop "HarnessObligations") |> Option.bind Json.asInt |> Option.map int |> Option.defaultValue -1))
 
 let private fopenFcloseContracts ns =
     $"""

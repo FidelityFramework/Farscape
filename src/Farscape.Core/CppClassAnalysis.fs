@@ -878,24 +878,33 @@ module CppClassAnalysis =
             |> List.sortBy _.InstantiationName
         { Build = build; Instantiations = instantiations; Declarations = declarations }
 
-    let private runSymbolTool program arguments (input: string option) =
+    let private tryRunSymbolTool program arguments (input: string option) : Result<string, Diagnostics.Refusal> =
         let info = ProcessLaunch.startInfo program arguments
         info.Environment.["LC_ALL"] <- "C"
         info.RedirectStandardInput <- input.IsSome
         use child = new System.Diagnostics.Process(StartInfo = info)
-        if not (child.Start()) then invalidOp $"Could not start {program}."
-        let output = child.StandardOutput.ReadToEndAsync()
-        let errors = child.StandardError.ReadToEndAsync()
-        match input with
-        | Some text ->
-            child.StandardInput.Write text
-            child.StandardInput.Close()
-        | None -> ()
-        child.WaitForExit()
-        let output = output.GetAwaiter().GetResult()
-        let errors = errors.GetAwaiter().GetResult()
-        if child.ExitCode <> 0 then invalidOp $"{program} failed ({child.ExitCode}): {errors.Trim()}"
-        output
+        if not (child.Start()) then
+            Error (Diagnostics.uncoded $"Could not start {program}.")
+        else
+            let output = child.StandardOutput.ReadToEndAsync()
+            let errors = child.StandardError.ReadToEndAsync()
+            match input with
+            | Some text ->
+                child.StandardInput.Write text
+                child.StandardInput.Close()
+            | None -> ()
+            child.WaitForExit()
+            let output = output.GetAwaiter().GetResult()
+            let errors = errors.GetAwaiter().GetResult()
+            if child.ExitCode <> 0 then
+                Error (Diagnostics.uncoded $"{program} failed ({child.ExitCode}): {errors.Trim()}")
+            else
+                Ok output
+
+    let private runSymbolTool program arguments (input: string option) =
+        match tryRunSymbolTool program arguments input with
+        | Ok output -> output
+        | Error refusal -> Diagnostics.raiseRefusal refusal
 
     type CppSymbolMetadata = {
         Mangled: string
@@ -1008,7 +1017,8 @@ module CppClassAnalysis =
                 let demangled =
                     if symbols.IsEmpty then []
                     else runSymbolTool "c++filt" ["--no-strip-underscore"] (Some (String.concat "\n" symbols + "\n")) |> lines
-                if symbols.Length <> demangled.Length then invalidOp "c++filt did not return one signature per exported symbol."
+                if symbols.Length <> demangled.Length then
+                    Diagnostics.raiseRefusal (Diagnostics.uncoded "c++filt did not return one signature per exported symbol.")
                 let paired = List.zip symbols demangled
                 let demangledMap = Map.ofList paired
                 let byAddr =
@@ -1057,7 +1067,8 @@ module CppClassAnalysis =
                                 | _ -> None
                             else None)
                         |> Map.ofList
-                if ClangToolchain.sha256 resolved <> hash then invalidOp $"Library artifact changed while inspecting '{libraryPath}'."
+                if ClangToolchain.sha256 resolved <> hash then
+                    Diagnostics.raiseRefusal (Diagnostics.uncoded $"Library artifact changed while inspecting '{libraryPath}'.")
                 soname, paired, vtableSlots)
         { LibraryPath = libraryPath; ResolvedPath = resolved; Sha256 = hash; Soname = soname },
         paired,

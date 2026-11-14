@@ -141,7 +141,7 @@ module TypedSignalGenerator =
                (ctx: FidelityCodeGenerator.GenerationContext) : string option =
         if signals.IsEmpty then None else
         if ctx.NativePointerSurface then
-            failwith "GObject signals cannot use experimental_native_pointer_surface; raw address carriers violate the Clef FFI boundary."
+            Diagnostics.raiseRefusal (Diagnostics.uncoded "GObject signals cannot use experimental_native_pointer_surface; raw address carriers violate the Clef FFI boundary.")
         let connect =
             declarations |> List.tryPick (function CppParser.Declaration.Function f when f.Name = "g_signal_connect_data" -> Some f | _ -> None)
             |> Option.defaultWith (fun () ->

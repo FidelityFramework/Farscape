@@ -256,11 +256,11 @@ module CppParser =
         else $"field '{origin.Field}' of '{origin.Parent}'"
 
     /// A unit whose generated anonymous record names collide (FS9114); carries the refusal.
-    exception AnonymousNameCollision of Diagnostics.Refusal
+
 
     /// A unit with an anonymous member Farscape cannot represent (FS9122) or whose generated
     /// member name names another member (FS9123); carries the refusal.
-    exception AnonymousMemberRefused of Diagnostics.Diagnostic
+
 
     /// Represents a C/C++ enum value with signed support
     type EnumValue = {
@@ -937,7 +937,7 @@ module CppParser =
         (parentLocation: Diagnostics.Located<Diagnostics.SourceLocation>)
         (node: JsonValue)
         (declaredFields: FieldDecl list)
-        : FieldDecl list * StructDecl list =
+        : Result<FieldDecl list * StructDecl list, Diagnostics.Diagnostic> =
         let position (declaration: JsonValue) (key: string) =
             getObject declaration "loc" |> Option.bind (fun loc ->
                 match getObject loc "expansionLoc" with
@@ -950,7 +950,7 @@ module CppParser =
                 && position declaration "col" = Some (int64 col)
                 && (position declaration "line" |> Option.forall ((=) (int64 line)))
             | None -> false
-        let rec name (parent: string) (parentLocation: Diagnostics.Located<Diagnostics.SourceLocation>) (node: JsonValue) (declaredFields: FieldDecl list) : FieldDecl list * StructDecl list =
+        let rec name (parent: string) (parentLocation: Diagnostics.Located<Diagnostics.SourceLocation>) (node: JsonValue) (declaredFields: FieldDecl list) : Result<FieldDecl list * StructDecl list, Diagnostics.Diagnostic> =
             let nested = ResizeArray<StructDecl>()
             let fields = ResizeArray<FieldDecl>()
             let declared = declaredFields |> List.map (fun f -> f.Name, f) |> Map.ofList
@@ -964,67 +964,76 @@ module CppParser =
                 |> Set.ofSeq
             let mutable unnamed : JsonValue option = None
             let mutable members = 0
+            let mutable refused : Diagnostics.Diagnostic option = None
             for child in getArray node "inner" do
-                match getStringOr child "kind" "" with
-                | ("RecordDecl" | "CXXRecordDecl") when getStringOr child "name" "" = "" && getBool child "completeDefinition" ->
-                    unnamed <- Some child
-                | "FieldDecl" when not (getBool child "isImplicit") ->
-                    let field = getStringOr child "name" ""
-                    match Map.tryFind field declared with
-                    | None -> ()
-                    | Some f ->
-                        let spelled = unnamedRecordSpelling.Match(getQualType child)
-                        let paired =
-                            match unnamed with
-                            | Some declaration when spelled.Success && pairs declaration spelled.Groups.["tag"].Value spelled.Groups.["loc"].Value ->
-                                processRecordDecl (Diagnostics.Provenance (clangSourceLocation spelled.Groups.["loc"].Value)) declaration |> Option.map (fun record -> declaration, record)
-                            | _ -> None
-                        match paired with
-                        | Some (declaration, inner) ->
-                            let generated = anonymousRecordName parent field
-                            let origin = { Parent = parent; Field = field; Location = spelled.Groups.["loc"].Value; Member = false }
-                            let innerFields, deeper = name generated inner.Location.Location declaration inner.Fields
-                            let named = { inner with Name = generated; Fields = innerFields; Anonymous = Some origin }
-                            nested.Add named
-                            nested.AddRange deeper
-                            let spelling = spelled.Groups.["pre"].Value + spelled.Groups.["tag"].Value + " " + generated + spelled.Groups.["post"].Value
-                            fields.Add { parseFieldType spelling with Name = f.Name; IsBitfield = f.IsBitfield; BitWidth = f.BitWidth; Attributes = f.Attributes }
-                        | None -> fields.Add f
-                | "FieldDecl" when getBool child "isImplicit" && getStringOr child "name" "" = "" ->
-                    members <- members + 1
-                    let field = anonymousMemberName members
-                    let clangType = getQualType child
-                    let spelled = anonymousMemberSpelling.Match clangType
-                    let location = if spelled.Success then spelled.Groups.["loc"].Value else ""
-                    if memberNames.Contains field then
-                        raise (AnonymousMemberRefused (Diagnostics.diagnostic Diagnostics.AnonymousMemberNameCollision $"the generated member name '{field}' of the anonymous member of '{parent}' declared at {location} in '{header}' names another member of that record. A generated name must name one member." (clangSourceLocation location)))
-                    let paired =
-                        match unnamed with
-                        | Some declaration when spelled.Success && pairs declaration spelled.Groups.["tag"].Value location ->
-                            processRecordDecl (Diagnostics.Provenance (clangSourceLocation location)) declaration |> Option.map (fun record -> declaration, record)
-                        | _ -> None
-                    match paired with
-                    | Some (declaration, inner) ->
-                        let generated = anonymousRecordName parent field
-                        let origin = { Parent = parent; Field = field; Location = location; Member = true }
-                        let innerFields, deeper = name generated inner.Location.Location declaration inner.Fields
-                        let named = { inner with Name = generated; Fields = innerFields; Anonymous = Some origin }
-                        nested.Add named
-                        nested.AddRange deeper
-                        let spelling = spelled.Groups.["pre"].Value + spelled.Groups.["tag"].Value + " " + generated
-                        fields.Add { parseFieldType spelling with Name = field; Attributes = extractAttributes child }
-                    | None ->
-                        // Clang's spelling locates the anonymous member's record; without it, the
-                        // enclosing record's location stands for the refusal's source.
-                        let source = if spelled.Success then clangSourceLocation location else parentLocation
-                        raise (AnonymousMemberRefused (Diagnostics.diagnostic Diagnostics.AnonymousMemberUnrepresented $"an anonymous member of '{parent}' in '{header}', of clang type '{clangType}', cannot be paired with a record clang declares for it, so '{parent}' has no representation of it. An anonymous member is never dropped from its record." source))
-                | _ -> ()
-            List.ofSeq fields, List.ofSeq nested
+                if refused.IsNone then
+                    match getStringOr child "kind" "" with
+                    | ("RecordDecl" | "CXXRecordDecl") when getStringOr child "name" "" = "" && getBool child "completeDefinition" ->
+                        unnamed <- Some child
+                    | "FieldDecl" when not (getBool child "isImplicit") ->
+                        let field = getStringOr child "name" ""
+                        match Map.tryFind field declared with
+                        | None -> ()
+                        | Some f ->
+                            let spelled = unnamedRecordSpelling.Match(getQualType child)
+                            let paired =
+                                match unnamed with
+                                | Some declaration when spelled.Success && pairs declaration spelled.Groups.["tag"].Value spelled.Groups.["loc"].Value ->
+                                    processRecordDecl (Diagnostics.Provenance (clangSourceLocation spelled.Groups.["loc"].Value)) declaration |> Option.map (fun record -> declaration, record)
+                                | _ -> None
+                            match paired with
+                            | Some (declaration, inner) ->
+                                let generated = anonymousRecordName parent field
+                                let origin = { Parent = parent; Field = field; Location = spelled.Groups.["loc"].Value; Member = false }
+                                match name generated inner.Location.Location declaration inner.Fields with
+                                | Error d -> refused <- Some d
+                                | Ok (innerFields, deeper) ->
+                                    let named = { inner with Name = generated; Fields = innerFields; Anonymous = Some origin }
+                                    nested.Add named
+                                    nested.AddRange deeper
+                                    let spelling = spelled.Groups.["pre"].Value + spelled.Groups.["tag"].Value + " " + generated + spelled.Groups.["post"].Value
+                                    fields.Add { parseFieldType spelling with Name = f.Name; IsBitfield = f.IsBitfield; BitWidth = f.BitWidth; Attributes = f.Attributes }
+                            | None -> fields.Add f
+                    | "FieldDecl" when getBool child "isImplicit" && getStringOr child "name" "" = "" ->
+                        members <- members + 1
+                        let field = anonymousMemberName members
+                        let clangType = getQualType child
+                        let spelled = anonymousMemberSpelling.Match clangType
+                        let location = if spelled.Success then spelled.Groups.["loc"].Value else ""
+                        if memberNames.Contains field then
+                            refused <- Some (Diagnostics.diagnostic Diagnostics.AnonymousMemberNameCollision $"the generated member name '{field}' of the anonymous member of '{parent}' declared at {location} in '{header}' names another member of that record. A generated name must name one member." (clangSourceLocation location))
+                        else
+                            let paired =
+                                match unnamed with
+                                | Some declaration when spelled.Success && pairs declaration spelled.Groups.["tag"].Value location ->
+                                    processRecordDecl (Diagnostics.Provenance (clangSourceLocation location)) declaration |> Option.map (fun record -> declaration, record)
+                                | _ -> None
+                            match paired with
+                            | Some (declaration, inner) ->
+                                let generated = anonymousRecordName parent field
+                                let origin = { Parent = parent; Field = field; Location = location; Member = true }
+                                match name generated inner.Location.Location declaration inner.Fields with
+                                | Error d -> refused <- Some d
+                                | Ok (innerFields, deeper) ->
+                                    let named = { inner with Name = generated; Fields = innerFields; Anonymous = Some origin }
+                                    nested.Add named
+                                    nested.AddRange deeper
+                                    let spelling = spelled.Groups.["pre"].Value + spelled.Groups.["tag"].Value + " " + generated
+                                    fields.Add { parseFieldType spelling with Name = field; Attributes = extractAttributes child }
+                            | None ->
+                                // Clang's spelling locates the anonymous member's record; without it, the
+                                // enclosing record's location stands for the refusal's source.
+                                let source = if spelled.Success then clangSourceLocation location else parentLocation
+                                refused <- Some (Diagnostics.diagnostic Diagnostics.AnonymousMemberUnrepresented $"an anonymous member of '{parent}' in '{header}', of clang type '{clangType}', cannot be paired with a record clang declares for it, so '{parent}' has no representation of it. An anonymous member is never dropped from its record." source)
+                    | _ -> ()
+            match refused with
+            | Some d -> Error d
+            | None -> Ok (List.ofSeq fields, List.ofSeq nested)
         name parent parentLocation node declaredFields
 
-    let private nameAnonymousRecords (header: string) (parent: string) (node: JsonValue) (record: StructDecl) : StructDecl * StructDecl list =
-        let fields, nested = nameAnonymousMemberFields header parent record.Location.Location node record.Fields
-        { record with Fields = fields }, nested
+    let private nameAnonymousRecords (header: string) (parent: string) (node: JsonValue) (record: StructDecl) : Result<StructDecl * StructDecl list, Diagnostics.Diagnostic> =
+        nameAnonymousMemberFields header parent record.Location.Location node record.Fields
+        |> Result.map (fun (fields, nested) -> { record with Fields = fields }, nested)
 
     /// Extract the explicit value from an EnumConstantDecl AST node, if present.
     /// Returns None when the enum constant has no initializer (implicit sequential value).
@@ -1108,10 +1117,11 @@ module CppParser =
         (targetFile: string)
         (includeRoot: string option)
         (verbose: bool)
-        (enrichFunction: (string * string) list option -> JsonValue -> FunctionDecl -> FunctionDecl)
-        : Declaration list * Set<string> * Declaration list =
+        (enrichFunction: (string * string) list option -> JsonValue -> FunctionDecl -> Result<FunctionDecl, Diagnostics.Refusal>)
+        : Result<Declaration list * Set<string> * Declaration list, Diagnostics.Refusal> =
 
         let results = ResizeArray<Declaration>()
+        let mutable astError : Diagnostics.Refusal option = None
         // Enums and records named only by a typedef (`typedef enum { ... } T;`,
         // `typedef union { ... } T;`): spelled `T`, not `enum T` or `union T`.
         let typedefNamedTags = System.Collections.Generic.HashSet<string>()
@@ -1124,7 +1134,14 @@ module CppParser =
         let files = System.Collections.Generic.Dictionary<string, (byte[] * int[]) option>()
         let located node = nodeProvenance files currentFile node
         let processFunction scope node =
-            processFunctionDecl (located node) node |> Option.map (enrichFunction scope node)
+            match processFunctionDecl (located node) node with
+            | None -> None
+            | Some fn ->
+                match enrichFunction scope node fn with
+                | Ok enriched -> Some enriched
+                | Error refusal ->
+                    if astError.IsNone then astError <- Some refusal
+                    None
 
         // Clang emits an anonymous typedef union or enum as a RecordDecl or EnumDecl followed
         // by a TypedefDecl whose RecordType or EnumType points back to that declaration.
@@ -1277,9 +1294,12 @@ module CppParser =
                         if name = "" then results.Add(Struct structDecl)
                         else
                             // Unnamed records its fields are typed with become declarations of their own.
-                            let named, nested = nameAnonymousRecords header name node { structDecl with Name = name }
-                            results.Add(Struct named)
-                            for record in nested do results.Add(Struct record)
+                            match nameAnonymousRecords header name node { structDecl with Name = name } with
+                            | Error d ->
+                                if astError.IsNone then astError <- Some (Diagnostics.refusalOf d)
+                            | Ok (named, nested) ->
+                                results.Add(Struct named)
+                                for record in nested do results.Add(Struct record)
                     | None -> ()
 
                 | "EnumDecl" ->
@@ -1376,7 +1396,11 @@ module CppParser =
                             |> Seq.choose processFieldDecl
                             |> List.ofSeq
                         let fields, nested =
-                            nameAnonymousMemberFields header name (located node).Location node declaredFields
+                            match nameAnonymousMemberFields header name (located node).Location node declaredFields with
+                            | Ok pair -> pair
+                            | Error d ->
+                                if astError.IsNone then astError <- Some (Diagnostics.refusalOf d)
+                                [], []
 
                         let isAbstract =
                             innerNodes
@@ -1503,7 +1527,9 @@ module CppParser =
                 | _ -> false)
             |> Seq.distinctBy (function Enum e -> "enum " + e.Name | Typedef t -> "typedef " + t.Name | _ -> "")
             |> List.ofSeq
-        results, Set.ofSeq typedefNamedTags, included
+        match astError with
+        | Some refusal -> Error refusal
+        | None -> Ok (results, Set.ofSeq typedefNamedTags, included)
 
     // =========================================================================
     // Macro Parsing
@@ -1919,139 +1945,153 @@ module CppParser =
     /// semantic positions after the source range, even for macro-expanded attributes.
     /// Match lexical declaration scope, kind and complete type so distinct functions cannot share evidence.
     let private enrichNonNullAttributes (options: HeaderParserOptions) =
+        let parseFailure (message: string) =
+            Error (Diagnostics.uncoded $"Failed to parse clang output: {message}")
         let normalize (signature: string) =
             signature |> Seq.filter (not << Char.IsWhiteSpace) |> Seq.toArray |> String
         let evidence = lazy (
             let args = buildClangArgs options
-            let output =
-                match runClang args ["-Xclang"; "-ast-dump"; "-fsyntax-only"; options.HeaderFile] options.Verbose with
-                | Ok text -> text
-                | Error error -> failwith $"Cannot establish nonnull parameter evidence: {error}"
-            let pointerParameter (line: string) =
-                // Text AST supplies the canonical type after a typedef spelling.
-                // nonnull without positions applies only to native pointer slots.
-                let quoted = line.Split('\'')
-                if quoted.Length < 3 then failwith "Clang parameter lacks its native type"
-                let nativeType = quoted.[quoted.Length - 2].Trim()
-                let lastStar = nativeType.LastIndexOf('*')
-                let firstParen = nativeType.IndexOf('(')
-                (lastStar >= 0 &&
-                    (nativeType.Substring(lastStar + 1).Split([|' '; '\t'|], StringSplitOptions.RemoveEmptyEntries)
-                     |> Array.forall (fun word -> List.contains word ["const"; "volatile"; "restrict"; "__restrict"; "__restrict__"])))
-                || (firstParen >= 0 && not (nativeType.Substring(0, firstParen).Contains('<'))
-                    && nativeType.Substring(firstParen + 1).TrimStart().StartsWith("*", StringComparison.Ordinal))
-            output.Split('\n')
-                |> Array.fold (fun (scopes, current, evidence) (line: string) ->
-                    let nodeDepth =
-                        line |> Seq.tryFindIndex (fun c -> c <> ' ' && c <> '|' && c <> '`' && c <> '-')
-                        |> Option.defaultValue 0
-                    let scopes = scopes |> List.filter (fun (depth, _) -> depth < nodeDepth)
-                    let words = line.Substring(nodeDepth).Split([|' '; '\t'|], StringSplitOptions.RemoveEmptyEntries)
-                    let nodeKind = if words.Length = 0 then "" else words.[0]
-                    let hasParentContext =
-                        let rangeStart = line.IndexOf('<')
-                        rangeStart >= 0 &&
-                        (line.Substring(0, rangeStart).Split([|' '; '\t'|], StringSplitOptions.RemoveEmptyEntries)
-                         |> Array.pairwise
-                         |> Array.exists (fun (marker, address) -> marker = "parent" && address.StartsWith("0x", StringComparison.Ordinal)))
-                    let identifier (name: string) =
-                        name.Length > 0 && (Char.IsLetter name.[0] || name.[0] = '_') &&
-                        (name |> Seq.forall (fun c -> Char.IsLetterOrDigit c || c = '_'))
-                    let scope =
-                        if hasParentContext && List.contains nodeKind ["NamespaceDecl"; "RecordDecl"; "CXXRecordDecl"] then Some None
-                        elif nodeKind = "NamespaceDecl" then
-                            let suffix = line.Substring(line.LastIndexOf('>') + 1).Trim().Split([|' '; '\t'; '\r'|], StringSplitOptions.RemoveEmptyEntries)
-                            let name =
-                                match List.ofArray suffix with
-                                | location :: "referenced" :: name :: tail
-                                | location :: "inline" :: name :: tail
-                                | location :: name :: tail
-                                    when (location.StartsWith("col:", StringComparison.Ordinal) || location.StartsWith("line:", StringComparison.Ordinal)) && identifier name ->
-                                    let tail = match tail with "inline" :: rest -> rest | _ -> tail
-                                    let tail = match tail with "nested" :: rest -> rest | _ -> tail
-                                    match tail with
-                                    | [] | ["external-linkage"] -> Some (nodeKind, name)
-                                    | ["original"; "Namespace"; address; quotedName]
-                                        when address.StartsWith("0x", StringComparison.Ordinal) && quotedName = $"'{name}'" -> Some (nodeKind, name)
+            match runClang args ["-Xclang"; "-ast-dump"; "-fsyntax-only"; options.HeaderFile] options.Verbose with
+            | Error error -> parseFailure $"Cannot establish nonnull parameter evidence: {error}"
+            | Ok output ->
+                let mutable dumpError : Diagnostics.Refusal option = None
+                let pointerParameter (line: string) =
+                    // Text AST supplies the canonical type after a typedef spelling.
+                    // nonnull without positions applies only to native pointer slots.
+                    let quoted = line.Split('\'')
+                    if quoted.Length < 3 then
+                        if dumpError.IsNone then dumpError <- Some (Diagnostics.uncoded "Failed to parse clang output: Clang parameter lacks its native type")
+                        false
+                    else
+                        let nativeType = quoted.[quoted.Length - 2].Trim()
+                        let lastStar = nativeType.LastIndexOf('*')
+                        let firstParen = nativeType.IndexOf('(')
+                        (lastStar >= 0 &&
+                            (nativeType.Substring(lastStar + 1).Split([|' '; '\t'|], StringSplitOptions.RemoveEmptyEntries)
+                             |> Array.forall (fun word -> List.contains word ["const"; "volatile"; "restrict"; "__restrict"; "__restrict__"])))
+                        || (firstParen >= 0 && not (nativeType.Substring(0, firstParen).Contains('<'))
+                            && nativeType.Substring(firstParen + 1).TrimStart().StartsWith("*", StringComparison.Ordinal))
+                let _, _, collected =
+                    output.Split('\n')
+                    |> Array.fold (fun (scopes, current, evidence) (line: string) ->
+                        let nodeDepth =
+                            line |> Seq.tryFindIndex (fun c -> c <> ' ' && c <> '|' && c <> '`' && c <> '-')
+                            |> Option.defaultValue 0
+                        let scopes = scopes |> List.filter (fun (depth, _) -> depth < nodeDepth)
+                        let words = line.Substring(nodeDepth).Split([|' '; '\t'|], StringSplitOptions.RemoveEmptyEntries)
+                        let nodeKind = if words.Length = 0 then "" else words.[0]
+                        let hasParentContext =
+                            let rangeStart = line.IndexOf('<')
+                            rangeStart >= 0 &&
+                            (line.Substring(0, rangeStart).Split([|' '; '\t'|], StringSplitOptions.RemoveEmptyEntries)
+                             |> Array.pairwise
+                             |> Array.exists (fun (marker, address) -> marker = "parent" && address.StartsWith("0x", StringComparison.Ordinal)))
+                        let identifier (name: string) =
+                            name.Length > 0 && (Char.IsLetter name.[0] || name.[0] = '_') &&
+                            (name |> Seq.forall (fun c -> Char.IsLetterOrDigit c || c = '_'))
+                        let scope =
+                            if hasParentContext && List.contains nodeKind ["NamespaceDecl"; "RecordDecl"; "CXXRecordDecl"] then Some None
+                            elif nodeKind = "NamespaceDecl" then
+                                let suffix = line.Substring(line.LastIndexOf('>') + 1).Trim().Split([|' '; '\t'; '\r'|], StringSplitOptions.RemoveEmptyEntries)
+                                let name =
+                                    match List.ofArray suffix with
+                                    | location :: "referenced" :: name :: tail
+                                    | location :: "inline" :: name :: tail
+                                    | location :: name :: tail
+                                        when (location.StartsWith("col:", StringComparison.Ordinal) || location.StartsWith("line:", StringComparison.Ordinal)) && identifier name ->
+                                        let tail = match tail with "inline" :: rest -> rest | _ -> tail
+                                        let tail = match tail with "nested" :: rest -> rest | _ -> tail
+                                        match tail with
+                                        | [] | ["external-linkage"] -> Some (nodeKind, name)
+                                        | ["original"; "Namespace"; address; quotedName]
+                                            when address.StartsWith("0x", StringComparison.Ordinal) && quotedName = $"'{name}'" -> Some (nodeKind, name)
+                                        | _ -> None
                                     | _ -> None
-                                | _ -> None
-                            Some name
-                        elif nodeKind = "RecordDecl" || nodeKind = "CXXRecordDecl" then
-                            Some (
-                                words
-                                |> Array.tryFindIndex (fun word -> List.contains word ["struct"; "class"; "union"])
-                                |> Option.bind (fun index ->
-                                    if index + 1 < words.Length && identifier words.[index + 1] && words.[index + 1] <> "definition" then
-                                        Some (nodeKind, words.[index + 1])
-                                    else None))
-                        elif List.contains nodeKind ["FunctionTemplateDecl"; "ClassTemplateDecl"; "ClassTemplateSpecializationDecl"; "ClassTemplatePartialSpecializationDecl";
-                                                    "FunctionDecl"; "CXXMethodDecl"; "CXXConstructorDecl"] then Some None
-                        else None
-                    let parentScope =
-                        scopes |> List.rev |> List.fold (fun parents (_, identity) ->
-                            match parents, identity with
-                            | Some parents, Some identity -> Some (parents @ [identity])
-                            | _ -> None) (Some [])
-                    let scopes = match scope with Some identity -> (nodeDepth, identity) :: scopes | None -> scopes
-                    // A function's own attributes keep its entry key. Its body and
-                    // unsupported contexts cannot contribute evidence to that key.
-                    let current = current |> List.filter (fun (_, depth, _, _) -> depth < nodeDepth)
-                    let functionKind =
-                        ["FunctionDecl "; "CXXMethodDecl "; "CXXConstructorDecl "]
-                        |> List.tryPick (fun kind -> let index = line.IndexOf(kind, StringComparison.Ordinal) in if index < 0 then None else Some (kind.Trim(), index))
-                    match functionKind with
-                    | Some (kind, depth) ->
-                        let quote = line.IndexOf('\'')
-                        let endQuote = if quote < 0 then -1 else line.IndexOf('\'', quote + 1)
-                        if endQuote < 0 then scopes, current, evidence else
-                        let name = line.Substring(0, quote).Trim().Split([|' '; '\t'|], StringSplitOptions.RemoveEmptyEntries) |> Array.last
-                        let signature = line.Substring(quote + 1, endQuote - quote - 1) |> normalize
-                        let key =
-                            if hasParentContext then None
-                            else parentScope |> Option.map (fun scope -> scope, kind, name, signature)
-                        scopes, (key, depth, [], 0) :: current, evidence
-                    | None ->
-                        let attribute = line.IndexOf("NonNullAttr ", StringComparison.Ordinal)
-                        let parameter = line.IndexOf("ParmVarDecl ", StringComparison.Ordinal)
-                        match current with
-                        | (key, depth, pointers, count) :: parents when parameter = depth + 2 ->
-                            let pointers = if pointerParameter line then count :: pointers else pointers
-                            scopes, (key, depth, pointers, count + 1) :: parents, evidence
-                        | (Some key, depth, pointers, _) :: _ when attribute = depth + 2 ->
-                            let rangeEnd = line.LastIndexOf('>')
-                            if rangeEnd < 0 then failwith "Clang NonNullAttr lacks a semantic source range"
-                            let positions =
-                                line.Substring(rangeEnd + 1).Split([|' '; '\t'; '\r'|], StringSplitOptions.RemoveEmptyEntries)
-                                |> Array.choose (fun token ->
-                                    match Int32.TryParse token with
-                                    | true, index when index > 0 -> Some (index - 1)
-                                    | _ when token = "Inherited" || token = "Implicit" -> None
-                                    | _ -> failwith $"Cannot read clang nonnull position '{token}'")
-                                |> Array.toList
-                                |> fun positions -> if positions.IsEmpty then List.rev pointers else positions
-                            let previous = Map.tryFind key evidence |> Option.defaultValue []
-                            scopes, current, Map.add key (positions :: previous) evidence
-                        | _ -> scopes, current, evidence) ([], [], Map.empty)
-                |> fun (_, _, evidence) -> evidence)
+                                Some name
+                            elif nodeKind = "RecordDecl" || nodeKind = "CXXRecordDecl" then
+                                Some (
+                                    words
+                                    |> Array.tryFindIndex (fun word -> List.contains word ["struct"; "class"; "union"])
+                                    |> Option.bind (fun index ->
+                                        if index + 1 < words.Length && identifier words.[index + 1] && words.[index + 1] <> "definition" then
+                                            Some (nodeKind, words.[index + 1])
+                                        else None))
+                            elif List.contains nodeKind ["FunctionTemplateDecl"; "ClassTemplateDecl"; "ClassTemplateSpecializationDecl"; "ClassTemplatePartialSpecializationDecl";
+                                                        "FunctionDecl"; "CXXMethodDecl"; "CXXConstructorDecl"] then Some None
+                            else None
+                        let parentScope =
+                            scopes |> List.rev |> List.fold (fun parents (_, identity) ->
+                                match parents, identity with
+                                | Some parents, Some identity -> Some (parents @ [identity])
+                                | _ -> None) (Some [])
+                        let scopes = match scope with Some identity -> (nodeDepth, identity) :: scopes | None -> scopes
+                        // A function's own attributes keep its entry key. Its body and
+                        // unsupported contexts cannot contribute evidence to that key.
+                        let current = current |> List.filter (fun (_, depth, _, _) -> depth < nodeDepth)
+                        let functionKind =
+                            ["FunctionDecl "; "CXXMethodDecl "; "CXXConstructorDecl "]
+                            |> List.tryPick (fun kind -> let index = line.IndexOf(kind, StringComparison.Ordinal) in if index < 0 then None else Some (kind.Trim(), index))
+                        match functionKind with
+                        | Some (kind, depth) ->
+                            let quote = line.IndexOf('\'')
+                            let endQuote = if quote < 0 then -1 else line.IndexOf('\'', quote + 1)
+                            if endQuote < 0 then scopes, current, evidence else
+                            let name = line.Substring(0, quote).Trim().Split([|' '; '\t'|], StringSplitOptions.RemoveEmptyEntries) |> Array.last
+                            let signature = line.Substring(quote + 1, endQuote - quote - 1) |> normalize
+                            let key =
+                                if hasParentContext then None
+                                else parentScope |> Option.map (fun scope -> scope, kind, name, signature)
+                            scopes, (key, depth, [], 0) :: current, evidence
+                        | None ->
+                            let attribute = line.IndexOf("NonNullAttr ", StringComparison.Ordinal)
+                            let parameter = line.IndexOf("ParmVarDecl ", StringComparison.Ordinal)
+                            match current with
+                            | (key, depth, pointers, count) :: parents when parameter = depth + 2 ->
+                                let pointers = if pointerParameter line then count :: pointers else pointers
+                                scopes, (key, depth, pointers, count + 1) :: parents, evidence
+                            | (Some key, depth, pointers, _) :: _ when attribute = depth + 2 ->
+                                let rangeEnd = line.LastIndexOf('>')
+                                if rangeEnd < 0 then
+                                    if dumpError.IsNone then dumpError <- Some (Diagnostics.uncoded "Failed to parse clang output: Clang NonNullAttr lacks a semantic source range")
+                                    scopes, current, evidence
+                                else
+                                    let positions =
+                                        line.Substring(rangeEnd + 1).Split([|' '; '\t'; '\r'|], StringSplitOptions.RemoveEmptyEntries)
+                                        |> Array.choose (fun token ->
+                                            match Int32.TryParse token with
+                                            | true, index when index > 0 -> Some (index - 1)
+                                            | _ when token = "Inherited" || token = "Implicit" -> None
+                                            | _ ->
+                                                if dumpError.IsNone then dumpError <- Some (Diagnostics.uncoded $"Failed to parse clang output: Cannot read clang nonnull position '{token}'")
+                                                None)
+                                        |> Array.toList
+                                        |> fun positions -> if positions.IsEmpty then List.rev pointers else positions
+                                    let previous = Map.tryFind key evidence |> Option.defaultValue []
+                                    scopes, current, Map.add key (positions :: previous) evidence
+                            | _ -> scopes, current, evidence) ([], [], Map.empty)
+                match dumpError with
+                | Some refusal -> Error refusal
+                | None -> Ok collected)
         fun scope node (f: FunctionDecl) ->
             if f.Attributes |> List.exists (fun a -> a.Kind = "NonNullAttr") then
-                let scope =
-                    match scope, getString node "parentDeclContextId" with
-                    | Some scope, None -> scope
-                    // Out-of-line declarations can have a different semantic parent.
-                    // A lexical key cannot establish their identity.
-                    | _ -> failwith $"Cannot establish lexical clang nonnull declaration scope for '{f.Name}'"
-                // The function type can retain a builtin's canonical typedef spelling
-                // while ParmVarDecl uses the header spelling. Do not reconstruct it.
-                let signature = getQualType node |> normalize
-                let positions =
-                    Map.tryFind (scope, getStringOr node "kind" "", f.Name, signature) evidence.Value
-                    |> Option.defaultWith (fun () -> failwith $"Cannot recover clang nonnull parameter evidence for '{f.Name}'")
-                let indices = positions |> List.collect id |> List.distinct |> List.sort
-                if indices |> List.exists (fun index -> index < 0 || index >= f.Parameters.Length) then
-                    failwith $"Clang nonnull parameter evidence is out of range for '{f.Name}'"
-                { f with Attributes = f.Attributes |> List.map (fun a -> if a.Kind = "NonNullAttr" then { a with Args = indices } else a) }
-            else f
+                match scope, getString node "parentDeclContextId" with
+                | Some scope, None ->
+                    match evidence.Value with
+                    | Error refusal -> Error refusal
+                    | Ok evidenceMap ->
+                        let signature = getQualType node |> normalize
+                        match Map.tryFind (scope, getStringOr node "kind" "", f.Name, signature) evidenceMap with
+                        | None -> parseFailure $"Cannot recover clang nonnull parameter evidence for '{f.Name}'"
+                        | Some positions ->
+                            let indices = positions |> List.collect id |> List.distinct |> List.sort
+                            if indices |> List.exists (fun index -> index < 0 || index >= f.Parameters.Length) then
+                                parseFailure $"Clang nonnull parameter evidence is out of range for '{f.Name}'"
+                            else
+                                Ok { f with Attributes = f.Attributes |> List.map (fun a -> if a.Kind = "NonNullAttr" then { a with Args = indices } else a) }
+                // Out-of-line declarations can have a different semantic parent.
+                // A lexical key cannot establish their identity.
+                | _ -> parseFailure $"Cannot establish lexical clang nonnull declaration scope for '{f.Name}'"
+            else Ok f
 
     /// Run clang preprocessor for macros
     let private runClangMacros (options: HeaderParserOptions) : Result<string, string> =
@@ -3099,69 +3139,70 @@ module CppParser =
                     let root = JsonValue.Parse(jsonOutput)
                     let targetFile = Path.GetFileName(options.HeaderFile)
 
-                    let declarations, typedefNamedTags, included = walkAst root options.HeaderFile targetFile options.IncludeRoot options.Verbose (enrichNonNullAttributes options)
-                    // Included enums are measured in this same unit, with its own enums.
-                    let measured = measureEnums options typedefNamedTags (declarations @ included)
-                    let declarations, included = List.splitAt declarations.Length measured
-                    match anonymousNameCollisions options.HeaderFile (declarations @ included) with
-                    | [] -> ()
-                    | collisions -> raise (AnonymousNameCollision (Diagnostics.refusalsOf collisions ""))
-                    // Each record's typedef attributes, from this unit's typedefs (#175).
-                    let declarations = annotateTypedefAttributes typedefNamedTags (declarations @ included) declarations
-                    // By-value parameters and results reaching an attributed typedef (#181),
-                    // measured in this same unit.
-                    let declarations = measureByValueTypedefs options (declarations @ included) declarations
-                    // Anonymous records, the records enclosing them, records carrying a
-                    // layout-neutral attribute, records whose field types reach an attributed
-                    // typedef and records carrying an unnamed bit-field are measured in this
-                    // same unit.
-                    let declarations = measureRecordLayouts options typedefNamedTags declarations
+                    match walkAst root options.HeaderFile targetFile options.IncludeRoot options.Verbose (enrichNonNullAttributes options) with
+                    | Error refusal -> Error refusal
+                    | Ok (declarations, typedefNamedTags, included) ->
+                        // Included enums are measured in this same unit, with its own enums.
+                        let measured = measureEnums options typedefNamedTags (declarations @ included)
+                        let declarations, included = List.splitAt declarations.Length measured
+                        match anonymousNameCollisions options.HeaderFile (declarations @ included) with
+                        | collisions when not collisions.IsEmpty ->
+                            Error (Diagnostics.refusalsOf collisions "")
+                        | _ ->
+                            // Each record's typedef attributes, from this unit's typedefs (#175).
+                            let declarations = annotateTypedefAttributes typedefNamedTags (declarations @ included) declarations
+                            // By-value parameters and results reaching an attributed typedef (#181),
+                            // measured in this same unit.
+                            let declarations = measureByValueTypedefs options (declarations @ included) declarations
+                            // Anonymous records, the records enclosing them, records carrying a
+                            // layout-neutral attribute, records whose field types reach an attributed
+                            // typedef and records carrying an unnamed bit-field are measured in this
+                            // same unit.
+                            let declarations = measureRecordLayouts options typedefNamedTags declarations
 
-                    if options.Verbose then
-                        printfn "[CppParser] Extracted %d AST declarations" (List.length declarations)
+                            if options.Verbose then
+                                printfn "[CppParser] Extracted %d AST declarations" (List.length declarations)
 
-                    // Pass 2: Macros (if requested)
-                    let macros =
-                        if options.IncludeMacros then
-                            match runClangMacros options with
-                            | Error err ->
-                                if options.Verbose then
-                                    printfn "[CppParser] Warning: Failed to extract macros: %s" err
-                                []
-                            | Ok macroOutput ->
-                                let allMacros =
-                                    macroOutput.Split([|'\n'; '\r'|], StringSplitOptions.RemoveEmptyEntries)
-                                    |> Array.choose parseMacroLine
-                                    |> Array.filter (fun m -> isUserMacro m.Name options.MacroPrefixes)
-                                    |> List.ofArray
-                                    // Each object macro as clang evaluates it in this unit (#193).
-                                    |> evaluateObjectMacros options
+                            // Pass 2: Macros (if requested)
+                            let macros =
+                                if options.IncludeMacros then
+                                    match runClangMacros options with
+                                    | Error err ->
+                                        if options.Verbose then
+                                            printfn "[CppParser] Warning: Failed to extract macros: %s" err
+                                        []
+                                    | Ok macroOutput ->
+                                        let allMacros =
+                                            macroOutput.Split([|'\n'; '\r'|], StringSplitOptions.RemoveEmptyEntries)
+                                            |> Array.choose parseMacroLine
+                                            |> Array.filter (fun m -> isUserMacro m.Name options.MacroPrefixes)
+                                            |> List.ofArray
+                                            // Each object macro as clang evaluates it in this unit (#193).
+                                            |> evaluateObjectMacros options
 
-                                if options.Verbose then
-                                    printfn "[CppParser] Extracted %d macros" (List.length allMacros)
+                                        if options.Verbose then
+                                            printfn "[CppParser] Extracted %d macros" (List.length allMacros)
 
-                                // Pass 3: Enrich macros with documentation from raw header comments
-                                let docMap = buildMacroDocumentationMap options
-                                let enriched = enrichMacrosWithDocumentation docMap allMacros
+                                        // Pass 3: Enrich macros with documentation from raw header comments
+                                        let docMap = buildMacroDocumentationMap options
+                                        let enriched = enrichMacrosWithDocumentation docMap allMacros
 
-                                if options.Verbose then
-                                    let docCount = enriched |> List.filter (fun m -> m.Documentation.IsSome) |> List.length
-                                    printfn "[CppParser] Enriched %d/%d macros with documentation" docCount (List.length enriched)
+                                        if options.Verbose then
+                                            let docCount = enriched |> List.filter (fun m -> m.Documentation.IsSome) |> List.length
+                                            printfn "[CppParser] Enriched %d/%d macros with documentation" docCount (List.length enriched)
 
-                                enriched
-                        else
-                            []
+                                        enriched
+                                else
+                                    []
 
-                    Ok {
-                        Declarations = declarations
-                        Templates = templateDeclarations options.HeaderFile root
-                        Macros = macros
-                        Included = included
-                        Aliases = measureResultAliases options declarations included
-                    }
+                            Ok {
+                                Declarations = declarations
+                                Templates = templateDeclarations options.HeaderFile root
+                                Macros = macros
+                                Included = included
+                                Aliases = measureResultAliases options declarations included
+                            }
                 with
-                | AnonymousNameCollision refusal -> Error refusal
-                | AnonymousMemberRefused d -> Error (Diagnostics.refusalOf d)
                 | :? Diagnostics.RefusalException as refused -> Error (Diagnostics.prefixed "Failed to parse clang output: " refused.Refusal)
                 | ex -> Error (Diagnostics.uncoded $"Failed to parse clang output: {ex.Message}")
 
@@ -3177,14 +3218,13 @@ module CppParser =
     /// can select (#178), such as `-fms-extensions`, whose tagged anonymous members a parse must
     /// refuse rather than drop.
     let internal declarationsOfAst (header: string) (astJson: string) : Result<Declaration list, string> =
-        try
-            let root = JsonValue.Parse astJson
-            let declarations, typedefNamed, included = walkAst root header (Path.GetFileName header) None false (fun _ _ f -> f)
+        let root = JsonValue.Parse astJson
+        match walkAst root header (Path.GetFileName header) None false (fun _ _ f -> Ok f) with
+        | Error refusal -> Error refusal.Text
+        | Ok (declarations, typedefNamed, included) ->
             match anonymousNameCollisions header (declarations @ included) with
             | [] -> Ok (annotateTypedefAttributes typedefNamed (declarations @ included) declarations)
             | collisions -> Error (Diagnostics.refusalsOf collisions "").Text
-        with
-        | AnonymousMemberRefused d -> Error (Diagnostics.render d)
 
     /// Parse a C/C++ header as one translation unit: its declarations (with macros), and the
     /// typedefs and enums its parse reaches through includes outside the library boundary.

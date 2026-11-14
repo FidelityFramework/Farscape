@@ -5,8 +5,7 @@ open System.Diagnostics
 open System.IO
 open System.Security.Cryptography
 open System.Text
-open System.Text.Json
-open System.Text.Json.Nodes
+open Fidelity.Data.JSON
 open Xunit
 open Farscape.Core
 open Farscape.Tests.SubstantiationTests
@@ -247,23 +246,68 @@ type private Rocq =
 let private lawsSymbols = [ "ax", "Axiom", "H_c_abi"; "prf", "Theorem", "identity_returns_input"; "prf", "Theorem", "pair_layout_sound"; "prf", "Lemma", "add_zero_helper" ]
 let private limitsSymbols = [ "prf", "Theorem", "unbounded_input_falsified"; "prf", "Theorem", "seven_is_admitted" ]
 
-let private fact (proposition: string) (assumptions: JsonNode) =
-    let entry = JsonObject()
-    entry["type"] <- JsonValue.Create proposition
-    entry["binders"] <- JsonObject()
-    if not (isNull assumptions) then entry["assumptions"] <- assumptions
-    entry :> JsonNode
+let private jProp (name: string) (v: JsonValue) : JsonValue =
+    match Json.prop name v with
+    | Some x -> x
+    | None -> JsonValue.Null
+
+let private jSet (name: string) (value: JsonValue) (v: JsonValue) : JsonValue =
+    match v with
+    | JsonValue.Object fields ->
+        if fields |> List.exists (fun (k, _) -> k = name) then
+            fields |> List.map (fun (k, old) -> if k = name then k, value else k, old) |> JsonValue.Object
+        else
+            JsonValue.Object (fields @ [ name, value ])
+    | other -> other
+
+let private jRemove (name: string) (v: JsonValue) : JsonValue =
+    match v with
+    | JsonValue.Object fields ->
+        fields |> List.filter (fun (k, _) -> k <> name) |> JsonValue.Object
+    | other -> other
+
+let private jUpdate (name: string) (f: JsonValue -> JsonValue) (v: JsonValue) : JsonValue =
+    match v with
+    | JsonValue.Object fields ->
+        fields |> List.map (fun (k, old) -> if k = name then k, f old else k, old) |> JsonValue.Object
+    | other -> other
+
+let private jAdd (item: JsonValue) (v: JsonValue) : JsonValue =
+    match v with
+    | JsonValue.Array items -> JsonValue.Array (items @ [ item ])
+    | other -> other
+
+let private jUpdateAt (idx: int) (f: JsonValue -> JsonValue) (v: JsonValue) : JsonValue =
+    match v with
+    | JsonValue.Array items ->
+        items |> List.mapi (fun i x -> if i = idx then f x else x) |> JsonValue.Array
+    | other -> other
+
+let private jRemoveAt (idx: int) (v: JsonValue) : JsonValue =
+    match v with
+    | JsonValue.Array items ->
+        items |> List.mapi (fun i x -> i, x) |> List.choose (fun (i, x) -> if i = idx then None else Some x) |> JsonValue.Array
+    | other -> other
+
+let private fact (proposition: string) (assumptions: JsonValue option) =
+    JsonValue.Object
+        [ yield "type", JsonValue.String proposition
+          yield "binders", JsonValue.Object []
+          match assumptions with
+          | Some a -> yield "assumptions", a
+          | None -> () ]
 
 let private axioms (names: string list) =
-    let values = JsonArray()
-    for name in names do values.Add(JsonValue.Create name)
-    values :> JsonNode
+    Some (JsonValue.Array (names |> List.map JsonValue.String))
 
-let private closed () = JsonValue.Create "closed" :> JsonNode
+let private closed () = Some (JsonValue.String "closed")
 
-/// Write a two-unit Rocq project. `laws` and `limits` are the unit sources; `alterFacts`
-/// and `alterConfig` edit the default facts and config before they are written.
-let private rocqWith (laws: string) (limits: string) (extraLimitsSymbols: (string * string * string) list) (alterFacts: JsonObject -> unit) (alterConfig: JsonObject -> unit) =
+let private correspondenceEntry (symbol: string) (targets: string list) =
+    JsonValue.Object
+        [ "RocqSymbol", JsonValue.String symbol
+          "Targets", JsonValue.Array (targets |> List.map JsonValue.String) ]
+
+let private rocqWith (laws: string) (limits: string) (extraLimitsSymbols: (string * string * string) list) (alterFacts: JsonValue -> JsonValue) (alterConfig: JsonValue -> JsonValue) =
     let directory = scratch "rocq"
     let theories = Path.Combine(directory, "theories")
     Directory.CreateDirectory theories |> ignore
@@ -275,45 +319,42 @@ let private rocqWith (laws: string) (limits: string) (extraLimitsSymbols: (strin
     File.WriteAllText(limitsPath, limits)
     File.WriteAllText(Path.ChangeExtension(lawsPath, ".glob"), glob "DossierProofs.Laws" laws lawsSymbols)
     File.WriteAllText(Path.ChangeExtension(limitsPath, ".glob"), glob "DossierProofs.Limits" limits (limitsSymbols @ extraLimitsSymbols))
-    let digests = JsonObject()
-    digests["theories/Laws.v"] <- JsonValue.Create(md5 (Encoding.UTF8.GetBytes laws))
-    digests["theories/Limits.v"] <- JsonValue.Create(md5 (Encoding.UTF8.GetBytes limits))
-    let symbols = JsonObject()
-    symbols["DossierProofs.Laws.H_c_abi"] <- fact "forall n : nat, n + 0 = n" null
-    symbols["DossierProofs.Laws.identity_returns_input"] <- fact "forall n : nat, n = n" (closed ())
-    symbols["DossierProofs.Laws.pair_layout_sound"] <- fact "forall a b : nat, a + 0 = a /\\ b = b" (axioms [ "H_c_abi" ])
-    symbols["DossierProofs.Laws.add_zero_helper"] <- fact "forall n : nat, n + 0 = n" (axioms [ "H_c_abi" ])
-    symbols["DossierProofs.Limits.unbounded_input_falsified"] <- fact "~ (forall n : nat, n = 0)" (closed ())
-    symbols["DossierProofs.Limits.seven_is_admitted"] <- fact "7 = 7" (closed ())
-    let facts = JsonObject()
-    facts["rocqVersion"] <- JsonValue.Create "9.1.0"
-    facts["digests"] <- digests
-    facts["symbols"] <- symbols
-    alterFacts facts
+    let digests =
+        JsonValue.Object
+            [ "theories/Laws.v", JsonValue.String(md5 (Encoding.UTF8.GetBytes laws))
+              "theories/Limits.v", JsonValue.String(md5 (Encoding.UTF8.GetBytes limits)) ]
+    let symbols =
+        JsonValue.Object
+            [ "DossierProofs.Laws.H_c_abi", fact "forall n : nat, n + 0 = n" None
+              "DossierProofs.Laws.identity_returns_input", fact "forall n : nat, n = n" (closed ())
+              "DossierProofs.Laws.pair_layout_sound", fact ("forall a b : nat, a + 0 = a " + "/\\ b = b") (axioms [ "H_c_abi" ])
+              "DossierProofs.Laws.add_zero_helper", fact "forall n : nat, n + 0 = n" (axioms [ "H_c_abi" ])
+              "DossierProofs.Limits.unbounded_input_falsified", fact "~ (forall n : nat, n = 0)" (closed ())
+              "DossierProofs.Limits.seven_is_admitted", fact "7 = 7" (closed ()) ]
+    let facts =
+        JsonValue.Object
+            [ "rocqVersion", JsonValue.String "9.1.0"
+              "digests", digests
+              "symbols", symbols ]
+        |> alterFacts
     let factsPath = Path.Combine(directory, "facts.json")
-    File.WriteAllText(factsPath, facts.ToJsonString())
-    let correspondence (symbol: string) (targets: string list) =
-        let entry = JsonObject()
-        entry["RocqSymbol"] <- JsonValue.Create symbol
-        let values = JsonArray()
-        for target in targets do values.Add(JsonValue.Create target)
-        entry["Targets"] <- values
-        entry :> JsonNode
-    let config = JsonObject()
-    config["SchemaVersion"] <- JsonValue.Create 1
-    config["FalsifiedSuffix"] <- JsonValue.Create "_falsified"
-    config["CheckMarker"] <- JsonValue.Create "*Check, not a guarantee.*"
-    let mappings = JsonArray()
-    mappings.Add(correspondence "DossierProofs.Laws.identity_returns_input" [ "Dossier.Probe.Scalar.seven" ])
-    mappings.Add(correspondence "DossierProofs.Laws.pair_layout_sound" [ "H-ABI-1"; "DossierPair" ])
-    config["Correspondence"] <- mappings
-    alterConfig config
+    File.WriteAllText(factsPath, Json.serialize facts)
+    let config =
+        JsonValue.Object
+            [ "SchemaVersion", Json.ofInt64 1L
+              "FalsifiedSuffix", JsonValue.String "_falsified"
+              "CheckMarker", JsonValue.String "*Check, not a guarantee.*"
+              "Correspondence",
+              JsonValue.Array
+                  [ correspondenceEntry "DossierProofs.Laws.identity_returns_input" [ "Dossier.Probe.Scalar.seven" ]
+                    correspondenceEntry "DossierProofs.Laws.pair_layout_sound" [ "H-ABI-1"; "DossierPair" ] ] ]
+        |> alterConfig
     let configPath = Path.Combine(directory, "rocq-dossier.json")
-    File.WriteAllText(configPath, config.ToJsonString())
+    File.WriteAllText(configPath, Json.serialize config)
     { Directory = directory; Project = project; Facts = factsPath; Config = configPath
       Laws = lawsPath; LawsGlob = Path.ChangeExtension(lawsPath, ".glob") }
 
-let private rocq () = rocqWith lawsSource limitsSource [] ignore ignore
+let private rocq () = rocqWith lawsSource limitsSource [] id id
 
 // ---------------------------------------------------------------------------
 // Receipts and requests
@@ -348,9 +389,106 @@ let private refusalReceipt (lib: Library) : SubstantiationDossier.RefusalControl
              ProtectionSummary = "Substantiation refuses the library before any manifest is written."
              Passed = true } |] }
 
-let private writeJson (label: string) (value: 'T) =
+let private seamChecksToJsonValue (r: SubstantiationDossier.SeamChecksReceipt) : JsonValue =
+    let checkJson (c: SubstantiationDossier.SeamCheckEntry) =
+        JsonValue.Object
+            [ "Id", JsonValue.String c.Id
+              "Category", JsonValue.String c.Category
+              "Summary", JsonValue.String c.Summary
+              "BinarySha256", JsonValue.String c.BinarySha256
+              "Passed", JsonValue.Bool c.Passed
+              "Command", JsonValue.String c.Command ]
+    JsonValue.Object
+        [ "SchemaVersion", Json.ofInt64 (int64 r.SchemaVersion)
+          "Package", JsonValue.String r.Package
+          "ManifestIntegritySha256", JsonValue.String r.ManifestIntegritySha256
+          "TargetTriple", JsonValue.String r.TargetTriple
+          "Checks", JsonValue.Array (r.Checks |> Array.toList |> List.map checkJson) ]
+
+let private seamSeamsChecksToJsonValue (r: SubstantiationSeams.SeamChecksReceipt) : JsonValue =
+    let checkJson (c: SubstantiationSeams.SeamCheckEntry) =
+        JsonValue.Object
+            [ "Id", JsonValue.String c.Id
+              "Category", JsonValue.String c.Category
+              "Summary", JsonValue.String c.Summary
+              "BinarySha256", JsonValue.String c.BinarySha256
+              "Passed", JsonValue.Bool c.Passed
+              "Command", JsonValue.String c.Command ]
+    JsonValue.Object
+        [ "SchemaVersion", Json.ofInt64 (int64 r.SchemaVersion)
+          "Package", JsonValue.String r.Package
+          "ManifestIntegritySha256", JsonValue.String r.ManifestIntegritySha256
+          "TargetTriple", JsonValue.String r.TargetTriple
+          "Checks", JsonValue.Array (r.Checks |> Array.toList |> List.map checkJson) ]
+
+let private refusalControlsToJsonValue (r: SubstantiationDossier.RefusalControlsReceipt) : JsonValue =
+    let ctrlJson (c: SubstantiationDossier.RefusalControlEntry) =
+        JsonValue.Object
+            [ "Id", JsonValue.String c.Id
+              "ExpectedCode", JsonValue.String c.ExpectedCode
+              "ObservedCode", JsonValue.String c.ObservedCode
+              "MisuseSummary", JsonValue.String c.MisuseSummary
+              "ProtectionSummary", JsonValue.String c.ProtectionSummary
+              "Passed", JsonValue.Bool c.Passed ]
+    JsonValue.Object
+        [ "SchemaVersion", Json.ofInt64 (int64 r.SchemaVersion)
+          "Package", JsonValue.String r.Package
+          "ManifestIntegritySha256", JsonValue.String r.ManifestIntegritySha256
+          "Controls", JsonValue.Array (r.Controls |> Array.toList |> List.map ctrlJson) ]
+
+let private seamsLedgerToJsonValue (ledger: SubstantiationSeams.SeamsLedgerReceipt) : JsonValue =
+    let dischargeJson (d: SubstantiationSeams.DischargeSummary) =
+        JsonValue.Object
+            [ "ReceiptPath", JsonValue.String d.ReceiptPath
+              "ReceiptSha256", JsonValue.String d.ReceiptSha256
+              "PremisesOutputPath", JsonValue.String d.PremisesOutputPath
+              "PremisesOutputSha256", JsonValue.String d.PremisesOutputSha256
+              "TotalObligations", Json.ofInt64 (int64 d.TotalObligations)
+              "DischargedUnsatCount", Json.ofInt64 (int64 d.DischargedUnsatCount)
+              "PremisesSatCount", Json.ofInt64 (int64 d.PremisesSatCount)
+              "LibraryObligations", Json.ofInt64 (int64 d.LibraryObligations)
+              "LibraryDischargedUnsatCount", Json.ofInt64 (int64 d.LibraryDischargedUnsatCount)
+              "LibraryPremisesSatCount", Json.ofInt64 (int64 d.LibraryPremisesSatCount)
+              "PendingOpenCount", Json.ofInt64 (int64 d.PendingOpenCount)
+              "RefutedCount", Json.ofInt64 (int64 d.RefutedCount) ]
+    let retainedJson (r: SubstantiationSeams.RetainedProbeBinary) =
+        JsonValue.Object
+            [ "CheckId", JsonValue.String r.CheckId
+              "BinaryPath", JsonValue.String r.BinaryPath
+              "BinarySha256", JsonValue.String r.BinarySha256 ]
+    let sharedJson (s: SubstantiationSeams.SharedLibraryComparison) =
+        JsonValue.Object
+            [ "CheckId", JsonValue.String s.CheckId
+              "SharedLibraryPath", JsonValue.String s.SharedLibraryPath
+              "SharedLibrarySha256", JsonValue.String s.SharedLibrarySha256
+              "DynamicProbeBinaryPath", JsonValue.String s.DynamicProbeBinaryPath
+              "DynamicProbeBinarySha256", JsonValue.String s.DynamicProbeBinarySha256 ]
+    JsonValue.Object
+        [ "Schema", JsonValue.String ledger.Schema
+          "SchemaVersion", Json.ofInt64 (int64 ledger.SchemaVersion)
+          "SeamChecksSchema", JsonValue.String ledger.SeamChecksSchema
+          "RefusalControlsSchema", JsonValue.String ledger.RefusalControlsSchema
+          "Package", JsonValue.String ledger.Package
+          "ManifestIntegritySha256", JsonValue.String ledger.ManifestIntegritySha256
+          "TargetTriple", JsonValue.String ledger.TargetTriple
+          "RequiredSeamCategories", JsonValue.Array (ledger.RequiredSeamCategories |> Array.toList |> List.map JsonValue.String)
+          "VerifiedPhysicalCategories", JsonValue.Array (ledger.VerifiedPhysicalCategories |> Array.toList |> List.map JsonValue.String)
+          "Discharge", dischargeJson ledger.Discharge
+          "RetainedBinaries", JsonValue.Array (ledger.RetainedBinaries |> Array.toList |> List.map retainedJson)
+          "SharedLibraries", JsonValue.Array (ledger.SharedLibraries |> Array.toList |> List.map sharedJson)
+          "SeamChecksPath", JsonValue.String ledger.SeamChecksPath
+          "SeamChecksSha256", JsonValue.String ledger.SeamChecksSha256
+          "RefusalControlsPath", JsonValue.String ledger.RefusalControlsPath
+          "RefusalControlsSha256", JsonValue.String ledger.RefusalControlsSha256 ]
+
+let private writeSeamJson (label: string) (value: SubstantiationDossier.SeamChecksReceipt) =
     let path = Path.Combine(scratch label, label + ".json")
-    File.WriteAllText(path, JsonSerializer.Serialize value)
+    File.WriteAllText(path, seamChecksToJsonValue value |> Json.serialize)
+    path
+
+let private writeRefusalJson (label: string) (value: SubstantiationDossier.RefusalControlsReceipt) =
+    let path = Path.Combine(scratch label, label + ".json")
+    File.WriteAllText(path, refusalControlsToJsonValue value |> Json.serialize)
     path
 
 let private realSeams =
@@ -718,13 +856,21 @@ let ``dossier API and CLI write one reconciled report for a real library with Ro
     Assert.Equal("probe.o", link.Member)
     Assert.Equal("global-strong", link.Binding)
     Assert.Matches("^[0-9a-f]{64}$", link.MemberSha256)
-    use witness = JsonDocument.Parse(File.ReadAllText lib.Manifest.WitnessUnits.Path)
+    let witness = Json.parseOrFail(File.ReadAllText lib.Manifest.WitnessUnits.Path)
     let emitted =
-        witness.RootElement.GetProperty("units").EnumerateArray()
-        |> Seq.collect (fun unitNode -> unitNode.GetProperty("imports").EnumerateArray())
-        |> Seq.filter (fun import -> import.GetProperty("symbol").GetString() = "dossier_identity")
-        |> Seq.exactlyOne
-    let emittedNode = emitted.GetProperty("sourceBoundary").GetProperty("declaration").GetInt32()
+        witness
+        |> jProp "units"
+        |> Json.items
+        |> List.collect (fun unitNode -> unitNode |> jProp "imports" |> Json.items)
+        |> List.filter (fun import -> (import |> Json.prop "symbol" |> Option.bind Json.asString) = Some "dossier_identity")
+        |> List.exactlyOne
+    let emittedNode =
+        emitted
+        |> jProp "sourceBoundary"
+        |> Json.prop "declaration"
+        |> Option.bind Json.asInt
+        |> Option.defaultValue -1L
+        |> int
     Assert.NotEqual(descriptor.PsgNode, emittedNode)
     let foreign = row "Dossier.Probe.Boundary.dossier_identity"
     Assert.Equal("foreign", foreign.Kind)
@@ -789,7 +935,7 @@ let ``dossier API and CLI write one reconciled report for a real library with Ro
 [<Fact>]
 let ``an admitted Rocq theorem is reported open with warning health and the action note`` () =
     let lib = library.Value
-    let fixture = rocqWith lawsSource (limitsSource + admittedSource) [ "prf", "Theorem", "pair_sum_commutes" ] ignore ignore
+    let fixture = rocqWith lawsSource (limitsSource + admittedSource) [ "prf", "Theorem", "pair_sum_commutes" ] id id
     let generated = requestFor lib.ManifestToml |> withRocq fixture |> SubstantiationDossier.generate |> accepted
     let dossier = generated.Dossier
     let markdown = File.ReadAllText generated.MarkdownPath
@@ -833,7 +979,7 @@ let ``an admitted Lemma and an admitted proof-mode Definition are reported open 
     Assert.NotEqual<string>(status, proved.OverallStatus)
     // Every Theorem of both units ends in Qed; the Lemma and the Definition end in Admitted.
     // facts.json carries no entry for either, as for any constant Rocq did not check.
-    let generated = generate (rocqWith lawsSource (limitsSource + unfinishedSource) unfinishedSymbols ignore ignore)
+    let generated = generate (rocqWith lawsSource (limitsSource + unfinishedSource) unfinishedSymbols id id)
     let dossier = generated.Dossier
     let markdown = File.ReadAllText generated.MarkdownPath
     let html = File.ReadAllText generated.HtmlPath
@@ -872,13 +1018,13 @@ let ``an admitted Lemma and an admitted proof-mode Definition are reported open 
     for source, symbol, name in
         [ lemmaOnly, unfinishedSymbols[0], "DossierProofs.Limits.helper_unfinished"
           definitionOnly, unfinishedSymbols[1], "DossierProofs.Limits.def_unfinished" ] do
-        let single = (generate (rocqWith lawsSource (limitsSource + source) [ symbol ] ignore ignore)).Dossier
+        let single = (generate (rocqWith lawsSource (limitsSource + source) [ symbol ] id id)).Dossier
         Assert.Equal<string[]>([| name |], symbolsOf single.Open.RocqOpen)
         Assert.Equal(proved.Counts.Open + 1, single.Counts.Open)
         Assert.Equal(status, single.OverallStatus)
     // The remaining declaration forms: a Remark, an Example, an Instance, and the Program
     // Definition that owns an admitted obligation.
-    let forms = (generate (rocqWith lawsSource (limitsSource + unfinishedFormsSource) unfinishedFormsSymbols ignore ignore)).Dossier
+    let forms = (generate (rocqWith lawsSource (limitsSource + unfinishedFormsSource) unfinishedFormsSymbols id id)).Dossier
     Assert.Equal<(string * string)[]>(
         [| "DossierProofs.Limits.remark_unfinished", "Remark"
            "DossierProofs.Limits.example_unfinished", "Example"
@@ -889,13 +1035,8 @@ let ``an admitted Lemma and an admitted proof-mode Definition are reported open 
     Assert.Equal(status, forms.OverallStatus)
     // An open item outside the public theorem keywords is no Correspondence symbol.
     let mapped =
-        rocqWith lawsSource (limitsSource + unfinishedSource) unfinishedSymbols ignore (fun config ->
-            let entry = JsonObject()
-            entry["RocqSymbol"] <- JsonValue.Create "DossierProofs.Limits.helper_unfinished"
-            let targets = JsonArray()
-            targets.Add(JsonValue.Create "Dossier.Probe.Scalar.seven")
-            entry["Targets"] <- targets
-            config["Correspondence"].AsArray().Add entry)
+        rocqWith lawsSource (limitsSource + unfinishedSource) unfinishedSymbols id (
+            jUpdate "Correspondence" (jAdd (correspondenceEntry "DossierProofs.Limits.helper_unfinished" [ "Dossier.Probe.Scalar.seven" ])))
     requestFor lib.ManifestJson |> withRocq mapped |> refusedWithText "FS9250" "is no public theorem statement"
 
 [<Fact>]
@@ -934,7 +1075,7 @@ let ``a dossier without Rocq or receipts reports pending seam runs and the fixed
     let partialSeamPath = Path.Combine(partialDir, "DossierProbe.seam-checks.json")
     let partialRefusalPath = Path.Combine(partialDir, "DossierProbe.refusal-controls.json")
     let partialLedgerPath = Path.Combine(partialDir, "DossierProbe.seams-ledger.json")
-    File.WriteAllText(partialSeamPath, JsonSerializer.Serialize(partialSeamReceipt, JsonSerializerOptions(WriteIndented = true)))
+    File.WriteAllText(partialSeamPath, seamSeamsChecksToJsonValue partialSeamReceipt |> Json.serializePretty)
     File.Copy(seams.RefusalControlsPath, partialRefusalPath, true)
     let partialLedger =
         { seams.Ledger with
@@ -945,7 +1086,7 @@ let ``a dossier without Rocq or receipts reports pending seam runs and the fixed
             SeamChecksSha256 = ClangToolchain.sha256 partialSeamPath
             RefusalControlsPath = partialRefusalPath
             RefusalControlsSha256 = ClangToolchain.sha256 partialRefusalPath }
-    File.WriteAllText(partialLedgerPath, JsonSerializer.Serialize(partialLedger, JsonSerializerOptions(WriteIndented = true)))
+    File.WriteAllText(partialLedgerPath, seamsLedgerToJsonValue partialLedger |> Json.serializePretty)
     let partly =
         { requestFor lib.ManifestJson with SeamChecksReceiptPath = Some partialSeamPath }
         |> SubstantiationDossier.generate |> accepted
@@ -974,18 +1115,16 @@ let ``dossier JSON parsing is a strict round trip and HTML escapes every non-ASC
     let dossier = (requestFor lib.ManifestJson |> withRocq (rocq ()) |> SubstantiationDossier.generate |> accepted).Dossier
     let json = SubstantiationDossier.toJson dossier
     Assert.Equal<SubstantiationDossier.Dossier>(dossier, SubstantiationDossier.parseDossierJson json |> accepted)
-    let edited (alter: JsonObject -> unit) =
-        let node = JsonNode.Parse(json).AsObject()
-        alter node
-        node.ToJsonString()
+    let edited (alter: JsonValue -> JsonValue) =
+        Json.parseOrFail json |> alter |> Json.serialize
     for malformed in
         [ "{"
           "[]"
-          edited (fun node -> node.Remove "Package" |> ignore)
-          edited (fun node -> node["Unknown"] <- JsonValue.Create 1)
-          edited (fun node -> node["Package"] <- null)
-          edited (fun node -> node["SchemaVersion"] <- JsonValue.Create 2)
-          edited (fun node -> node.["Counts"].AsObject().Remove "Open" |> ignore)
+          edited (jRemove "Package")
+          edited (jSet "Unknown" (Json.ofInt64 1L))
+          edited (jSet "Package" JsonValue.Null)
+          edited (jSet "SchemaVersion" (Json.ofInt64 2L))
+          edited (jUpdate "Counts" (jRemove "Open"))
           json.Replace("\"SchemaVersion\": 1,", "\"SchemaVersion\": 1,\n  \"SchemaVersion\": 1,") ] do
         SubstantiationDossier.parseDossierJson malformed |> refused "FS9247"
     // A non-ASCII proposition and markup in a symbol reach HTML only as character references.
@@ -1040,17 +1179,17 @@ let ``stale Rocq and receipt digests refuse with FS9248`` () =
     File.AppendAllText(stale.Laws, "\n")
     requestFor lib.ManifestJson |> withRocq stale |> refusedWith "FS9248"
     // facts.json records a digest that differs from the .glob DIGEST line.
-    let digest path (alter: JsonObject -> unit) = rocqWith lawsSource limitsSource [] (fun facts -> alter (facts["digests"].AsObject())) ignore |> path
+    let digest path (alter: JsonValue -> JsonValue) = rocqWith lawsSource limitsSource [] (jUpdate "digests" alter) id |> path
     for facts in
-        [ digest id (fun digests -> digests["theories/Laws.v"] <- JsonValue.Create(String.replicate 32 "0"))
-          digest id (fun digests -> digests.Remove "theories/Limits.v" |> ignore)
-          digest id (fun digests -> digests["theories/Extra.v"] <- JsonValue.Create(String.replicate 32 "0")) ] do
+        [ digest id (jSet "theories/Laws.v" (JsonValue.String(String.replicate 32 "0")))
+          digest id (jRemove "theories/Limits.v")
+          digest id (jSet "theories/Extra.v" (JsonValue.String(String.replicate 32 "0"))) ] do
         requestFor lib.ManifestJson |> withRocq facts |> refusedWith "FS9248"
     // A receipt that records another manifest's integrity digest.
     let other = String.replicate 64 "a"
-    { requestFor lib.ManifestJson with SeamChecksReceiptPath = Some(writeJson "seam-checks" { seamReceipt lib with ManifestIntegritySha256 = other }) }
+    { requestFor lib.ManifestJson with SeamChecksReceiptPath = Some(writeSeamJson "seam-checks" { seamReceipt lib with ManifestIntegritySha256 = other }) }
     |> refusedWith "FS9248"
-    { requestFor lib.ManifestJson with RefusalControlsReceiptPath = Some(writeJson "refusal-controls" { refusalReceipt lib with ManifestIntegritySha256 = other }) }
+    { requestFor lib.ManifestJson with RefusalControlsReceiptPath = Some(writeRefusalJson "refusal-controls" { refusalReceipt lib with ManifestIntegritySha256 = other }) }
     |> refusedWith "FS9248"
 
 [<Fact>]
@@ -1073,20 +1212,20 @@ let ``an invalid companion Rocq project refuses with FS9249`` () =
     File.Delete missingProject.Project
     refusedRocq missingProject
     // A project that lists no unit.
-    let empty = rocqWith lawsSource limitsSource [] (fun facts -> facts["digests"] <- JsonObject()) ignore
+    let empty = rocqWith lawsSource limitsSource [] (jSet "digests" (JsonValue.Object [])) id
     File.WriteAllText(empty.Project, "-Q theories DossierProofs\n")
     refusedRocq empty
     // A proved public theorem without a fact, without a type, or without assumptions.
-    let symbols (alter: JsonObject -> unit) = rocqWith lawsSource limitsSource [] (fun facts -> alter (facts["symbols"].AsObject())) ignore
-    refusedRocq (symbols (fun entries -> entries.Remove "DossierProofs.Laws.identity_returns_input" |> ignore))
-    refusedRocq (symbols (fun entries -> entries.Remove "DossierProofs.Limits.unbounded_input_falsified" |> ignore))
-    refusedRocq (symbols (fun entries -> entries.Remove "DossierProofs.Limits.seven_is_admitted" |> ignore))
-    refusedRocq (symbols (fun entries -> entries.["DossierProofs.Laws.identity_returns_input"].AsObject().Remove "assumptions" |> ignore))
-    refusedRocq (symbols (fun entries -> entries.["DossierProofs.Limits.seven_is_admitted"].AsObject().Remove "type" |> ignore))
+    let symbols (alter: JsonValue -> JsonValue) = rocqWith lawsSource limitsSource [] (jUpdate "symbols" alter) id
+    refusedRocq (symbols (jRemove "DossierProofs.Laws.identity_returns_input"))
+    refusedRocq (symbols (jRemove "DossierProofs.Limits.unbounded_input_falsified"))
+    refusedRocq (symbols (jRemove "DossierProofs.Limits.seven_is_admitted"))
+    refusedRocq (symbols (jUpdate "DossierProofs.Laws.identity_returns_input" (jRemove "assumptions")))
+    refusedRocq (symbols (jUpdate "DossierProofs.Limits.seven_is_admitted" (jRemove "type")))
     // Binder documentation that names no written binder, repeats one, or reverses the order.
     let laws (before: string) (after: string) =
         Assert.Contains(before, lawsSource)
-        rocqWith (lawsSource.Replace(before, after)) limitsSource [] ignore ignore
+        rocqWith (lawsSource.Replace(before, after)) limitsSource [] id id
     refusedRocq (laws "- [n:] the value passed" "- [wrong_binder:] the value passed")
     refusedRocq (laws "    - [n:] the value passed to the foreign identity function. *)" "    - [n:] the value passed.\n    - [n:] the same binder again. *)")
     refusedRocq (laws "    - [a:] the left field.\n    - [b:] the right field,\n      measured at bit offset 32. *)" "    - [b:] the right field.\n    - [a:] the left field. *)")
@@ -1104,8 +1243,9 @@ let ``an unterminated Rocq unit and an admission that no declaration owns refuse
     // facts.json entry for it. Without the refusal the theorem would be listed as proved.
     let limitsWith (extra: string) (symbols: (string * string * string) list) =
         rocqWith lawsSource (limitsSource + extra) symbols (fun facts ->
-            for _, _, name in symbols do
-                facts["symbols"].AsObject().["DossierProofs.Limits." + name] <- fact "True" (closed ())) ignore
+            symbols
+            |> List.fold (fun acc (_, _, name) ->
+                jUpdate "symbols" (jSet ("DossierProofs.Limits." + name) (fact "True" (closed ()))) acc) facts) id
     let refusedUnit (fragment: string) (fixture: Rocq) =
         requestFor lib.ManifestJson |> withRocq fixture |> refusedWithText "FS9249" fragment
     // Control: the same theorem, terminated and closed by Qed, is a guarantee.
@@ -1138,13 +1278,8 @@ let ``unreconciled correspondence refuses with FS9250`` () =
     let manifest = lib.Manifest
     // Rocq correspondence naming no Clef declaration, no Rocq statement, or an internal Lemma.
     let mapping (symbol: string) (target: string) =
-        rocqWith lawsSource limitsSource [] ignore (fun config ->
-            let entry = JsonObject()
-            entry["RocqSymbol"] <- JsonValue.Create symbol
-            let targets = JsonArray()
-            targets.Add(JsonValue.Create target)
-            entry["Targets"] <- targets
-            config["Correspondence"].AsArray().Add entry)
+        rocqWith lawsSource limitsSource [] id (
+            jUpdate "Correspondence" (jAdd (correspondenceEntry symbol [ target ])))
     for fixture in
         [ mapping "DossierProofs.Limits.seven_is_admitted" "Dossier.Probe.Scalar.absent"
           mapping "DossierProofs.Limits.seven_is_admitted" "H-Callback-1"
@@ -1155,38 +1290,52 @@ let ``unreconciled correspondence refuses with FS9250`` () =
     for target in [ "Dossier.Probe.Boundary.dossier_pair_sumDescriptor"; "DossierPair"; "H-Link-1" ] do
         requestFor lib.ManifestJson |> withRocq (mapping "DossierProofs.Limits.seven_is_admitted" target) |> SubstantiationDossier.generate |> accepted |> ignore
     // A witness manifest rebound to a valid digest still has to reconcile.
-    let witness expected (alter: JsonNode -> unit) =
+    let witness expected (alter: JsonValue -> JsonValue) =
         changedBytes manifest.WitnessUnits.Path (fun bytes ->
-            let json = JsonNode.Parse(Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF'))
-            alter json
-            Encoding.UTF8.GetBytes(json.ToJsonString())) (fun () ->
+            let json = Json.parseOrFail(Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF')) |> alter
+            Encoding.UTF8.GetBytes(Json.serialize json)) (fun () ->
                 let request =
                     resealed lib (fun manifest -> { manifest with WitnessUnits = { manifest.WitnessUnits with Sha256 = ClangToolchain.sha256 manifest.WitnessUnits.Path } })
                     |> requestFor
                 if expected = "" then SubstantiationDossier.generate request |> accepted |> ignore
                 else refusedWith expected request)
-    let obligations (json: JsonNode) = json.["proof"].["obligations"].AsArray()
-    witness "" ignore
+    let updateObligations (f: JsonValue -> JsonValue) = jUpdate "proof" (jUpdate "obligations" f)
+    witness "" id
     // The obligation list of the witness against the retained obligation inventory.
-    witness "FS9250" (fun json -> (obligations json).[0].["kind"] <- JsonValue.Create "")
-    witness "FS9250" (fun json -> (obligations json).[0].["kind"] <- JsonValue.Create "forged-kind")
-    witness "FS9250" (fun json -> (obligations json).[0].["source"] <- JsonValue.Create "/forged/Source.clef:1:1")
-    witness "FS9250" (fun json -> (obligations json).[0].["anchor"] <- JsonValue.Create "forged_anchor")
-    witness "FS9250" (fun json -> (obligations json).RemoveAt 0)
-    witness "FS9250" (fun json -> (obligations json).Add((obligations json).[0].DeepClone()))
+    witness "FS9250" (updateObligations (jUpdateAt 0 (jSet "kind" (JsonValue.String ""))))
+    witness "FS9250" (updateObligations (jUpdateAt 0 (jSet "kind" (JsonValue.String "forged-kind"))))
+    witness "FS9250" (updateObligations (jUpdateAt 0 (jSet "source" (JsonValue.String ("/" + "forged/Source.clef:1:1")))))
+    witness "FS9250" (updateObligations (jUpdateAt 0 (jSet "anchor" (JsonValue.String "forged_anchor"))))
+    witness "FS9250" (updateObligations (jRemoveAt 0))
+    witness "FS9250" (updateObligations (fun arr ->
+        match arr with
+        | JsonValue.Array (first :: _ as items) -> JsonValue.Array (items @ [ first ])
+        | other -> other))
     // The source proof receipt embedded in the witness against 06c_psg_discharge.json.
-    witness "FS9250" (fun json -> json.["proof"].["source"].["Invocation"] <- JsonValue.Create(Guid.NewGuid().ToString()))
-    witness "FS9250" (fun json -> json.["proof"].["source"].["QuerySha256"] <- JsonValue.Create(String.replicate 64 "0"))
+    witness "FS9250" (jUpdate "proof" (jUpdate "source" (jSet "Invocation" (JsonValue.String(Guid.NewGuid().ToString())))))
+    witness "FS9250" (jUpdate "proof" (jUpdate "source" (jSet "QuerySha256" (JsonValue.String(String.replicate 64 "0")))))
     // A witnessed definition whose source node is a library node and whose traversal root is not.
     witness "FS9250" (fun json ->
-        let definitions = json.["units"].AsArray().[0].["definitions"].AsArray()
-        let definition (symbol: string) = definitions |> Seq.find (fun entry -> entry.["symbol"].GetValue<string>() = symbol)
-        (definition "Dossier.Probe.Scalar.seven").["traversalRoot"] <- (definition "main").["traversalRoot"].DeepClone())
+        let defs = json |> jProp "units" |> Json.items |> List.head |> jProp "definitions" |> Json.items
+        let mainRoot =
+            defs
+            |> List.find (fun entry -> (entry |> Json.prop "symbol" |> Option.bind Json.asString) = Some "main")
+            |> jProp "traversalRoot"
+        jUpdate "units" (jUpdateAt 0 (jUpdate "definitions" (fun arr ->
+            match arr with
+            | JsonValue.Array items ->
+                items
+                |> List.map (fun entry ->
+                    if (entry |> Json.prop "symbol" |> Option.bind Json.asString) = Some "Dossier.Probe.Scalar.seven" then
+                        jSet "traversalRoot" mainRoot entry
+                    else
+                        entry)
+                |> JsonValue.Array
+            | other -> other))) json)
     // Without a proof obligation list every obligation takes the fixed fallback text.
     changedBytes manifest.WitnessUnits.Path (fun bytes ->
-        let json = JsonNode.Parse(Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF'))
-        json["proof"] <- null
-        Encoding.UTF8.GetBytes(json.ToJsonString())) (fun () ->
+        let json = Json.parseOrFail(Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF')) |> jSet "proof" JsonValue.Null
+        Encoding.UTF8.GetBytes(Json.serialize json)) (fun () ->
             let generated =
                 resealed lib (fun manifest -> { manifest with WitnessUnits = { manifest.WitnessUnits with Sha256 = ClangToolchain.sha256 manifest.WitnessUnits.Path } })
                 |> requestFor |> SubstantiationDossier.generate |> accepted
@@ -1195,22 +1344,40 @@ let ``unreconciled correspondence refuses with FS9250`` () =
                 Assert.Equal("Proven compiler safety obligation", obligation.Guarantee)))
     // A forged pairing on the witnessed foreign import is a substantiation FS9243, reported
     // by the dossier as a correspondence failure.
-    let emittedImport (json: JsonNode) =
-        json["units"].AsArray()
-        |> Seq.collect (fun unitNode -> unitNode["imports"].AsArray())
-        |> Seq.find (fun import -> import["symbol"].GetValue<string>() = "dossier_identity")
-    witness "FS9250" (fun json -> (emittedImport json).["sourceBoundary"].["library"] <- JsonValue.Create "not_linked")
-    witness "FS9250" (fun json -> (emittedImport json).["symbol"] <- JsonValue.Create "uninventoried_symbol")
+    let updateEmittedImport (f: JsonValue -> JsonValue) (json: JsonValue) =
+        jUpdate "units" (fun units ->
+            match units with
+            | JsonValue.Array unitItems ->
+                unitItems
+                |> List.map (jUpdate "imports" (fun imps ->
+                    match imps with
+                    | JsonValue.Array impItems ->
+                        impItems
+                        |> List.map (fun imp ->
+                            if (imp |> Json.prop "symbol" |> Option.bind Json.asString) = Some "dossier_identity" then f imp else imp)
+                        |> JsonValue.Array
+                    | other -> other))
+                |> JsonValue.Array
+            | other -> other) json
+    witness "FS9250" (updateEmittedImport (jUpdate "sourceBoundary" (jSet "library" (JsonValue.String "not_linked"))))
+    witness "FS9250" (updateEmittedImport (jSet "symbol" (JsonValue.String "uninventoried_symbol")))
     // A valid symbol of the same library on the wrong FunctionDescriptor is refused as well:
     // the import of `dossier_identity` renamed to `dossier_pair_sum`, and the same import
     // moved to the `dossier_pair_sum` descriptor binding.
-    let retainedPsg = JsonNode.Parse(File.ReadAllText(manifest.Psg0.Path).TrimStart('\uFEFF'))
+    let retainedPsg = Json.parseOrFail(File.ReadAllText(manifest.Psg0.Path).TrimStart('\uFEFF'))
     let pairSumDescriptor =
-        retainedPsg["nodes"].AsArray()
-        |> Seq.find (fun node -> node["kind"].GetValue<string>().StartsWith("Binding (\"dossier_pair_sumDescriptor\"", StringComparison.Ordinal))
-        |> fun node -> node["id"].GetValue<int>()
-    witness "FS9250" (fun json -> (emittedImport json).["symbol"] <- JsonValue.Create "dossier_pair_sum")
-    witness "FS9250" (fun json -> (emittedImport json).["sourceBoundary"].["declaration"] <- JsonValue.Create pairSumDescriptor)
+        retainedPsg
+        |> jProp "nodes"
+        |> Json.items
+        |> List.find (fun node ->
+            let kind = node |> Json.prop "kind" |> Option.bind Json.asString |> Option.defaultValue ""
+            kind.StartsWith("Binding (\"dossier_pair_sumDescriptor\"", StringComparison.Ordinal))
+        |> Json.prop "id"
+        |> Option.bind Json.asInt
+        |> Option.defaultValue -1L
+        |> int
+    witness "FS9250" (updateEmittedImport (jSet "symbol" (JsonValue.String "dossier_pair_sum")))
+    witness "FS9250" (updateEmittedImport (jUpdate "sourceBoundary" (jSet "declaration" (Json.ofInt64 (int64 pairSumDescriptor)))))
     requestFor lib.ManifestJson |> SubstantiationDossier.generate |> accepted |> ignore
 
 [<Fact>]
@@ -1259,14 +1426,25 @@ let ``a witnessed import retargeted to a result contract or a runtime binding re
     //    and a valid envelope, through the complete generator.
     let witness expected (fragment: string) (node: int) =
         changedBytes manifest.WitnessUnits.Path (fun bytes ->
-            let json = JsonNode.Parse(Encoding.UTF8.GetString(bytes).TrimStart('﻿'))
-            let emitted =
-                json["units"].AsArray()
-                |> Seq.collect (fun unitNode -> unitNode["imports"].AsArray())
-                |> Seq.filter (fun import -> import["symbol"].GetValue<string>() = identity)
-                |> Seq.exactlyOne
-            emitted.["sourceBoundary"].["declaration"] <- JsonValue.Create node
-            Encoding.UTF8.GetBytes(json.ToJsonString())) (fun () ->
+            let json =
+                Json.parseOrFail(Encoding.UTF8.GetString(bytes).TrimStart('﻿'))
+                |> jUpdate "units" (fun units ->
+                    match units with
+                    | JsonValue.Array unitItems ->
+                        unitItems
+                        |> List.map (jUpdate "imports" (fun imps ->
+                            match imps with
+                            | JsonValue.Array impItems ->
+                                impItems
+                                |> List.map (fun imp ->
+                                    if (imp |> Json.prop "symbol" |> Option.bind Json.asString) = Some identity then
+                                        jUpdate "sourceBoundary" (jSet "declaration" (Json.ofInt64 (int64 node))) imp
+                                    else imp)
+                                |> JsonValue.Array
+                            | other -> other))
+                        |> JsonValue.Array
+                    | other -> other)
+            Encoding.UTF8.GetBytes(Json.serialize json)) (fun () ->
                 let request =
                     resealed lib (fun manifest -> { manifest with WitnessUnits = { manifest.WitnessUnits with Sha256 = ClangToolchain.sha256 manifest.WitnessUnits.Path } })
                     |> requestFor
@@ -1300,7 +1478,7 @@ let ``invalid seam and refusal receipts refuse with FS9251`` () =
           seamWith { first with BinarySha256 = "abc" }
           seamWith { first with Summary = "" }
           seamWith { first with Command = " " } ] do
-        { requestFor lib.ManifestJson with SeamChecksReceiptPath = Some(writeJson "seam-checks" receipt) } |> refusedWith "FS9251"
+        { requestFor lib.ManifestJson with SeamChecksReceiptPath = Some(writeSeamJson "seam-checks" receipt) } |> refusedWith "FS9251"
     let refusals = refusalReceipt lib
     let control = refusals.Controls[0]
     for receipt in
@@ -1314,12 +1492,12 @@ let ``invalid seam and refusal receipts refuse with FS9251`` () =
           { refusals with Controls = [| control; control |] }
           { refusals with Controls = [| { control with MisuseSummary = "" } |] }
           { refusals with Controls = [| { control with ProtectionSummary = "" } |] } ] do
-        { requestFor lib.ManifestJson with RefusalControlsReceiptPath = Some(writeJson "refusal-controls" receipt) } |> refusedWith "FS9251"
+        { requestFor lib.ManifestJson with RefusalControlsReceiptPath = Some(writeRefusalJson "refusal-controls" receipt) } |> refusedWith "FS9251"
     // Schema-valid seam-checks or refusal-controls receipts supplied WITHOUT their mandatory
     // co-located <Package>.seams-ledger.json receipt fail closed with FS9251 (#219 B3).
-    { requestFor lib.ManifestJson with SeamChecksReceiptPath = Some(writeJson "orphan-seam-checks" seam) }
+    { requestFor lib.ManifestJson with SeamChecksReceiptPath = Some(writeSeamJson "orphan-seam-checks" seam) }
     |> refusedWithText "FS9251" "lacks its required co-located DossierProbe.seams-ledger.json"
-    { requestFor lib.ManifestJson with RefusalControlsReceiptPath = Some(writeJson "orphan-refusal-controls" refusals) }
+    { requestFor lib.ManifestJson with RefusalControlsReceiptPath = Some(writeRefusalJson "orphan-refusal-controls" refusals) }
     |> refusedWithText "FS9251" "lacks its required co-located DossierProbe.seams-ledger.json"
     // Valid receipts placed in two distinct directories resolve to distinct ledgers -> FS9251.
     let seams = realSeams.Value
@@ -1407,57 +1585,58 @@ let ``malformed or unpaired dossier inputs refuse with FS9247`` () =
     resealed lib (fun manifest -> { manifest with Boundary = { manifest.Boundary with ExternSymbols = [||] } })
     |> requestFor |> refusedWith "FS9247"
     // Receipts: a duplicate key, an unknown field, a missing field, a null and a wrong type.
-    let seamJson = JsonSerializer.Serialize(seamReceipt lib)
-    let seamEdited (alter: JsonObject -> unit) =
-        let node = JsonNode.Parse(seamJson).AsObject()
-        alter node
-        node.ToJsonString()
+    let seamJson = seamChecksToJsonValue (seamReceipt lib) |> Json.serialize
+    let seamEdited (alter: JsonValue -> JsonValue) =
+        Json.parseOrFail seamJson |> alter |> Json.serialize
     Assert.StartsWith("{\"SchemaVersion\":1,", seamJson)
     for text in
         [ "{\"SchemaVersion\":1," + seamJson.Substring 1
-          seamEdited (fun node -> node["Unknown"] <- JsonValue.Create true)
-          seamEdited (fun node -> node.Remove "TargetTriple" |> ignore)
-          seamEdited (fun node -> node["TargetTriple"] <- null)
-          seamEdited (fun node -> node["SchemaVersion"] <- JsonValue.Create "1")
-          seamEdited (fun node -> node.["Checks"].AsArray().[0].AsObject().Remove "Passed" |> ignore)
-          seamEdited (fun node -> node.["Checks"].AsArray().[0].["Passed"] <- JsonValue.Create "true")
+          seamEdited (jSet "Unknown" (JsonValue.Bool true))
+          seamEdited (jRemove "TargetTriple")
+          seamEdited (jSet "TargetTriple" JsonValue.Null)
+          seamEdited (jSet "SchemaVersion" (JsonValue.String "1"))
+          seamEdited (jUpdate "Checks" (jUpdateAt 0 (jRemove "Passed")))
+          seamEdited (jUpdate "Checks" (jUpdateAt 0 (jSet "Passed" (JsonValue.String "true"))))
           "not json" ] do
         refusedWith "FS9247" { valid with SeamChecksReceiptPath = Some(writeText "seam-checks" text) }
     refusedWith "FS9247" { valid with SeamChecksReceiptPath = Some(Path.Combine(scratch "absent", "seam-checks.json")) }
-    let refusalJson = JsonSerializer.Serialize(refusalReceipt lib)
+    let refusalJson = refusalControlsToJsonValue (refusalReceipt lib) |> Json.serialize
     for text in
         [ "{\"Package\":\"DossierProbe\"," + refusalJson.Substring 1
           refusalJson.Replace("\"Passed\":true", "\"Passed\":null")
           refusalJson.Replace("\"Controls\":", "\"Extra\":0,\"Controls\":") ] do
         refusedWith "FS9247" { valid with RefusalControlsReceiptPath = Some(writeText "refusal-controls" text) }
     // The Rocq config.
-    let config (alter: JsonObject -> unit) = rocqWith lawsSource limitsSource [] ignore alter
+    let config (alter: JsonValue -> JsonValue) = rocqWith lawsSource limitsSource [] id alter
     for malformed in
-        [ config (fun node -> node["SchemaVersion"] <- JsonValue.Create 2)
-          config (fun node -> node["FalsifiedSuffix"] <- JsonValue.Create "")
-          config (fun node -> node["CheckMarker"] <- JsonValue.Create "")
-          config (fun node -> node.Remove "CheckMarker" |> ignore)
-          config (fun node -> node["Extra"] <- JsonValue.Create 1)
-          config (fun node -> node.["Correspondence"].AsArray().Add(node.["Correspondence"].AsArray().[0].DeepClone()))
-          config (fun node -> node.["Correspondence"].AsArray().[0].["Targets"] <- JsonArray())
-          config (fun node -> node.["Correspondence"].AsArray().[0].["RocqSymbol"] <- JsonValue.Create " ") ] do
+        [ config (jSet "SchemaVersion" (Json.ofInt64 2L))
+          config (jSet "FalsifiedSuffix" (JsonValue.String ""))
+          config (jSet "CheckMarker" (JsonValue.String ""))
+          config (jRemove "CheckMarker")
+          config (jSet "Extra" (Json.ofInt64 1L))
+          config (jUpdate "Correspondence" (fun arr ->
+              match arr with
+              | JsonValue.Array (first :: _ as items) -> JsonValue.Array (items @ [ first ])
+              | other -> other))
+          config (jUpdate "Correspondence" (jUpdateAt 0 (jSet "Targets" (JsonValue.Array []))))
+          config (jUpdate "Correspondence" (jUpdateAt 0 (jSet "RocqSymbol" (JsonValue.String " ")))) ] do
         valid |> withRocq malformed |> refusedWith "FS9247"
     // facts.json.
-    let facts (alter: JsonObject -> unit) = rocqWith lawsSource limitsSource [] alter ignore
-    let theorem (node: JsonObject) = node.["symbols"].["DossierProofs.Laws.identity_returns_input"].AsObject()
+    let facts (alter: JsonValue -> JsonValue) = rocqWith lawsSource limitsSource [] alter id
+    let updateTheorem (f: JsonValue -> JsonValue) = jUpdate "symbols" (jUpdate "DossierProofs.Laws.identity_returns_input" f)
     for malformed in
-        [ facts (fun node -> node["extra"] <- JsonValue.Create 1)
-          facts (fun node -> node.Remove "rocqVersion" |> ignore)
-          facts (fun node -> node["rocqVersion"] <- JsonValue.Create "")
-          facts (fun node -> node["digests"] <- JsonArray())
-          facts (fun node -> node.["digests"].["theories/Laws.v"] <- JsonValue.Create 7)
-          facts (fun node -> (theorem node)["assumptions"] <- JsonValue.Create "open")
-          facts (fun node -> (theorem node)["assumptions"] <- JsonArray())
-          facts (fun node -> (theorem node)["assumptions"] <- null)
-          facts (fun node -> (theorem node)["type"] <- JsonValue.Create "")
-          facts (fun node -> (theorem node).Remove "binders" |> ignore)
-          facts (fun node -> (theorem node)["binders"] <- JsonArray())
-          facts (fun node -> (theorem node)["extra"] <- JsonValue.Create 1) ] do
+        [ facts (jSet "extra" (Json.ofInt64 1L))
+          facts (jRemove "rocqVersion")
+          facts (jSet "rocqVersion" (JsonValue.String ""))
+          facts (jSet "digests" (JsonValue.Array []))
+          facts (jUpdate "digests" (jSet "theories/Laws.v" (Json.ofInt64 7L)))
+          facts (updateTheorem (jSet "assumptions" (JsonValue.String "open")))
+          facts (updateTheorem (jSet "assumptions" (JsonValue.Array [])))
+          facts (updateTheorem (jSet "assumptions" JsonValue.Null))
+          facts (updateTheorem (jSet "type" (JsonValue.String "")))
+          facts (updateTheorem (jRemove "binders"))
+          facts (updateTheorem (jSet "binders" (JsonValue.Array [])))
+          facts (updateTheorem (jSet "extra" (Json.ofInt64 1L))) ] do
         valid |> withRocq malformed |> refusedWith "FS9247"
     let duplicated = rocq ()
     File.WriteAllText(duplicated.Facts, (File.ReadAllText duplicated.Facts).Replace("\"rocqVersion\":\"9.1.0\",", "\"rocqVersion\":\"9.1.0\",\"rocqVersion\":\"9.1.0\","))

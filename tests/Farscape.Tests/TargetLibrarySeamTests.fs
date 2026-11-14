@@ -3,7 +3,7 @@ namespace Farscape.Tests
 open System
 open System.IO
 open System.Text
-open System.Text.Json
+open Fidelity.Data.JSON
 open Xunit
 open Farscape.Core
 open Farscape.Tests.SubstantiationTests
@@ -364,9 +364,18 @@ module TargetLibrarySeamScaffoldingTests =
                 let artifactsDir = Path.Combine(work, targetLib + "-artifacts")
                 Directory.CreateDirectory artifactsDir |> ignore
                 let outcomes =
-                    [| for i in 1 .. total -> {| ObligationId = sprintf "%s.ob.%d" targetLib i; Verdict = "unsat" |} |]
+                    [ for i in 1 .. total ->
+                        JsonValue.Object [
+                            "ObligationId", JsonValue.String (sprintf "%s.ob.%d" targetLib i)
+                            "Verdict", JsonValue.String "unsat"
+                        ] ]
                 let dischargePath = Path.Combine(artifactsDir, "06c_psg_discharge.json")
-                let dischargeJson = JsonSerializer.Serialize({| Stage = "psg"; Outcomes = outcomes |})
+                let dischargeJson =
+                    JsonValue.Object [
+                        "Stage", JsonValue.String "psg"
+                        "Outcomes", JsonValue.Array outcomes
+                    ]
+                    |> Json.serialize
                 writeUtf8 dischargePath dischargeJson
                 let premisesPath = Path.Combine(artifactsDir, "06b_premises_sat.stdout")
                 writeLines premisesPath [ for _ in 1 .. total -> "sat" ]

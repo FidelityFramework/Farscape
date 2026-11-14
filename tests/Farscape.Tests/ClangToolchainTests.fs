@@ -51,7 +51,7 @@ let ``clang selection uses FIDELITY_CLANG then unversioned clang on PATH`` () =
 let ``a FIDELITY_CLANG naming no file is refused without PATH being searched`` () =
     let environment, read = recorded (Map.ofList [ "FIDELITY_CLANG", "/missing/clang"; "PATH", "/usr/bin" ])
     let error =
-        Assert.Throws<System.InvalidOperationException>(fun () ->
+        Assert.Throws<Diagnostics.RefusalException>(fun () ->
             ClangToolchain.resolveWith environment "/fixture" (fun path -> path = "/usr/bin/clang") |> ignore)
     Assert.Equal("FIDELITY_CLANG selects '/missing/clang', which does not exist; PATH is not searched.", error.Message)
     Assert.Equal<string list>([ "FIDELITY_CLANG" ], List.ofSeq read)
@@ -59,7 +59,7 @@ let ``a FIDELITY_CLANG naming no file is refused without PATH being searched`` (
 [<Fact>]
 let ``versioned clang names on PATH do not satisfy resolution`` () =
     let variables = Map.ofList [ "PATH", "/usr/bin" ]
-    let error = Assert.Throws<System.InvalidOperationException>(fun () -> resolve variables [ "/usr/bin/clang-21"; "/usr/bin/clang-20"; "/usr/bin/clang-19" ] |> ignore)
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> resolve variables [ "/usr/bin/clang-21"; "/usr/bin/clang-20"; "/usr/bin/clang-19" ] |> ignore)
     Assert.Equal("clang was not found on PATH; set FIDELITY_CLANG.", error.Message)
 
 [<Fact>]
@@ -70,7 +70,7 @@ let ``FIDELITY_LLVM_BIN does not select clang`` () =
     Assert.Equal("/two/clang", selected.Path)
     Assert.Equal(ClangToolchain.Source.Path, selected.Origin)
     // With no clang on PATH, the clang in the backend directory is not selected either.
-    let error = Assert.Throws<System.InvalidOperationException>(fun () -> resolve backend [ "/llvm/bin/clang" ] |> ignore)
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> resolve backend [ "/llvm/bin/clang" ] |> ignore)
     Assert.Equal("clang was not found on PATH; set FIDELITY_CLANG.", error.Message)
     // A backend directory that does not exist is no refusal of the clang resolution.
     Assert.Equal("/two/clang", (resolve (Map.add "FIDELITY_LLVM_BIN" "/missing" backend) [ "/two/clang" ]).Path)
@@ -106,7 +106,7 @@ let ``a FIDELITY_LLVM_AR naming no file is refused without another llvm-ar being
         probed.Add path
         List.contains path installed
     let error =
-        Assert.Throws<System.InvalidOperationException>(fun () ->
+        Assert.Throws<Diagnostics.RefusalException>(fun () ->
             ClangToolchain.resolveArchiverWith environment (Some "/clang/bin") exists |> ignore)
     Assert.Equal("FIDELITY_LLVM_AR selects '/missing/llvm-ar', which does not exist; no other llvm-ar is searched for.", error.Message)
     // `PATH` is not read, and the selected path is the only one tested for existence: neither
@@ -114,7 +114,7 @@ let ``a FIDELITY_LLVM_AR naming no file is refused without another llvm-ar being
     Assert.Equal<string list>([ "FIDELITY_LLVM_AR" ], List.ofSeq read)
     Assert.Equal<string list>([ "/missing/llvm-ar" ], List.ofSeq probed)
     // The refusal does not depend on a clang directory being known.
-    let error = Assert.Throws<System.InvalidOperationException>(fun () -> resolveArchiver variables None installed |> ignore)
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> resolveArchiver variables None installed |> ignore)
     Assert.Equal("FIDELITY_LLVM_AR selects '/missing/llvm-ar', which does not exist; no other llvm-ar is searched for.", error.Message)
     // Control: the same installation without the selection resolves, beside clang and then on
     // `PATH`, so the refusal is the invalid selection's and not a missing llvm-ar's.
@@ -146,18 +146,18 @@ let ``an invalid FIDELITY_LLVM_AR is refused on a file system holding llvm-ar be
         // is refused; neither other llvm-ar is resolved in its place.
         for invalid in [ Path.Combine(directory, "missing", "llvm-ar"); selected; beside; searched ] do
             for clangDir in [ Some beside; None ] do
-                let error = Assert.Throws<System.InvalidOperationException>(fun () -> resolveOver clangDir (Some invalid) |> ignore)
+                let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> resolveOver clangDir (Some invalid) |> ignore)
                 Assert.Equal($"FIDELITY_LLVM_AR selects '{invalid}', which does not exist; no other llvm-ar is searched for.", error.Message))
 
 [<Fact>]
 let ``versioned llvm-ar and GNU ar names do not satisfy archiver resolution`` () =
     let installed = [ "/clang/bin/ar"; "/clang/bin/llvm-ar-21"; "/usr/bin/ar"; "/usr/bin/llvm-ar-21"; "/usr/bin/llvm-ar-18"; "/usr/bin/gcc-ar" ]
     let error =
-        Assert.Throws<System.InvalidOperationException>(fun () ->
+        Assert.Throws<Diagnostics.RefusalException>(fun () ->
             resolveArchiver (Map.ofList [ "PATH", "/usr/bin" ]) (Some "/clang/bin") installed |> ignore)
     Assert.Equal("llvm-ar was not found beside clang or on PATH; set FIDELITY_LLVM_AR.", error.Message)
     // Without a PATH variable there is still no selection.
-    let error = Assert.Throws<System.InvalidOperationException>(fun () -> resolveArchiver Map.empty None installed |> ignore)
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> resolveArchiver Map.empty None installed |> ignore)
     Assert.Equal("llvm-ar was not found beside clang or on PATH; set FIDELITY_LLVM_AR.", error.Message)
 
 [<Fact>]
@@ -167,7 +167,7 @@ let ``FIDELITY_LLVM_BIN does not select llvm-ar`` () =
     Assert.Equal("/clang/bin/llvm-ar", resolveArchiver backend (Some "/clang/bin") [ "/llvm/bin/llvm-ar"; "/clang/bin/llvm-ar"; "/two/llvm-ar" ])
     Assert.Equal("/two/llvm-ar", resolveArchiver backend (Some "/clang/bin") [ "/llvm/bin/llvm-ar"; "/two/llvm-ar" ])
     // With no llvm-ar beside clang or on PATH, the one in the backend directory is not selected either.
-    let error = Assert.Throws<System.InvalidOperationException>(fun () -> resolveArchiver backend (Some "/clang/bin") [ "/llvm/bin/llvm-ar" ] |> ignore)
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> resolveArchiver backend (Some "/clang/bin") [ "/llvm/bin/llvm-ar" ] |> ignore)
     Assert.Equal("llvm-ar was not found beside clang or on PATH; set FIDELITY_LLVM_AR.", error.Message)
     // A backend directory that does not exist is no refusal of the archiver resolution.
     Assert.Equal("/two/llvm-ar", resolveArchiver (Map.add "FIDELITY_LLVM_BIN" "/missing" backend) None [ "/two/llvm-ar" ])

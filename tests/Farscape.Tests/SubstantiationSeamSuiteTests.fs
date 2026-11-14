@@ -5,8 +5,7 @@ open System.Buffers.Binary
 open System.Diagnostics
 open System.IO
 open System.Text
-open System.Text.Json
-open System.Text.Json.Nodes
+open Fidelity.Data.JSON
 open Xunit
 open Farscape.Core
 open Farscape.Tests.SubstantiationTests
@@ -26,6 +25,52 @@ let private scratch label =
 
 let private writeLines path (lines: string list) =
     File.WriteAllText(path, String.concat "\n" lines + "\n", UTF8Encoding(false))
+
+let private serializeSeamsLedgerReceipt (ledger: SubstantiationSeams.SeamsLedgerReceipt) : string =
+    let dischargeJson (d: SubstantiationSeams.DischargeSummary) =
+        JsonValue.Object
+            [ "ReceiptPath", JsonValue.String d.ReceiptPath
+              "ReceiptSha256", JsonValue.String d.ReceiptSha256
+              "PremisesOutputPath", JsonValue.String d.PremisesOutputPath
+              "PremisesOutputSha256", JsonValue.String d.PremisesOutputSha256
+              "TotalObligations", Json.ofInt64 (int64 d.TotalObligations)
+              "DischargedUnsatCount", Json.ofInt64 (int64 d.DischargedUnsatCount)
+              "PremisesSatCount", Json.ofInt64 (int64 d.PremisesSatCount)
+              "LibraryObligations", Json.ofInt64 (int64 d.LibraryObligations)
+              "LibraryDischargedUnsatCount", Json.ofInt64 (int64 d.LibraryDischargedUnsatCount)
+              "LibraryPremisesSatCount", Json.ofInt64 (int64 d.LibraryPremisesSatCount)
+              "PendingOpenCount", Json.ofInt64 (int64 d.PendingOpenCount)
+              "RefutedCount", Json.ofInt64 (int64 d.RefutedCount) ]
+    let retainedJson (r: SubstantiationSeams.RetainedProbeBinary) =
+        JsonValue.Object
+            [ "CheckId", JsonValue.String r.CheckId
+              "BinaryPath", JsonValue.String r.BinaryPath
+              "BinarySha256", JsonValue.String r.BinarySha256 ]
+    let sharedJson (s: SubstantiationSeams.SharedLibraryComparison) =
+        JsonValue.Object
+            [ "CheckId", JsonValue.String s.CheckId
+              "SharedLibraryPath", JsonValue.String s.SharedLibraryPath
+              "SharedLibrarySha256", JsonValue.String s.SharedLibrarySha256
+              "DynamicProbeBinaryPath", JsonValue.String s.DynamicProbeBinaryPath
+              "DynamicProbeBinarySha256", JsonValue.String s.DynamicProbeBinarySha256 ]
+    JsonValue.Object
+        [ "Schema", JsonValue.String ledger.Schema
+          "SchemaVersion", Json.ofInt64 (int64 ledger.SchemaVersion)
+          "SeamChecksSchema", JsonValue.String ledger.SeamChecksSchema
+          "RefusalControlsSchema", JsonValue.String ledger.RefusalControlsSchema
+          "Package", JsonValue.String ledger.Package
+          "ManifestIntegritySha256", JsonValue.String ledger.ManifestIntegritySha256
+          "TargetTriple", JsonValue.String ledger.TargetTriple
+          "RequiredSeamCategories", JsonValue.Array (ledger.RequiredSeamCategories |> Array.toList |> List.map JsonValue.String)
+          "VerifiedPhysicalCategories", JsonValue.Array (ledger.VerifiedPhysicalCategories |> Array.toList |> List.map JsonValue.String)
+          "Discharge", dischargeJson ledger.Discharge
+          "RetainedBinaries", JsonValue.Array (ledger.RetainedBinaries |> Array.toList |> List.map retainedJson)
+          "SharedLibraries", JsonValue.Array (ledger.SharedLibraries |> Array.toList |> List.map sharedJson)
+          "SeamChecksPath", JsonValue.String ledger.SeamChecksPath
+          "SeamChecksSha256", JsonValue.String ledger.SeamChecksSha256
+          "RefusalControlsPath", JsonValue.String ledger.RefusalControlsPath
+          "RefusalControlsSha256", JsonValue.String ledger.RefusalControlsSha256 ]
+    |> Json.serializePretty
 
 let private runWithBound (timeoutMs: int) (work: string) (label: string) (info: ProcessStartInfo) =
     if String.IsNullOrWhiteSpace info.WorkingDirectory then info.WorkingDirectory <- work
@@ -1331,12 +1376,16 @@ let ``verifyDischarge and evaluate refuse tampered 06c_psg_discharge and 06b_pre
 
     // 4. 06c outcome count disagrees with manifest.Proof.DischargedUnsatCount
     assertTamperedDischargeRefused "06c-count-mismatch" true "UNSAT count" (fun receiptPath _ m ->
-        use doc = JsonDocument.Parse(File.ReadAllText receiptPath)
-        let outcomes = doc.RootElement.GetProperty("Outcomes").EnumerateArray() |> Seq.toArray
+        let doc = Json.parseOrFail(File.ReadAllText receiptPath)
+        let outcomes = doc |> Json.prop "Outcomes" |> Option.map Json.items |> Option.defaultValue [] |> List.toArray
         Assert.True(outcomes.Length >= 2)
-        let truncated = outcomes[0 .. outcomes.Length - 2] |> Array.map _.GetRawText() |> String.concat ",\n"
-        let json = "{\n  \"Stage\": \"psg\",\n  \"Outcomes\": [\n" + truncated + "\n  ]\n}\n"
-        File.WriteAllText(receiptPath, json, UTF8Encoding(false))
+        let truncated = outcomes[0 .. outcomes.Length - 2] |> Array.toList
+        let json =
+            JsonValue.Object
+                [ "Stage", JsonValue.String "psg"
+                  "Outcomes", JsonValue.Array truncated ]
+            |> Json.serializePretty
+        File.WriteAllText(receiptPath, json + "\n", UTF8Encoding(false))
         m)
 
     // 5. 06c SHA-256 drift against manifest.Proof.ReceiptSha256
@@ -1821,7 +1870,7 @@ let ``tampered manifest, child receipt SHA drift, ledger Discharge drift, and re
             { generated.Ledger with
                 SeamChecksPath = seamCopy
                 RefusalControlsPath = refusalCopy }
-        File.WriteAllText(ledgerCopy, JsonSerializer.Serialize(rebasedLedger, JsonSerializerOptions(WriteIndented = true)), UTF8Encoding(false))
+        File.WriteAllText(ledgerCopy, serializeSeamsLedgerReceipt rebasedLedger, UTF8Encoding(false))
         SubstantiationSeams.readLedgerReceipt libcFx.Manifest ledgerCopy |> accepted |> ignore
         seamCopy, refusalCopy, ledgerCopy, rebasedLedger
 
@@ -1842,7 +1891,7 @@ let ``tampered manifest, child receipt SHA drift, ledger Discharge drift, and re
     let badDischargeCount =
         { baseLedger3 with
             Discharge = { baseLedger3.Discharge with DischargedUnsatCount = baseLedger3.Discharge.DischargedUnsatCount + 1 } }
-    File.WriteAllText(ledgerCopy3, JsonSerializer.Serialize(badDischargeCount, JsonSerializerOptions(WriteIndented = true)), UTF8Encoding(false))
+    File.WriteAllText(ledgerCopy3, serializeSeamsLedgerReceipt badDischargeCount, UTF8Encoding(false))
     SubstantiationSeams.readLedgerReceipt libcFx.Manifest ledgerCopy3 |> refused "FS9253"
 
     // R7b-2: Ledger Discharge.ReceiptSha256 disagrees with manifest.Proof.ReceiptSha256 -> refused with FS9253.
@@ -1850,7 +1899,7 @@ let ``tampered manifest, child receipt SHA drift, ledger Discharge drift, and re
     let badDischargeSha =
         { baseLedger4 with
             Discharge = { baseLedger4.Discharge with ReceiptSha256 = String.replicate 64 "c" } }
-    File.WriteAllText(ledgerCopy4, JsonSerializer.Serialize(badDischargeSha, JsonSerializerOptions(WriteIndented = true)), UTF8Encoding(false))
+    File.WriteAllText(ledgerCopy4, serializeSeamsLedgerReceipt badDischargeSha, UTF8Encoding(false))
     SubstantiationSeams.readLedgerReceipt libcFx.Manifest ledgerCopy4 |> refused "FS9253"
 
     // R5 in ledger reader: Unexpected SharedLibraries entry on non-elision check -> refused with FS9253.
@@ -1862,7 +1911,7 @@ let ``tampered manifest, child receipt SHA drift, ledger Discharge drift, and re
           DynamicProbeBinaryPath = fx.SharedLib
           DynamicProbeBinarySha256 = String.replicate 64 "f" }
     let badSharedLedger = { baseLedger5 with SharedLibraries = [| badSharedEntry |] }
-    File.WriteAllText(ledgerCopy5, JsonSerializer.Serialize(badSharedLedger, JsonSerializerOptions(WriteIndented = true)), UTF8Encoding(false))
+    File.WriteAllText(ledgerCopy5, serializeSeamsLedgerReceipt badSharedLedger, UTF8Encoding(false))
     SubstantiationSeams.readLedgerReceipt libcFx.Manifest ledgerCopy5 |> refused "FS9253"
 
     // R6b in ledger reader: Unmeasured ClangTarget ("not-measured") is unconditionally refused with FS9253.
@@ -1873,7 +1922,7 @@ let ``tampered manifest, child receipt SHA drift, ledger Discharge drift, and re
             Package = unmeasuredManifest.Package
             ManifestIntegritySha256 = unmeasuredManifest.IntegritySha256
             TargetTriple = "not-measured" }
-    File.WriteAllText(ledgerCopy6, JsonSerializer.Serialize(unmeasuredLedger, JsonSerializerOptions(WriteIndented = true)), UTF8Encoding(false))
+    File.WriteAllText(ledgerCopy6, serializeSeamsLedgerReceipt unmeasuredLedger, UTF8Encoding(false))
     SubstantiationSeams.readLedgerReceipt unmeasuredManifest ledgerCopy6 |> refused "FS9253"
 
     // R7c-1 (B3): RetainedBinaries digest drift in ledger is refused by readLedgerReceipt (FS9253)
@@ -1883,7 +1932,7 @@ let ``tampered manifest, child receipt SHA drift, ledger Discharge drift, and re
         baseLedger7.RetainedBinaries
         |> Array.map (fun item -> { item with BinarySha256 = String.replicate 64 "b" })
     let badRetainedLedger = { baseLedger7 with RetainedBinaries = tamperedRetained }
-    File.WriteAllText(ledgerCopy7, JsonSerializer.Serialize(badRetainedLedger, JsonSerializerOptions(WriteIndented = true)), UTF8Encoding(false))
+    File.WriteAllText(ledgerCopy7, serializeSeamsLedgerReceipt badRetainedLedger, UTF8Encoding(false))
     SubstantiationSeams.readLedgerReceipt libcFx.Manifest ledgerCopy7 |> refused "FS9253"
     SubstantiationDossier.generate
         { ManifestPath = libcFx.ManifestJson
@@ -2409,17 +2458,47 @@ let ``stripped ELF symtab, probe fidproj synthesis conflicts, multi-archive stat
     for file in Directory.GetFiles fx.Manifest.ArtifactsDirectory do
         File.Copy(file, Path.Combine(copiedArtifacts, Path.GetFileName file), true)
     let copiedWitnessPath = Path.Combine(copiedArtifacts, "10_witness_units.json")
-    let witnessNode = JsonNode.Parse(File.ReadAllText(copiedWitnessPath).TrimStart('\uFEFF'))
+    let witnessNode = Json.parseOrFail(File.ReadAllText(copiedWitnessPath).TrimStart('\uFEFF'))
     let mutable removedAdapterDef = false
-    for unitNode in witnessNode.["units"].AsArray() do
-        let defs : JsonArray = unitNode.["definitions"].AsArray()
-        for i = defs.Count - 1 downto 0 do
-            let sym = (defs.[i]).["symbol"].GetValue<string>()
-            if sym.Contains("seam_invoke_callback", StringComparison.Ordinal) then
-                defs.RemoveAt i
-                removedAdapterDef <- true
+    let updatedWitnessNode =
+        match witnessNode with
+        | JsonValue.Object rootFields ->
+            rootFields
+            |> List.map (fun (k, v) ->
+                if k = "units" then
+                    let units =
+                        Json.items v
+                        |> List.map (fun unitNode ->
+                            match unitNode with
+                            | JsonValue.Object unitFields ->
+                                unitFields
+                                |> List.map (fun (uk, uv) ->
+                                    if uk = "definitions" then
+                                        let keptDefs =
+                                            Json.items uv
+                                            |> List.filter (fun defNode ->
+                                                let sym =
+                                                    defNode
+                                                    |> Json.prop "symbol"
+                                                    |> Option.bind Json.asString
+                                                    |> Option.defaultValue ""
+                                                if sym.Contains("seam_invoke_callback", StringComparison.Ordinal) then
+                                                    removedAdapterDef <- true
+                                                    false
+                                                else
+                                                    true)
+                                        uk, JsonValue.Array keptDefs
+                                    else
+                                        uk, uv)
+                                |> JsonValue.Object
+                            | other -> other)
+                    k, JsonValue.Array units
+                else
+                    k, v)
+            |> JsonValue.Object
+        | other -> other
     Assert.True removedAdapterDef
-    File.WriteAllText(copiedWitnessPath, witnessNode.ToJsonString(), UTF8Encoding(false))
+    File.WriteAllText(copiedWitnessPath, Json.serialize updatedWitnessNode, UTF8Encoding(false))
     let tamperedAdapterManifest =
         { fx.Manifest with
             ArtifactsDirectory = copiedArtifacts
@@ -2492,7 +2571,7 @@ let ``stripped ELF symtab, probe fidproj synthesis conflicts, multi-archive stat
     Directory.CreateDirectory sharedLedgerDir |> ignore
     let writeModifiedProbeLedger label (mutate: SubstantiationSeams.SeamsLedgerReceipt -> SubstantiationSeams.SeamsLedgerReceipt) =
         let p = Path.Combine(sharedLedgerDir, label + ".seams-ledger.json")
-        File.WriteAllText(p, JsonSerializer.Serialize(mutate cleanRun.Ledger, JsonSerializerOptions(WriteIndented = true)), UTF8Encoding(false))
+        File.WriteAllText(p, serializeSeamsLedgerReceipt (mutate cleanRun.Ledger), UTF8Encoding(false))
         SubstantiationSeams.readLedgerReceipt fx.Manifest p
 
     // Omitting SharedLibraries entry for `seam-link-elision` -> refused with FS9253.

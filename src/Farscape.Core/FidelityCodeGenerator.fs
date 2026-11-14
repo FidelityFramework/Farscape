@@ -1712,7 +1712,7 @@ module FidelityCodeGenerator =
         | Quoted(RecordBlock fields) -> Quoted(RecordBlock (fields |> List.map (function
             | "Parameters", ArrayBlock parameters -> "Parameters", ArrayBlock (parameters |> List.mapi parameter)
             | field -> field)))
-        | _ -> invalidOp "A native entry reference requires the owning quoted function descriptor."
+        | _ -> Diagnostics.raiseRefusal (Diagnostics.uncoded "FunctionDescriptor body must be a quoted RecordBlock")
 
     /// Only a real callback/argument adapter needs a separate native declaration.
     /// An unchanged optional entry carrier is already the public binding surface.

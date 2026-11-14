@@ -488,13 +488,19 @@ module ProtocolParser =
     // dispatch contract; the former generator and synthetic extern projection
     // have been removed.
 
-    let private requireTypeOnly (entryPoint: string) (interfaces: ProtocolInterface list) =
+    let private tryRequireTypeOnly (entryPoint: string) (interfaces: ProtocolInterface list) : Result<unit, Diagnostics.Refusal> =
         match interfaces |> List.tryPick (fun iface ->
             iface.Requests |> List.tryHead |> Option.map (fun request -> iface.Name, request.Name)) with
         | Some (interfaceName, requestName) ->
-            invalidOp
-                $"ProtocolParser.{entryPoint} cannot generate XML request '{interfaceName}.{requestName}': legacy marshal and synthetic extern projection is retired. Use TypedProtocolGenerator with an admitted typed protocol dispatch contract, or toTypeDeclarations for protocol type metadata."
-        | None -> ()
+            Error (
+                Diagnostics.uncoded
+                    $"ProtocolParser.{entryPoint} cannot generate XML request '{interfaceName}.{requestName}': legacy marshal and synthetic extern projection is retired. Use TypedProtocolGenerator with an admitted typed protocol dispatch contract, or toTypeDeclarations for protocol type metadata.")
+        | None -> Ok ()
+
+    let private requireTypeOnly (entryPoint: string) (interfaces: ProtocolInterface list) =
+        match tryRequireTypeOnly entryPoint interfaces with
+        | Ok () -> ()
+        | Error refusal -> Diagnostics.raiseRefusal refusal
 
     /// Retired request implementation projection. Request-bearing interfaces
     /// fail before returning an AST; request-free interfaces have no bodies.

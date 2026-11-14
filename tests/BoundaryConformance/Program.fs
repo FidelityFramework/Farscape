@@ -4,7 +4,7 @@ open System
 open System.IO
 open System.Security.Cryptography
 open System.Text
-open System.Text.Json
+open Fidelity.Data.JSON
 open Farscape.Core
 open Clef.Compiler.Project
 open Clef.Compiler.NativeTypedTree.NativeTypes
@@ -17,11 +17,16 @@ module Abi = Farscape.Core.Types
 
 let require condition message = if not condition then invalidOp message
 let need = function Ok value -> value | Error error -> invalidOp (string error)
-let json (value: 'a) = JsonSerializer.Serialize<'a>(value)
+let json (value: string) = Json.serialize (JsonValue.String value)
+let jsonList (values: string list) = Json.serialize (JsonValue.Array (values |> List.map JsonValue.String))
 let hash path = File.ReadAllBytes path |> SHA256.HashData |> Convert.ToHexString
 let loadedAssemblies () =
     [System.Reflection.Assembly.GetExecutingAssembly().Location; typeof<ProjectCheckResult>.Assembly.Location; typeof<PilotTypes.PilotProject>.Assembly.Location]
-    |> List.map (fun path -> {| Path = path; Sha256 = hash path |})
+    |> List.map (fun path ->
+        JsonValue.Object [
+            "Path", JsonValue.String path
+            "Sha256", JsonValue.String (hash path)
+        ])
 
 type Observation = { Case: string; Expected: string; Passed: bool; Detail: string }
 type Inputs = { Work: string; Platform: string; Metadata: string; Header: string; Pilot: PilotTypes.PilotProject; Declarations: CppParser.Declaration list }
@@ -42,11 +47,20 @@ let checkExistingProject path =
     retainDiagnostics work result
     let failures = ProjectChecker.getErrorMessages result
     let evidence =
-        {| Project = result.Options.ProjectPath; SourceErrors = failures.Length; NativeExecution = "not attempted"
-           Assemblies = loadedAssemblies ()
-           Inputs = result.InputFiles |> List.map (fun (path, captured) ->
-               {| Path = path; CapturedUtf8Sha256 = Encoding.UTF8.GetBytes(captured) |> SHA256.HashData |> Convert.ToHexString |}) |}
-    File.WriteAllText(Path.Combine(work, "results.json"), JsonSerializer.Serialize(evidence, JsonSerializerOptions(WriteIndented = true)))
+        JsonValue.Object [
+            "Project", JsonValue.String result.Options.ProjectPath
+            "SourceErrors", JsonValue.ofInt64 (int64 failures.Length)
+            "NativeExecution", JsonValue.String "not attempted"
+            "Assemblies", JsonValue.Array (loadedAssemblies ())
+            "Inputs",
+            JsonValue.Array (
+                result.InputFiles |> List.map (fun (path, captured) ->
+                    JsonValue.Object [
+                        "Path", JsonValue.String path
+                        "CapturedUtf8Sha256", JsonValue.String (Encoding.UTF8.GetBytes(captured) |> SHA256.HashData |> Convert.ToHexString)
+                    ]))
+        ]
+    File.WriteAllText(Path.Combine(work, "results.json"), Json.serializePretty evidence)
     if ProjectChecker.hasErrors result then
         for failure in failures do eprintfn "%s" failure
         eprintfn "Source project check failed with %d error(s); native execution not attempted. Evidence: %s" failures.Length work
@@ -96,7 +110,7 @@ let check (inputs: Inputs) name sources (main: string) =
     File.WriteAllText(project,
         "[package]\nname = " + json name + "\nversion = \"0.1.0\"\n" +
         "[compilation]\ntarget = \"cpu\"\n[dependencies]\nplatform = { path = " + json inputs.Platform + " }\n" +
-        "metadata = { path = " + json inputs.Metadata + " }\n[build]\noutput_kind = \"console\"\nsources = " + json (sources @ [entry]) + "\n")
+        "metadata = { path = " + json inputs.Metadata + " }\n[build]\noutput_kind = \"console\"\nsources = " + jsonList (sources @ [entry]) + "\n")
     let result = ProjectChecker.checkProject project |> need
     retainDiagnostics directory result
     // Parser recovery, a missing dependency or an unrelated type error cannot
@@ -404,14 +418,33 @@ let main _ =
 """
         rejectWith "CCS8401" "Raw addresses are not denotable in Clef" result)
 
+    let runnerLabel = "F#" + " / " + ".NET"
     let evidence =
-        {| Runner = "F# / .NET"; Generation = "actual clang header plus current-source Farscape.Core"
-           Verification = "current-source Clef ProjectChecker and public PSG publication; no native execution"
-           Platform = inputs.Platform; Metadata = inputs.Metadata
-           Header = {| Path = inputs.Header; Sha256 = hash inputs.Header |}
-           Assemblies = loadedAssemblies ()
-           Observations = observations.ToArray() |}
-    File.WriteAllText(Path.Combine(inputs.Work, "results.json"), JsonSerializer.Serialize(evidence, JsonSerializerOptions(WriteIndented = true)))
+        JsonValue.Object [
+            "Runner", JsonValue.String runnerLabel
+            "Generation", JsonValue.String "actual clang header plus current-source Farscape.Core"
+            "Verification", JsonValue.String "current-source Clef ProjectChecker and public PSG publication; no native execution"
+            "Platform", JsonValue.String inputs.Platform
+            "Metadata", JsonValue.String inputs.Metadata
+            "Header",
+            JsonValue.Object [
+                "Path", JsonValue.String inputs.Header
+                "Sha256", JsonValue.String (hash inputs.Header)
+            ]
+            "Assemblies", JsonValue.Array (loadedAssemblies ())
+            "Observations",
+            JsonValue.Array (
+                observations
+                |> Seq.map (fun obs ->
+                    JsonValue.Object [
+                        "Case", JsonValue.String obs.Case
+                        "Expected", JsonValue.String obs.Expected
+                        "Passed", JsonValue.Bool obs.Passed
+                        "Detail", JsonValue.String obs.Detail
+                    ])
+                |> Seq.toList)
+        ]
+    File.WriteAllText(Path.Combine(inputs.Work, "results.json"), Json.serializePretty evidence)
     printfn "%d/%d source conformance gates passed. Evidence: %s" (observations |> Seq.filter _.Passed |> Seq.length) observations.Count inputs.Work
     if observations |> Seq.forall _.Passed then 0 else 1
 

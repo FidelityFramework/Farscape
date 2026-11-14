@@ -670,7 +670,8 @@ module ArchiveInspection =
                 let memberDigest =
                     match provenance.Members |> List.tryFind (fun (archiveMember: ArchiveMember) -> archiveMember.Index = definition.MemberIndex) with
                     | Some archiveMember -> archiveMember.Sha256
-                    | None -> invalidArg "resolvedBindings" $"symbol '{symbol}' is bound to member index {definition.MemberIndex}, which the provenance does not list"
+                    | None ->
+                        Diagnostics.raiseRefusal (Diagnostics.uncoded $"symbol '{symbol}' is bound to member index {definition.MemberIndex}, which the provenance does not list")
                 TomlTable.empty
                 |> TomlTable.add "symbol" (text symbol)
                 |> TomlTable.add "member" (text definition.MemberName)

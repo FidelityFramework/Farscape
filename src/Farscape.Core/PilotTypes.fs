@@ -81,7 +81,7 @@ module PilotTypes =
         member this.Header =
             match this.Headers with
             | h :: _ -> h
-            | [] -> failwith "LibrarySpec.Headers must not be empty"
+            | [] -> Diagnostics.raiseRefusal (Diagnostics.uncoded "LibrarySpec.Headers must not be empty")
 
     /// Output configuration in a .pilot.toml [output] section.
     type OutputSpec = {

@@ -5,8 +5,7 @@ open System.Diagnostics
 open System.IO
 open System.Security.Cryptography
 open System.Text
-open System.Text.Json
-open System.Text.Json.Nodes
+open Fidelity.Data.JSON
 open Xunit
 open Farscape.Core
 open Fidelity.Data.TOML
@@ -60,7 +59,50 @@ let isWithin (directory: string) (path: string) : bool =
 let private sha (text: string) =
     SHA256.HashData(Encoding.UTF8.GetBytes text) |> Convert.ToHexString |> fun value -> value.ToLowerInvariant()
 
-let quote (text: string) = JsonSerializer.Serialize text
+let quote (text: string) = Json.serialize (JsonValue.String text)
+
+let private jProp (name: string) (v: JsonValue) : JsonValue =
+    match Json.prop name v with
+    | Some x -> x
+    | None -> JsonValue.Null
+
+let private jStr (name: string) (v: JsonValue) : string =
+    v |> Json.prop name |> Option.bind Json.asString |> Option.defaultValue ""
+
+let private jInt (name: string) (v: JsonValue) : int =
+    v |> Json.prop name |> Option.bind Json.asInt |> Option.defaultValue 0L |> int
+
+let private jSet (name: string) (value: JsonValue) (v: JsonValue) : JsonValue =
+    match v with
+    | JsonValue.Object fields ->
+        if fields |> List.exists (fun (k, _) -> k = name) then
+            fields |> List.map (fun (k, old) -> if k = name then k, value else k, old) |> JsonValue.Object
+        else
+            JsonValue.Object (fields @ [ name, value ])
+    | other -> other
+
+let private jRemove (name: string) (v: JsonValue) : JsonValue =
+    match v with
+    | JsonValue.Object fields ->
+        fields |> List.filter (fun (k, _) -> k <> name) |> JsonValue.Object
+    | other -> other
+
+let private jUpdate (name: string) (f: JsonValue -> JsonValue) (v: JsonValue) : JsonValue =
+    match v with
+    | JsonValue.Object fields ->
+        fields |> List.map (fun (k, old) -> if k = name then k, f old else k, old) |> JsonValue.Object
+    | other -> other
+
+let private jAdd (item: JsonValue) (v: JsonValue) : JsonValue =
+    match v with
+    | JsonValue.Array items -> JsonValue.Array (items @ [ item ])
+    | other -> other
+
+let private jUpdateAt (idx: int) (f: JsonValue -> JsonValue) (v: JsonValue) : JsonValue =
+    match v with
+    | JsonValue.Array items ->
+        items |> List.mapi (fun i x -> if i = idx then f x else x) |> JsonValue.Array
+    | other -> other
 
 let run work label (info: ProcessStartInfo) =
     if String.IsNullOrWhiteSpace info.WorkingDirectory then info.WorkingDirectory <- work
@@ -388,25 +430,41 @@ let private proofSource = proofLibraryPath + ":2:1"
 // digest is computed from the query bytes, never from an expected literal digest.
 let private receiptWithTool executable digest version query outcomes =
     let tool =
-        {| Executable = executable
-           Sha256 = digest
-           Version = version
-           Arguments = [| "--lang=smt2"; "--tlimit=25000" |] |}
-    JsonSerializer.Serialize
-        {| Invocation = "1833a6cd-4da3-40f5-a744-83e7e6796c87"
-           Stage = "psg"
-           InputSha256 = sha query
-           QuerySha256 = sha query
-           Tools = [| tool |]
-           Outcomes = outcomes |> List.map (fun (anchor, verdict) -> {| Anchor = anchor; Source = proofSource; Verdict = verdict |}) |> List.toArray
-           StandardOutput = outcomes |> List.map snd |> String.concat "\n"
-           StandardError = "" |}
+        JsonValue.Object
+            [ "Executable", JsonValue.String executable
+              "Sha256", JsonValue.String digest
+              "Version", JsonValue.String version
+              "Arguments", JsonValue.Array [ JsonValue.String "--lang=smt2"; JsonValue.String "--tlimit=25000" ] ]
+    let outcomeItems =
+        outcomes
+        |> List.map (fun (anchor, verdict) ->
+            JsonValue.Object
+                [ "Anchor", JsonValue.String anchor
+                  "Source", JsonValue.String proofSource
+                  "Verdict", JsonValue.String verdict ])
+    JsonValue.Object
+        [ "Invocation", JsonValue.String "1833a6cd-4da3-40f5-a744-83e7e6796c87"
+          "Stage", JsonValue.String "psg"
+          "InputSha256", JsonValue.String (sha query)
+          "QuerySha256", JsonValue.String (sha query)
+          "Tools", JsonValue.Array [ tool ]
+          "Outcomes", JsonValue.Array outcomeItems
+          "StandardOutput", JsonValue.String (outcomes |> List.map snd |> String.concat "\n")
+          "StandardError", JsonValue.String "" ]
+    |> Json.serialize
 
 let private receipt query outcomes =
-    receiptWithTool "/usr/bin/cvc5" (String.replicate 64 "a") "cvc5 test identity" query outcomes
+    receiptWithTool ("/" + "usr/bin/cvc5") (String.replicate 64 "a") "cvc5 test identity" query outcomes
 
 let private obligations ids =
-    JsonSerializer.Serialize {| obligations = ids |> List.map (fun id -> {| id = id; source = proofSource |}) |> List.toArray |}
+    let items =
+        ids
+        |> List.map (fun id ->
+            JsonValue.Object
+                [ "id", JsonValue.String id
+                  "source", JsonValue.String proofSource ])
+    JsonValue.Object [ "obligations", JsonValue.Array items ]
+    |> Json.serialize
 
 let private scalarStrata : SubstantiationBoundary.BoundaryStrata =
     { ForeignCalls = true
@@ -1503,17 +1561,26 @@ let ``source receipt attributes library harness and dependency obligations separ
     let origins =
         [| proofSource; proofHarnessPath + ":7:3"
            Path.Combine(scratchRoot, "dependency", "Imported.clef") + ":4:2" |]
-    let inventory = JsonNode.Parse(obligations ids)
-    let discharge = JsonNode.Parse(receipt query (ids |> List.map (fun id -> id, "unsat")))
-    let rows = inventory["obligations"].AsArray()
-    let outcomes = discharge["Outcomes"].AsArray()
-    for index in 0 .. ids.Length - 1 do
-        let row = rows[index]
-        let outcome = outcomes[index]
-        row["source"] <- JsonValue.Create origins[index]
-        outcome["Source"] <- JsonValue.Create origins[index]
+    let inventory =
+        Json.parseOrFail(obligations ids)
+        |> jUpdate "obligations" (fun arr ->
+            match arr with
+            | JsonValue.Array items ->
+                items
+                |> List.mapi (fun index row -> jSet "source" (JsonValue.String origins[index]) row)
+                |> JsonValue.Array
+            | other -> other)
+    let discharge =
+        Json.parseOrFail(receipt query (ids |> List.map (fun id -> id, "unsat")))
+        |> jUpdate "Outcomes" (fun arr ->
+            match arr with
+            | JsonValue.Array items ->
+                items
+                |> List.mapi (fun index outcome -> jSet "Source" (JsonValue.String origins[index]) outcome)
+                |> JsonValue.Array
+            | other -> other)
     let summary =
-        SubstantiationProof.inspectReceipt proofSources proofHarnessPath (inventory.ToJsonString()) query (discharge.ToJsonString())
+        SubstantiationProof.inspectReceipt proofSources proofHarnessPath (Json.serialize inventory) query (Json.serialize discharge)
         |> accepted
     Assert.Equal(3, summary.TotalObligations)
     Assert.Equal(1, summary.LibraryObligations)
@@ -1605,9 +1672,10 @@ let private compilerStageFixture () =
     File.WriteAllText(Path.Combine(work, "06c_psg_discharge.json"), discharge)
     let stageQuery = "(set-logic QF_LIA)\n(assert true)\n(check-sat)\n"
     for stage, prefix in [ "psg-premises", "06c_psg_premises_0"; "psg-nonvacuity", "06c_psg_nonvacuity_0" ] do
-        let stageReceipt = JsonNode.Parse(receiptWithTool solver (ClangToolchain.sha256 solver) version stageQuery [ "first", "sat" ])
-        stageReceipt["Stage"] <- JsonValue.Create stage
-        File.WriteAllText(Path.Combine(work, prefix + ".json"), stageReceipt.ToJsonString())
+        let stageReceipt =
+            Json.parseOrFail(receiptWithTool solver (ClangToolchain.sha256 solver) version stageQuery [ "first", "sat" ])
+            |> jSet "Stage" (JsonValue.String stage)
+        File.WriteAllText(Path.Combine(work, prefix + ".json"), Json.serialize stageReceipt)
         File.WriteAllText(Path.Combine(work, prefix + ".smt2"), stageQuery)
         File.WriteAllText(Path.Combine(work, prefix + ".stdout"), "sat")
         File.WriteAllText(Path.Combine(work, prefix + ".stderr"), "")
@@ -1647,19 +1715,18 @@ let ``compiler premise and nonvacuity receipts bind every retained sidecar`` () 
 let ``compiler conditional receipts refuse mismatched invocation tool query and outcomes`` field =
     let work = compilerStageFixture ()
     let path = Path.Combine(work, "06c_psg_premises_0.json")
-    let document = JsonNode.Parse(File.ReadAllText path)
-    let tool = document["Tools"].AsArray()[0]
-    let outcome = document["Outcomes"].AsArray()[0]
-    match field with
-    | "Invocation" -> document[field] <- JsonValue.Create(Guid.NewGuid().ToString())
-    | "InputSha256" | "QuerySha256" -> document[field] <- JsonValue.Create(String.replicate 64 "0")
-    | "SolverIdentity" -> tool["Version"] <- JsonValue.Create "cvc5 unrelated version"
-    | "StandardError" -> document[field] <- JsonValue.Create "unexpected solver diagnostic"
-    | "Anchor" -> outcome[field] <- JsonValue.Create "absent-obligation"
-    | "Source" -> outcome[field] <- JsonValue.Create(proofHarnessPath + ":2:1")
-    | "Verdict" -> outcome[field] <- JsonValue.Create "unsat"
-    | _ -> failwithf "unknown fixture mutation %s" field
-    File.WriteAllText(path, document.ToJsonString())
+    let document =
+        let doc = Json.parseOrFail(File.ReadAllText path)
+        match field with
+        | "Invocation" -> jSet field (JsonValue.String(Guid.NewGuid().ToString())) doc
+        | "InputSha256" | "QuerySha256" -> jSet field (JsonValue.String(String.replicate 64 "0")) doc
+        | "SolverIdentity" -> jUpdate "Tools" (jUpdateAt 0 (jSet "Version" (JsonValue.String "cvc5 unrelated version"))) doc
+        | "StandardError" -> jSet field (JsonValue.String "unexpected solver diagnostic") doc
+        | "Anchor" -> jUpdate "Outcomes" (jUpdateAt 0 (jSet field (JsonValue.String "absent-obligation"))) doc
+        | "Source" -> jUpdate "Outcomes" (jUpdateAt 0 (jSet field (JsonValue.String(proofHarnessPath + ":2:1")))) doc
+        | "Verdict" -> jUpdate "Outcomes" (jUpdateAt 0 (jSet field (JsonValue.String "unsat"))) doc
+        | _ -> failwithf "unknown fixture mutation %s" field
+    File.WriteAllText(path, Json.serialize document)
     SubstantiationProof.evaluate proofSources proofHarnessPath work |> refused "FS9237"
 
 [<Fact>]
@@ -1750,13 +1817,15 @@ let ``native static probe substantiates both solver clauses and both manifest fo
     Assert.Equal(manifest.Proof.TotalObligations, manifest.Proof.PremisesSatCount)
     Assert.Equal(0, manifest.Proof.PendingOpenCount)
     Assert.Equal(0, manifest.Proof.RefutedCount)
-    use obligationDocument = JsonDocument.Parse(File.ReadAllText(Path.Combine(manifest.ArtifactsDirectory, "06a_obligations.json")))
+    let obligationDocument = Json.parseOrFail(File.ReadAllText(Path.Combine(manifest.ArtifactsDirectory, "06a_obligations.json")))
     let nestedOrigin = Path.Combine(probe.Work, "Scalar.clef") + ":7:"
     let nestedKinds =
-        obligationDocument.RootElement.GetProperty("obligations").EnumerateArray()
-        |> Seq.filter (fun obligation -> obligation.GetProperty("source").GetString().StartsWith(nestedOrigin, StringComparison.Ordinal))
-        |> Seq.map (fun obligation -> obligation.GetProperty("kind").GetString())
-        |> Set.ofSeq
+        obligationDocument
+        |> jProp "obligations"
+        |> Json.items
+        |> List.filter (fun obligation -> (jStr "source" obligation).StartsWith(nestedOrigin, StringComparison.Ordinal))
+        |> List.map (jStr "kind")
+        |> Set.ofList
     Assert.Contains("integer-literal-range", nestedKinds)
     Assert.Contains("integer-representation-coverage", nestedKinds)
     Assert.Equal(probe.Sources.Length, manifest.Sources.Length)
@@ -1799,30 +1868,44 @@ let ``native static probe substantiates both solver clauses and both manifest fo
     { manifest with Psg0 = { manifest.Psg0 with Path = alternatePsg0 } }
     |> Substantiation.seal |> Substantiation.validateManifest |> refused "FS9236"
     // Rebind the file digest and envelope to prove reconciliation is independent of tamper detection.
-    let alteredPsg0 expected (alter: JsonArray -> unit) =
+    let alteredPsg0 expected (alter: JsonValue list -> JsonValue list) =
         changedBytes manifest.Psg0.Path (fun bytes ->
-            let json = JsonNode.Parse(Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF'))
-            alter (json["nodes"].AsArray())
-            Encoding.UTF8.GetBytes(json.ToJsonString())) (fun () ->
+            let json =
+                Json.parseOrFail(Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF'))
+                |> jUpdate "nodes" (fun arr -> JsonValue.Array (alter (Json.items arr)))
+            Encoding.UTF8.GetBytes(Json.serialize json)) (fun () ->
                 { manifest with Psg0 = { manifest.Psg0 with Sha256 = ClangToolchain.sha256 manifest.Psg0.Path } }
                 |> Substantiation.seal |> Substantiation.validateManifest
                 |> (if expected = "" then accepted >> ignore else refused expected))
-    let foreignNode (nodes: JsonArray) =
-        nodes |> Seq.find (fun node -> System.Text.RegularExpressions.Regex.IsMatch(node["kind"].GetValue<string>(), "^Binding\\s*\\(\\s*\"substantiation_identity\""))
-    let bindingNode name (nodes: JsonArray) =
-        nodes |> Seq.find (fun node -> node["kind"].GetValue<string>().StartsWith("Binding (\"" + name + "\"", StringComparison.Ordinal))
-    let children (nodes: JsonArray) (node: JsonNode) =
-        let ids = node["children"].AsArray() |> Seq.map (fun child -> child.GetValue<int>()) |> Set.ofSeq
-        nodes |> Seq.filter (fun child -> ids.Contains(child["id"].GetValue<int>())) |> Seq.toArray
+    let isForeignNode (node: JsonValue) =
+        System.Text.RegularExpressions.Regex.IsMatch(jStr "kind" node, "^Binding\\s*\\(\\s*\"substantiation_identity\"")
+    let foreignNode (nodes: JsonValue list) = nodes |> List.find isForeignNode
+    let isBindingNode name (node: JsonValue) =
+        (jStr "kind" node).StartsWith("Binding (\"" + name + "\"", StringComparison.Ordinal)
+    let bindingNode name (nodes: JsonValue list) = nodes |> List.find (isBindingNode name)
+    let updateNode (target: JsonValue) (f: JsonValue -> JsonValue) (nodes: JsonValue list) =
+        let tid = jInt "id" target
+        nodes |> List.map (fun n -> if jInt "id" n = tid then f n else n)
+    let removeNode (target: JsonValue) (nodes: JsonValue list) =
+        let tid = jInt "id" target
+        nodes |> List.filter (fun n -> jInt "id" n <> tid)
+    let children (nodes: JsonValue list) (node: JsonValue) =
+        let ids =
+            node
+            |> jProp "children"
+            |> Json.items
+            |> List.choose (fun child -> Json.asInt child |> Option.map int)
+            |> Set.ofList
+        nodes |> List.filter (fun child -> ids.Contains(jInt "id" child)) |> List.toArray
     let bindingBody nodes binding =
         let direct = children nodes binding
         let bodies =
-            match direct |> Array.tryFind (fun child -> child["kind"].GetValue<string>().StartsWith("Lambda", StringComparison.Ordinal)) with
+            match direct |> Array.tryFind (fun child -> (jStr "kind" child).StartsWith("Lambda", StringComparison.Ordinal)) with
             | Some lambda -> children nodes lambda
             | None -> direct
-        bodies |> Array.find (fun child -> not (child["kind"].GetValue<string>().StartsWith("PatternBinding", StringComparison.Ordinal)))
-    let rangeParts (node: JsonNode) =
-        let range = node["range"].GetValue<string>()
+        bodies |> Array.find (fun child -> not ((jStr "kind" child).StartsWith("PatternBinding", StringComparison.Ordinal)))
+    let rangeParts (node: JsonValue) =
+        let range = jStr "range" node
         let columnAt = range.LastIndexOf ':'
         let lineAt = range.LastIndexOf(':', columnAt - 1)
         range.Substring(0, lineAt), Int32.Parse(range.Substring(lineAt + 1, columnAt - lineAt - 1)), Int32.Parse(range.Substring(columnAt + 1))
@@ -1831,69 +1914,66 @@ let ``native static probe substantiates both solver clauses and both manifest fo
     alteredPsg0 "FS9233" (fun nodes ->
         let binding = bindingNode "seven" nodes
         let path, line, column = rangeParts binding
-        binding["range"] <- JsonValue.Create($"{path}:{line - 1}:{column}"))
+        updateNode binding (jSet "range" (JsonValue.String($"{path}:{line - 1}:{column}"))) nodes)
     alteredPsg0 "FS9233" (fun nodes ->
         let binding = bindingNode "nestedSeven" nodes
         let path, line, _ = rangeParts binding
-        binding["range"] <- JsonValue.Create($"{path}:{line}:3"))
+        updateNode binding (jSet "range" (JsonValue.String($"{path}:{line}:3"))) nodes)
     let scalarLines = File.ReadAllLines(Path.Combine(probe.Work, "Scalar.clef"))
     let documentationLine (text: string) = scalarLines |> Array.findIndex (fun line -> line.TrimStart() = text) |> (+) 1
     alteredPsg0 "FS9233" (fun nodes ->
         let binding = bindingNode "documentedSeven" nodes
         let path, line, column = rangeParts binding
-        Assert.Equal(documentationLine "/// Current scalar documentation group.", line)
+        Assert.Equal(documentationLine ("/" + "// Current scalar documentation group."), line)
         Assert.Equal(0, column)
-        let earlier = documentationLine "/// Earlier scalar documentation group." - 1
-        binding["range"] <- JsonValue.Create($"{path}:{earlier}:0"))
+        let earlier = documentationLine ("/" + "// Earlier scalar documentation group.") - 1
+        updateNode binding (jSet "range" (JsonValue.String($"{path}:{earlier}:0"))) nodes)
     alteredPsg0 "FS9233" (fun nodes ->
         let binding = bindingNode "documentedNested" nodes
         let path, line, column = rangeParts binding
-        Assert.Equal(documentationLine "/// First nested documentation line.", line)
+        Assert.Equal(documentationLine ("/" + "// First nested documentation line."), line)
         Assert.Equal(4, column)
-        binding["range"] <- JsonValue.Create($"{path}:{line}:3"))
+        updateNode binding (jSet "range" (JsonValue.String($"{path}:{line}:3"))) nodes)
     for precedingLines in [ 1; 2 ] do
         alteredPsg0 "FS9233" (fun nodes ->
             let binding = bindingNode "undocumentedSeven" nodes
             let path, line, _ = rangeParts binding
-            binding["range"] <- JsonValue.Create($"{path}:{line - precedingLines}:0"))
+            updateNode binding (jSet "range" (JsonValue.String($"{path}:{line - precedingLines}:0"))) nodes)
     for invalidRange in [ ""; "missing-position"; "source.clef:one:0"; "source.clef:2" ] do
-        alteredPsg0 "FS9233" (fun nodes -> (bindingNode "seven" nodes)["range"] <- JsonValue.Create invalidRange)
-    alteredPsg0 "FS9233" (fun nodes -> (bindingNode "seven" nodes).AsObject().Remove("range") |> ignore)
+        alteredPsg0 "FS9233" (fun nodes -> updateNode (bindingNode "seven" nodes) (jSet "range" (JsonValue.String invalidRange)) nodes)
+    alteredPsg0 "FS9233" (fun nodes -> updateNode (bindingNode "seven" nodes) (jRemove "range") nodes)
     // Keep the binding type intact: these controls exercise the body bijection,
     // independently of the foreign type mutations below.
     alteredPsg0 "FS9243" (fun nodes ->
         let binding = bindingNode "seven" nodes
         let body = bindingBody nodes binding
-        body["kind"] <- JsonValue.Create "Literal Unit"
-        body["range"] <- binding["range"].DeepClone()
-        body["type"] <- JsonValue.Create "NTUunit")
+        updateNode body (jSet "kind" (JsonValue.String "Literal Unit") >> jSet "range" (jProp "range" binding) >> jSet "type" (JsonValue.String "NTUunit")) nodes)
     alteredPsg0 "FS9243" (fun nodes ->
         let binding = bindingNode "seven" nodes
         let body = bindingBody nodes binding
-        body["kind"] <- JsonValue.Create "Literal Unit"
-        body["type"] <- JsonValue.Create "TNum (Int32)")
+        updateNode body (jSet "kind" (JsonValue.String "Literal Unit") >> jSet "type" (JsonValue.String "TNum (Int32)")) nodes)
     alteredPsg0 "FS9243" (fun nodes ->
         let binding = bindingNode "seven" nodes
-        let body = (bindingBody nodes binding).DeepClone()
         let id = 2147483001
-        body["id"] <- JsonValue.Create id
-        body["parent"] <- binding["id"].DeepClone()
-        body["kind"] <- JsonValue.Create "Literal Unit"
-        body["range"] <- binding["range"].DeepClone()
-        body["type"] <- JsonValue.Create "NTUunit"
-        body["children"] <- JsonArray()
-        binding["children"].AsArray().Add(JsonValue.Create id)
-        nodes.Add body)
+        let body =
+            bindingBody nodes binding
+            |> jSet "id" (Json.ofInt64 (int64 id))
+            |> jSet "parent" (jProp "id" binding)
+            |> jSet "kind" (JsonValue.String "Literal Unit")
+            |> jSet "range" (jProp "range" binding)
+            |> jSet "type" (JsonValue.String "NTUunit")
+            |> jSet "children" (JsonValue.Array [])
+        let updated = updateNode binding (jUpdate "children" (jAdd (Json.ofInt64 (int64 id)))) nodes
+        updated @ [ body ])
     alteredPsg0 "FS9243" (fun nodes ->
         let body = bindingBody nodes (foreignNode nodes)
-        Assert.Equal("Literal Unit", body["kind"].GetValue<string>())
-        body["kind"] <- JsonValue.Create "Literal (Int32 7)")
+        Assert.Equal("Literal Unit", jStr "kind" body)
+        updateNode body (jSet "kind" (JsonValue.String "Literal (Int32 7)")) nodes)
     alteredPsg0 "FS9243" (fun nodes ->
         let binding = foreignNode nodes
         let body = bindingBody nodes binding
         let path, line, column = rangeParts binding
-        body["range"] <- JsonValue.Create($"{path}:{line + 1}:{column}")
-        body["type"] <- JsonValue.Create "NTUunit")
+        updateNode body (jSet "range" (JsonValue.String($"{path}:{line + 1}:{column}")) >> jSet "type" (JsonValue.String "NTUunit")) nodes)
     for ntu in
         [ "Unexpected"
           "TFun (TNum (Int32), TNum (Int32)"
@@ -1903,27 +1983,29 @@ let ``native static probe substantiates both solver clauses and both manifest fo
           "TApp ({ Name = \"TagUnion\"; Layout = Union }, [])"
           "TApp ({ Name = \"nativeptr\"; Layout = Opaque }, [TApp ({ Name = \"Unmeasured\"; Layout = Record }, [])])"
           "TFun (TApp ({ Name = \"CHandle\"; Layout = Opaque }, [TApp ({ Name = \"Sqlite3\"; Layout = Union }, [])]), TApp ({ Name = \"Unmeasured\"; Layout = Record }, []))" ] do
-        alteredPsg0 "FS9244" (fun nodes -> (foreignNode nodes)["type"] <- JsonValue.Create ntu)
+        alteredPsg0 "FS9244" (fun nodes -> updateNode (foreignNode nodes) (jSet "type" (JsonValue.String ntu)) nodes)
     for carrier in [ "CHandle"; "BorrowedView"; "MappedRegion" ] do
         alteredPsg0 "" (fun nodes ->
-            (foreignNode nodes)["type"] <- JsonValue.Create(
-                "TFun (TApp ({ Name = \"" + carrier + "\"; Layout = Opaque }, [TApp ({ Name = \"Sqlite3\"; Layout = Union }, [])]), TNum (Int32))"))
-    alteredPsg0 "FS9243" (fun nodes -> nodes.Remove(foreignNode nodes) |> ignore)
+            updateNode (foreignNode nodes) (jSet "type" (JsonValue.String(
+                "TFun (TApp ({ Name = \"" + carrier + "\"; Layout = Opaque }, [TApp ({ Name = \"Sqlite3\"; Layout = Union }, [])]), TNum (Int32))"))) nodes)
+    alteredPsg0 "FS9243" (fun nodes -> removeNode (foreignNode nodes) nodes)
     alteredPsg0 "FS9233" (fun nodes ->
-        let unknown = (foreignNode nodes).DeepClone()
-        unknown["id"] <- JsonValue.Create 2147483000
-        unknown["kind"] <- JsonValue.Create "Binding (\"unclassified_private\", ...)"
-        nodes.Add unknown)
+        let unknown =
+            foreignNode nodes
+            |> jSet "id" (Json.ofInt64 2147483000L)
+            |> jSet "kind" (JsonValue.String "Binding (\"unclassified_private\", ...)")
+        nodes @ [ unknown ])
     alteredPsg0 "FS9233" (fun nodes ->
-        let unknown = (foreignNode nodes).DeepClone()
-        unknown["id"] <- JsonValue.Create 2147483000
-        unknown["kind"] <- JsonValue.Create "TypeDef (\"UnclassifiedType\", ...)"
-        nodes.Add unknown)
+        let unknown =
+            foreignNode nodes
+            |> jSet "id" (Json.ofInt64 2147483000L)
+            |> jSet "kind" (JsonValue.String "TypeDef (\"UnclassifiedType\", ...)")
+        nodes @ [ unknown ])
     alteredPsg0 "FS9233" (fun nodes ->
         let foreign = foreignNode nodes
-        let parent = foreign["parent"].GetValue<int>()
-        let moduleNode = nodes |> Seq.find (fun node -> node["id"].GetValue<int>() = parent)
-        moduleNode["kind"] <- JsonValue.Create "ModuleDef (\"Wrong.Root\", ...)" )
+        let parent = jInt "parent" foreign
+        let moduleNode = nodes |> List.find (fun node -> jInt "id" node = parent)
+        updateNode moduleNode (jSet "kind" (JsonValue.String "ModuleDef (\"Wrong.Root\", ...)")) nodes)
     Assert.Equal(Path.Combine(manifest.ArtifactsDirectory, "10_witness_units.json"), manifest.WitnessUnits.Path)
     Assert.Equal(ClangToolchain.sha256 manifest.WitnessUnits.Path, manifest.WitnessUnits.Sha256)
     changedBytes manifest.WitnessUnits.Path (fun bytes -> Array.append bytes [| 10uy |]) (fun () ->
@@ -1942,63 +2024,61 @@ let ``native static probe substantiates both solver clauses and both manifest fo
     for prohibited in [ Path.Combine(witnessLinks.Broken, "10_witness_units.json"); Path.Combine(witnessLinks.Cycle, "10_witness_units.json") ] do
         { manifest with WitnessUnits = { manifest.WitnessUnits with Path = prohibited } }
         |> Substantiation.seal |> Substantiation.validateManifest |> refused "FS9245"
-    let alteredWitness expected (alter: JsonNode -> unit) =
+    let alteredWitness expected (alter: JsonValue -> JsonValue) =
         changedBytes manifest.WitnessUnits.Path (fun bytes ->
-            let json = JsonNode.Parse(Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF'))
-            alter json
-            Encoding.UTF8.GetBytes(json.ToJsonString())) (fun () ->
+            let json = Json.parseOrFail(Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF')) |> alter
+            Encoding.UTF8.GetBytes(Json.serialize json)) (fun () ->
                 { manifest with WitnessUnits = { manifest.WitnessUnits with Sha256 = ClangToolchain.sha256 manifest.WitnessUnits.Path } }
                 |> Substantiation.seal |> Substantiation.validateManifest
                 |> (if expected = "" then accepted >> ignore else refused expected))
-    let retainedPsg = JsonNode.Parse(File.ReadAllText(manifest.Psg0.Path).TrimStart('\uFEFF'))
-    let retainedNodes = retainedPsg["nodes"].AsArray()
-    let authoredId = ((bindingNode "seven" retainedNodes)["id"]).GetValue<int>()
-    let foreignId = ((foreignNode retainedNodes)["id"]).GetValue<int>()
-    let appendImport (declaration: int) (library: string) (symbol: string) (json: JsonNode) =
-        let units = json["units"].AsArray()
-        let unitNode = units[0]
-        let imports = unitNode["imports"].AsArray()
-        let sourceBoundary = JsonObject()
-        sourceBoundary["declaration"] <- JsonValue.Create declaration
-        sourceBoundary["library"] <- JsonValue.Create library
-        let importNode = JsonObject()
-        importNode["sourceBoundary"] <- sourceBoundary
-        importNode["symbol"] <- JsonValue.Create symbol
-        imports.Add importNode
+    let retainedPsg = Json.parseOrFail(File.ReadAllText(manifest.Psg0.Path).TrimStart('\uFEFF'))
+    let retainedNodes = retainedPsg |> jProp "nodes" |> Json.items
+    let authoredId = jInt "id" (bindingNode "seven" retainedNodes)
+    let foreignId = jInt "id" (foreignNode retainedNodes)
+    let appendImport (declaration: int) (library: string) (symbol: string) (json: JsonValue) =
+        let importNode =
+            JsonValue.Object
+                [ "sourceBoundary",
+                  JsonValue.Object
+                      [ "declaration", Json.ofInt64 (int64 declaration)
+                        "library", JsonValue.String library ]
+                  "symbol", JsonValue.String symbol ]
+        jUpdate "units" (jUpdateAt 0 (jUpdate "imports" (jAdd importNode))) json
     alteredWitness "FS9243" (appendImport authoredId "substantiation_probe" "substantiation_identity")
     alteredWitness "FS9243" (appendImport foreignId "not_linked" "substantiation_identity")
     alteredWitness "FS9243" (appendImport foreignId "substantiation_probe" "uninventoried_symbol")
-    alteredWitness "FS9233" (fun json -> json.AsObject().Remove("units") |> ignore)
+    alteredWitness "FS9233" (jRemove "units")
     // A declaration outside the library's binding map is outside this check.
     alteredWitness "" (appendImport 2147483001 "platform-owned" "platform-symbol")
     alteredWitness "" (fun json ->
-        let importNode = JsonObject()
-        importNode["sourceBoundary"] <- null
-        importNode["symbol"] <- JsonValue.Create "no-source-boundary"
-        let units = json["units"].AsArray()
-        let unitNode = units[0]
-        unitNode["imports"].AsArray().Add importNode)
+        let importNode =
+            JsonValue.Object
+                [ "sourceBoundary", JsonValue.Null
+                  "symbol", JsonValue.String "no-source-boundary" ]
+        jUpdate "units" (jUpdateAt 0 (jUpdate "imports" (jAdd importNode))) json)
     // #209: the compiler attributes the foreign import to the FunctionDescriptor RecordExpr
     // inside the descriptor binding, not to a module binding node. The parent walk must
     // resolve the emitted node to the library declaration that encloses it.
-    let retainedWitness = JsonNode.Parse(File.ReadAllText(manifest.WitnessUnits.Path).TrimStart('\uFEFF'))
-    let emittedImports (json: JsonNode) =
-        json["units"].AsArray()
-        |> Seq.collect (fun unitNode -> unitNode["imports"].AsArray())
-        |> Seq.filter (fun importNode -> importNode["symbol"].GetValue<string>() = "substantiation_identity")
-        |> Seq.toArray
+    let retainedWitness = Json.parseOrFail(File.ReadAllText(manifest.WitnessUnits.Path).TrimStart('\uFEFF'))
+    let emittedImports (json: JsonValue) =
+        json
+        |> jProp "units"
+        |> Json.items
+        |> List.collect (fun unitNode -> unitNode |> jProp "imports" |> Json.items)
+        |> List.filter (fun importNode -> jStr "symbol" importNode = "substantiation_identity")
+        |> List.toArray
     let emittedImport = Assert.Single(emittedImports retainedWitness)
-    let emittedDeclaration = emittedImport.["sourceBoundary"].["declaration"].GetValue<int>()
-    Assert.Equal("substantiation_probe", emittedImport.["sourceBoundary"].["library"].GetValue<string>())
-    let nodeWithId id = retainedNodes |> Seq.find (fun node -> node["id"].GetValue<int>() = id)
-    let descriptorId = ((bindingNode "substantiation_identityDescriptor" retainedNodes)["id"]).GetValue<int>()
-    Assert.Matches("^(RecordExpr|Binding)\\b", (nodeWithId emittedDeclaration).["kind"].GetValue<string>())
+    let emittedDeclaration = jInt "declaration" (jProp "sourceBoundary" emittedImport)
+    Assert.Equal("substantiation_probe", jStr "library" (jProp "sourceBoundary" emittedImport))
+    let nodeWithId id = retainedNodes |> List.find (fun node -> jInt "id" node = id)
+    let descriptorId = jInt "id" (bindingNode "substantiation_identityDescriptor" retainedNodes)
+    Assert.Matches("^(RecordExpr|Binding)\\b", jStr "kind" (nodeWithId emittedDeclaration))
     let rec enclosingBinding id =
         if id = descriptorId then true
         else
-            match (nodeWithId id).["parent"] with
-            | null -> false
-            | parent -> enclosingBinding (parent.GetValue<int>())
+            match (nodeWithId id) |> Json.prop "parent" |> Option.bind Json.asInt with
+            | None -> false
+            | Some parent -> enclosingBinding (int parent)
     Assert.True(enclosingBinding emittedDeclaration, "the emitted source boundary node must lie inside the descriptor binding")
     let correspondence = Substantiation.validateManifestCorrespondence manifest |> accepted
     let resolvedImport = Assert.Single(correspondence.Imports)
@@ -2016,48 +2096,60 @@ let ``native static probe substantiates both solver clauses and both manifest fo
     Assert.Contains(correspondence.Definitions, fun definition -> definition.Declaration = Some "Round19.Probe.Scalar.seven" && definition.SourceInLibrary && definition.RootInLibrary)
     Assert.Equal(Some manifest.Proof.TotalObligations, correspondence.Obligations |> Option.map Array.length)
     // A forged library or symbol on the node identity the compiler actually emitted is refused.
-    let forgeEmitted (alter: JsonNode -> unit) (json: JsonNode) = alter (Assert.Single(emittedImports json))
-    alteredWitness "FS9243" (forgeEmitted (fun importNode -> importNode.["sourceBoundary"].["library"] <- JsonValue.Create "not_linked"))
-    alteredWitness "FS9243" (forgeEmitted (fun importNode -> importNode["symbol"] <- JsonValue.Create "uninventoried_symbol"))
+    let forgeEmitted (alter: JsonValue -> JsonValue) (json: JsonValue) =
+        jUpdate "units" (fun units ->
+            match units with
+            | JsonValue.Array unitItems ->
+                unitItems
+                |> List.map (jUpdate "imports" (fun imps ->
+                    match imps with
+                    | JsonValue.Array impItems ->
+                        impItems
+                        |> List.map (fun imp -> if jStr "symbol" imp = "substantiation_identity" then alter imp else imp)
+                        |> JsonValue.Array
+                    | other -> other))
+                |> JsonValue.Array
+            | other -> other) json
+    alteredWitness "FS9243" (forgeEmitted (jUpdate "sourceBoundary" (jSet "library" (JsonValue.String "not_linked"))))
+    alteredWitness "FS9243" (forgeEmitted (jSet "symbol" (JsonValue.String "uninventoried_symbol")))
     // The same node identity, appended with a forged pairing, is refused as well.
     alteredWitness "FS9243" (appendImport emittedDeclaration "not_linked" "substantiation_identity")
     alteredWitness "FS9243" (appendImport emittedDeclaration "substantiation_probe" "uninventoried_symbol")
     // A descendant of an authored runtime binding is no boundary declaration.
-    let authoredBody = ((bindingBody retainedNodes (bindingNode "seven" retainedNodes))["id"]).GetValue<int>()
+    let authoredBody = jInt "id" (bindingBody retainedNodes (bindingNode "seven" retainedNodes))
     alteredWitness "FS9243" (appendImport authoredBody "substantiation_probe" "substantiation_identity")
     // A library node below no module binding (the root module, a type definition) is refused.
-    let libraryModuleId = (foreignNode retainedNodes).["parent"].GetValue<int>()
+    let libraryModuleId = jInt "parent" (foreignNode retainedNodes)
     alteredWitness "FS9243" (appendImport libraryModuleId "substantiation_probe" "substantiation_identity")
     let libraryTypeId =
         retainedNodes
-        |> Seq.find (fun node -> node["kind"].GetValue<string>().StartsWith("TypeDef", StringComparison.Ordinal) && node["range"].GetValue<string>().Contains("Scalar.clef:", StringComparison.Ordinal))
-        |> fun node -> node["id"].GetValue<int>()
+        |> List.find (fun node -> (jStr "kind" node).StartsWith("TypeDef", StringComparison.Ordinal) && (jStr "range" node).Contains("Scalar.clef:", StringComparison.Ordinal))
+        |> jInt "id"
     alteredWitness "FS9243" (appendImport libraryTypeId "substantiation_probe" "substantiation_identity")
     // Resource imports are attributed through the same parent walk.
-    let appendResource (sourceBoundary: JsonNode) (library: string) (symbol: string) (json: JsonNode) =
-        let resource = JsonObject()
-        resource["sourceBoundary"] <- sourceBoundary
-        resource["library"] <- JsonValue.Create library
-        resource["symbol"] <- JsonValue.Create symbol
-        let units = json["units"].AsArray()
-        let unitNode = units[0]
-        unitNode["resourceImports"].AsArray().Add resource
-    alteredWitness "" (appendResource (JsonValue.Create emittedDeclaration) "substantiation_probe" "substantiation_identity")
-    alteredWitness "FS9243" (appendResource (JsonValue.Create emittedDeclaration) "not_linked" "substantiation_identity")
-    alteredWitness "FS9243" (appendResource (JsonValue.Create authoredId) "substantiation_probe" "substantiation_identity")
-    alteredWitness "FS9243" (appendResource (JsonValue.Create libraryModuleId) "substantiation_probe" "substantiation_identity")
-    alteredWitness "FS9243" (appendResource (JsonValue.Create "not-a-node") "substantiation_probe" "substantiation_identity")
-    alteredWitness "" (appendResource (JsonValue.Create 2147483001) "platform-owned" "platform-symbol")
+    let appendResource (sourceBoundary: JsonValue) (library: string) (symbol: string) (json: JsonValue) =
+        let resource =
+            JsonValue.Object
+                [ "sourceBoundary", sourceBoundary
+                  "library", JsonValue.String library
+                  "symbol", JsonValue.String symbol ]
+        jUpdate "units" (jUpdateAt 0 (jUpdate "resourceImports" (jAdd resource))) json
+    alteredWitness "" (appendResource (Json.ofInt64 (int64 emittedDeclaration)) "substantiation_probe" "substantiation_identity")
+    alteredWitness "FS9243" (appendResource (Json.ofInt64 (int64 emittedDeclaration)) "not_linked" "substantiation_identity")
+    alteredWitness "FS9243" (appendResource (Json.ofInt64 (int64 authoredId)) "substantiation_probe" "substantiation_identity")
+    alteredWitness "FS9243" (appendResource (Json.ofInt64 (int64 libraryModuleId)) "substantiation_probe" "substantiation_identity")
+    alteredWitness "FS9243" (appendResource (JsonValue.String "not-a-node") "substantiation_probe" "substantiation_identity")
+    alteredWitness "" (appendResource (Json.ofInt64 2147483001L) "platform-owned" "platform-symbol")
     // Parent edges that form a cycle or name an absent node cannot be walked and are refused.
-    let harnessMain (nodes: JsonArray) =
-        nodes |> Seq.find (fun node ->
-            node["kind"].GetValue<string>().StartsWith("Binding (\"main\"", StringComparison.Ordinal)
-            && node["range"].GetValue<string>().Contains("SubstantiationRoot.clef:", StringComparison.Ordinal))
+    let harnessMain (nodes: JsonValue list) =
+        nodes |> List.find (fun node ->
+            (jStr "kind" node).StartsWith("Binding (\"main\"", StringComparison.Ordinal)
+            && (jStr "range" node).Contains("SubstantiationRoot.clef:", StringComparison.Ordinal))
     alteredPsg0 "FS9233" (fun nodes ->
         let binding = harnessMain nodes
         let child = (children nodes binding)[0]
-        binding["parent"] <- child["id"].DeepClone())
-    alteredPsg0 "FS9233" (fun nodes -> (harnessMain nodes)["parent"] <- JsonValue.Create 2147483600)
+        updateNode binding (jSet "parent" (jProp "id" child)) nodes)
+    alteredPsg0 "FS9233" (fun nodes -> updateNode (harnessMain nodes) (jSet "parent" (Json.ofInt64 2147483600L)) nodes)
     Substantiation.validateManifest manifest |> accepted
     Assert.False(Directory.Exists(Path.Combine(manifest.ArtifactsDirectory, "recheck-boundary")), "boundary validation must clean its temporary directory")
     let checkMalformed changed =
@@ -2213,10 +2305,9 @@ let ``witnessed imports swapped between two FunctionDescriptors of one library a
     Assert.Equal(Substantiation.DescriptorSymbol.NotDescriptor, (declaration "identityResultContract").Descriptor)
     // Every alteration rebinds the file digests and the envelope, so each refusal below is the
     // reconciliation and not the digest check.
-    let jsonBytes (alter: JsonNode -> unit) (bytes: byte[]) =
-        let json = JsonNode.Parse(Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF'))
-        alter json
-        Encoding.UTF8.GetBytes(json.ToJsonString())
+    let jsonBytes (alter: JsonValue -> JsonValue) (bytes: byte[]) =
+        let json = Json.parseOrFail(Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF')) |> alter
+        Encoding.UTF8.GetBytes(Json.serialize json)
     let rebound () =
         { manifest with
             Psg0 = { manifest.Psg0 with Sha256 = ClangToolchain.sha256 manifest.Psg0.Path }
@@ -2224,81 +2315,103 @@ let ``witnessed imports swapped between two FunctionDescriptors of one library a
         |> Substantiation.seal |> Substantiation.validateManifest
     let expecting (expected: string) (result: Result<unit, Diagnostics.Refusal>) =
         if expected = "" then accepted result else refused expected result
-    let alteredWitness expected (alter: JsonNode -> unit) =
+    let alteredWitness expected (alter: JsonValue -> JsonValue) =
         changedBytes manifest.WitnessUnits.Path (jsonBytes alter) (fun () -> rebound () |> expecting expected)
-    let alteredPsg0 expected (alter: JsonArray -> unit) =
-        changedBytes manifest.Psg0.Path (jsonBytes (fun json -> alter (json["nodes"].AsArray()))) (fun () -> rebound () |> expecting expected)
-    let importOf (symbol: string) (json: JsonNode) =
-        json["units"].AsArray()
-        |> Seq.collect (fun unitNode -> unitNode["imports"].AsArray())
-        |> Seq.filter (fun importNode -> importNode["symbol"].GetValue<string>() = symbol)
-        |> Seq.exactlyOne
-    let nodeOf (importNode: JsonNode) = importNode.["sourceBoundary"].["declaration"].GetValue<int>()
-    alteredWitness "" ignore
-    alteredPsg0 "" ignore
+    let alteredPsg0 expected (alter: JsonValue list -> JsonValue list) =
+        changedBytes manifest.Psg0.Path (jsonBytes (jUpdate "nodes" (fun arr -> JsonValue.Array (alter (Json.items arr))))) (fun () -> rebound () |> expecting expected)
+    let importOf (symbol: string) (json: JsonValue) =
+        json
+        |> jProp "units"
+        |> Json.items
+        |> List.collect (fun unitNode -> unitNode |> jProp "imports" |> Json.items)
+        |> List.filter (fun importNode -> jStr "symbol" importNode = symbol)
+        |> List.exactlyOne
+    let updateImports (f: JsonValue -> JsonValue) (json: JsonValue) =
+        jUpdate "units" (fun units ->
+            match units with
+            | JsonValue.Array unitItems ->
+                unitItems
+                |> List.map (jUpdate "imports" (fun imps ->
+                    match imps with
+                    | JsonValue.Array impItems -> impItems |> List.map f |> JsonValue.Array
+                    | other -> other))
+                |> JsonValue.Array
+            | other -> other) json
+    let nodeOf (importNode: JsonValue) = jInt "declaration" (jProp "sourceBoundary" importNode)
+    alteredWitness "" id
+    alteredPsg0 "" id
     // Both symbols are extern symbols of the one linked library, so the boundary inventory
     // admits either of them on either declaration. One import renamed to the other symbol:
-    alteredWitness "FS9243" (fun json -> (importOf identity json)["symbol"] <- JsonValue.Create echo)
+    alteredWitness "FS9243" (updateImports (fun imp -> if jStr "symbol" imp = identity then jSet "symbol" (JsonValue.String echo) imp else imp))
     // The two symbols exchanged between the two descriptor nodes:
-    alteredWitness "FS9243" (fun json ->
-        let first, second = importOf identity json, importOf echo json
-        first["symbol"] <- JsonValue.Create echo
-        second["symbol"] <- JsonValue.Create identity)
+    alteredWitness "FS9243" (updateImports (fun imp ->
+        let sym = jStr "symbol" imp
+        if sym = identity then jSet "symbol" (JsonValue.String echo) imp
+        elif sym = echo then jSet "symbol" (JsonValue.String identity) imp
+        else imp))
     // The two descriptor node identities exchanged between the two symbols:
     alteredWitness "FS9243" (fun json ->
-        let first, second = importOf identity json, importOf echo json
-        let firstNode, secondNode = nodeOf first, nodeOf second
-        first.["sourceBoundary"].["declaration"] <- JsonValue.Create secondNode
-        second.["sourceBoundary"].["declaration"] <- JsonValue.Create firstNode)
+        let firstNode = nodeOf (importOf identity json)
+        let secondNode = nodeOf (importOf echo json)
+        updateImports (fun imp ->
+            let sym = jStr "symbol" imp
+            if sym = identity then jUpdate "sourceBoundary" (jSet "declaration" (Json.ofInt64 (int64 secondNode))) imp
+            elif sym = echo then jUpdate "sourceBoundary" (jSet "declaration" (Json.ofInt64 (int64 firstNode))) imp
+            else imp) json)
     // The same rule holds on the module binding nodes: a descriptor binding carries its
     // CName, and a FidelityExtern binding carries its own library and symbol.
-    let retainedPsg = JsonNode.Parse(File.ReadAllText(manifest.Psg0.Path).TrimStart('\uFEFF'))
-    let retainedNodes = retainedPsg["nodes"].AsArray()
+    let retainedPsg = Json.parseOrFail(File.ReadAllText(manifest.Psg0.Path).TrimStart('\uFEFF'))
+    let retainedNodes = retainedPsg |> jProp "nodes" |> Json.items
     let bindingId (name: string) =
         retainedNodes
-        |> Seq.find (fun node -> node["kind"].GetValue<string>().StartsWith("Binding (\"" + name + "\"", StringComparison.Ordinal))
-        |> fun node -> node["id"].GetValue<int>()
-    let retarget (symbol: string) (node: int) (json: JsonNode) =
-        (importOf symbol json).["sourceBoundary"].["declaration"] <- JsonValue.Create node
+        |> List.find (fun node -> (jStr "kind" node).StartsWith("Binding (\"" + name + "\"", StringComparison.Ordinal))
+        |> jInt "id"
+    let retarget (symbol: string) (node: int) (json: JsonValue) =
+        updateImports (fun imp ->
+            if jStr "symbol" imp = symbol then
+                jUpdate "sourceBoundary" (jSet "declaration" (Json.ofInt64 (int64 node))) imp
+            else imp) json
     alteredWitness "" (retarget identity (bindingId (identity + "Descriptor")))
     alteredWitness "FS9243" (retarget identity (bindingId (echo + "Descriptor")))
     alteredWitness "" (retarget identity (bindingId identity))
     alteredWitness "FS9243" (retarget identity (bindingId echo))
     // A resource import is attributed by the same rule.
-    let retainedWitness = JsonNode.Parse(File.ReadAllText(manifest.WitnessUnits.Path).TrimStart('\uFEFF'))
+    let retainedWitness = Json.parseOrFail(File.ReadAllText(manifest.WitnessUnits.Path).TrimStart('\uFEFF'))
     let identityRecord = nodeOf (importOf identity retainedWitness)
-    let appendResource (node: int) (symbol: string) (json: JsonNode) =
-        let resource = JsonObject()
-        resource["sourceBoundary"] <- JsonValue.Create node
-        resource["library"] <- JsonValue.Create "substantiation_probe"
-        resource["symbol"] <- JsonValue.Create symbol
-        let units = json["units"].AsArray()
-        let unitNode = units[0]
-        unitNode["resourceImports"].AsArray().Add resource
+    let appendResource (node: int) (symbol: string) (json: JsonValue) =
+        let resource =
+            JsonValue.Object
+                [ "sourceBoundary", Json.ofInt64 (int64 node)
+                  "library", JsonValue.String "substantiation_probe"
+                  "symbol", JsonValue.String symbol ]
+        jUpdate "units" (jUpdateAt 0 (jUpdate "resourceImports" (jAdd resource))) json
     alteredWitness "" (appendResource identityRecord identity)
     alteredWitness "FS9243" (appendResource identityRecord echo)
     // The CName is the literal the compiler PSG publishes for the record's CName field, and
     // the source text at that literal's range spells it. A PSG literal renamed to the other
     // valid symbol, or moved off its source position, establishes no CName; the import that
     // resolves to the descriptor is then refused, whether or not the witness is renamed to match.
-    let cnameLiteral (nodes: JsonArray) =
-        let record = nodes |> Seq.find (fun node -> node["id"].GetValue<int>() = identityRecord)
-        let field = System.Text.RegularExpressions.Regex.Match(record["kind"].GetValue<string>(), @"\(""CName"",\s*NodeId\s+([0-9]+)\)")
+    let cnameLiteral (nodes: JsonValue list) =
+        let record = nodes |> List.find (fun node -> jInt "id" node = identityRecord)
+        let field = System.Text.RegularExpressions.Regex.Match(jStr "kind" record, @"\(""CName"",\s*NodeId\s+([0-9]+)\)")
         Assert.True(field.Success, "the witnessed node is not the FunctionDescriptor record")
         let literal = Int32.Parse field.Groups[1].Value
-        nodes |> Seq.find (fun node -> node["id"].GetValue<int>() = literal)
-    let renameLiteral (nodes: JsonArray) = (cnameLiteral nodes)["kind"] <- JsonValue.Create("Literal (String \"" + echo + "\")")
+        nodes |> List.find (fun node -> jInt "id" node = literal)
+    let updateLiteral (f: JsonValue -> JsonValue) (nodes: JsonValue list) =
+        let litId = jInt "id" (cnameLiteral nodes)
+        nodes |> List.map (fun n -> if jInt "id" n = litId then f n else n)
+    let renameLiteral (nodes: JsonValue list) = updateLiteral (jSet "kind" (JsonValue.String("Literal (String \"" + echo + "\")"))) nodes
     let retainedLiteral = cnameLiteral retainedNodes
-    Assert.Equal("Literal (String \"" + identity + "\")", retainedLiteral["kind"].GetValue<string>())
+    Assert.Equal("Literal (String \"" + identity + "\")", jStr "kind" retainedLiteral)
     alteredPsg0 "FS9243" renameLiteral
-    changedBytes manifest.Psg0.Path (jsonBytes (fun json -> renameLiteral (json["nodes"].AsArray()))) (fun () ->
-        alteredWitness "FS9243" (fun json -> (importOf identity json)["symbol"] <- JsonValue.Create echo))
+    changedBytes manifest.Psg0.Path (jsonBytes (jUpdate "nodes" (fun arr -> JsonValue.Array (renameLiteral (Json.items arr))))) (fun () ->
+        alteredWitness "FS9243" (updateImports (fun imp -> if jStr "symbol" imp = identity then jSet "symbol" (JsonValue.String echo) imp else imp)))
     alteredPsg0 "FS9243" (fun nodes ->
         let literal = cnameLiteral nodes
-        let range = literal["range"].GetValue<string>()
+        let range = jStr "range" literal
         let columnAt = range.LastIndexOf ':'
-        literal["range"] <- JsonValue.Create(range.Substring(0, columnAt + 1) + string (Int32.Parse(range.Substring(columnAt + 1)) + 1)))
-    alteredPsg0 "FS9243" (fun nodes -> (cnameLiteral nodes)["kind"] <- JsonValue.Create "Literal (Int32 7)")
+        updateLiteral (jSet "range" (JsonValue.String(range.Substring(0, columnAt + 1) + string (Int32.Parse(range.Substring(columnAt + 1)) + 1)))) nodes)
+    alteredPsg0 "FS9243" (updateLiteral (jSet "kind" (JsonValue.String "Literal (Int32 7)")))
     Substantiation.validateManifest manifest |> accepted
 
 [<Fact>]
@@ -2329,41 +2442,51 @@ let ``a witnessed import retargeted to a result contract or a runtime binding is
     let exported (select: Substantiation.SourceDigest -> string[]) = manifest.Sources |> Array.collect select
     Assert.Contains(contract.Qualified, exported (fun source -> source.CompileTimeDeclarations))
     Assert.Contains(runtime.Qualified, exported (fun source -> source.RuntimeDeclarations))
-    let alteredWitness expected (alter: JsonNode -> unit) =
+    let alteredWitness expected (alter: JsonValue -> JsonValue) =
         changedBytes manifest.WitnessUnits.Path (fun bytes ->
-            let json = JsonNode.Parse(Encoding.UTF8.GetString(bytes).TrimStart('﻿'))
-            alter json
-            Encoding.UTF8.GetBytes(json.ToJsonString())) (fun () ->
+            let json = Json.parseOrFail(Encoding.UTF8.GetString(bytes).TrimStart('﻿')) |> alter
+            Encoding.UTF8.GetBytes(Json.serialize json)) (fun () ->
                 let result =
                     { manifest with WitnessUnits = { manifest.WitnessUnits with Sha256 = ClangToolchain.sha256 manifest.WitnessUnits.Path } }
                     |> Substantiation.seal |> Substantiation.validateManifest
                 if expected = "" then accepted result else refused expected result)
-    let emittedImport (json: JsonNode) =
-        json["units"].AsArray()
-        |> Seq.collect (fun unitNode -> unitNode["imports"].AsArray())
-        |> Seq.filter (fun importNode -> importNode["symbol"].GetValue<string>() = identity)
-        |> Seq.exactlyOne
-    let retarget (node: int) (json: JsonNode) =
-        (emittedImport json).["sourceBoundary"].["declaration"] <- JsonValue.Create node
-    let appendResource (node: int) (json: JsonNode) =
-        let resource = JsonObject()
-        resource["sourceBoundary"] <- JsonValue.Create node
-        resource["library"] <- JsonValue.Create library
-        resource["symbol"] <- JsonValue.Create identity
-        let units = json["units"].AsArray()
-        let unitNode = units[0]
-        unitNode["resourceImports"].AsArray().Add resource
+    let retarget (node: int) (json: JsonValue) =
+        jUpdate "units" (fun units ->
+            match units with
+            | JsonValue.Array unitItems ->
+                unitItems
+                |> List.map (jUpdate "imports" (fun imps ->
+                    match imps with
+                    | JsonValue.Array impItems ->
+                        impItems
+                        |> List.map (fun imp ->
+                            if jStr "symbol" imp = identity then
+                                jUpdate "sourceBoundary" (jSet "declaration" (Json.ofInt64 (int64 node))) imp
+                            else imp)
+                        |> JsonValue.Array
+                    | other -> other))
+                |> JsonValue.Array
+            | other -> other) json
+    let appendResource (node: int) (json: JsonValue) =
+        let resource =
+            JsonValue.Object
+                [ "sourceBoundary", Json.ofInt64 (int64 node)
+                  "library", JsonValue.String library
+                  "symbol", JsonValue.String identity ]
+        jUpdate "units" (jUpdateAt 0 (jUpdate "resourceImports" (jAdd resource))) json
     // A descendant of the result contract binding resolves to that binding by the parent walk.
-    let retainedPsg = JsonNode.Parse(File.ReadAllText(manifest.Psg0.Path).TrimStart('﻿'))
+    let retainedPsg = Json.parseOrFail(File.ReadAllText(manifest.Psg0.Path).TrimStart('﻿'))
     let contractChild =
-        retainedPsg["nodes"].AsArray()
-        |> Seq.find (fun node ->
-            match node["parent"] with
-            | null -> false
-            | parent -> parent.GetValue<int>() = contract.BindingNodeId)
-        |> fun node -> node["id"].GetValue<int>()
+        retainedPsg
+        |> jProp "nodes"
+        |> Json.items
+        |> List.find (fun node ->
+            match node |> Json.prop "parent" |> Option.bind Json.asInt with
+            | None -> false
+            | Some parent -> int parent = contract.BindingNodeId)
+        |> jInt "id"
     // Controls: the unaltered witness, and the import on each of its two owning bindings.
-    alteredWitness "" ignore
+    alteredWitness "" id
     alteredWitness "" (retarget descriptor.BindingNodeId)
     alteredWitness "" (retarget foreign.BindingNodeId)
     alteredWitness "" (appendResource descriptor.BindingNodeId)

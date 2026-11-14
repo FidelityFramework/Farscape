@@ -23,10 +23,10 @@ open WrapperTypes
 module WrapperCodeGenerator =
 
     let private rejectErrno () =
-        failwith "errno wrappers require a declared native scalar errno accessor; CHandle<int> cannot be dereferenced in Clef source."
+        Diagnostics.raiseRefusal (Diagnostics.uncoded "errno wrappers require a declared native scalar errno accessor; CHandle<int> cannot be dereferenced in Clef source.")
 
     let private rejectNullWithReason reasonFn =
-        failwith $"null_with_reason wrappers require a declared reason return type, nullability, native text extent and ownership projection for '{reasonFn}'; an opaque CHandle cannot be treated as a reason string."
+        Diagnostics.raiseRefusal (Diagnostics.uncoded $"null_with_reason wrappers require a declared reason return type, nullability, native text extent and ownership projection for '{reasonFn}'; an opaque CHandle cannot be treated as a reason string.")
 
     // =========================================================================
     // Wrapper Return Type Computation
@@ -401,7 +401,7 @@ module WrapperCodeGenerator =
         : string =
 
         if nativePointerSurface then
-            failwith "experimental_native_pointer_surface cannot emit Clef wrappers: raw address carriers violate the FFI boundary contract."
+            Diagnostics.raiseRefusal (Diagnostics.uncoded "experimental_native_pointer_surface cannot emit Clef wrappers: raw address carriers violate the FFI boundary contract.")
         match errorHandling with
         | UseErrno _ -> rejectErrno ()
         | UseNullWithReason reasonFn -> rejectNullWithReason reasonFn
