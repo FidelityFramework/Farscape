@@ -3,7 +3,7 @@ module Landing.Acceptance.Boundary
 
 open Landing.Boundary
 
-let private scalarEntry (value: int) (delta: int) =
+let private scalarEntry (value: int) (delta: int) : int =
     if value = 4294967295 && delta = -173 then -7 else 9
 
 let private voidEntry (value: int) (delta: int) : unit =

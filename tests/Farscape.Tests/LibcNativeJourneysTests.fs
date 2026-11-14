@@ -133,6 +133,15 @@ let private generate work name headers functions contracts =
                   "let private atExit () : unit = ()"
               "let registrationSample () : int ="
               "    atexit { " + callbackType + ".Invoke = FnPtr.ofFunction atExit }"
+          elif List.contains "qsort" functions && List.contains "malloc" functions && List.contains "free" functions then
+              "let private qsortCmp (_a: option<CHandle<unit>>) (_b: option<CHandle<unit>>) : int = 0"
+              "let sortSample () : int ="
+              "    match malloc 16 with"
+              "    | Some buf ->"
+              "        qsort buf 4 4 { " + callbackType + ".Invoke = FnPtr.ofFunction qsortCmp }"
+              "        free buf"
+              "        1"
+              "    | None -> 0"
           elif List.contains "getpid" functions then
               "let sample () : int ="
               "    if getpid () > 0 then 1 else 0" ]
@@ -169,7 +178,7 @@ let private readReceipt = function
     | Ok value -> value
     | Error reason -> failwithf "Discharge receipt refused: %A" reason
 
-let private census checkPremises artifacts =
+let private censusWithReceipt checkPremises (expectedReceiptOpt: (string * string) option) artifacts =
     let at name = requiredFile name (Path.Combine(artifacts, name))
     let ids = File.ReadAllText(at "06a_obligations.json") |> obligationIds |> readReceipt
     let receipt = File.ReadAllText(at "06c_psg_discharge.json") |> parse |> readReceipt
@@ -178,13 +187,100 @@ let private census checkPremises artifacts =
         { ExpectedStage = "psg"; InputFileSha256 = querySha; QueryFileSha256 = querySha; ObligationIds = ids }
     Assert.Empty(refusalsOf expected receipt)
     Assert.NotEmpty ids
+    for tool in receipt.Tools do
+        Assert.Equal(tool.ExecutableSha256.ToLowerInvariant(), (ClangToolchain.sha256 tool.Executable).ToLowerInvariant())
+    let mlirReceiptPath = Path.Combine(artifacts, "09_mlir_discharge.json")
+    let mlirInputPath = Path.Combine(artifacts, "09_obligations.mlir")
+    let mlirQueryPath = Path.Combine(artifacts, "09_obligations.smt2")
+    let mlirHashes =
+        if File.Exists mlirReceiptPath then
+            let mlirReceipt = File.ReadAllText mlirReceiptPath |> parse |> readReceipt
+            let mlirInHash = ClangToolchain.sha256 (requiredFile "09_obligations.mlir" mlirInputPath)
+            let mlirQueryHash = ClangToolchain.sha256 (requiredFile "09_obligations.smt2" mlirQueryPath)
+            let mlirExpected =
+                { ExpectedStage = "mlir"
+                  InputFileSha256 = mlirInHash
+                  QueryFileSha256 = mlirQueryHash
+                  ObligationIds = ids }
+            Assert.Empty(refusalsOf mlirExpected mlirReceipt)
+            for tool in mlirReceipt.Tools do
+                Assert.Equal(tool.ExecutableSha256.ToLowerInvariant(), (ClangToolchain.sha256 tool.Executable).ToLowerInvariant())
+            Some(mlirInHash, mlirQueryHash)
+        else
+            Assert.False(File.Exists mlirInputPath || File.Exists mlirQueryPath,
+                         $"MLIR obligations retained without 09_mlir_discharge.json in {artifacts}")
+            None
+    let artifactReceiptInfo =
+        match expectedReceiptOpt with
+        | Some(path, expectedBinarySha) -> Some(requiredFile "artifact-receipt.json" path, Some expectedBinarySha)
+        | None ->
+            [ Path.Combine(artifacts, "artifact-receipt.json")
+              Path.Combine(Path.GetDirectoryName artifacts, "artifact-receipt.json") ]
+            |> List.tryFind File.Exists
+            |> Option.map (fun path -> path, None)
+    match artifactReceiptInfo with
+    | Some(path, expectedBinaryShaOpt) ->
+        use doc = JsonDocument.Parse(File.ReadAllText path)
+        let root = doc.RootElement
+        Assert.Equal("elf-rocq", root.GetProperty("Stage").GetString())
+        Assert.Equal(querySha.ToLowerInvariant(), root.GetProperty("SourceQuerySha256").GetString().ToLowerInvariant())
+        match mlirHashes with
+        | Some(mlirInHash, mlirQueryHash) ->
+            Assert.Equal(mlirInHash.ToLowerInvariant(), root.GetProperty("MlirInputSha256").GetString().ToLowerInvariant())
+            Assert.Equal(mlirQueryHash.ToLowerInvariant(), root.GetProperty("MlirQuerySha256").GetString().ToLowerInvariant())
+        | None ->
+            for propName in [ "MlirInputSha256"; "MlirQuerySha256" ] do
+                match root.TryGetProperty propName with
+                | true, prop ->
+                    Assert.True(
+                        prop.ValueKind = JsonValueKind.Null || String.IsNullOrEmpty(prop.GetString()),
+                        $"artifact-receipt.json sets {propName} without retained 09_mlir_discharge.json")
+                | false, _ -> ()
+        match expectedBinaryShaOpt with
+        | Some expectedSha ->
+            Assert.Equal(expectedSha.ToLowerInvariant(), root.GetProperty("ArtifactSha256").GetString().ToLowerInvariant())
+        | None -> ()
+        let idSet = Set.ofList ids
+        let claimAnchors =
+            [ for claim in root.GetProperty("Claims").EnumerateArray() do
+                  yield claim.GetProperty("Anchor").GetString() ]
+        let solverAnchors =
+            [ for anchor in root.GetProperty("SolverOnlyAnchors").EnumerateArray() do
+                  yield anchor.GetString() ]
+        let claimSet = Set.ofList claimAnchors
+        let solverSet = Set.ofList solverAnchors
+        Assert.Equal(claimAnchors.Length, claimSet.Count)
+        Assert.Equal(solverAnchors.Length, solverSet.Count)
+        Assert.Equal(ids.Length, claimAnchors.Length + solverAnchors.Length)
+        Assert.True(Set.isEmpty (Set.intersect claimSet solverSet), "Claims and SolverOnlyAnchors must be disjoint")
+        Assert.True(Set.union claimSet solverSet = idSet, "Claims + SolverOnlyAnchors must equal 06a_obligations.json")
+    | None -> ()
     if checkPremises then
         let premises = File.ReadAllLines(at "06b_premises_sat.stdout") |> Array.filter (String.IsNullOrWhiteSpace >> not)
         Assert.Equal(ids.Length, premises.Length)
         Assert.All(premises, fun verdict -> Assert.Equal("sat", verdict.Trim()))
-    for tool in receipt.Tools do
-        Assert.Equal(tool.ExecutableSha256.ToLowerInvariant(), (ClangToolchain.sha256 tool.Executable).ToLowerInvariant())
     ids.Length
+
+// Library substantiation emits no elf-rocq artifact-receipt.json; compiled probe binaries require one via verifyCompiledProbeProofs.
+let private census checkPremises artifacts =
+    censusWithReceipt checkPremises None artifacts
+
+let private verifyCompiledProbeProofs (sources: string list) (harness: string) (binary: string) =
+    let probeDir = Path.GetDirectoryName binary
+    let prefix = Path.GetFileName binary + ".proof-"
+    let receiptPath =
+        match Directory.GetDirectories(probeDir, prefix + "*")
+              |> Array.map (fun dir -> Path.Combine(dir, "artifact-receipt.json"))
+              |> Array.filter File.Exists with
+        | [| single |] -> single
+        | found -> failwithf "Expected exactly one %s*/artifact-receipt.json alongside %s, found %A" prefix binary found
+    let intermediates = Path.Combine(probeDir, "targets", "intermediates")
+    let summary = SubstantiationProof.evaluate (Array.ofList sources) harness intermediates |> accepted
+    Assert.Equal(summary.TotalObligations, summary.DischargedUnsatCount)
+    Assert.Equal(0, summary.PendingOpenCount)
+    Assert.Equal(0, summary.RefutedCount)
+    let binarySha = ClangToolchain.sha256 binary
+    Assert.Equal(summary.TotalObligations, censusWithReceipt true (Some(receiptPath, binarySha)) intermediates)
 
 let private compile work name sources =
     let path = project work name "console" sources
@@ -295,14 +391,14 @@ let ``163 real libc getpid close read positive EOF and EBADF retain ELF and disc
         let binary, built = compile work "ProbeLibc163" (fx.Sources @ [ entry ])
         Assert.True(built.ExitCode = 0, built.Stdout + built.Stderr)
         let digest = inspectBinary work binary [ "getpid"; "close"; "read" ]
-        census false (Path.Combine(work, "targets", "intermediates")) |> ignore
+        verifyCompiledProbeProofs fx.Sources entry binary
         let ebadfEntry = Path.Combine(work, "ProbeLibc163Ebadf.clef")
         Assert.NotEqual<string>(ioProbe, ioEbadfProbe)
         write ebadfEntry ioEbadfProbe
         let ebadfBinary, ebadfBuilt = compile work "ProbeLibc163Ebadf" (fx.Sources @ [ ebadfEntry ])
         Assert.True(ebadfBuilt.ExitCode = 0, ebadfBuilt.Stdout + ebadfBuilt.Stderr)
         let ebadfDigest = inspectBinary work ebadfBinary [ "getpid"; "close"; "read" ]
-        census false (Path.Combine(work, "targets", "intermediates")) |> ignore
+        verifyCompiledProbeProofs fx.Sources ebadfEntry ebadfBinary
         let payload = Encoding.UTF8.GetBytes "farscape-163-ok"
         Assert.Equal(15, payload.Length)
         for label, exe, expectedDigest, input, expectedCode in
@@ -368,12 +464,12 @@ let private mallocFreeContracts ns =
 [[options.bindings]]
 name = "malloc"
 symbol = "malloc"
-return_handle = "unit"
+return_handle = "MallocBuffer"
 resource = {{ kind = "owned_nullable_return", release_binding = "{ns}.Boundary.free", release_parameter = 0, hypothesis = {{ identity = "libc.malloc.owned", version = "1", source = "ISO C malloc/free" }} }}
 [[options.bindings]]
 name = "free"
 symbol = "free"
-parameter_handles = ["unit"]
+parameter_handles = ["MallocBuffer"]
 """
 
 let private resourceContracts =
@@ -529,7 +625,7 @@ let ``45 46 real libc multi-contract seams census and dossier reconcile with mal
                 ("module LibcRealSuite.Closure\nopen LibcRealSuite.Boundary\nopen LibcRealSuite.Boundary.Types\n[<EntryPoint>]\nlet main _ : int =\n    let captured = LibcRealSuite.Boundary.getpid ()\n    let entry () : unit =\n        let _ = LibcRealSuite.Boundary.close captured\n        ()\n    LibcRealSuite.Boundary.atexit { " + callbackType + ".Invoke = FnPtr.ofFunction entry }\n")
         let forged =
             probe "Forged" false
-                "module LibcControl.Forged\n[<EntryPoint>]\nlet main _ : int =\n    let handle: CHandle<unit> = NativeDefault.zeroed ()\n    if handle = handle then 0 else 1\n"
+                "module LibcControl.Forged\nopen LibcControl.Boundary.Types\n[<EntryPoint>]\nlet main _ : int =\n    let handle: CHandle<MallocBuffer> = NativeDefault.zeroed ()\n    if handle = handle then 0 else 1\n"
         let forgedProject = project controlWork "Forged" "console" (controlFx.Sources @ [ forged ])
         let badRelease = Path.Combine(work, "BadRelease.pilot.toml")
         write badRelease
@@ -571,9 +667,10 @@ let ``45 46 real libc multi-contract seams census and dossier reconcile with mal
             Assert.True control.Passed
             Assert.Equal(control.ExpectedCode, control.ObservedCode))
         SubstantiationSeams.readLedgerReceipt manifest generated.LedgerPath |> accepted |> ignore
+        let probeEntryFor = Map.ofList [ "scalar", scalar; "lifecycle", lifecycle; "callback", callback; "range", range ]
         for retained in generated.Ledger.RetainedBinaries do
             Assert.Equal(retained.BinarySha256, ClangToolchain.sha256 retained.BinaryPath)
-            census false (Path.Combine(Path.GetDirectoryName retained.BinaryPath, "targets", "intermediates")) |> ignore
+            verifyCompiledProbeProofs fx.Sources probeEntryFor[retained.CheckId] retained.BinaryPath
         let callbackBinary = generated.Ledger.RetainedBinaries |> Array.find (fun item -> item.CheckId = "callback")
         let callbackWork = Path.GetDirectoryName callbackBinary.BinaryPath
         inspectBinary callbackWork callbackBinary.BinaryPath [ "exit"; "_exit"; "atexit" ] |> ignore
@@ -610,3 +707,251 @@ let ``45 46 real libc multi-contract seams census and dossier reconcile with mal
         Assert.Equal(dossier.Dossier.OverallStatus, json.RootElement.GetProperty("OverallStatus").GetString())
         Assert.Equal(manifest.Proof.TotalObligations, json.RootElement.GetProperty("Counts").GetProperty("Guarantees").GetInt32())
         Assert.Equal(manifest.Proof.HarnessObligations, json.RootElement.GetProperty("Guarantees").GetProperty("HarnessObligations").GetInt32()))
+
+let private fopenFcloseContracts ns =
+    $"""
+[[options.bindings]]
+name = "fopen"
+symbol = "fopen"
+return_handle = "FILE"
+resource = {{ kind = "owned_nullable_return", release_binding = "{ns}.Boundary.fclose", release_parameter = 0, hypothesis = {{ identity = "libc.file.owned", version = "1", source = "ISO C fopen/fclose" }} }}
+read_only_buffers = [
+  {{ parameter = 0, content = "text", extent = {{ nul_terminated = true }}, retention = {{ kind = "during_call" }}, hypothesis = {{ identity = "libc.fopen.path", version = "1", source = "stdio.h" }} }},
+  {{ parameter = 1, content = "text", extent = {{ nul_terminated = true }}, retention = {{ kind = "during_call" }}, hypothesis = {{ identity = "libc.fopen.mode", version = "1", source = "stdio.h" }} }}
+]
+[[options.bindings]]
+name = "fclose"
+symbol = "fclose"
+parameter_handles = ["FILE"]
+"""
+
+[<Fact>]
+let ``164 real libc malloc free Some None retain ELF and discharge census`` () =
+    withScratch "164-malloc" (fun work ->
+        let fx =
+            generate work "Libc164Malloc" [ "/usr/include/unistd.h"; "/usr/include/stdlib.h" ]
+                [ "getpid"; "malloc"; "free" ]
+                (mallocFreeContracts "Libc164Malloc")
+        let source = fx.Sources |> List.map File.ReadAllText |> String.concat "\n"
+        for evidence in [ "OwnedNullableReturn"; "libc.malloc.owned"; "CHandle<MallocBuffer>" ] do
+            Assert.Contains(evidence, source)
+        let manifest = substantiate fx
+        Assert.Equal(manifest.Proof.TotalObligations, census true manifest.ArtifactsDirectory)
+        let probeSource =
+            String.concat "\n"
+                [ "module Libc164Malloc.Run"
+                  "open Libc164Malloc.Boundary"
+                  "let private allocateValid () : int ="
+                  "    match malloc 64 with"
+                  "    | Some buf ->"
+                  "        free buf"
+                  "        1"
+                  "    | None -> 0"
+                  "let private allocateImpossible () : int ="
+                  "    match malloc 18446744073709551615 with"
+                  "    | Some buf ->"
+                  "        free buf"
+                  "        0"
+                  "    | None -> 1"
+                  "[<EntryPoint>]"
+                  "let main _ : int ="
+                  "    let pid = getpid ()"
+                  "    if pid > 0 && allocateValid () = 1 && allocateImpossible () = 1 then"
+                  "        Console.writeln \"164:malloc:ok\""
+                  "        0"
+                  "    else 1" ]
+        let entry = Path.Combine(work, "ProbeLibc164Malloc.clef")
+        write entry probeSource
+        let binary, built = compile work "ProbeLibc164Malloc" (fx.Sources @ [ entry ])
+        Assert.True(built.ExitCode = 0, built.Stdout + built.Stderr)
+        let digest = inspectBinary work binary [ "malloc"; "free" ]
+        verifyCompiledProbeProofs fx.Sources entry binary
+        let outcome = ProcessLaunch.startInfo binary [] |> execute work "run-164-malloc" 10000 (Some [||])
+        succeeded "164-malloc" outcome
+        Assert.Equal("164:malloc:ok\n", outcome.Stdout.Replace("\r\n", "\n"))
+        Assert.Equal(digest, ClangToolchain.sha256 binary))
+
+[<Fact>]
+let ``164 real libc fopen fclose generates contracts substantiates census and refuses unsettled buffer`` () =
+    withScratch "164-fopen" (fun work ->
+        let fx =
+            generate work "Libc164Fopen" [ "/usr/include/unistd.h"; "/usr/include/stdio.h" ]
+                [ "getpid"; "fopen"; "fclose" ]
+                (fopenFcloseContracts "Libc164Fopen")
+        let source = fx.Sources |> List.map File.ReadAllText |> String.concat "\n"
+        for evidence in [ "OwnedNullableReturn"; "libc.file.owned"; "CHandle<FILE>"; "libc.fopen.path"; "libc.fopen.mode" ] do
+            Assert.Contains(evidence, source)
+        let manifest = substantiate fx
+        Assert.Equal(manifest.Proof.TotalObligations, census true manifest.ArtifactsDirectory)
+
+        // Passing non-settled function parameters into fopen read_only_buffers is refused (CCS8424 / CCS8403)
+        // with no binary produced. (Settled literal calls await Farscape #211 ReadOnlyBufferUses support.)
+        let unsettled =
+            String.concat "\n"
+                [ "module Libc164Fopen.Unsettled"
+                  "open Libc164Fopen.Boundary"
+                  "let private openValid (path: string) (mode: string) : int ="
+                  "    match fopen path mode with"
+                  "    | Some stream -> fclose stream"
+                  "    | None -> -1"
+                  "[<EntryPoint>]"
+                  "let main _ : int = openValid \"/nonexistent\" \"r\"" ]
+        let entry = Path.Combine(work, "UnsettledLibc164Fopen.clef")
+        write entry unsettled
+        let binary, built = compile work "UnsettledLibc164Fopen" (fx.Sources @ [ entry ])
+        Assert.NotEqual(0, built.ExitCode)
+        Assert.False(File.Exists binary, "unsettled fopen read_only_buffers produced a binary")
+        let codes = compilerCodes (built.Stdout + built.Stderr)
+        Assert.Contains("CCS8424", codes)
+        Assert.Contains("CCS8403", codes))
+
+[<Fact>]
+let ``164 fopen fclose and malloc free missing wrong and repeated release controls fail with exact codes`` () =
+    withScratch "164-refusals" (fun work ->
+        // Wrong release in pilot contract (fopen paired with free): FS9154.
+        let badRelease = Path.Combine(work, "BadFileRelease.pilot.toml")
+        write badRelease
+            (pilotText "LibcBadRelease" [ "/usr/include/stdio.h"; "/usr/include/stdlib.h" ] [ "fopen"; "free" ] mismatchedRelease)
+        BindingGenerator.generateFromProjectDiagnosed badRelease false false Types.LP64 |> refused "FS9154"
+
+        let sampleFile = Path.Combine(work, "sample-164-neg.txt")
+        write sampleFile "farscape-164-neg\n"
+        let fx =
+            generate work "Libc164Neg" [ "/usr/include/unistd.h"; "/usr/include/stdio.h"; "/usr/include/stdlib.h" ]
+                [ "getpid"; "fopen"; "fclose"; "malloc"; "free" ]
+                (fopenFcloseContracts "Libc164Neg" + mallocFreeContracts "Libc164Neg")
+
+        // Missing release on fopen (leaked FILE): literal args pass Clef buffer settlement; Clef flags leaked handle with CCS8403.
+        let leakFile = Path.Combine(work, "LeakFile.clef")
+        write leakFile
+            ("module Libc164Neg.LeakFile\nopen Libc164Neg.Boundary\n[<EntryPoint>]\nlet main _ : int =\n    match fopen "
+             + quote sampleFile + " \"r\" with\n    | Some stream -> if stream = stream then 0 else 1\n    | None -> 1\n")
+        let leakFileBin, leakFileOutcome = compile work "LeakFile" (fx.Sources @ [ leakFile ])
+        expectCompilerRefusal [ "CCS8403" ] leakFileBin leakFileOutcome
+
+        // Missing release on malloc (leaked MallocBuffer): CCS8403.
+        let leakMalloc = Path.Combine(work, "LeakMalloc.clef")
+        write leakMalloc
+            "module Libc164Neg.LeakMalloc\nopen Libc164Neg.Boundary\n[<EntryPoint>]\nlet main _ : int =\n    match malloc 32 with\n    | Some buf -> if buf = buf then 0 else 1\n    | None -> 1\n"
+        let leakMallocBin, leakMallocOutcome = compile work "LeakMalloc" (fx.Sources @ [ leakMalloc ])
+        expectCompilerRefusal [ "CCS8403" ] leakMallocBin leakMallocOutcome
+
+        // Wrong call-site release (FILE handle passed to free): CCS8003.
+        let wrongCallRelease = Path.Combine(work, "WrongCallRelease.clef")
+        write wrongCallRelease
+            ("module Libc164Neg.WrongCallRelease\nopen Libc164Neg.Boundary\n[<EntryPoint>]\nlet main _ : int =\n    match fopen "
+             + quote sampleFile + " \"r\" with\n    | Some stream -> free stream; 0\n    | None -> 1\n")
+        let wrongBin, wrongOutcome = compile work "WrongCallRelease" (fx.Sources @ [ wrongCallRelease ])
+        expectCompilerRefusal [ "CCS8003" ] wrongBin wrongOutcome
+
+        // Repeated release (double fclose and double free): Composer must refuse via psg proof stage foreign-resource-cleanup (SAT refutation).
+        let expectProofCleanupRefusal (label: string) (binary: string) outcome =
+            Assert.NotEqual(0, outcome.ExitCode)
+            Assert.False(File.Exists binary, $"{label}: refused compilation produced a binary")
+            let output = outcome.Stdout + outcome.Stderr
+            Assert.DoesNotContain("Unhandled exception", output)
+            Assert.DoesNotContain("CCS8403", compilerCodes output)
+            let isCleanupProofRefusal =
+                output.Contains("psg proof stage", StringComparison.Ordinal)
+                && output.Contains("was not discharged: sat", StringComparison.Ordinal)
+                && (output.Contains("foreign-resource-cleanup", StringComparison.Ordinal)
+                    || output.Contains("666F726569676E2D7265736F757263652D636C65616E7570", StringComparison.Ordinal))
+            Assert.True(
+                isCleanupProofRefusal,
+                $"{label}: expected psg proof stage foreign-resource-cleanup refusal, got:\n{output}")
+
+        let doubleFclose = Path.Combine(work, "DoubleFclose.clef")
+        write doubleFclose
+            ("module Libc164Neg.DoubleFclose\nopen Libc164Neg.Boundary\n[<EntryPoint>]\nlet main _ : int =\n    match fopen "
+             + quote sampleFile + " \"r\" with\n    | Some stream -> let _ = fclose stream in fclose stream\n    | None -> 1\n")
+        let doubleCloseBin, doubleCloseOutcome = compile work "DoubleFclose" (fx.Sources @ [ doubleFclose ])
+        expectProofCleanupRefusal "DoubleFclose" doubleCloseBin doubleCloseOutcome
+
+        let doubleFree = Path.Combine(work, "DoubleFree.clef")
+        write doubleFree
+            "module Libc164Neg.DoubleFree\nopen Libc164Neg.Boundary\n[<EntryPoint>]\nlet main _ : int =\n    match malloc 32 with\n    | Some buf -> free buf; free buf; 0\n    | None -> 1\n"
+        let doubleFreeBin, doubleFreeOutcome = compile work "DoubleFree" (fx.Sources @ [ doubleFree ])
+        expectProofCleanupRefusal "DoubleFree" doubleFreeBin doubleFreeOutcome)
+
+let private qsortInvocationContracts = """
+[[options.bindings]]
+name = "qsort"
+symbol = "qsort"
+nonnull_callbacks = [3]
+callback_invocations = [{ parameter = 3, identity = "libc.qsort.compar", version = "1", source = "stdlib.h", scope = "during_call" }]
+"""
+
+let private qsortContracts = """
+[[options.bindings]]
+name = "qsort"
+symbol = "qsort"
+parameter_handles = ["MallocBuffer"]
+nonnull_callbacks = [3]
+"""
+
+[<Fact>]
+let ``165 real libc qsort enforces FS9144 on const void star refuses captures or mismatches and reports CCS8413 handle-callback boundary`` () =
+    withScratch "165" (fun work ->
+        // Under Farscape #189 / #195, undeclared `const void *` comparator parameters refuse callback_invocations with FS9144.
+        let fs9144Pilot = Path.Combine(work, "QsortCallbackInvocations.pilot.toml")
+        write fs9144Pilot
+            (pilotText "Libc165Refused" [ "/usr/include/stdlib.h" ] [ "qsort" ] qsortInvocationContracts)
+        BindingGenerator.generateFromProjectDiagnosed fs9144Pilot false false Types.LP64 |> refused "FS9144"
+
+        let fx =
+            generate work "Libc165" [ "/usr/include/unistd.h"; "/usr/include/stdlib.h" ]
+                [ "getpid"; "malloc"; "free"; "qsort" ]
+                (mallocFreeContracts "Libc165" + qsortContracts)
+        let source = fx.Sources |> List.map File.ReadAllText |> String.concat "\n"
+        let callbackType = Regex.Match(source, @"type\s+(Callback_\w*compar\w*Entry)\s*=").Groups[1].Value
+        Assert.False(String.IsNullOrWhiteSpace callbackType, source)
+
+        // Capturing callback over runtime local: refused with CCS8096 and CCS8207 (no CCS8413;
+        // also admits CCS8403/CCS8414 from unsettled qsort wrapper pending Farscape #211).
+        let capturing = Path.Combine(work, "CapturingQsort.clef")
+        write capturing
+            ("module Libc165.Capturing\nopen Libc165.Boundary\nopen Libc165.Boundary.Types\n[<EntryPoint>]\nlet main _ : int =\n    let bias = getpid ()\n    let cmp (_a: option<CHandle<unit>>) (_b: option<CHandle<unit>>) : int = if bias > 0 then 0 else 1\n    match malloc 16 with\n    | Some buf ->\n        qsort buf 4 4 { "
+             + callbackType + ".Invoke = FnPtr.ofFunction cmp }\n        free buf\n        0\n    | None -> 1\n")
+        let capBin, capOutcome = compile work "CapturingQsort" (fx.Sources @ [ capturing ])
+        Assert.NotEqual(0, capOutcome.ExitCode)
+        Assert.False(File.Exists capBin, "refused capturing qsort compilation produced a binary")
+        let capOut = capOutcome.Stdout + capOutcome.Stderr
+        Assert.DoesNotContain("Unhandled exception", capOut)
+        let capCodes = compilerCodes capOut
+        Assert.Contains("CCS8096", capCodes)
+        Assert.Contains("CCS8207", capCodes)
+        Assert.DoesNotContain("CCS8413", capCodes)
+        Assert.True(Set.isSubset capCodes (Set.ofList [ "CCS8096"; "CCS8207"; "CCS8403"; "CCS8414" ]), capOut)
+
+        // Mismatched callback signature (wrong parameter types): refused with CCS8003 and CCS8207
+        // (no CCS8413; also admits CCS8011 unobserved range on _a plus CCS8403/CCS8414 from
+        // unsettled qsort wrapper pending Farscape #211).
+        let mismatched = Path.Combine(work, "MismatchedQsort.clef")
+        write mismatched
+            ("module Libc165.Mismatched\nopen Libc165.Boundary\nopen Libc165.Boundary.Types\nlet private badCmp (_a: int) (_b: int) : int = 0\n[<EntryPoint>]\nlet main _ : int =\n    match malloc 16 with\n    | Some buf ->\n        qsort buf 4 4 { "
+             + callbackType + ".Invoke = FnPtr.ofFunction badCmp }\n        free buf\n        0\n    | None -> 1\n")
+        let misBin, misOutcome = compile work "MismatchedQsort" (fx.Sources @ [ mismatched ])
+        Assert.NotEqual(0, misOutcome.ExitCode)
+        Assert.False(File.Exists misBin, "refused mismatched qsort compilation produced a binary")
+        let misOut = misOutcome.Stdout + misOutcome.Stderr
+        Assert.DoesNotContain("Unhandled exception", misOut)
+        let misCodes = compilerCodes misOut
+        Assert.Contains("CCS8003", misCodes)
+        Assert.Contains("CCS8207", misCodes)
+        Assert.DoesNotContain("CCS8413", misCodes)
+        Assert.True(Set.isSubset misCodes (Set.ofList [ "CCS8003"; "CCS8011"; "CCS8207"; "CCS8403"; "CCS8414" ]), misOut)
+
+        // Nullable-handle comparator callbacks (`option<CHandle<unit>> -> option<CHandle<unit>> -> int`)
+        // currently refuse with CCS8413 (pending Farscape #211 compiler settlement in clef/Composer;
+        // once cleared, runtime verification requires nmemb >= 2 per #415 C3).
+        let subRes =
+            Substantiation.evaluate
+                { FidprojPath = fx.Project; PilotPath = Some fx.Pilot; LinkProvenancePath = None
+                  OutputDirectory = Some(Path.Combine(work, "manifest"))
+                  WorkDirectory = Some(Path.Combine(work, "substantiation"))
+                  AllowWarnings = false; Verbose = false }
+        match subRes with
+        | Ok _ -> failwith "Expected FS9235 / CCS8413 refusal for nullable-handle comparator callback"
+        | Error (refusal: Diagnostics.Refusal) ->
+            Assert.Contains("FS9235", refusal.Diagnostics |> List.map _.Code)
+            Assert.Contains("CCS8413", refusal.Text))

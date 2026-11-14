@@ -1410,3 +1410,416 @@ module TargetLibrarySeamScaffoldingTests =
             |> refusedWithMessage "FS9253" "do not define 'sqlite3_absent_dead_symbol'"
         finally
             Directory.Delete(work, true)
+
+    [<Fact>]
+    let ``SQLite M2 static archive compiles Clef probes via Composer opt and ld.lld LTO elides dead symbols and reconciles dossier`` () =
+        let work = TestHelpers.TestScratch.create "m2-sqlite-static-seam-lto"
+        try
+            let header = Path.Combine(work, "sqlite3_static.h")
+            writeLines header
+                [ "int sqlite3_libversion_number(void);"
+                  "int sqlite3_threadsafe(void);"
+                  "int sqlite3_sleep(int ms);"
+                  "void *sqlite3_malloc(int n);"
+                  "void sqlite3_free(void *ptr);"
+                  "int sqlite3_unused_dead_symbol(int value);" ]
+            let usedC = Path.Combine(work, "sqlite_used.c")
+            writeLines usedC
+                [ "#include <stdlib.h>"
+                  "#include \"sqlite3_static.h\""
+                  "int sqlite3_libversion_number(void) { return 3046001; }"
+                  "int sqlite3_threadsafe(void) { return 1; }"
+                  "int sqlite3_sleep(int ms) { return ms >= 0 ? ms : -22; }"
+                  "void *sqlite3_malloc(int n) { return n > 0 ? malloc((size_t)n) : (void *)0; }"
+                  "void sqlite3_free(void *ptr) { free(ptr); }"
+                  "#ifdef SQLITE_STATIC_LTO"
+                  "__attribute__((visibility(\"hidden\")))"
+                  "#endif"
+                  "int sqlite3_unused_dead_symbol(int value) { return value + 99; }" ]
+
+            // Seam fixture (not full upstream SQLite): mark the dead symbol hidden only in the static LTO archive
+            // (so ld.lld LTO elides it intra-object even under --export-dynamic) while libsqlite3.so retains it in .dynsym.
+            let usedObj = Path.Combine(work, "sqlite_used.o")
+            let usedPicObj = Path.Combine(work, "sqlite_used.pic.o")
+            let archivePath = Path.Combine(work, "libsqlite3.a")
+            let sharedPath = Path.Combine(work, "libsqlite3.so")
+            let ltoTargetFlag =
+                match System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture with
+                | System.Runtime.InteropServices.Architecture.X64 -> "--target=x86_64-unknown-linux-gnu"
+                | System.Runtime.InteropServices.Architecture.Arm64 -> "--target=aarch64-unknown-linux-gnu"
+                | arch -> failwithf "Unsupported architecture for LTO target triple check: %A" arch
+
+            run work "cc-used-lto" (ClangToolchain.startInfo [ ltoTargetFlag; "-O2"; "-flto"; "-DSQLITE_STATIC_LTO"; "-c"; usedC; "-o"; usedObj ]) |> ignore
+            run work "ar-sqlite3" (ClangToolchain.arStartInfo [ "rcs"; archivePath; usedObj ]) |> ignore
+            run work "cc-used-pic" (ClangToolchain.startInfo [ "-O2"; "-fPIC"; "-c"; usedC; "-o"; usedPicObj ]) |> ignore
+            run work "ld-sqlite3-so" (ClangToolchain.startInfo [ "-shared"; "-fPIC"; "-Wl,-soname,libsqlite3.so.0"; usedPicObj; "-o"; sharedPath ]) |> ignore
+
+            let sharedSha = ClangToolchain.sha256 sharedPath
+            let pilot = Path.Combine(work, "SqliteStatic.pilot.toml")
+            writeLines pilot
+                [ "[library]"
+                  "name = \"sqlite3\""
+                  "headers = [" + quote header + "]"
+                  "include_paths = [" + quote work + "]"
+                  "[library.artifact]"
+                  "kind = \"static-archive\""
+                  "path = " + quote archivePath
+                  "sha256 = " + quote (ClangToolchain.sha256 archivePath)
+                  "[output]"
+                  "mode = \"fidelity\""
+                  "directory = \"generated\""
+                  "[error_conventions]"
+                  "default = \"none\""
+                  "[error_conventions.overrides]"
+                  "sqlite3_sleep = \"return_code\""
+                  "[annotations.nonnull]"
+                  "sqlite3_free = [0]"
+                  "[options]"
+                  "c_header_mode = true"
+                  "opaque_handles = true"
+                  "descriptor_only_dependencies = true"
+                  "link_libraries = true"
+                  "[[options.bindings]]"
+                  "name = \"sqlite3_malloc\""
+                  "symbol = \"sqlite3_malloc\""
+                  "return_handle = \"SqliteAlloc\""
+                  "resource = { kind = \"owned_nullable_return\", release_binding = \"Fidelity.Sqlite.Boundary.sqlite3_free\", release_parameter = 0, hypothesis = { identity = \"sqlite.malloc.owned\", version = \"1\", source = \"sqlite3_static.h\" } }"
+                  "[[options.bindings]]"
+                  "name = \"sqlite3_free\""
+                  "symbol = \"sqlite3_free\""
+                  "parameter_handles = [\"SqliteAlloc\"]"
+                  "[[namespace]]"
+                  "name = \"Fidelity.Sqlite.Boundary\""
+                  "library = \"sqlite3\""
+                  "description = \"SQLite M2 static archive Composer LTO seam boundary\""
+                  "functions = [\"sqlite3_libversion_number\", \"sqlite3_threadsafe\", \"sqlite3_sleep\", \"sqlite3_malloc\", \"sqlite3_free\"]" ]
+
+            ScratchDirectory.within work (fun () -> BindingGenerator.generateFromProjectDiagnosed pilot false false Types.LP64)
+            |> accepted |> ignore
+
+            let provenance =
+                match Directory.GetFiles(Path.Combine(work, "generated"), "*.link-provenance.toml", SearchOption.AllDirectories) with
+                | [| path |] -> path
+                | paths -> failwithf "expected one generated link provenance manifest, got %A" paths
+            let generatedSources =
+                [ Path.Combine(work, "generated", "Types.clef")
+                  Path.Combine(work, "generated", "ReturnCode.clef")
+                  Path.Combine(work, "generated", "Boundary", "Types.clef")
+                  Path.Combine(work, "generated", "Boundary", "Boundary.clef") ]
+                |> List.filter File.Exists
+            Assert.NotEmpty generatedSources
+
+            let loading = Path.Combine(work, "Loading.clef")
+            let loadingTemplate = Path.Combine(__SOURCE_DIRECTORY__, "..", "native-callbacks", "Loading.clef")
+            writeUtf8 loading
+                (File.ReadAllText(loadingTemplate)
+                    .Replace("landingprobe", "sqlite3")
+                    .Replace("tests/native-callbacks/probe.c", header)
+                    .Replace("prebuilt probe archive", "SQLite M2 static archive"))
+
+            let caller = Path.Combine(work, "Caller.clef")
+            writeLines caller
+                [ "module Fidelity.Sqlite.Caller"
+                  "let sample () : int ="
+                  "    let ver = Fidelity.Sqlite.Boundary.sqlite3_libversion_number ()"
+                  "    let safe = Fidelity.Sqlite.Boundary.sqlite3_threadsafe ()"
+                  "    let slept = Fidelity.Sqlite.Boundary.sqlite3_sleep 5"
+                  "    if ver = 3046001 && safe = 1 && slept = 5 then 1 else 0" ]
+
+            let dependencies, platform = platformTables ()
+            let metadata = sibling "BAREWIRE_METADATA_PROJECT" "BAREWire/src/BAREWire.BindingMetadata.fidproj"
+            let fidproj = Path.Combine(work, "SqliteStatic.fidproj")
+            writeLines fidproj
+                [ "[package]"
+                  "name = \"SqliteStatic\""
+                  "version = \"1.0.0\""
+                  "[compilation]"
+                  "target = \"cpu\""
+                  "[build]"
+                  "output_kind = \"library\""
+                  "sources = [" + (([ loading ] @ generatedSources @ [ caller ]) |> List.filter (fun p -> Path.GetFileName p <> "ReturnCode.clef") |> List.map quote |> String.concat ", ") + "]"
+                  "[dependencies]"
+                  yield! dependencies
+                  "metadata = { path = " + quote metadata + " }"
+                  "[platform]"
+                  yield! platform
+                  "loading = \"Landing.Acceptance.Loading.contract\""
+                  "[link]"
+                  "libraries = [\"sqlite3\"]" ]
+
+            let manifestDir = Path.Combine(work, "manifest")
+            let manifest =
+                Substantiation.evaluate
+                    { FidprojPath = fidproj
+                      PilotPath = Some pilot
+                      LinkProvenancePath = Some provenance
+                      OutputDirectory = Some manifestDir
+                      WorkDirectory = Some(Path.Combine(work, "substantiation"))
+                      AllowWarnings = false
+                      Verbose = false }
+                |> accepted
+            Assert.Equal("static-archive", manifest.Boundary.LinkMode)
+            Assert.Contains("static-dynamic-link-elision", manifest.Boundary.RequiredSeamChecks)
+            Assert.Equal(manifest.Proof.TotalObligations, manifest.Proof.DischargedUnsatCount)
+            Assert.Equal(0, manifest.Proof.PendingOpenCount)
+            let manifestJson = Path.Combine(manifestDir, "SqliteStatic.substantiation.json")
+
+            let probesDir = Path.Combine(work, "probes")
+            Directory.CreateDirectory probesDir |> ignore
+            let probeScalar = Path.Combine(probesDir, "ProbeSqliteScalar.clef")
+            writeLines probeScalar
+                [ "module Fidelity.Sqlite.ProbeScalar"
+                  "[<EntryPoint>]"
+                  "let main _ : int ="
+                  "    if Fidelity.Sqlite.Boundary.sqlite3_libversion_number () = 3046001"
+                  "       && Fidelity.Sqlite.Boundary.sqlite3_threadsafe () = 1 then"
+                  "        Console.writeln \"sqlite:scalar:ok\""
+                  "        0"
+                  "    else 1" ]
+            let probeLink = Path.Combine(probesDir, "ProbeSqliteElision.clef")
+            writeLines probeLink
+                [ "module Fidelity.Sqlite.ProbeElision"
+                  "[<EntryPoint>]"
+                  "let main _ : int ="
+                  "    if Fidelity.Sqlite.Boundary.sqlite3_libversion_number () = 3046001 then"
+                  "        Console.writeln \"sqlite:elision:ok\""
+                  "        0"
+                  "    else 2" ]
+            let probeError = Path.Combine(probesDir, "ProbeSqliteSentinel.clef")
+            writeLines probeError
+                [ "module Fidelity.Sqlite.ProbeSentinel"
+                  "[<EntryPoint>]"
+                  "let main _ : int ="
+                  "    let err = Fidelity.Sqlite.Boundary.sqlite3_sleep (-1)"
+                  "    let ok = Fidelity.Sqlite.Boundary.sqlite3_sleep 5"
+                  "    if err = -22 && ok = 5 then"
+                  "        Console.writeln \"sqlite:sentinel:ok\""
+                  "        0"
+                  "    else 3" ]
+            let probeLifecycle = Path.Combine(probesDir, "ProbeSqliteLifecycle.clef")
+            writeLines probeLifecycle
+                [ "module Fidelity.Sqlite.ProbeLifecycle"
+                  "let private validAlloc () : int ="
+                  "    match Fidelity.Sqlite.Boundary.sqlite3_malloc 64 with"
+                  "    | Some ptr ->"
+                  "        Fidelity.Sqlite.Boundary.sqlite3_free ptr"
+                  "        1"
+                  "    | None -> 0"
+                  "let private zeroAlloc () : int ="
+                  "    match Fidelity.Sqlite.Boundary.sqlite3_malloc 0 with"
+                  "    | Some ptr ->"
+                  "        Fidelity.Sqlite.Boundary.sqlite3_free ptr"
+                  "        0"
+                  "    | None -> 1"
+                  "[<EntryPoint>]"
+                  "let main _ : int ="
+                  "    if validAlloc () = 1 && zeroAlloc () = 1 then"
+                  "        Console.writeln \"sqlite:lifecycle:ok\""
+                  "        0"
+                  "    else 4" ]
+            let dynamicProbeC = Path.Combine(probesDir, "sqlite_dyn_probe.c")
+            writeLines dynamicProbeC
+                [ "#include " + quote header
+                  "int main(void) {"
+                  "    return (sqlite3_libversion_number() == 3046001 && sqlite3_threadsafe() == 1) ? 0 : 1;"
+                  "}" ]
+
+            let controlsDir = Path.Combine(work, "controls")
+            Directory.CreateDirectory controlsDir |> ignore
+            let missingHeader = Path.Combine(controlsDir, "missing_sqlite.h")
+            writeLines missingHeader [ "int sqlite3_nonexistent_symbol(int value);" ]
+            let refusalMissing = Path.Combine(controlsDir, "MissingSym.pilot.toml")
+            writeLines refusalMissing
+                [ "[library]"
+                  "name = \"sqlite3\""
+                  "headers = [" + quote missingHeader + "]"
+                  "include_paths = [" + quote controlsDir + "]"
+                  "[library.artifact]"
+                  "kind = \"static-archive\""
+                  "path = " + quote archivePath
+                  "sha256 = " + quote (ClangToolchain.sha256 archivePath)
+                  "[output]"
+                  "mode = \"fidelity\""
+                  "directory = \"out\""
+                  "[options]"
+                  "c_header_mode = true"
+                  "link_libraries = true"
+                  "[[namespace]]"
+                  "name = \"Refusal.Sqlite\""
+                  "library = \"sqlite3\""
+                  "description = \"Missing archive symbol negative control\""
+                  "functions = [\"sqlite3_nonexistent_symbol\"]" ]
+            let refusalCallableSrc = Path.Combine(controlsDir, "RefusalCallable.clef")
+            writeLines refusalCallableSrc
+                [ "module Refusal.SqliteCallable"
+                  "let exportedHelper (x: int) : int = x + 1" ]
+            let refusalSubProj = Path.Combine(controlsDir, "RefusalCallable.fidproj")
+            writeLines refusalSubProj
+                [ "[package]"
+                  "name = \"RefusalSqliteCallable\""
+                  "version = \"1.0.0\""
+                  "[compilation]"
+                  "target = \"cpu\""
+                  "[build]"
+                  "output_kind = \"library\""
+                  "sources = [" + quote refusalCallableSrc + "]"
+                  "[dependencies]"
+                  yield! dependencies
+                  "[platform]"
+                  yield! platform ]
+            let refusalLeakSrc = Path.Combine(controlsDir, "LeakSqliteAlloc.clef")
+            writeLines refusalLeakSrc
+                [ "module Refusal.LeakSqlite"
+                  "[<EntryPoint>]"
+                  "let main _ : int ="
+                  "    match Fidelity.Sqlite.Boundary.sqlite3_malloc 32 with"
+                  "    | Some ptr -> if ptr = ptr then 0 else 1"
+                  "    | None -> 1" ]
+            let refusalComposerProj = Path.Combine(controlsDir, "LeakSqliteAlloc.fidproj")
+            writeLines refusalComposerProj
+                [ "[package]"
+                  "name = \"LeakSqliteAlloc\""
+                  "version = \"1.0.0\""
+                  "[compilation]"
+                  "target = \"cpu\""
+                  "[build]"
+                  "output_kind = \"console\""
+                  "sources = [" + (([ loading ] @ generatedSources @ [ refusalLeakSrc ]) |> List.filter (fun p -> Path.GetFileName p <> "ReturnCode.clef") |> List.map quote |> String.concat ", ") + "]"
+                  "[dependencies]"
+                  yield! dependencies
+                  "metadata = { path = " + quote metadata + " }"
+                  "[platform]"
+                  yield! platform
+                  "loading = \"Landing.Acceptance.Loading.contract\""
+                  "[link]"
+                  "libraries = [\"sqlite3\"]" ]
+
+            let spec = Path.Combine(work, "SqliteStatic.seams.toml")
+            writeLines spec
+                [ "schema_version = 1"
+                  "target_triple = " + quote manifest.Boundary.ClangTarget
+                  ""
+                  "[[checks]]"
+                  "id = \"sqlite-scalar\""
+                  "category = \"scalar-handle-link-and-call\""
+                  "summary = \"SQLite M2 scalar version and threadsafe checks run through Composer LTO static archive link.\""
+                  "entry_source = " + quote probeScalar
+                  "required_symbols = [\"sqlite3_libversion_number\", \"sqlite3_threadsafe\"]"
+                  "expected_stdout = \"sqlite:scalar:ok\""
+                  ""
+                  "[[checks]]"
+                  "id = \"sqlite-link-elision\""
+                  "category = \"static-dynamic-link-elision\""
+                  "summary = \"Composer opt + ld.lld LTO elides intra-object bitcode (-flto) dead symbol while shared library link keeps imports.\""
+                  "entry_source = " + quote probeLink
+                  "required_symbols = [\"sqlite3_libversion_number\"]"
+                  "expected_stdout = \"sqlite:elision:ok\""
+                  "[checks.elf]"
+                  "elided_symbols = [\"sqlite3_unused_dead_symbol\"]"
+                  "retained_static_symbols = [\"sqlite3_libversion_number\"]"
+                  "forbidden_needed_libraries = [\"libsqlite3.so.0\"]"
+                  "shared_library = " + quote sharedPath
+                  "shared_library_sha256 = " + quote sharedSha
+                  "dynamic_probe_source = " + quote dynamicProbeC
+                  "retained_dynamic_imports = [\"sqlite3_libversion_number\", \"sqlite3_threadsafe\"]"
+                  ""
+                  "[[checks]]"
+                  "id = \"sqlite-sentinel\""
+                  "category = \"error-sentinel-conformance\""
+                  "summary = \"SQLite M2 return_code convention preserves negative sentinel (-22) and positive count (5).\""
+                  "entry_source = " + quote probeError
+                  "required_symbols = [\"sqlite3_sleep\"]"
+                  "expected_stdout = \"sqlite:sentinel:ok\""
+                  ""
+                  "[[checks]]"
+                  "id = \"sqlite-lifecycle\""
+                  "category = \"owned-handle-lifecycle\""
+                  "summary = \"SQLite M2 owned_nullable_return sqlite3_malloc and sqlite3_free pair handles Some and None safely.\""
+                  "entry_source = " + quote probeLifecycle
+                  "required_symbols = [\"sqlite3_malloc\", \"sqlite3_free\"]"
+                  "expected_stdout = \"sqlite:lifecycle:ok\""
+                  ""
+                  "[[refusal_controls]]"
+                  "id = \"sqlite-refusal-missing-symbol\""
+                  "kind = \"pilot\""
+                  "target = " + quote refusalMissing
+                  "expected_code = \"FS9228\""
+                  "misuse_summary = \"Pilot declares sqlite3_nonexistent_symbol not defined in libsqlite3.a.\""
+                  "protection_summary = \"Archive provenance refuses missing symbol with FS9228.\""
+                  ""
+                  "[[refusal_controls]]"
+                  "id = \"sqlite-refusal-callable\""
+                  "kind = \"substantiation\""
+                  "target = " + quote refusalSubProj
+                  "expected_code = \"FS9246\""
+                  "misuse_summary = \"Parameterized non-extern library declaration cannot be universally activated.\""
+                  "protection_summary = \"Substantiation refuses unactivatable declaration with FS9246.\""
+                  ""
+                  "[[refusal_controls]]"
+                  "id = \"sqlite-refusal-leak\""
+                  "kind = \"composer\""
+                  "target = " + quote refusalComposerProj
+                  "expected_code = \"CCS8403\""
+                  "misuse_summary = \"Owned CHandle<SqliteAlloc> returned by sqlite3_malloc escapes without sqlite3_free release.\""
+                  "protection_summary = \"Composer refuses leaked SQLite foreign allocation handle with CCS8403.\"" ]
+
+            let evaluated =
+                SubstantiationSeams.evaluate
+                    { ManifestPath = manifestJson
+                      SpecPath = spec
+                      OutputDirectory = Some(Path.Combine(work, "seams-out"))
+                      WorkDirectory = Some(Path.Combine(work, "seams-work"))
+                      Verbose = false }
+                |> accepted
+            Assert.Equal(4, evaluated.SeamChecks.Checks.Length)
+            Assert.Equal(3, evaluated.RefusalControls.Controls.Length)
+            Assert.All(evaluated.RefusalControls.Controls, fun c -> Assert.Equal(c.ExpectedCode, c.ObservedCode))
+            let sharedComparison = Assert.Single evaluated.Ledger.SharedLibraries
+            let ltoRetained =
+                evaluated.Ledger.RetainedBinaries
+                |> Array.find (fun item -> item.CheckId = "sqlite-link-elision")
+            let ltoElf = SubstantiationSeams.inspectElfExecutable ltoRetained.BinaryPath |> accepted
+            Assert.Contains("sqlite3_libversion_number", ltoElf.DefinedSymtab)
+            Assert.DoesNotContain("sqlite3_unused_dead_symbol", ltoElf.DefinedSymtab)
+            Assert.DoesNotContain("sqlite3_unused_dead_symbol", ltoElf.DefinedDynsym)
+            Assert.DoesNotContain("sqlite3_unused_dead_symbol", ltoElf.UndefinedDynsym)
+            let sharedElf = SubstantiationSeams.inspectElfExecutable sharedComparison.SharedLibraryPath |> accepted
+            Assert.Contains("sqlite3_unused_dead_symbol", sharedElf.DefinedDynsym)
+
+            let dossierOut = Path.Combine(work, "dossier-out")
+            let generated =
+                SubstantiationDossier.generate
+                    { ManifestPath = manifestJson
+                      OutputDirectory = Some dossierOut
+                      RocqProjectPath = None
+                      RocqFactsPath = None
+                      RocqConfigPath = None
+                      SeamChecksReceiptPath = Some evaluated.SeamChecksPath
+                      RefusalControlsReceiptPath = Some evaluated.RefusalControlsPath }
+                |> accepted
+            Assert.StartsWith("SUBSTANTIATED --", generated.Dossier.OverallStatus)
+            Assert.Equal(0, generated.Dossier.Counts.Open)
+            Assert.Equal(0, generated.Dossier.Counts.PendingSeamCategories)
+            Assert.Equal(manifest.Proof.DischargedUnsatCount, generated.Dossier.Counts.Guarantees)
+
+            // Negative control (FS9253): requiring the unreferenced elided symbol fails seam evaluation with the exact symbol message.
+            let badSpec = Path.Combine(work, "SqliteStaticMissingReq.seams.toml")
+            writeUtf8 badSpec
+                (File.ReadAllText(spec).Replace(
+                    "required_symbols = [\"sqlite3_libversion_number\"]",
+                    "required_symbols = [\"sqlite3_unused_dead_symbol\"]"))
+            match SubstantiationSeams.evaluate
+                      { ManifestPath = manifestJson
+                        SpecPath = badSpec
+                        OutputDirectory = Some(Path.Combine(work, "seams-bad-out"))
+                        WorkDirectory = Some(Path.Combine(work, "seams-bad-work"))
+                        Verbose = false } with
+            | Error (refusal: Diagnostics.Refusal) ->
+                Assert.Equal<string list>([ "FS9253" ], refusal.Diagnostics |> List.map (fun d -> d.Code) |> List.distinct)
+                Assert.Contains(
+                    "checks[sqlite-link-elision].required_symbols names 'sqlite3_unused_dead_symbol', which is absent from manifest.Boundary.ExternSymbols.",
+                    refusal.Text,
+                    StringComparison.Ordinal)
+            | Ok _ -> failwith "Expected FS9253 refusal when requiring elided symbol 'sqlite3_unused_dead_symbol'"
+        finally
+            Directory.Delete(work, true)

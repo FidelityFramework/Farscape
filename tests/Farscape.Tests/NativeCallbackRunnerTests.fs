@@ -2492,7 +2492,7 @@ let ``the second witness is derived from Boundary.clef with its own module, name
     let derivedLines =
         [ "module Landing.Acceptance.OtherBoundary"
           "open Landing.Other.Boundary"
-          "let private scalarEntry (value: int) (delta: int) ="
+          "let private scalarEntry (value: int) (delta: int) : int ="
           "    if value = 4294967295 && delta = -290 then -19 else 9"
           "let private voidEntry (value: int) (delta: int) : unit ="
           "    if value = 4294967295 && delta = -290 then"
@@ -2568,17 +2568,16 @@ type BoundaryMutation = { Witness: string; Replacements: (string * string) list 
 let private mutated (mutation: BoundaryMutation) (boundary: string) : string =
     mutation.Replacements |> List.fold (fun text (original, replacement) -> mutate original replacement text) boundary
 
-// The shape of Boundary.clef is the one Composer (observed at v0.0.2+d17eb195) compiles and links:
+// The shape of Boundary.clef is the one Composer (observed at v0.0.2+207e0eec) compiles and links:
 // - Fidelity.PSG refuses an entry record held by a module-level binding
 //   (`Emission.Callable.Aggregates.I5`), so each record is constructed at the call that passes it.
-// - Alex refuses a return type annotation on the scalar entry (`AX4001`: the annotated result
-//   has the 64-bit carrier of `int`, the entry's declared result 32 bits), so `scalarEntry`
-//   declares no return type.
-// - Composer's artifact correspondence refuses a function that constructs a record and does
-//   more than return the call that passes it ("Closed callback record token has an extra or
-//   unsupported typed use or escape"), so `invokeScalar` and `invokeVoid` each hold that one call.
-//   A local bound before that call is accepted: the `local-binding` control below compiles,
-//   links and runs.
+// - Alex previously refused a return type annotation on the scalar entry (`AX4001`), now fixed (#212):
+//   `scalarEntry` declares `: int`.
+// - Composer's artifact correspondence checks each callback record construction at its call site.
+//   A single local binding in a function is accepted (`local-binding` below); placing two
+//   distinct callback entries in one `run ()` is covered by the `#213` acceptance Fact
+//   `multi-callback-in-one-caller` below (blocked on Composer `EnvironmentArtifacts.recordToken`
+//   at Composer v0.0.2+207e0eec; filter pre-#213 green runs with `--filter "Category!=Pending213"`).
 
 /// The record expression `invokeScalar` passes to `landing_invoke`, built from the function `entry`.
 let private scalarRecord (entry: string) : string =
@@ -2602,8 +2601,8 @@ let private wrongReturn : BoundaryMutation =
 let private wrongArgument : BoundaryMutation =
     { Witness = "wrong-argument"
       Replacements =
-        [ ("let private scalarEntry (value: int) (delta: int) =\n    if value = 4294967295 && delta = -173 then -7 else 9",
-           "let private scalarEntry (value: bool) (delta: int) =\n    if value && delta = -173 then -7 else 9") ] }
+        [ ("let private scalarEntry (value: int) (delta: int) : int =\n    if value = 4294967295 && delta = -173 then -7 else 9",
+           "let private scalarEntry (value: bool) (delta: int) : int =\n    if value && delta = -173 then -7 else 9") ] }
 
 /// Boundary.clef with `invokeVoid` moved before `invokeScalar`, and `invokeScalar` holding
 /// `body` under its unchanged header. `invokeVoid ()` is the one source of a run-time `int`
@@ -2677,9 +2676,9 @@ let ``the boundary mutations change the witness they describe and nothing else``
     let lines (text: string) = text.Split('\n') |> List.ofArray
     // The lines of `text` that construct an entry record.
     let constructions (text: string) = lines text |> List.filter (fun line -> line.Contains("FnPtr.ofFunction"))
-    // The witness holds the shape Composer compiles and links: the scalar entry declares no
-    // return type, and each record is constructed once, at the call its function returns.
-    for held in [ "let private scalarEntry (value: int) (delta: int) =\n"; invokeScalarSource + "\n"; invokeVoidSource + "\n" ] do
+    // The witness holds the shape Composer compiles and links: `scalarEntry` declares `: int`,
+    // and each record is constructed once, at the call its function returns.
+    for held in [ "let private scalarEntry (value: int) (delta: int) : int =\n"; invokeScalarSource + "\n"; invokeVoidSource + "\n" ] do
         Assert.Contains(held, boundary)
     same [ "    landing_invoke " + scalarRecord "scalarEntry"; "    landing_invoke_void " + voidRecord ] (constructions boundary)
     Assert.Contains("let run () : int =\n    let scalarResult = invokeScalar ()\n    let voidResult = invokeVoid ()\n", boundary)
@@ -2838,6 +2837,42 @@ let ``a closure over a run-time local passed to FnPtr.ofFunction is refused by C
             // No other line of the witness, and no other file, is reported under either code.
             for reported in refusalsIn output do
                 same (witness, recordLine, "error") (Path.GetFileName reported.File, reported.Line, reported.Severity))
+
+[<Fact>]
+[<Trait("Category", "Pending213")>]
+let ``multi-callback-in-one-caller: landing_invoke and landing_invoke_void inside one run () compile, link and run`` () =
+    withJourney "multi-callback-in-one-caller" (fun work ->
+        let stage = stage work
+        let bindings = generate stage "probe.pilot.toml" "probe.h" "Bindings" "Landing.Boundary"
+        let combinedBoundary =
+            [ "/// Layer 2 native-entry acceptance; both callbacks invoked in one caller (#213)."
+              "/// Awaits Composer EnvironmentArtifacts.recordToken fix (refused on Composer v0.0.2+207e0eec)."
+              "module Landing.Acceptance.Boundary"
+              ""
+              "open Landing.Boundary"
+              ""
+              "let private scalarEntry (value: int) (delta: int) : int ="
+              "    if value = 4294967295 && delta = -173 then -7 else 9"
+              ""
+              "let private voidEntry (value: int) (delta: int) : unit ="
+              "    if value = 4294967295 && delta = -173 then"
+              "        landing_record 346"
+              "    else"
+              "        landing_record (-1)"
+              ""
+              "let run () : int ="
+              "    let scalarResult ="
+              "        landing_invoke " + scalarRecord "scalarEntry"
+              "    let voidResult ="
+              "        landing_invoke_void " + voidRecord
+              "    if scalarResult = 0 && voidResult = 0 then 0 else 10"
+              "" ]
+            |> String.concat "\n"
+        File.WriteAllText(Path.Combine(work, "CombinedBoundary.clef"), combinedBoundary)
+        accepted stage "multi-callback-in-one-caller" bindings [ "CombinedBoundary.clef"; "Main.clef" ] [ boundaryEntries ]
+            "landing: scalar/void callback arguments and results passed"
+        |> requireReceipt [ boundaryEntries ] 2)
+    |> requireRetained
 
 /// The header of a callback entry Composer does not settle yet: an opaque record handle and
 /// the caller's `void *` context (Farscape #189 generates the declarations; #211 tracks their
