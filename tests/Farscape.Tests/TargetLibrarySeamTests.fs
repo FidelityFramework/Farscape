@@ -242,6 +242,64 @@ module TargetLibrarySeamScaffoldingTests =
         finally
             Directory.Delete(work, true)
 
+    let private sqlitePilotLines (outDir: string) (artifactLines: string list) =
+        [ "[library]"
+          "name = \"sqlite3\""
+          "headers = [\"/usr/include/sqlite3.h\"]"
+          "include_paths = [\"/usr/include\"]"
+          "macro_prefixes = [\"SQLITE_\"]" ]
+        @ artifactLines @
+        [ "[output]"
+          "mode = \"fidelity\""
+          "directory = " + quote outDir
+          "[error_conventions]"
+          "default = \"none\""
+          "[options]"
+          "c_header_mode = true"
+          "descriptor_only_dependencies = true"
+          "link_libraries = true"
+          "[[options.bindings]]"
+          "name = \"sqlite3_open_v2\""
+          "reference_parameters = [1]"
+          "read_only_buffers = ["
+          "  { parameter = 0, content = \"text\", extent = { nul_terminated = true }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"sqlite.open.filename\", version = \"1\", source = \"sqlite3.h\" } },"
+          "  { parameter = 3, content = \"text\", extent = { nul_terminated = true }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"sqlite.open.zvfs\", version = \"1\", source = \"sqlite3.h\" } }"
+          "]"
+          "buffer_absences = [{ parameter = 3, hypothesis = { identity = \"sqlite.open.zvfs.absent\", version = \"1\", source = \"sqlite3.h\" } }]"
+          "[[options.bindings]]"
+          "name = \"sqlite3_prepare_v2\""
+          "reference_parameters = [3, 4]"
+          "read_only_buffers = [{ parameter = 1, content = \"text\", extent = { count_parameter = 2 }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"sqlite.prepare_v2.sql\", version = \"1\", source = \"sqlite3.h\" } }]"
+          "[[options.bindings]]"
+          "name = \"sqlite3_prepare_v3\""
+          "reference_parameters = [4, 5]"
+          "read_only_buffers = [{ parameter = 1, content = \"text\", extent = { count_parameter = 2 }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"sqlite.prepare_v3.sql\", version = \"1\", source = \"sqlite3.h\" } }]"
+          "[[options.bindings]]"
+          "name = \"sqlite3_bind_text\""
+          "constant_parameters = [\"\", \"\", \"\", \"\", \"SQLITE_STATIC\"]"
+          "read_only_buffers = [{ parameter = 2, content = \"text\", extent = { count_parameter = 3 }, retention = { kind = \"retained_until\", owner_parameter = 0, redefined_by = [0, 1], releases = [{ binding = \"Fidelity.Sqlite.Boundary.sqlite3_clear_bindings\", parameter = 0 }, { binding = \"Fidelity.Sqlite.Boundary.sqlite3_finalize\", parameter = 0 }] }, hypothesis = { identity = \"sqlite.bind.text.static\", version = \"1\", source = \"sqlite3.h\" } }]"
+          "[[options.bindings]]"
+          "name = \"sqlite3_bind_blob\""
+          "constant_parameters = [\"\", \"\", \"\", \"\", \"SQLITE_STATIC\"]"
+          "read_only_buffers = [{ parameter = 2, content = \"bytes\", extent = { count_parameter = 3 }, retention = { kind = \"retained_until\", owner_parameter = 0, redefined_by = [0, 1], releases = [{ binding = \"Fidelity.Sqlite.Boundary.sqlite3_clear_bindings\", parameter = 0 }, { binding = \"Fidelity.Sqlite.Boundary.sqlite3_finalize\", parameter = 0 }] }, hypothesis = { identity = \"sqlite.bind.blob.static\", version = \"1\", source = \"sqlite3.h\" } }]"
+          "[[options.bindings]]"
+          "name = \"sqlite3_column_text\""
+          "borrowed_result = { content = \"text\", owner_parameter = 0, extent = { binding = \"Fidelity.Sqlite.Boundary.sqlite3_column_bytes\", arguments = [0, 1] }, invalidated_by = [{ binding = \"Fidelity.Sqlite.Boundary.sqlite3_step\", parameter = 0 }, { binding = \"Fidelity.Sqlite.Boundary.sqlite3_reset\", parameter = 0 }, { binding = \"Fidelity.Sqlite.Boundary.sqlite3_finalize\", parameter = 0 }], hypothesis = { identity = \"sqlite.column.text\", version = \"1\", source = \"sqlite3.h\" } }"
+          "[[options.bindings]]"
+          "name = \"sqlite3_column_blob\""
+          "borrowed_result = { content = \"bytes\", owner_parameter = 0, extent = { binding = \"Fidelity.Sqlite.Boundary.sqlite3_column_bytes\", arguments = [0, 1] }, invalidated_by = [{ binding = \"Fidelity.Sqlite.Boundary.sqlite3_step\", parameter = 0 }, { binding = \"Fidelity.Sqlite.Boundary.sqlite3_reset\", parameter = 0 }, { binding = \"Fidelity.Sqlite.Boundary.sqlite3_finalize\", parameter = 0 }], hypothesis = { identity = \"sqlite.column.blob\", version = \"1\", source = \"sqlite3.h\" } }"
+          "[[options.bindings]]"
+          "name = \"sqlite3_errmsg\""
+          "borrowed_result = { content = \"text\", owner_parameter = 0, extent = { nul_terminated = true }, invalidated_by = [{ any_owner_call = true }], hypothesis = { identity = \"sqlite.errmsg\", version = \"1\", source = \"sqlite3.h\" } }"
+          "[[options.bindings]]"
+          "name = \"sqlite3_bind_parameter_index\""
+          "read_only_buffers = [{ parameter = 1, content = \"text\", extent = { nul_terminated = true }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"sqlite.bind_param_index.zname\", version = \"1\", source = \"sqlite3.h\" } }]"
+          "[[namespace]]"
+          "name = \"Fidelity.Sqlite.Boundary\""
+          "library = \"sqlite3\""
+          "description = \"SQLite M2 Phase B zero-copy boundary\""
+          "functions = [\"sqlite3_open_v2\", \"sqlite3_close_v2\", \"sqlite3_prepare_v2\", \"sqlite3_prepare_v3\", \"sqlite3_step\", \"sqlite3_reset\", \"sqlite3_finalize\", \"sqlite3_clear_bindings\", \"sqlite3_bind_text\", \"sqlite3_bind_blob\", \"sqlite3_column_text\", \"sqlite3_column_blob\", \"sqlite3_column_bytes\", \"sqlite3_errmsg\", \"sqlite3_bind_parameter_index\"]" ]
+
     [<Fact>]
     let ``SQLite M2 pilot generates Phase B zero-copy contracts and coded refusal controls`` () =
         let sqliteHeader = "/usr/include/sqlite3.h"
@@ -250,62 +308,7 @@ module TargetLibrarySeamScaffoldingTests =
         try
             let outDir = Path.Combine(work, "generated")
             let pilotPath = Path.Combine(work, "Sqlite.pilot.toml")
-            writeLines pilotPath
-                [ "[library]"
-                  "name = \"sqlite3\""
-                  "headers = [\"/usr/include/sqlite3.h\"]"
-                  "include_paths = [\"/usr/include\"]"
-                  "macro_prefixes = [\"SQLITE_\"]"
-                  "[output]"
-                  "mode = \"fidelity\""
-                  "directory = " + quote outDir
-                  "[error_conventions]"
-                  "default = \"none\""
-                  "[options]"
-                  "c_header_mode = true"
-                  "descriptor_only_dependencies = true"
-                  "link_libraries = true"
-                  "[[options.bindings]]"
-                  "name = \"sqlite3_open_v2\""
-                  "reference_parameters = [1]"
-                  "read_only_buffers = ["
-                  "  { parameter = 0, content = \"text\", extent = { nul_terminated = true }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"sqlite.open.filename\", version = \"1\", source = \"sqlite3.h\" } },"
-                  "  { parameter = 3, content = \"text\", extent = { nul_terminated = true }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"sqlite.open.zvfs\", version = \"1\", source = \"sqlite3.h\" } }"
-                  "]"
-                  "buffer_absences = [{ parameter = 3, hypothesis = { identity = \"sqlite.open.zvfs.absent\", version = \"1\", source = \"sqlite3.h\" } }]"
-                  "[[options.bindings]]"
-                  "name = \"sqlite3_prepare_v2\""
-                  "reference_parameters = [3, 4]"
-                  "read_only_buffers = [{ parameter = 1, content = \"text\", extent = { count_parameter = 2 }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"sqlite.prepare_v2.sql\", version = \"1\", source = \"sqlite3.h\" } }]"
-                  "[[options.bindings]]"
-                  "name = \"sqlite3_prepare_v3\""
-                  "reference_parameters = [4, 5]"
-                  "read_only_buffers = [{ parameter = 1, content = \"text\", extent = { count_parameter = 2 }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"sqlite.prepare_v3.sql\", version = \"1\", source = \"sqlite3.h\" } }]"
-                  "[[options.bindings]]"
-                  "name = \"sqlite3_bind_text\""
-                  "constant_parameters = [\"\", \"\", \"\", \"\", \"SQLITE_STATIC\"]"
-                  "read_only_buffers = [{ parameter = 2, content = \"text\", extent = { count_parameter = 3 }, retention = { kind = \"retained_until\", owner_parameter = 0, redefined_by = [0, 1], releases = [{ binding = \"Fidelity.Sqlite.Boundary.sqlite3_clear_bindings\", parameter = 0 }, { binding = \"Fidelity.Sqlite.Boundary.sqlite3_finalize\", parameter = 0 }] }, hypothesis = { identity = \"sqlite.bind.text.static\", version = \"1\", source = \"sqlite3.h\" } }]"
-                  "[[options.bindings]]"
-                  "name = \"sqlite3_bind_blob\""
-                  "constant_parameters = [\"\", \"\", \"\", \"\", \"SQLITE_STATIC\"]"
-                  "read_only_buffers = [{ parameter = 2, content = \"bytes\", extent = { count_parameter = 3 }, retention = { kind = \"retained_until\", owner_parameter = 0, redefined_by = [0, 1], releases = [{ binding = \"Fidelity.Sqlite.Boundary.sqlite3_clear_bindings\", parameter = 0 }, { binding = \"Fidelity.Sqlite.Boundary.sqlite3_finalize\", parameter = 0 }] }, hypothesis = { identity = \"sqlite.bind.blob.static\", version = \"1\", source = \"sqlite3.h\" } }]"
-                  "[[options.bindings]]"
-                  "name = \"sqlite3_column_text\""
-                  "borrowed_result = { content = \"text\", owner_parameter = 0, extent = { binding = \"Fidelity.Sqlite.Boundary.sqlite3_column_bytes\", arguments = [0, 1] }, invalidated_by = [{ binding = \"Fidelity.Sqlite.Boundary.sqlite3_step\", parameter = 0 }, { binding = \"Fidelity.Sqlite.Boundary.sqlite3_reset\", parameter = 0 }, { binding = \"Fidelity.Sqlite.Boundary.sqlite3_finalize\", parameter = 0 }], hypothesis = { identity = \"sqlite.column.text\", version = \"1\", source = \"sqlite3.h\" } }"
-                  "[[options.bindings]]"
-                  "name = \"sqlite3_column_blob\""
-                  "borrowed_result = { content = \"bytes\", owner_parameter = 0, extent = { binding = \"Fidelity.Sqlite.Boundary.sqlite3_column_bytes\", arguments = [0, 1] }, invalidated_by = [{ binding = \"Fidelity.Sqlite.Boundary.sqlite3_step\", parameter = 0 }, { binding = \"Fidelity.Sqlite.Boundary.sqlite3_reset\", parameter = 0 }, { binding = \"Fidelity.Sqlite.Boundary.sqlite3_finalize\", parameter = 0 }], hypothesis = { identity = \"sqlite.column.blob\", version = \"1\", source = \"sqlite3.h\" } }"
-                  "[[options.bindings]]"
-                  "name = \"sqlite3_errmsg\""
-                  "borrowed_result = { content = \"text\", owner_parameter = 0, extent = { nul_terminated = true }, invalidated_by = [{ any_owner_call = true }], hypothesis = { identity = \"sqlite.errmsg\", version = \"1\", source = \"sqlite3.h\" } }"
-                  "[[options.bindings]]"
-                  "name = \"sqlite3_bind_parameter_index\""
-                  "read_only_buffers = [{ parameter = 1, content = \"text\", extent = { nul_terminated = true }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"sqlite.bind_param_index.zname\", version = \"1\", source = \"sqlite3.h\" } }]"
-                  "[[namespace]]"
-                  "name = \"Fidelity.Sqlite.Boundary\""
-                  "library = \"sqlite3\""
-                  "description = \"SQLite M2 Phase B zero-copy boundary\""
-                  "functions = [\"sqlite3_open_v2\", \"sqlite3_close_v2\", \"sqlite3_prepare_v2\", \"sqlite3_prepare_v3\", \"sqlite3_step\", \"sqlite3_reset\", \"sqlite3_finalize\", \"sqlite3_clear_bindings\", \"sqlite3_bind_text\", \"sqlite3_bind_blob\", \"sqlite3_column_text\", \"sqlite3_column_blob\", \"sqlite3_column_bytes\", \"sqlite3_errmsg\", \"sqlite3_bind_parameter_index\"]" ]
+            writeLines pilotPath (sqlitePilotLines outDir [])
 
             ScratchDirectory.within work (fun () -> BindingGenerator.generateFromProjectDiagnosed pilotPath false false Types.LP64)
             |> accepted |> ignore
@@ -457,5 +460,289 @@ module TargetLibrarySeamScaffoldingTests =
                 [ "module Fidelity.DescriptorAdmission.Unknown"
                   "let unknownDesc : Expr<BogusDescriptor> = <@ () @>" ]
             Substantiation.inspectSource Set.empty unknownPath |> refused "FS9233"
+        finally
+            Directory.Delete(work, true)
+
+    [<Fact>]
+    let ``Static Binding Elision Test preserves byte-identical SQLite Clef and fidproj outputs between dynamic and static archive modes`` () =
+        let work = TestHelpers.TestScratch.create "sqlite-static-elision"
+        try
+            Assert.True(File.Exists "/usr/include/sqlite3.h", "Required system header missing: /usr/include/sqlite3.h")
+
+            let stubSource =
+                [ "void *sqlite3_open_v2(const char *f, void **p, int fl, const char *v) { (void)f;(void)p;(void)fl;(void)v; return 0; }"
+                  "int sqlite3_close_v2(void *db) { (void)db; return 0; }"
+                  "int sqlite3_prepare_v2(void *db, const char *s, int n, void **st, const char **t) { (void)db;(void)s;(void)n;(void)st;(void)t; return 0; }"
+                  "int sqlite3_prepare_v3(void *db, const char *s, int n, unsigned p, void **st, const char **t) { (void)db;(void)s;(void)n;(void)p;(void)st;(void)t; return 0; }"
+                  "int sqlite3_step(void *st) { (void)st; return 0; }"
+                  "int sqlite3_reset(void *st) { (void)st; return 0; }"
+                  "int sqlite3_finalize(void *st) { (void)st; return 0; }"
+                  "int sqlite3_clear_bindings(void *st) { (void)st; return 0; }"
+                  "int sqlite3_bind_text(void *st, int i, const char *v, int n, void (*d)(void *)) { (void)st;(void)i;(void)v;(void)n;(void)d; return 0; }"
+                  "int sqlite3_bind_blob(void *st, int i, const void *v, int n, void (*d)(void *)) { (void)st;(void)i;(void)v;(void)n;(void)d; return 0; }"
+                  "const unsigned char *sqlite3_column_text(void *st, int c) { (void)st;(void)c; return 0; }"
+                  "const void *sqlite3_column_blob(void *st, int c) { (void)st;(void)c; return 0; }"
+                  "int sqlite3_column_bytes(void *st, int c) { (void)st;(void)c; return 0; }"
+                  "const char *sqlite3_errmsg(void *db) { (void)db; return 0; }"
+                  "int sqlite3_bind_parameter_index(void *st, const char *z) { (void)st;(void)z; return 0; }" ]
+                |> String.concat "\n"
+            let archivePath, archiveSha = writeProbeArchive work "sqlite3" stubSource
+
+            let dynDir = Path.Combine(work, "dynamic")
+            let dynPilot = Path.Combine(work, "DynamicSqlite.pilot.toml")
+            writeLines dynPilot (sqlitePilotLines dynDir [])
+            ScratchDirectory.within work (fun () -> BindingGenerator.generateFromProjectDiagnosed dynPilot false false Types.LP64)
+            |> accepted |> ignore
+
+            let staticDir = Path.Combine(work, "static")
+            let staticPilot = Path.Combine(work, "StaticSqlite.pilot.toml")
+            writeLines staticPilot
+                (sqlitePilotLines staticDir
+                    [ "[library.artifact]"
+                      "kind = \"static-archive\""
+                      "path = " + quote archivePath
+                      "sha256 = " + quote archiveSha ])
+            ScratchDirectory.within work (fun () -> BindingGenerator.generateFromProjectDiagnosed staticPilot false false Types.LP64)
+            |> accepted |> ignore
+
+            let readSurface dir =
+                Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories)
+                |> Seq.filter (fun p -> p.EndsWith(".clef", StringComparison.Ordinal) || p.EndsWith(".fidproj", StringComparison.Ordinal))
+                |> Seq.map (fun p -> Path.GetRelativePath(dir, p), File.ReadAllBytes p)
+                |> Seq.sortBy fst
+                |> Seq.toList
+
+            let dynSurface = readSurface dynDir
+            let staticSurface = readSurface staticDir
+            Assert.True(dynSurface.Length >= 3)
+            Assert.Equal<string list>(dynSurface |> List.map fst, staticSurface |> List.map fst)
+            for (relPath, dynBytes), (_, staticBytes) in List.zip dynSurface staticSurface do
+                Assert.True((dynBytes = staticBytes), $"Static Binding Elision Test failed: '{relPath}' bytes differed between dynamic and static generation.")
+                Assert.Equal<byte[]>(dynBytes, staticBytes)
+
+            Assert.Empty(Directory.GetFiles(dynDir, "*.link-provenance.toml", SearchOption.AllDirectories))
+            let provenancePath = Assert.Single(Directory.GetFiles(staticDir, "*.link-provenance.toml", SearchOption.AllDirectories))
+            let provenanceText = File.ReadAllText provenancePath
+            Assert.Contains("kind = \"static-archive\"", provenanceText)
+            Assert.Contains(archiveSha.ToLowerInvariant(), provenanceText)
+            Assert.Contains("symbol = \"sqlite3_open_v2\"", provenanceText)
+            Assert.Contains("symbol = \"sqlite3_bind_text\"", provenanceText)
+        finally
+            Directory.Delete(work, true)
+
+    [<Fact>]
+    let ``Substantiation inspectSource admits StaticArchiveContract and ProcessLinkSpec loading contracts and refuses non-literal bodies with FS9233`` () =
+        let work = TestHelpers.TestScratch.create "static-loading-contract-admission"
+        try
+            let sha64 = String.replicate 64 "a"
+            let archivePath = Path.Combine(work, "ArchiveContract.clef")
+            writeLines archivePath
+                [ "module Fidelity.Platform.ArchiveContractTest"
+                  "let archiveContract : BAREWire.Platform.StaticArchiveContract = {"
+                  "    ArchivePath = \"libsqlite3.a\""
+                  "    ArchiveSource = \"sqlite-3.53.4\""
+                  "    Sha256 = \"" + sha64 + "\""
+                  "    Format = \"llvm-bitcode\""
+                  "    Visibility = \"default\""
+                  "}" ]
+            let archiveDigest =
+                Substantiation.inspectSource (set [ "Fidelity.Platform.ArchiveContractTest.archiveContract" ]) archivePath
+                |> accepted
+            Assert.Contains("Fidelity.Platform.ArchiveContractTest.archiveContract", archiveDigest.CompileTimeDeclarations)
+
+            let specPath = Path.Combine(work, "LoadingSpec.clef")
+            writeLines specPath
+                [ "module Fidelity.Platform.LoadingSpecTest"
+                  "let linkSpec : BAREWire.Platform.ProcessLinkSpec = {"
+                  "    Contract = {"
+                  "        Identity = \"sqlite-static\""
+                  "        Version = \"1\""
+                  "        Source = \"test\""
+                  "        Library = \"sqlite3\""
+                  "        Runtime = \"libc\""
+                  "        Os = \"linux\""
+                  "        Arch = \"x86_64\""
+                  "        LoadAt = \"StaticLink\""
+                  "        LiveUntil = \"ProcessTermination\""
+                  "        Unloading = \"Forbidden\""
+                  "        ExportedLibrary = \"Forbidden\""
+                  "    }"
+                  "    LinkKind = \"static-archive\""
+                  "    DynamicSharedObject = \"\""
+                  "    StaticArchive = Some {"
+                  "        ArchivePath = \"libsqlite3.a\""
+                  "        ArchiveSource = \"sqlite-3.53.4\""
+                  "        Sha256 = \"" + sha64 + "\""
+                  "        Format = \"llvm-bitcode\""
+                  "        Visibility = \"default\""
+                  "    }"
+                  "}" ]
+            let specDigest =
+                Substantiation.inspectSource (set [ "Fidelity.Platform.LoadingSpecTest.linkSpec" ]) specPath
+                |> accepted
+            Assert.Contains("Fidelity.Platform.LoadingSpecTest.linkSpec", specDigest.CompileTimeDeclarations)
+
+            let dynSpecPath = Path.Combine(work, "DynamicLoadingSpec.clef")
+            writeLines dynSpecPath
+                [ "module Fidelity.Platform.DynamicLoadingSpecTest"
+                  "let dynSpec : BAREWire.Platform.ProcessLinkSpec = {"
+                  "    Contract = { Identity = \"sqlite-dyn\"; Version = \"1\"; Source = \"test\"; Library = \"sqlite3\"; Runtime = \"libc\"; Os = \"linux\"; Arch = \"x86_64\"; LoadAt = \"ProcessStartup\"; LiveUntil = \"ProcessTermination\"; Unloading = \"Forbidden\"; ExportedLibrary = \"Forbidden\" }"
+                  "    LinkKind = \"dynamic-shared-object\""
+                  "    DynamicSharedObject = \"libsqlite3.so.0\""
+                  "    StaticArchive = None"
+                  "}" ]
+            let dynDigest =
+                Substantiation.inspectSource (set [ "Fidelity.Platform.DynamicLoadingSpecTest.dynSpec" ]) dynSpecPath
+                |> accepted
+            Assert.Contains("Fidelity.Platform.DynamicLoadingSpecTest.dynSpec", dynDigest.CompileTimeDeclarations)
+
+            let negativeBodies =
+                [ "top-level-call", "ProcessLinkSpec.staticArchive baseContract archiveContract"
+                  "nested-ident", "{\n    Contract = { Identity = \"x\" }\n    LinkKind = \"static-archive\"\n    DynamicSharedObject = \"\"\n    StaticArchive = Some archiveContract\n}"
+                  "nested-helper-call", "{\n    Contract = { Identity = \"x\" }\n    LinkKind = \"static-archive\"\n    DynamicSharedObject = \"\"\n    StaticArchive = Some (StaticArchiveContract.create \"lib.a\" \"src\" \"" + sha64 + "\" \"llvm-bitcode\" \"default\")\n}"
+                  "nested-contract-call", "{\n    Contract = mkContract ()\n    LinkKind = \"static-archive\"\n    DynamicSharedObject = \"\"\n    StaticArchive = None\n}"
+                  "trailing-expr", "{ Identity = \"x\" } |> ignore" ]
+            for name, body in negativeBodies do
+                let badPath = Path.Combine(work, $"Bad_{name}.clef")
+                writeLines badPath
+                    [ "module Fidelity.Platform.BadLoadingTest"
+                      $"let badSpec : BAREWire.Platform.ProcessLinkSpec = {body}" ]
+                Substantiation.inspectSource (set [ "Fidelity.Platform.BadLoadingTest.badSpec" ]) badPath
+                |> refused "FS9233"
+        finally
+            Directory.Delete(work, true)
+
+    [<Fact>]
+    let ``inspectElfExecutable extracts DT_SONAME and verifyElfExpectations matches versioned DT_SONAME`` () =
+        let work = TestHelpers.TestScratch.create "elf-dt-soname-probe"
+        try
+            let libC = Path.Combine(work, "soname_probe.c")
+            let sharedPath = Path.Combine(work, "libsoname_probe.so")
+            let dynProbeC = Path.Combine(work, "dyn_probe.c")
+            let staticProbeC = Path.Combine(work, "static_probe.c")
+            let staticBin = Path.Combine(work, "static_probe")
+            writeUtf8 libC "int soname_probe_add(int a, int b) { return a + b; }\nint soname_probe_dead(void) { return 99; }\n"
+            writeUtf8 dynProbeC "int soname_probe_add(int a, int b);\nint main(void) { return soname_probe_add(20, 22) == 42 ? 0 : 1; }\n"
+            writeUtf8 staticProbeC "int main(void) { return 0; }\n"
+
+            run work "compile-soname-so" (ClangToolchain.startInfo [ "-O2"; "-shared"; "-fPIC"; "-Wl,-soname,libsoname_probe.so.0"; libC; "-o"; sharedPath ]) |> ignore
+            run work "compile-static-bin" (ClangToolchain.startInfo [ "-O2"; staticProbeC; "-o"; staticBin ]) |> ignore
+
+            let sharedElf = SubstantiationSeams.inspectElfExecutable sharedPath |> accepted
+            Assert.Equal(Some "libsoname_probe.so.0", sharedElf.Soname)
+
+            let staticElf = SubstantiationSeams.inspectElfExecutable staticBin |> accepted
+            Assert.Equal(None, staticElf.Soname)
+
+            let stubFile name : Substantiation.FileDigest =
+                let p = Path.Combine(work, name)
+                writeUtf8 p name
+                { Substantiation.Path = p; Sha256 = ClangToolchain.sha256 p }
+            let pilotStub : SubstantiationBoundary.FileDigest =
+                let p = Path.Combine(work, "pilot.toml")
+                writeUtf8 p "pilot"
+                { SubstantiationBoundary.Path = p; Sha256 = ClangToolchain.sha256 p; Kind = "pilot" }
+            let artifactsDir = Path.Combine(work, "artifacts")
+            Directory.CreateDirectory artifactsDir |> ignore
+            let manifest =
+                TargetLibraryCensusFixtures.buildManifest
+                    "SonameProbe"
+                    artifactsDir
+                    (stubFile "SonameProbe.fidproj")
+                    (stubFile "Composer.dll")
+                    (stubFile "dotnet")
+                    ({ Substantiation.Path = staticBin; Sha256 = ClangToolchain.sha256 staticBin } : Substantiation.FileDigest)
+                    (stubFile "Harness.fidproj")
+                    (stubFile "compiler.log")
+                    (stubFile "01_psg0.json")
+                    (stubFile "10_witness_units.json")
+                    (TargetLibraryCensusFixtures.buildBoundary pilotStub (clangTargetTriple work))
+                    (TargetLibraryCensusFixtures.buildProof 1 1 "0" "0" "0" "0" "0")
+
+            let checkWith (id: string) (soPath: string) (soSha: string) (probeSrc: string) (imports: string[]) : SubstantiationSeams.PhysicalCheckSpec =
+                { Id = id
+                  Category = "static-dynamic-link-elision"
+                  Summary = "Verify DT_SONAME matching in shared library comparison probe"
+                  EntrySource = Path.Combine(work, "Entry.clef")
+                  ExtraSources = [||]
+                  IncludeRuntimeSources = false
+                  RequiredSymbols = [||]
+                  LoadingContract = None
+                  ExpectedExitCode = 0
+                  ExpectedStdout = ""
+                  Elf =
+                    Some
+                        { ElidedSymbols = [||]
+                          RetainedStaticSymbols = [||]
+                          ForbiddenNeededLibraries = [| "libsoname_probe.so.0" |]
+                          SharedLibrary = Some soPath
+                          SharedLibrarySha256 = Some soSha
+                          DynamicProbeSource = Some probeSrc
+                          RetainedDynamicImports = imports } }
+
+            let probeWork = Path.Combine(work, "probe-work")
+            Directory.CreateDirectory probeWork |> ignore
+            let comparison =
+                match SubstantiationSeams.verifyElfExpectationsDiagnosed manifest (checkWith "soname-comparison" sharedPath sharedElf.Sha256 dynProbeC [| "soname_probe_add" |]) staticElf probeWork |> accepted with
+                | Some cmp -> cmp
+                | None -> failwith "Expected SharedLibraryComparison when SharedLibrary is configured"
+            let dynBinElf = SubstantiationSeams.inspectElfExecutable comparison.DynamicProbeBinaryPath |> accepted
+            Assert.Contains("libsoname_probe.so.0", dynBinElf.NeededLibraries)
+
+            let refusedWithMessage (expectedCode: string) (expectedFragment: string) = function
+                | Error (refusal: Diagnostics.Refusal) ->
+                    Assert.Equal<string list>([ expectedCode ], refusal.Diagnostics |> List.map (fun d -> d.Code) |> List.distinct)
+                    Assert.Contains(expectedFragment, refusal.Text, StringComparison.Ordinal)
+                | Ok _ -> failwithf "expected %s refusal containing '%s', got success" expectedCode expectedFragment
+
+            // Negative 1: empty DT_SONAME (d_val = 0 pointing to .dynstr[0] = "") refuses with FS9253.
+            let emptyBytes = File.ReadAllBytes sharedPath
+            let shoff = int (System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(ReadOnlySpan<byte>(emptyBytes, 40, 8)))
+            let shentsize = int (System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(ReadOnlySpan<byte>(emptyBytes, 58, 2)))
+            let shnum = int (System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(ReadOnlySpan<byte>(emptyBytes, 60, 2)))
+            let dynSecOff, dynSecSize =
+                [ 0 .. shnum - 1 ]
+                |> List.pick (fun idx ->
+                    let off = shoff + idx * shentsize
+                    if System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(ReadOnlySpan<byte>(emptyBytes, off + 4, 4)) = 6u then
+                        Some (int (System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(ReadOnlySpan<byte>(emptyBytes, off + 24, 8))),
+                              int (System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(ReadOnlySpan<byte>(emptyBytes, off + 32, 8))))
+                    else None)
+            let mutable clearedSoname = false
+            for entryIdx in 0 .. (dynSecSize / 16) - 1 do
+                let entryOff = dynSecOff + entryIdx * 16
+                if not clearedSoname && System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(ReadOnlySpan<byte>(emptyBytes, entryOff, 8)) = 14L then
+                    System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(Span<byte>(emptyBytes, entryOff + 8, 8), 0UL)
+                    clearedSoname <- true
+            Assert.True(clearedSoname, "Expected DT_SONAME entry in shared object to zero its d_val")
+            let emptySonameSo = Path.Combine(work, "libempty_soname.so")
+            File.WriteAllBytes(emptySonameSo, emptyBytes)
+            SubstantiationSeams.inspectElfExecutable emptySonameSo
+            |> refusedWithMessage "FS9253" "ELF64 DT_SONAME entry names an empty library."
+
+            // Negative 2: non-bare DT_SONAME containing '/', '.', or '..' refuses with FS9253 bare-filename guard in verifyElfExpectations.
+            for label, badSoname in [ "slash", "sub/libbad.so.0"; "dot", "."; "dotdot", ".." ] do
+                let badSonameSo = Path.Combine(work, $"lib{label}_soname.so")
+                run work ("compile-" + label + "-soname") (ClangToolchain.startInfo [ "-O2"; "-shared"; "-fPIC"; $"-Wl,-soname,{badSoname}"; libC; "-o"; badSonameSo ]) |> ignore
+                let badElf = SubstantiationSeams.inspectElfExecutable badSonameSo |> accepted
+                Assert.Equal(Some badSoname, badElf.Soname)
+                let badWork = Path.Combine(work, label + "-work")
+                Directory.CreateDirectory badWork |> ignore
+                SubstantiationSeams.verifyElfExpectationsDiagnosed manifest (checkWith (label + "-soname") badSonameSo badElf.Sha256 dynProbeC [| "soname_probe_add" |]) staticElf badWork
+                |> refusedWithMessage "FS9253" "must be a bare filename."
+
+            // Negative 3: conflicting DT_SONAME entries refuse with FS9253.
+            let conflictBytes = File.ReadAllBytes sharedPath
+            let mutable patchedNeeded = false
+            for entryIdx in 0 .. (dynSecSize / 16) - 1 do
+                let entryOff = dynSecOff + entryIdx * 16
+                if not patchedNeeded && System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(ReadOnlySpan<byte>(conflictBytes, entryOff, 8)) = 1L then
+                    System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(Span<byte>(conflictBytes, entryOff, 8), 14L)
+                    patchedNeeded <- true
+            Assert.True(patchedNeeded, "Expected DT_NEEDED entry in shared object to patch into conflicting DT_SONAME")
+            let conflictPath = Path.Combine(work, "libconflict_soname.so")
+            File.WriteAllBytes(conflictPath, conflictBytes)
+            SubstantiationSeams.inspectElfExecutable conflictPath
+            |> refusedWithMessage "FS9253" "conflicting DT_SONAME entries"
         finally
             Directory.Delete(work, true)

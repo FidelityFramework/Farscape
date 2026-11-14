@@ -540,7 +540,7 @@ module Substantiation =
                                 let exportedName = parent + "." + bindingName
                                 let tail = content.Substring(declaration.Length)
                                 let quoteType = Regex.Match(tail, @"^\s*:\s*Expr\s*<\s*([A-Za-z_][A-Za-z0-9_.]*)\s*>\s*=\s*(.*)$")
-                                let loadingType = Regex.Match(tail, @"^\s*:\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)*ProcessLinkContract\s*=\s*(.*)$")
+                                let loadingType = Regex.Match(tail, @"^\s*:\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:ProcessLinkContract|StaticArchiveContract|ProcessLinkSpec)\s*=\s*(.*)$")
                                 let hasLiteral = attached |> Array.exists (fun item -> item.Head = "Literal")
                                 if foreign then
                                     if modifiers.Contains "mutable" then
@@ -580,7 +580,10 @@ module Substantiation =
                                 elif loadingType.Success && selectedMetadata.Contains qualified then
                                     if attached.Length <> 0 || declaration.Groups[1].Value <> "let" || modifiers.Contains "rec" || modifiers.Contains "inline" then
                                         unavailable qualified
-                                    if not ((initialBody loadingType.Groups[1].Value).StartsWith("{", StringComparison.Ordinal)) then
+                                    let contractBody =
+                                        Array.append [| loadingType.Groups[1].Value |] lines[index + 1 .. blockEnd - 1]
+                                        |> String.concat "\n"
+                                    if not (SubstantiationBoundary.isLiteralLoadingRecord contractBody) then
                                         invalidOp $"Selected loading declaration {qualified} must have a literal contract body."
                                     descriptors.Add exportedName
                                 elif quoteType.Success then

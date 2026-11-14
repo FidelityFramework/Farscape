@@ -128,7 +128,8 @@ module SubstantiationSeams =
           UndefinedSymtab: Set<string>
           DefinedDynsym: Set<string>
           UndefinedDynsym: Set<string>
-          NeededLibraries: string[] }
+          NeededLibraries: string[]
+          Soname: string option }
 
     type Generated =
         { Manifest: Substantiation.Manifest
@@ -427,6 +428,7 @@ module SubstantiationSeams =
             let mutable definedDynsym = Set.empty
             let mutable undefinedDynsym = Set.empty
             let needed = ResizeArray<string>()
+            let mutable soname : string option = None
             let mutable hasSymtab = false
 
             for section in sections do
@@ -447,6 +449,13 @@ module SubstantiationSeams =
                     if section.EntSize <> 16 || section.Size % 16 <> 0 then
                         fail resolved $"ELF64 dynamic section has invalid entry size {section.EntSize} for section size {section.Size}; expected sh_entsize = 16."
                     let count = section.Size / 16
+                    let readDynString (tagName: string) (dVal: uint64) =
+                        if dVal > uint64 UInt32.MaxValue then
+                            fail resolved $"ELF64 {tagName} string offset {dVal} overflows uint32."
+                        let libraryName = readCString section.Link (uint32 dVal)
+                        if String.IsNullOrWhiteSpace libraryName then
+                            fail resolved $"ELF64 {tagName} entry names an empty library."
+                        libraryName
                     let mutable active = true
                     let mutable index = 0
                     while active && index < count do
@@ -457,13 +466,16 @@ module SubstantiationSeams =
                             active <- false
                         elif dTag = 1L then
                             // DT_NEEDED = 1
-                            if dVal > uint64 UInt32.MaxValue then
-                                fail resolved $"ELF64 DT_NEEDED string offset {dVal} overflows uint32."
-                            let libraryName = readCString section.Link (uint32 dVal)
-                            if String.IsNullOrWhiteSpace libraryName then
-                                fail resolved "ELF64 DT_NEEDED entry names an empty library."
+                            let libraryName = readDynString "DT_NEEDED" dVal
                             if not (needed.Contains libraryName) then
                                 needed.Add libraryName
+                        elif dTag = 14L then
+                            // DT_SONAME = 14
+                            let libraryName = readDynString "DT_SONAME" dVal
+                            match soname with
+                            | Some existing when existing <> libraryName ->
+                                fail resolved $"ELF64 binary defines conflicting DT_SONAME entries '{existing}' and '{libraryName}'."
+                            | _ -> soname <- Some libraryName
                         index <- index + 1
                 | _ -> ()
 
@@ -477,7 +489,8 @@ module SubstantiationSeams =
               UndefinedSymtab = undefinedSymtab
               DefinedDynsym = definedDynsym
               UndefinedDynsym = undefinedDynsym
-              NeededLibraries = needed.ToArray() })
+              NeededLibraries = needed.ToArray()
+              Soname = soname })
 
     // =========================================================================
     // Manifest and live proof discharge verification
@@ -1237,6 +1250,14 @@ module SubstantiationSeams =
                 File.Copy(sharedPath, stagedShared, true)
                 if not (String.Equals(ClangToolchain.sha256 stagedShared, sharedElf.Sha256, StringComparison.OrdinalIgnoreCase)) then
                     fail stagedShared $"Staged shared library '{stagedShared}' SHA-256 drifted during copy."
+                let expectedNeeded = sharedElf.Soname |> Option.defaultValue sharedFileName
+                if String.IsNullOrEmpty expectedNeeded || expectedNeeded = "." || expectedNeeded = ".." || Path.GetFileName expectedNeeded <> expectedNeeded then
+                    fail sharedPath $"Shared library '{sharedPath}' DT_SONAME '{expectedNeeded}' must be a bare filename."
+                if expectedNeeded <> sharedFileName then
+                    let stagedSoname = Path.Combine(dynLibDir, expectedNeeded)
+                    File.Copy(sharedPath, stagedSoname, true)
+                    if not (String.Equals(ClangToolchain.sha256 stagedSoname, sharedElf.Sha256, StringComparison.OrdinalIgnoreCase)) then
+                        fail stagedSoname $"Staged SONAME library '{stagedSoname}' SHA-256 drifted during copy."
                 let shortName = sharedLibraryShortName sharedPath
                 let dynBinary = Path.Combine(probeWork, "dynamic-probe-" + sanitizeIdentifier check.Id)
                 let compileOutcome =
@@ -1263,8 +1284,8 @@ module SubstantiationSeams =
                     match inspectElfExecutable dynBinary with
                     | Ok inspected -> inspected
                     | Error refusal -> Diagnostics.raiseRefusal refusal
-                if not (Array.contains sharedFileName dynElf.NeededLibraries) then
-                    fail dynBinary $"Dynamic comparison binary '{dynBinary}' lacks DT_NEEDED '{sharedFileName}'."
+                if not (Array.contains expectedNeeded dynElf.NeededLibraries) then
+                    fail dynBinary $"Dynamic comparison binary '{dynBinary}' lacks DT_NEEDED '{expectedNeeded}' (shared library '{sharedFileName}')."
                 for imported in spec.RetainedDynamicImports do
                     if not (dynElf.UndefinedDynsym.Contains imported) then
                         fail dynBinary $"Dynamic comparison binary '{dynBinary}' lacks expected undefined .dynsym import '{imported}'."

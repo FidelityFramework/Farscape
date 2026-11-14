@@ -427,6 +427,63 @@ module SubstantiationBoundary =
     let isLiteralAttribute (attribute: AttributeItem) =
         attribute.Head = "Literal" && Regex.IsMatch(attribute.Arguments, @"^\s*(?:\(\s*\))?\s*$")
 
+    /// Verify that a `LexedSource.CodeSurface` record body is built solely from
+    /// string literals (`?`), nested record literals `{ ... }`, `None`, and `Some { ... }`,
+    /// rejecting any nested binding reference or function application.
+    let isLiteralLoadingRecord (maskedBody: string) : bool =
+        let tokens =
+            Regex.Matches(maskedBody, @"\?|\{|\}|;|\(|\)|=|``[^`\r\n]+``|[A-Za-z_][A-Za-z0-9_']*|\S")
+            |> Seq.cast<Match>
+            |> Seq.map _.Value
+            |> Seq.toArray
+        let isFieldName (token: string) =
+            token <> "Some"
+            && token <> "None"
+            && Regex.IsMatch(token, @"^(?:``[^`\r\n]+``|[A-Za-z_][A-Za-z0-9_']*)$")
+        let rec parseValue (at: int) : int option =
+            if at >= tokens.Length then None
+            else
+                match tokens[at] with
+                | "?" | "None" -> Some (at + 1)
+                | "{" -> parseRecord at
+                | "(" ->
+                    match parseValue (at + 1) with
+                    | Some next when next < tokens.Length && tokens[next] = ")" -> Some (next + 1)
+                    | _ -> None
+                | "Some" -> parseSomeArg (at + 1)
+                | _ -> None
+        and parseSomeArg (at: int) : int option =
+            if at >= tokens.Length then None
+            else
+                match tokens[at] with
+                | "{" -> parseRecord at
+                | "(" ->
+                    match parseSomeArg (at + 1) with
+                    | Some next when next < tokens.Length && tokens[next] = ")" -> Some (next + 1)
+                    | _ -> None
+                | "?" -> Some (at + 1)
+                | _ -> None
+        and parseRecord (at: int) : int option =
+            if at >= tokens.Length || tokens[at] <> "{" then None
+            else
+                let rec parseFields cursor count =
+                    if cursor >= tokens.Length then None
+                    elif tokens[cursor] = "}" then
+                        if count > 0 then Some (cursor + 1) else None
+                    elif isFieldName tokens[cursor] && cursor + 1 < tokens.Length && tokens[cursor + 1] = "=" then
+                        match parseValue (cursor + 2) with
+                        | Some afterVal ->
+                            let next =
+                                if afterVal < tokens.Length && tokens[afterVal] = ";" then afterVal + 1
+                                else afterVal
+                            parseFields next (count + 1)
+                        | None -> None
+                    else None
+                parseFields (at + 1) 0
+        match parseRecord 0 with
+        | Some finished -> finished = tokens.Length
+        | None -> false
+
     let parseFidelityExtern path (source: LexedSource) =
         let attributes = source.Attributes |> Array.filter hasFidelityExtern
         let unresolved message = fail Diagnostics.SubstantiationExternUnresolved path message
