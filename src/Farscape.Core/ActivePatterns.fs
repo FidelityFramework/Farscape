@@ -61,24 +61,35 @@ module ActivePatterns =
     // F# Keyword Active Pattern
     // =========================================================================
 
-    /// F# keywords that need backtick quoting when used as parameter names
+    /// F# / Clef reserved keywords that need backtick quoting when used as parameter or binding identifiers
     let private fsharpKeywords =
         set [
-            "abstract"; "and"; "as"; "assert"; "base"; "begin"; "class"; "default"
-            "delegate"; "do"; "done"; "downcast"; "downto"; "elif"; "else"; "end"
-            "exception"; "extern"; "false"; "finally"; "fixed"; "for"; "fun"; "function"
-            "global"; "if"; "in"; "inherit"; "inline"; "interface"; "internal"; "lazy"
-            "let"; "match"; "member"; "module"; "mutable"; "namespace"; "new"; "not"
-            "null"; "of"; "open"; "or"; "override"; "private"; "public"; "rec"; "return"
-            "select"; "static"; "struct"; "then"; "to"; "true"; "try"; "type"; "upcast"
-            "use"; "val"; "void"; "when"; "while"; "with"; "yield"
+            "abstract"; "and"; "as"; "asr"; "assert"; "base"; "begin"; "break"
+            "checked"; "class"; "component"; "const"; "constraint"; "continue"; "default"
+            "delegate"; "do"; "done"; "downcast"; "downto"; "eager"; "elif"; "else"; "end"
+            "exception"; "extern"; "false"; "finally"; "fixed"; "for"; "fori"; "fun"; "function"
+            "global"; "if"; "in"; "include"; "inherit"; "inline"; "interface"; "internal"
+            "land"; "lazy"; "let"; "lor"; "lsl"; "lsr"; "lxor"
+            "match"; "member"; "mixin"; "mod"; "module"; "mutable"; "namespace"; "new"; "not"
+            "null"; "of"; "open"; "or"; "override"; "parallel"; "params"; "private"; "process"
+            "protected"; "public"; "pure"; "rec"; "return"; "sealed"; "select"; "sig"; "static"
+            "struct"; "tailcall"; "then"; "to"; "trait"; "true"; "try"; "type"; "upcast"
+            "use"; "val"; "virtual"; "void"; "when"; "while"; "with"; "yield"
         ]
+
+    /// Strip compiler-reserved leading `__` underscores without backtick-quoting.
+    let stripReservedPrefix (name: string) : string =
+        if name.StartsWith("__") then name.TrimStart('_') else name
+
+    /// Strip backtick quoting from a cleaned F# identifier for ABI metadata names.
+    let unquoteIdentifier (name: string) : string =
+        name.Replace("``", "")
 
     /// Decompose a parameter name: strip leading underscores and detect F# keywords.
     /// FSharpKeyword: the stripped name is an F# keyword → needs backtick quoting
     /// CleanName: safe to use as-is
     let (|FSharpKeyword|CleanName|) (name: string) =
-        let stripped = if name.StartsWith("__") then name.TrimStart('_') else name
+        let stripped = stripReservedPrefix name
         if fsharpKeywords.Contains(stripped) then FSharpKeyword stripped
         else CleanName stripped
 

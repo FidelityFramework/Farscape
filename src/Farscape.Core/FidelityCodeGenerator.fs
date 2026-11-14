@@ -917,7 +917,7 @@ module FidelityCodeGenerator =
                 let element = ctx.Bindings |> Map.tryFind func.Name |> Option.bind (fun b -> List.tryItem index b.ReferenceElements) |> Option.filter ((<>) "")
                 let represented = if reference then element |> Option.defaultWith (fun () -> cType.Substring(0, cType.LastIndexOf('*')).Trim()) else cType
                 let typeRef, provenance = abiClaim ctx represented
-                let clefName = (parameterName func.Parameters index).Replace("``", "")
+                let clefName = unquoteIdentifier (parameterName func.Parameters index)
                 // A parameter fixed to a function-pointer sentinel crosses as that constant (#192):
                 // the Clef signature has no parameter for it.
                 let passBy, provenance =
@@ -2236,7 +2236,7 @@ module FidelityCodeGenerator =
                 Quoted(RecordBlock [
                     "CName", Literal (quoteString symbol)
                     "Parameters", ArrayBlock (parameters |> List.map (fun (p, repr) -> RecordConstruction [
-                        "Name", Literal (quoteString p.Name); "Type", Literal repr; "PassBy", Identifier "Value" ]))
+                        "Name", Literal (quoteString (unquoteIdentifier p.Name)); "Type", Literal repr; "PassBy", Identifier "Value" ]))
                     "ReturnType", Literal returnRef
                     "CallingConvention", Identifier "CDecl"
                     "OwnershipTransfer", Identifier ownership ]))
@@ -2303,7 +2303,7 @@ module FidelityCodeGenerator =
                 Quoted(RecordBlock [
                     "CName", Literal (quoteString symbol)
                     "Parameters", ArrayBlock (parameters |> List.map (fun (p, repr) -> RecordConstruction [
-                        "Name", Literal (quoteString p.Name); "Type", Literal repr; "PassBy", Identifier "Value" ]))
+                        "Name", Literal (quoteString (unquoteIdentifier p.Name)); "Type", Literal repr; "PassBy", Identifier "Value" ]))
                     "ReturnType", Literal returnRef
                     "CallingConvention", Identifier "CDecl"
                     "OwnershipTransfer", Identifier ownership ]))
@@ -2501,7 +2501,7 @@ module FidelityCodeGenerator =
                 Quoted(RecordBlock [
                     "CName", Literal (quoteString symbol)
                     "Parameters", ArrayBlock (parameters |> List.map (fun (p, repr) -> RecordConstruction [
-                        "Name", Literal (quoteString p.Name); "Type", Literal repr; "PassBy", Identifier "Value" ]))
+                        "Name", Literal (quoteString (unquoteIdentifier p.Name)); "Type", Literal repr; "PassBy", Identifier "Value" ]))
                     "ReturnType", Literal returnRef
                     "CallingConvention", Identifier "CDecl"
                     "OwnershipTransfer", Identifier ownership ]))
@@ -2583,7 +2583,7 @@ module FidelityCodeGenerator =
         let methodDecls = methods |> List.mapi (fun index f ->
             let overloads = methods |> List.filter (fun other -> other.Name = f.Name)
             let suffix = if overloads.Length > 1 then "_" + string index else ""
-            let name = safeName + "_" + cleanParamName f.Name + suffix
+            let name = safeName + "_" + stripReservedPrefix f.Name + suffix
             let symbol = if shimmed then shimPrefix + "_" + f.Name + suffix else f.MangledName.Value
             let info = CppClassAnalysis.analyzeMethodReturn ctx.KnownClasses f
             let args = parameters f

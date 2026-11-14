@@ -2187,3 +2187,69 @@ let ``read-only buffer and absence validation refuses invalid contracts cleanly`
             NonnullAnnotations = if shape = "absence-nonnull" then Some { Parameters = Map.ofList [ "take", [ 1 ] ]; Returns = Set.empty } else None }
     let d = refusedBy (fun () -> FidelityCodeGenerator.generateModule ctx Set.empty declarations "Test.Native" "test" "test" [] |> ignore)
     Assert.Equal(expectedCode, d.Code)
+
+[<Fact>]
+let ``ROCm-style F# reserved keyword parameters such as mod are backtick-quoted in signatures and raw in descriptors`` () =
+    let hipModTypedef = CppParser.Declaration.Typedef (mkTypedef "hipModule_t" "struct ihipModule_t *")
+    let hipFn = mkFunc "hipModuleGetFunctionCount" "int" [ "count", "int *"; "mod", "hipModule_t" ]
+    let multiKwFn = mkFunc "reserve_check" "void" [ "Mod", "int"; "mod", "int"; "asr", "int"; "land", "int"; "lor", "int"; "lsl", "int"; "lsr", "int"; "lxor", "int"; "sig", "int"; "const", "int"; "params", "int" ]
+    let hipBinding =
+        { plainProjection "hipModuleGetFunctionCount" with
+            ReferenceParameters = [ 0 ]
+            ParameterHandles = [ ""; "hipModule" ] }
+    let declarations = [ hipModTypedef; CppParser.Declaration.Function hipFn; CppParser.Declaration.Function multiKwFn ]
+    let ctx = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
+    let ctx = { ctx with Bindings = Map.ofList [ "hipModuleGetFunctionCount", hipBinding ] }
+    let source = FidelityCodeGenerator.generateModule ctx Set.empty declarations "Test.ROCm.Module" "amdhip64" "ROCm module" []
+    Assert.Contains("let hipModuleGetFunctionCount (count: int array) (``mod``: option<CHandle<hipModule>>) : int =", source)
+    Assert.Contains("Name = \"mod\"", source)
+    Assert.DoesNotContain("(mod:", source)
+    Assert.Contains("(``mod``: int) (mod_1: int) (``asr``: int) (``land``: int) (``lor``: int) (``lsl``: int) (``lsr``: int) (``lxor``: int) (``sig``: int) (``const``: int) (``params``: int)", source)
+
+[<Fact>]
+let ``C++ class methods and descriptors keep composite names unquoted and descriptor parameter names raw`` () =
+    let noExcept : CppParser.AttributeData = { Kind = "NoExceptAttr"; Args = []; StringArg = None }
+    let ctor =
+        { mkFuncWithAttrs "Box" "void" [ "const", "int" ] [ noExcept ] with
+            MangledName = Some "_ZN3BoxC1Ei" }
+    let modMethod =
+        { mkFuncWithAttrs "mod" "int" [ "mod", "int" ] [ noExcept ] with
+            MangledName = Some "_ZN3Box3modEi" }
+    let procMethod =
+        { mkFuncWithAttrs "__process" "int" [ "process", "int" ] [ noExcept ] with
+            MangledName = Some "_ZN3Box7processEi" }
+    let boxClass : CppParser.ClassDecl =
+        { Name = "Box"
+          Methods = [ CppParser.Declaration.Function modMethod; CppParser.Declaration.Function procMethod ]
+          Constructors = [ CppParser.Declaration.Function ctor ]
+          Fields = [ { Name = "value"; Type = "int"; IsVolatile = false; IsConst = false; IsArray = false; ArraySize = None; IsBitfield = false; BitWidth = None; Attributes = [] } ]
+          Documentation = None
+          IsAbstract = false
+          HasUserDestructor = true
+          DestructorMangledName = Some "_ZN3BoxD1Ev"
+          HasUserCopyConstructor = false
+          HasUserMoveConstructor = false
+          BaseClasses = []
+          UnnamedBitFields = []
+          TypedefAttributes = []
+          Measured = Some { Name = "Box"; SizeBits = 32; DataSizeBits = 32; AlignmentBits = 32; FieldOffsetsBits = [ 0 ] }
+          QualifiedName = Some "Box"
+          Location = TestHelpers.constructed }
+    let spec : PilotTypes.CppClassSpec =
+        { Name = "Box"; Namespace = "Test.Cpp"; Bind = true; KindOverride = None; SizeOverride = None }
+    let decls = [ CppParser.Declaration.Class boxClass ]
+    let ctx =
+        { FidelityCodeGenerator.buildGenerationContext decls Types.LP64 Map.empty with
+            CppClasses = Map.ofList [ "Box", spec ] }
+    let source = FidelityCodeGenerator.generateModule ctx Set.empty decls "Test.Cpp" "box" "C++ keyword class" []
+    Assert.Contains("let Box_ctor (``const``: int) : option<CHandle<Box>> =", source)
+    Assert.Contains("let Box_ctorDescriptor : Expr<FunctionDescriptor> =", source)
+    Assert.Contains("let Box_mod (self: CHandle<Box>) (``mod``: int) : int =", source)
+    Assert.Contains("let Box_modDescriptor : Expr<FunctionDescriptor> =", source)
+    Assert.Contains("let Box_process (self: CHandle<Box>) (``process``: int) : int =", source)
+    Assert.Contains("let Box_processDescriptor : Expr<FunctionDescriptor> =", source)
+    Assert.Contains("Name = \"const\"", source)
+    Assert.Contains("Name = \"mod\"", source)
+    Assert.Contains("Name = \"process\"", source)
+    Assert.DoesNotContain("Box_``", source)
+    Assert.DoesNotContain("Name = \"``", source)

@@ -122,6 +122,39 @@ let ``cleanParamName backtick-quotes keywords`` () =
     Assert.Equal("``base``", cleanParamName "__base")
     Assert.Equal("count", cleanParamName "count")
 
+[<Theory>]
+[<InlineData("mod")>]
+[<InlineData("asr")>]
+[<InlineData("land")>]
+[<InlineData("lor")>]
+[<InlineData("lsl")>]
+[<InlineData("lsr")>]
+[<InlineData("lxor")>]
+[<InlineData("sig")>]
+[<InlineData("const")>]
+[<InlineData("eager")>]
+[<InlineData("break")>]
+[<InlineData("checked")>]
+[<InlineData("component")>]
+[<InlineData("constraint")>]
+[<InlineData("continue")>]
+[<InlineData("fori")>]
+[<InlineData("include")>]
+[<InlineData("mixin")>]
+[<InlineData("parallel")>]
+[<InlineData("params")>]
+[<InlineData("process")>]
+[<InlineData("protected")>]
+[<InlineData("pure")>]
+[<InlineData("sealed")>]
+[<InlineData("tailcall")>]
+[<InlineData("trait")>]
+[<InlineData("virtual")>]
+let ``cleanParamName and quoteIdentifier escape all Clef and F# reserved keywords`` kw =
+    Assert.Equal($"``{kw}``", cleanParamName kw)
+    Assert.Equal($"``{kw}``", cleanParamName ("__" + kw))
+    Assert.Equal($"``{kw}``", quoteIdentifier kw)
+
 [<Fact>]
 let ``ArrayType extracts size`` () =
     match "uint32_t[4]" with
