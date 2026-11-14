@@ -1256,7 +1256,8 @@ module CppParser =
             elif not isImplicit && isFromTargetFile node then
                 if verbose then
                     let name = getStringOr node "name" "<anonymous>"
-                    printfn "[CppParser] Processing %s: %s (file: %A)" kind name currentFile
+                    let fileLabel = match currentFile with Some path -> path | None -> "<none>"
+                    printfn "[CppParser] Processing %s: %s (file: %s)" kind name fileLabel
 
                 match kind with
                 | "FunctionDecl" ->

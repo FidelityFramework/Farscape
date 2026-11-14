@@ -1066,53 +1066,124 @@ module SubstantiationBoundary =
                 let hypotheses, checks = deriveContract origin strata
                 let files = Array.append linkFiles layoutFiles |> Array.distinctBy (fun f -> f.Path, f.Kind)
                 let evidenceFiles kind = files |> Array.filter (fun f -> f.Kind = kind) |> Array.map (fun f -> f.Path + "@sha256:" + f.Sha256) |> String.concat ", "
+                let stringOpt = function
+                    | Some text -> $"Some({text})"
+                    | None -> "None"
+                let intList (values: int list) =
+                    values |> List.map string |> String.concat ", "
+                let formatErrorConvention = function
+                    | PilotTypes.Errno -> "Errno"
+                    | PilotTypes.ReturnCode -> "ReturnCode"
+                    | PilotTypes.EnumErrorCode (errorType, successValue, errorStringFn, errorNameFn) ->
+                        $"EnumErrorCode({errorType}, {successValue}, {stringOpt errorStringFn}, {stringOpt errorNameFn})"
+                    | PilotTypes.NullWithReason reasonFunction -> $"NullWithReason({reasonFunction})"
+                    | PilotTypes.NoErrorConvention -> "NoErrorConvention"
+                let formatErrorOverrides (overrides: Map<string, PilotTypes.ErrorConvention>) =
+                    overrides
+                    |> Map.toList
+                    |> List.map (fun (fnName, conv) -> $"{fnName}={formatErrorConvention conv}")
+                    |> String.concat ", "
+                    |> fun body -> "{" + body + "}"
+                let formatOwnership = function
+                    | Some PilotTypes.CallerOwns -> "CallerOwns"
+                    | Some PilotTypes.CalleeOwns -> "CalleeOwns"
+                    | Some PilotTypes.Borrowed -> "Borrowed"
+                    | None -> "none"
+                let formatBorrowedExtent = function
+                    | PilotTypes.BorrowedExtent.Companion (binding, args) -> $"Companion({binding}, [{intList args}])"
+                    | PilotTypes.BorrowedExtent.NulTerminated -> "NulTerminated"
+                let formatInvalidation = function
+                    | PilotTypes.BorrowInvalidation.OwnerCall (binding, parameter) -> $"OwnerCall({binding}, {parameter})"
+                    | PilotTypes.BorrowInvalidation.AnyOwnerCall -> "AnyOwnerCall"
+                let formatBufferExtent = function
+                    | PilotTypes.BindingReadOnlyBufferExtent.ExplicitCount countParam -> $"ExplicitCount({countParam})"
+                    | PilotTypes.BindingReadOnlyBufferExtent.UncountedNulTerminated -> "UncountedNulTerminated"
+                let formatContent = function
+                    | PilotTypes.BorrowedContent.Text -> "Text"
+                    | PilotTypes.BorrowedContent.Bytes -> "Bytes"
+                let formatReleases (releases: PilotTypes.BindingRetentionRelease list) =
+                    releases |> List.map (fun rel -> $"{rel.Binding}[{rel.Parameter}]") |> String.concat ", "
+                let formatRetention = function
+                    | PilotTypes.BindingBufferRetention.DuringCall -> "DuringCall"
+                    | PilotTypes.BindingBufferRetention.RetainedUntil (owner, redefinedBy, releases) ->
+                        $"RetainedUntil(owner={owner}, redefinedBy=[{intList redefinedBy}], releases=[{formatReleases releases}])"
+                let formatNonnullParameters (parameters: Map<string, int list>) =
+                    parameters
+                    |> Map.toList
+                    |> List.map (fun (fnName, indices) -> $"{fnName}:[{intList indices}]")
+                    |> String.concat ", "
+                    |> fun body -> "{" + body + "}"
+                let formatNonnullReturns (returns: Set<string>) =
+                    returns |> Set.toList |> String.concat ", " |> fun body -> "{" + body + "}"
+                let formatFlexibleRule = function
+                    | PilotTypes.ElementCount -> "ElementCount"
+                    | PilotTypes.RecordBytes -> "RecordBytes"
+                let formatCallbackRetention = function
+                    | Some (ret: PilotTypes.BindingCallbackRetention) ->
+                        $"owner={ret.OwnerParameter}, redefinedBy=[{intList ret.RedefinedBy}], releases=[{formatReleases ret.Releases}]"
+                    | None -> "none"
+                let formatRegistration (reg: PilotTypes.CallbackRegistration) =
+                    $"fn={reg.Function}, callback={reg.CallbackParam}, data={stringOpt reg.DataParam}"
+                let formatListener (listener: PilotTypes.ListenerStruct) =
+                    $"name={listener.Name}, registration={stringOpt listener.RegistrationFunction}"
                 let contractDetails = [
                     yield "exported surface=" + (request.Sources |> Array.map fst |> String.concat ", ")
                     match pilot |> Option.bind _.ErrorConventions with
                     | Some e when errors ->
-                        yield sprintf "error default=%A; selected overrides=%A" e.Default (e.Overrides |> Map.filter (fun name _ -> usedSymbol name))
+                        let selectedOverrides = e.Overrides |> Map.filter (fun name _ -> usedSymbol name)
+                        yield $"error default={formatErrorConvention e.Default}; selected overrides={formatErrorOverrides selectedOverrides}"
                     | _ -> ()
                     for b in bindings do
-                        if b.Ownership.IsSome then yield sprintf "%s ownership=%A" b.Name b.Ownership
+                        if b.Ownership.IsSome then yield $"{b.Name} ownership={formatOwnership b.Ownership}"
                         match b.Resource with
                         | Some r -> yield $"{b.Name} resource={r.Identity}@{r.Version}; release={r.ReleaseBinding}[{r.ReleaseParameter}]; source={r.Source}"
                         | None -> ()
                         match b.BorrowedResult with
-                        | Some r -> yield sprintf "%s borrowed=%s@%s; source=%s; extent=%A; invalidatedBy=%A" b.Name r.Identity r.Version r.Source r.Extent r.InvalidatedBy
+                        | Some r ->
+                            let invalidationText = r.InvalidatedBy |> List.map formatInvalidation |> String.concat ", "
+                            yield $"{b.Name} borrowed={r.Identity}@{r.Version}; source={r.Source}; extent={formatBorrowedExtent r.Extent}; invalidatedBy=[{invalidationText}]"
                         | None -> ()
                         for buffer in b.WritableBuffers do
                             yield $"{b.Name} buffer[{buffer.Parameter}]={buffer.Identity}@{buffer.Version}; countParameter={buffer.CountParameter}; source={buffer.Source}"
                         for buffer in b.ReadOnlyBuffers do
-                            yield sprintf "%s readOnlyBuffer[%d]=%s@%s; extent=%A; content=%A; retention=%A; source=%s" b.Name buffer.Parameter buffer.Identity buffer.Version buffer.Extent buffer.Content buffer.Retention buffer.Source
+                            yield $"{b.Name} readOnlyBuffer[{buffer.Parameter}]={buffer.Identity}@{buffer.Version}; extent={formatBufferExtent buffer.Extent}; content={formatContent buffer.Content}; retention={formatRetention buffer.Retention}; source={buffer.Source}"
                         for absence in b.BufferAbsences do
                             yield $"{b.Name} bufferAbsence[{absence.Parameter}]={absence.Identity}@{absence.Version}; source={absence.Source}"
                     match pilot |> Option.bind _.Nonnull with
                     | Some n when strata.Nullability ->
-                        yield sprintf "nonnull parameters=%A; returns=%A" (n.Parameters |> Map.filter (fun name _ -> usedSymbol name)) (n.Returns |> Set.filter usedSymbol)
+                        let selectedParams = n.Parameters |> Map.filter (fun name _ -> usedSymbol name)
+                        let selectedReturns = n.Returns |> Set.filter usedSymbol
+                        yield $"nonnull parameters={formatNonnullParameters selectedParams}; returns={formatNonnullReturns selectedReturns}"
                     | _ -> ()
                     for mapped in mappedReturns do
                         yield $"mapped {mapped.Name}; acquire={mapped.Acquire}; release={mapped.Release}; schema={mapped.Schema}; alignment={mapped.Alignment}; access={mapped.Access}"
                     for array in flexibleArrays do
-                        yield sprintf "flexible %s.%s; count=%s; rule=%A; source=%s" array.Record array.Field array.CountField array.Rule array.Source
+                        yield $"flexible {array.Record}.{array.Field}; count={array.CountField}; rule={formatFlexibleRule array.Rule}; source={array.Source}"
                 ]
                 let callbackDetails = [
                     yield "exported callback surface=" + (request.Sources |> Array.map fst |> String.concat ", ")
                     for b in bindings do
                         for callback in b.CallbackInvocations do
-                            yield sprintf "%s[%d]=%s@%s; scope=%s; source=%s; exit=%A; retention=%A" b.Name callback.Parameter callback.Identity callback.Version callback.Scope callback.Source callback.ExitBinding callback.Retention
+                            yield $"{b.Name}[{callback.Parameter}]={callback.Identity}@{callback.Version}; scope={callback.Scope}; source={callback.Source}; exit={stringOpt callback.ExitBinding}; retention={formatCallbackRetention callback.Retention}"
                     match pilot |> Option.bind _.Callbacks with
                     | Some callbacks ->
                         for registration in callbacks.Registrations do
-                            if usedSymbol registration.Function then yield sprintf "registration=%A" registration
+                            if usedSymbol registration.Function then yield $"registration={formatRegistration registration}"
                         for listener in callbacks.ListenerStructs do
-                            if emitted listener.Name then yield sprintf "listener=%A" listener
+                            if emitted listener.Name then yield $"listener={formatListener listener}"
                     | None -> ()
                 ]
                 let boundHypotheses = hypotheses |> Array.map (fun hypothesis ->
                     let details =
                         match hypothesis.Family with
                         | "H-ABI" ->
-                            let records = layouts |> Array.filter (fun l -> emitted l.Name) |> Array.map (fun l -> sprintf "%s:%s size=%d alignment=%d offsets=%A bits" l.Header l.Name l.SizeBits l.AlignmentBits l.FieldOffsetsBits) |> String.concat "; "
+                            let records =
+                                layouts
+                                |> Array.filter (fun l -> emitted l.Name)
+                                |> Array.map (fun l ->
+                                    let offsetList = l.FieldOffsetsBits |> Array.map string |> String.concat ", "
+                                    $"{l.Header}:{l.Name} size={l.SizeBits} alignment={l.AlignmentBits} offsets=[{offsetList}] bits")
+                                |> String.concat "; "
                             let enumFacts = enums |> Array.filter (fun e -> emitted e.Name) |> Array.map (fun e -> sprintf "%s:%s width=%d signed=%b" e.Header e.Name e.WidthBits e.Signed) |> String.concat "; "
                             sprintf "Clang=%s; target=%s; pilot=%s; headers=%s; records=[%s]; enums=[%s]" clang clangTarget (evidenceFiles "pilot") (evidenceFiles "header") records enumFacts
                         | "H-Link" ->

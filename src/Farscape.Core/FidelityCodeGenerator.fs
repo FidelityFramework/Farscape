@@ -1552,7 +1552,9 @@ module FidelityCodeGenerator =
                                         Named (CodeRenderer.renderType (wrapOption (clefTypeOf pointee)) + " array")
                                     | Scalar r when r.Family = TypeMapper.Pointer ->
                                         Named (CodeRenderer.renderType (wrapOption (clefTypeOf (Scalar r))) + " array")
-                                    | _ -> refuse Diagnostics.ReferenceCellUnsupported referenceKey "Reference requires a scalar or opaque pointer cell"
+                                    | Unresolved recordName when ctx.ValueStructs.Contains recordName && not (ctx.Structs.TryFind recordName |> Option.exists _.IsUnion) ->
+                                        Named (recordName + " array")
+                                    | _ -> refuse Diagnostics.ReferenceCellUnsupported referenceKey "Reference requires a scalar, opaque pointer, or declared value_structs record cell"
                                 | ParsedCType info when info.PointerDepth = 2 ->
                                     let pointerType = cType.Substring(0, cType.LastIndexOf('*')).Trim()
                                     let element = resolveIn ctx pointerType |> clefTypeOf |> wrapOption
@@ -2187,6 +2189,16 @@ module FidelityCodeGenerator =
                     | Scalar r when r.Family = TypeMapper.Pointer && not nonnull -> wrapOption (clefTypeOf resolved)
                     | FunctionPointer _ when not nonnull ->
                         refuseField Diagnostics.NullableCallbackUnadmitted $"Value struct '{s.Name}' field '{field.Name}' requires explicit nonnull callback-slot evidence; nullable callback fields require a supported boundary adapter."
+                    | Unresolved name ->
+                        match byValueRecordOf unitCtx field.Type with
+                        | Some (recordName, "union") ->
+                            refuseShape $"Value struct '{s.Name}' field '{field.Name}' has union type '{recordName}'; a plain record with scalar or pointer fields is required."
+                        | Some (recordName, "struct") when ctx.ValueStructs.Contains recordName ->
+                            Named recordName
+                        | Some (recordName, kind) ->
+                            refuseShape $"Value struct '{s.Name}' field '{field.Name}' has {kind} type '{recordName}' not declared in options.value_structs; a plain record with scalar, pointer or value-struct fields is required."
+                        | None ->
+                            refuseShape $"Value struct '{s.Name}' field '{field.Name}' has unrepresented type '{name}'; a plain record with scalar or pointer fields is required."
                     | _ -> clefTypeOf resolved)
                 [ RecordType(s.Name, s.Fields |> List.map (fun field -> cleanParamName field.Name, fieldType field), s.Documentation, []) ]
             else []
@@ -2797,6 +2809,48 @@ module FidelityCodeGenerator =
         |> List.map (prepareFunction ctx namespace' libraryName >> anchorFor ctx namespace')
         |> Map.ofList
 
+    /// Topologically order struct/record declaration groups so nested or referenced
+    /// child records are emitted before dependent parent records (cycle-safe).
+    let private orderStructGroups (groups: FsDecl list list) : FsDecl list =
+        let groupArr = groups |> List.filter (fun g -> not g.IsEmpty) |> Array.ofList
+        let rec referencedNames = function
+            | Named name -> [ name ]
+            | Generic (_, inner) -> referencedNames inner
+            | Generic2 (_, a, b) -> referencedNames a @ referencedNames b
+            | Unit -> []
+            | FunctionType (args, ret) -> List.collect referencedNames (ret :: args)
+        let definedNames (decls: FsDecl list) =
+            let recordNames = decls |> List.choose (function RecordType (name, _, _, _) -> Some name | _ -> None)
+            if not recordNames.IsEmpty then recordNames
+            else decls |> List.choose (function SubModule (name, _) -> Some name | _ -> None)
+        let definedIndex =
+            (Map.empty, [ 0 .. groupArr.Length - 1 ])
+            ||> List.fold (fun acc idx ->
+                (acc, definedNames groupArr[idx])
+                ||> List.fold (fun m name -> if m.ContainsKey name then m else m.Add(name, idx)))
+        let dependencies (idx: int) =
+            groupArr[idx]
+            |> List.collect (function
+                | RecordType (_, fields, _, _) -> fields |> List.collect (snd >> referencedNames)
+                | _ -> [])
+            |> List.choose (fun name ->
+                match definedIndex.TryFind name with
+                | Some depIdx when depIdx <> idx -> Some depIdx
+                | _ -> None)
+            |> List.distinct
+        let rec visit (visiting: Set<int>) (visited: Set<int>, acc: int list) idx =
+            if visited.Contains idx || visiting.Contains idx then visited, acc
+            else
+                let visiting' = visiting.Add idx
+                let visited', acc' =
+                    dependencies idx
+                    |> List.fold (fun state depIdx -> visit visiting' state depIdx) (visited, acc)
+                visited'.Add idx, idx :: acc'
+        let _, orderedRev =
+            ([ 0 .. groupArr.Length - 1 ])
+            |> List.fold (fun state idx -> visit Set.empty state idx) (Set.empty, [])
+        orderedRev |> List.rev |> List.collect (fun idx -> groupArr[idx])
+
     /// Generate a Clef module with explicit control over what gets emitted.
     /// Uses the full GenerationContext for type resolution, but only declares
     /// the opaque handles in handlesToDeclare and the declarations passed in.
@@ -2831,7 +2885,7 @@ module FidelityCodeGenerator =
 
         let enums = groups |> List.collect (function GEnum d -> d | _ -> [])
         let structs =
-            let declarations = groups |> List.collect (function GStruct d -> d | _ -> [])
+            let declarations = groups |> List.choose (function GStruct d -> Some d | _ -> None) |> orderStructGroups
             if ctx.CppClasses.IsEmpty then declarations else List.distinct declarations
         let functionDeclarations =
             groups

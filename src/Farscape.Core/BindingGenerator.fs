@@ -109,16 +109,35 @@ module BindingGenerator =
     /// serialize, are settled by measuring each declaring unit (`agreeMeasurements`).
     let private declaredShape (s: CppParser.StructDecl) =
         let attributes (attrs: CppParser.AttributeData list) =
-            attrs |> List.map (fun a -> a.Kind + sprintf "%A" a.Args + defaultArg a.StringArg "") |> String.concat ","
+            attrs
+            |> List.map (fun a ->
+                let args = a.Args |> List.map string |> String.concat "; "
+                let textArg = match a.StringArg with Some value -> value | None -> ""
+                $"{a.Kind}[{args}]{textArg}")
+            |> String.concat ","
         let field (f: CppParser.FieldDecl) =
-            let extent = if f.IsArray then sprintf "[%A]" f.ArraySize else ""
-            let width = if f.IsBitfield then sprintf ":%A" f.BitWidth else ""
+            let extent =
+                if f.IsArray then
+                    match f.ArraySize with
+                    | Some count -> $"[{count}]"
+                    | None -> "[?]"
+                else ""
+            let width =
+                if f.IsBitfield then
+                    match f.BitWidth with
+                    | Some bits -> $":{bits}"
+                    | None -> ":?"
+                else ""
             f.Name + ":" + f.Type + extent + width + attributes f.Attributes
+        let typedefSite = function
+            | CppParser.FieldType fieldName -> $"field({fieldName})"
+            | CppParser.RecordName -> "record"
+        let bitfieldWidth = function Some bits -> string bits | None -> "?"
         let kind = if s.IsUnion then "union" else "struct"
         // Unnamed bit-fields (#176) and the typedef attributes the record reaches in its unit
         // (#175) are part of its declared shape: they move its bytes.
-        let padding = s.UnnamedBitFields |> List.map (fun b -> sprintf "@%d:%s:%A" b.Position b.Type b.Width) |> String.concat ","
-        let typedefs = s.TypedefAttributes |> List.map (fun a -> sprintf "%A>%s>%s" a.Site a.Typedef (attributes [a.Attribute])) |> String.concat ","
+        let padding = s.UnnamedBitFields |> List.map (fun b -> $"@{b.Position}:{b.Type}:{bitfieldWidth b.Width}") |> String.concat ","
+        let typedefs = s.TypedefAttributes |> List.map (fun a -> $"{typedefSite a.Site}>{a.Typedef}>{attributes [a.Attribute]}") |> String.concat ","
         String.concat " " [ kind; s.Name; "{"; s.Fields |> List.map field |> String.concat "; "; "}"; attributes s.Attributes; padding; typedefs ]
 
     /// The records a record's fields hold by value, resolved through the same typedef
@@ -514,7 +533,9 @@ module BindingGenerator =
         : Map<string * string, FidelityCodeGenerator.UnitFacts> =
         let identity = function
             | CppParser.Declaration.Struct s when s.Name <> "" && CppParser.isDefinedRecord s -> Some (("struct", s.Name), declaredShape s)
-            | CppParser.Declaration.Function f -> Some (("function", f.Name), sprintf "%s(%A)" f.ReturnType f.Parameters)
+            | CppParser.Declaration.Function f ->
+                let parameters = f.Parameters |> List.map (fun (paramType, paramName) -> paramType + ":" + paramName) |> String.concat "; "
+                Some (("function", f.Name), $"{f.ReturnType}({parameters})")
             | CppParser.Declaration.Typedef t -> Some (("typedef", t.Name), t.UnderlyingType)
             | _ -> None
         let declared (decls: CppParser.Declaration list) =
@@ -1447,21 +1468,35 @@ module BindingGenerator =
                         let unique = selected |> List.distinct
                         if unique.Length <> 1 then
                             refuse Diagnostics.ContractBindingNotSelectedOnce $"{binding.Name} {contract}: requires exactly one selected native declaration"
-                    let selectedNames = project.Namespaces |> List.collect (fun n -> n.Functions) |> Set.ofList
+                    let selectedFuncs =
+                        project.Namespaces
+                        |> List.collect (fun ns -> PilotAnalyzer.filterDeclarationsForNamespace ns declarations)
+                        |> List.choose (function CppParser.Declaration.Function f -> Some f | _ -> None)
                     let rec markers = function
                         | CodeAST.Generic("CHandle", CodeAST.Named n) when not (Set.contains n (Set.ofList ["unit"; "int"; "float"; "bool"; "string"])) -> [n]
                         | CodeAST.Generic(_, t) -> markers t
                         | CodeAST.FunctionType(args, ret) -> List.collect markers (ret :: args)
                         | _ -> []
-                    let phantomMarkers =
+                    let markerFromType (unit: FidelityCodeGenerator.GenerationContext) (ty: string) =
+                        FidelityCodeGenerator.resolveCType unit.TypedefMap dataModel unit.OpaqueHandles unit.Delegates unit.Enums ty
+                        |> FidelityCodeGenerator.clefTypeOf |> markers
+                    let functionMarkers =
+                        selectedFuncs |> List.collect (fun f ->
+                            let unit = FidelityCodeGenerator.inFunctionUnit { baseCtx with DeclarationUnits = unitTypedefMaps } f
+                            let projection = projections |> List.tryFind (fun b -> b.Name = f.Name)
+                            let handleMarkers =
+                                match projection with
+                                | Some b -> (b.ParameterHandles @ Option.toList b.ReturnHandle) |> List.filter (System.String.IsNullOrWhiteSpace >> not)
+                                | None -> []
+                            handleMarkers @ ((f.ReturnType :: (f.Parameters |> List.map snd)) |> List.collect (markerFromType unit)))
+                    let valueStructNames = project.Options |> Option.map (fun opts -> Set.ofList opts.ValueStructs) |> Option.defaultValue Set.empty
+                    let structFieldMarkers =
                         declarations |> List.collect (function
-                        | CppParser.Declaration.Function f when selectedNames.Contains f.Name ->
-                            (f.ReturnType :: (f.Parameters |> List.map snd)) |> List.collect (fun ty ->
-                                let unit = FidelityCodeGenerator.inFunctionUnit { baseCtx with DeclarationUnits = unitTypedefMaps } f
-                                FidelityCodeGenerator.resolveCType unit.TypedefMap dataModel unit.OpaqueHandles unit.Delegates unit.Enums ty
-                                |> FidelityCodeGenerator.clefTypeOf |> markers)
+                        | CppParser.Declaration.Struct s when valueStructNames.Contains s.Name ->
+                            let unit = FidelityCodeGenerator.inUnitOf "struct" s.Name { baseCtx with DeclarationUnits = unitTypedefMaps }
+                            s.Fields |> List.collect (fun field -> markerFromType unit field.Type)
                         | _ -> [])
-                        |> Set.ofList
+                    let phantomMarkers = Set.ofList (functionMarkers @ structFieldMarkers)
                     { baseCtx with
                         CppClasses =
                             project.CppConfig |> Option.map _.Classes |> Option.defaultValue []
@@ -1581,8 +1616,23 @@ module BindingGenerator =
                         // Declared value structs: the record types and descriptors by-value
                         // claims cite (#162), emitted though no namespace classifies them here.
                         let valueStructs = ctx.ValueStructs |> Set.filter ctx.Structs.ContainsKey
+                        let rec expandNestedRecords (frontier: Set<string>) (visited: Set<string>) =
+                            if Set.isEmpty frontier then visited
+                            else
+                                let next =
+                                    frontier
+                                    |> Set.toList
+                                    |> List.collect (fun name ->
+                                        match ctx.Structs.TryFind name with
+                                        | Some s -> nestedRecords (FidelityCodeGenerator.inUnitOf "struct" s.Name ctx) s
+                                        | None -> [])
+                                    |> Set.ofList
+                                let fresh = Set.difference next visited
+                                expandNestedRecords fresh (Set.union visited fresh)
+                        let seedRecords = Set.unionMany [storageNames; requestedStorage; valueStructs]
+                        let allRecords = expandNestedRecords seedRecords seedRecords
                         let cppClassNames = ctx.CppClasses |> Map.toSeq |> Seq.map fst |> Set.ofSeq
-                        { classified with SharedTypes = Set.unionMany [constants; storageNames; requestedStorage; signalTypes; valueStructs; cppClassNames]; LocalTypes = Map.empty }
+                        { classified with SharedTypes = Set.unionMany [constants; allRecords; signalTypes; cppClassNames]; LocalTypes = Map.empty }
                     else
                         { classified with
                             SharedTypes = Set.unionMany [classified.SharedTypes; storageNames; signalTypes]

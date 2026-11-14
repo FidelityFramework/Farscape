@@ -746,3 +746,427 @@ module TargetLibrarySeamScaffoldingTests =
             |> refusedWithMessage "FS9253" "conflicting DT_SONAME entries"
         finally
             Directory.Delete(work, true)
+
+    let private duckdbPilotLines (outDir: string) =
+        [ "[library]"
+          "name = \"duckdb\""
+          "headers = [\"/usr/include/duckdb.h\"]"
+          "include_paths = [\"/usr/include\"]"
+          "macro_prefixes = [\"DUCKDB_\"]"
+          "[output]"
+          "mode = \"fidelity\""
+          "directory = " + quote outDir
+          "[error_conventions]"
+          "default = \"enum_error_code\""
+          "error_type = \"duckdb_state\""
+          "success_value = \"DuckDBSuccess\""
+          "[error_conventions.overrides]"
+          "duckdb_library_version = \"none\""
+          "duckdb_close = \"none\""
+          "duckdb_disconnect = \"none\""
+          "duckdb_destroy_config = \"none\""
+          "duckdb_destroy_result = \"none\""
+          "duckdb_result_error = \"none\""
+          "duckdb_column_name = \"none\""
+          "duckdb_column_type = \"none\""
+          "duckdb_column_count = \"none\""
+          "duckdb_row_count = \"none\""
+          "duckdb_result_chunk_count = \"none\""
+          "duckdb_result_get_chunk = \"none\""
+          "duckdb_fetch_chunk = \"none\""
+          "duckdb_destroy_data_chunk = \"none\""
+          "duckdb_data_chunk_get_size = \"none\""
+          "duckdb_data_chunk_get_column_count = \"none\""
+          "duckdb_destroy_prepare = \"none\""
+          "duckdb_malloc = \"none\""
+          "duckdb_free = \"none\""
+          "[annotations.nonnull]"
+          "duckdb_free = [0]"
+          "[options]"
+          "c_header_mode = true"
+          "descriptor_only_dependencies = true"
+          "generate_descriptors = true"
+          "link_libraries = true"
+          "abi_critical_structs = [\"typedef duckdb_string_t\", \"struct duckdb_result\"]"
+          "value_structs = [\"duckdb_result\"]"
+          "[[options.bindings]]"
+          "name = \"duckdb_open\""
+          "reference_parameters = [1]"
+          "read_only_buffers = [{ parameter = 0, content = \"text\", extent = { nul_terminated = true }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"duckdb.open.path\", version = \"1.5.6\", source = \"duckdb.h\" } }]"
+          "buffer_absences = [{ parameter = 0, hypothesis = { identity = \"duckdb.open.path.inmemory\", version = \"1.5.6\", source = \"duckdb.h\" } }]"
+          "[[options.bindings]]"
+          "name = \"duckdb_close\""
+          "reference_parameters = [0]"
+          "[[options.bindings]]"
+          "name = \"duckdb_connect\""
+          "reference_parameters = [1]"
+          "[[options.bindings]]"
+          "name = \"duckdb_disconnect\""
+          "reference_parameters = [0]"
+          "[[options.bindings]]"
+          "name = \"duckdb_create_config\""
+          "reference_parameters = [0]"
+          "[[options.bindings]]"
+          "name = \"duckdb_destroy_config\""
+          "reference_parameters = [0]"
+          "[[options.bindings]]"
+          "name = \"duckdb_set_config\""
+          "read_only_buffers = ["
+          "  { parameter = 1, content = \"text\", extent = { nul_terminated = true }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"duckdb.set_config.name\", version = \"1.5.6\", source = \"duckdb.h\" } },"
+          "  { parameter = 2, content = \"text\", extent = { nul_terminated = true }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"duckdb.set_config.option\", version = \"1.5.6\", source = \"duckdb.h\" } }"
+          "]"
+          "[[options.bindings]]"
+          "name = \"duckdb_query\""
+          "reference_parameters = [2]"
+          "read_only_buffers = [{ parameter = 1, content = \"text\", extent = { nul_terminated = true }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"duckdb.query.sql\", version = \"1.5.6\", source = \"duckdb.h\" } }]"
+          "[[options.bindings]]"
+          "name = \"duckdb_destroy_result\""
+          "reference_parameters = [0]"
+          "[[options.bindings]]"
+          "name = \"duckdb_result_error\""
+          "read_only_reference_parameters = [0]"
+          "borrowed_result = { content = \"text\", owner_parameter = 0, extent = { nul_terminated = true }, invalidated_by = [{ binding = \"Fidelity.DuckDb.Database.duckdb_destroy_result\", parameter = 0 }], hypothesis = { identity = \"duckdb.result_error\", version = \"1.5.6\", source = \"duckdb.h\" } }"
+          "[[options.bindings]]"
+          "name = \"duckdb_column_name\""
+          "read_only_reference_parameters = [0]"
+          "borrowed_result = { content = \"text\", owner_parameter = 0, extent = { nul_terminated = true }, invalidated_by = [{ binding = \"Fidelity.DuckDb.Database.duckdb_destroy_result\", parameter = 0 }], hypothesis = { identity = \"duckdb.column_name\", version = \"1.5.6\", source = \"duckdb.h\" } }"
+          "[[options.bindings]]"
+          "name = \"duckdb_column_type\""
+          "read_only_reference_parameters = [0]"
+          "[[options.bindings]]"
+          "name = \"duckdb_column_count\""
+          "read_only_reference_parameters = [0]"
+          "[[options.bindings]]"
+          "name = \"duckdb_row_count\""
+          "read_only_reference_parameters = [0]"
+          "[[options.bindings]]"
+          "name = \"duckdb_prepare\""
+          "reference_parameters = [2]"
+          "read_only_buffers = [{ parameter = 1, content = \"text\", extent = { nul_terminated = true }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"duckdb.prepare.sql\", version = \"1.5.6\", source = \"duckdb.h\" } }]"
+          "[[options.bindings]]"
+          "name = \"duckdb_destroy_prepare\""
+          "reference_parameters = [0]"
+          "[[options.bindings]]"
+          "name = \"duckdb_execute_prepared\""
+          "reference_parameters = [1]"
+          "[[options.bindings]]"
+          "name = \"duckdb_bind_varchar\""
+          "read_only_buffers = [{ parameter = 2, content = \"text\", extent = { nul_terminated = true }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"duckdb.bind_varchar.val\", version = \"1.5.6\", source = \"duckdb.h\" } }]"
+          "[[options.bindings]]"
+          "name = \"duckdb_bind_varchar_length\""
+          "read_only_buffers = [{ parameter = 2, content = \"text\", extent = { count_parameter = 3 }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"duckdb.bind_varchar_length.val\", version = \"1.5.6\", source = \"duckdb.h\" } }]"
+          "[[options.bindings]]"
+          "name = \"duckdb_destroy_data_chunk\""
+          "reference_parameters = [0]"
+          "[[options.bindings]]"
+          "name = \"duckdb_malloc\""
+          "ownership = \"caller_owns\""
+          "resource = { kind = \"owned_nullable_return\", release_binding = \"Fidelity.DuckDb.Database.duckdb_free\", release_parameter = 0, hypothesis = { identity = \"duckdb.malloc.resource\", version = \"1.5.6\", source = \"duckdb.h\" } }"
+          "[[namespace]]"
+          "name = \"Fidelity.DuckDb.Database\""
+          "library = \"duckdb\""
+          "description = \"DuckDB database, query, prepared statement, and chunk API\""
+          "functions = [\"duckdb_library_version\", \"duckdb_open\", \"duckdb_close\", \"duckdb_connect\", \"duckdb_disconnect\", \"duckdb_create_config\", \"duckdb_destroy_config\", \"duckdb_set_config\", \"duckdb_query\", \"duckdb_destroy_result\", \"duckdb_result_error\", \"duckdb_column_name\", \"duckdb_column_type\", \"duckdb_column_count\", \"duckdb_row_count\", \"duckdb_result_chunk_count\", \"duckdb_result_get_chunk\", \"duckdb_fetch_chunk\", \"duckdb_destroy_data_chunk\", \"duckdb_data_chunk_get_size\", \"duckdb_data_chunk_get_column_count\", \"duckdb_prepare\", \"duckdb_destroy_prepare\", \"duckdb_execute_prepared\", \"duckdb_bind_int64\", \"duckdb_bind_varchar\", \"duckdb_bind_varchar_length\", \"duckdb_malloc\", \"duckdb_free\"]" ]
+
+    [<Fact>]
+    let ``DuckDB #198 pilot generates Schema 53 zero-pointer surface and classifies FS91xx/FS92xx refusal gates`` () =
+        let duckdbHeader = "/usr/include/duckdb.h"
+        if not (File.Exists duckdbHeader) then
+            ()
+        else
+            let work = TestHelpers.TestScratch.create "m2-duckdb-pilot"
+            try
+                let refusedWith (expectedCode: string) (expectedFragment: string) = function
+                    | Error (refusal: Diagnostics.Refusal) ->
+                        Assert.Equal<string list>([ expectedCode ], refusal.Diagnostics |> List.map (fun d -> d.Code) |> List.distinct)
+                        Assert.Contains(expectedFragment, refusal.Text, StringComparison.Ordinal)
+                    | Ok _ -> failwithf "expected %s refusal containing '%s', got success" expectedCode expectedFragment
+
+                let outDir = Path.Combine(work, "generated")
+                let pilotPath = Path.Combine(work, "Duckdb.pilot.toml")
+                writeLines pilotPath (duckdbPilotLines outDir)
+
+                ScratchDirectory.within work (fun () -> BindingGenerator.generateFromProjectDiagnosed pilotPath false false Types.LP64)
+                |> accepted |> ignore
+
+                let generatedFiles = readGeneratedTexts outDir
+                Assert.True(generatedFiles.Length >= 3)
+                assertNoRawPointers generatedFiles
+                BindingGenerator.verifyEmittedClefPurity generatedFiles |> accepted |> ignore
+
+                let typesCode = File.ReadAllText(Path.Combine(outDir, "Types.clef"))
+                let databaseCode = File.ReadAllText(Path.Combine(outDir, "Database", "Database.clef"))
+                let fidprojPath = Path.Combine(outDir, "Fidelity.DuckDb.Database.fidproj")
+                Assert.True(File.Exists fidprojPath)
+                let fidprojText = File.ReadAllText(fidprojPath).Replace("\r\n", "\n")
+                Assert.Contains("[link]\nlibraries = [\"duckdb\"]", fidprojText)
+
+                // Every referenced type and nested descriptor in Types.clef is declared (#198 audit).
+                for expectedTypeDecl in
+                    [ "type _duckdb_database = private | Opaque__duckdb_database"
+                      "type _duckdb_connection = private | Opaque__duckdb_connection"
+                      "type _duckdb_data_chunk = private | Opaque__duckdb_data_chunk"
+                      "type duckdb_column = private | Opaque_duckdb_column"
+                      "type duckdb_result = {"
+                      "module duckdb_result ="
+                      "module duckdb_string_t ="
+                      "module duckdb_string_t_value ="
+                      "module duckdb_string_t_value_pointer ="
+                      "module duckdb_string_t_value_inlined =" ] do
+                    Assert.Contains(expectedTypeDecl, typesCode)
+                Assert.DoesNotContain("type duckdb_string_t = {", typesCode)
+                Assert.DoesNotContain("CHandle<duckdb_result>", databaseCode)
+
+                let combined = generatedFiles |> List.map snd |> String.concat "\n"
+                for expectedFragment in
+                    [ "module DuckdbState ="
+                      "| 0 -> \"DuckDBSuccess\""
+                      "Expr<ReadOnlyBufferDescriptor>"
+                      "Expr<BufferAbsenceContract>"
+                      "Expr<BorrowedResultViewDescriptor>"
+                      "Expr<ResourceDescriptor>"
+                      "let duckdb_open (path: option<string>)"
+                      "let duckdb_query (connection: option<CHandle<_duckdb_connection>>) (query: string) (out_result: duckdb_result array) : int ="
+                      "{ Name = \"out_result\"; Type = Named \"duckdb_result\"; PassBy = Reference }"
+                      "let duckdb_execute_prepared (prepared_statement: option<CHandle<_duckdb_prepared_statement>>) (out_result: duckdb_result array) : int ="
+                      "let duckdb_destroy_result (result: duckdb_result array) : unit ="
+                      "let duckdb_result_error (result: duckdb_result array) : option<ReadOnlyView<byte>> ="
+                      "{ Name = \"result\"; Type = Named \"duckdb_result\"; PassBy = ReadOnlyReference }"
+                      "let duckdb_column_name (result: duckdb_result array) (col: int) : option<ReadOnlyView<byte>> ="
+                      "let duckdb_column_type (result: duckdb_result array) (col: int) : int ="
+                      "let duckdb_column_count (result: duckdb_result array) : int ="
+                      "let duckdb_row_count (result: duckdb_result array) : int ="
+                      "let duckdb_free (ptr: CHandle<unit>) : unit ="
+                      "let duckdb_fetch_chunk (result: duckdb_result) : option<CHandle<_duckdb_data_chunk>> =" ] do
+                    Assert.Contains(expectedFragment, combined)
+
+                // Gate 1 (FS9119, duckdb.h:831-838,6671,6496): by-value struct & reference parameters refuse unless listed in options.value_structs.
+                let missingValueStructsPilot = Path.Combine(work, "DuckdbMissingValueStructs.pilot.toml")
+                File.ReadAllText(pilotPath).Replace("value_structs = [\"duckdb_result\"]", "")
+                |> writeUtf8 missingValueStructsPilot
+                ScratchDirectory.within work (fun () -> BindingGenerator.generateFromProjectDiagnosed missingValueStructsPilot false false Types.LP64)
+                |> refusedWith "FS9119" "value_structs"
+
+                // Gate 2 (FS9146, duckdb.h:1951): unannotated callback-taking DuckDB APIs require explicit nonnull/absence evidence.
+                let unannotatedCallbackOut = Path.Combine(work, "gen-cb-unannotated")
+                let unannotatedCallbackPilot = Path.Combine(work, "DuckdbUnannotatedCallback.pilot.toml")
+                writeLines unannotatedCallbackPilot
+                    [ "[library]"
+                      "name = \"duckdb\""
+                      "headers = [\"/usr/include/duckdb.h\"]"
+                      "include_paths = [\"/usr/include\"]"
+                      "[output]"
+                      "mode = \"fidelity\""
+                      "directory = " + quote unannotatedCallbackOut
+                      "[options]"
+                      "c_header_mode = true"
+                      "[[namespace]]"
+                      "name = \"Fidelity.DuckDb.Callbacks\""
+                      "library = \"duckdb\""
+                      "description = \"DuckDB unannotated callback gate\""
+                      "functions = [\"duckdb_aggregate_function_set_functions\"]" ]
+                ScratchDirectory.within work (fun () -> BindingGenerator.generateFromProjectDiagnosed unannotatedCallbackPilot false false Types.LP64)
+                |> refusedWith "FS9146" "native function-pointer parameter requires explicit nonnull evidence"
+
+                // Gate 3 (FS9144, duckdb.h:7290,7210): scalar callback entry taking duckdb_function_info / void* refuses outside admitted profile.
+                for fnName, paramOrd, expectedTypeFragment in
+                    [ "duckdb_scalar_function_set_function", 1, "duckdb_function_info"
+                      "duckdb_scalar_function_set_extra_info", 2, "void *" ] do
+                    let cbOut = Path.Combine(work, "gen-" + fnName)
+                    let cbPilot = Path.Combine(work, fnName + ".pilot.toml")
+                    writeLines cbPilot
+                        [ "[library]"
+                          "name = \"duckdb\""
+                          "headers = [\"/usr/include/duckdb.h\"]"
+                          "include_paths = [\"/usr/include\"]"
+                          "[output]"
+                          "mode = \"fidelity\""
+                          "directory = " + quote cbOut
+                          "[options]"
+                          "c_header_mode = true"
+                          "[[options.bindings]]"
+                          "name = " + quote fnName
+                          $"nonnull_callbacks = [{paramOrd}]"
+                          $"callback_invocations = [{{ parameter = {paramOrd}, identity = \"duckdb.{fnName}\", version = \"1.5.6\", source = \"duckdb.h\", scope = \"during_call\" }}]"
+                          "[[namespace]]"
+                          "name = \"Fidelity.DuckDb.Callbacks\""
+                          "library = \"duckdb\""
+                          "description = \"DuckDB callback entry gate\""
+                          "functions = [" + quote fnName + "]" ]
+                    ScratchDirectory.within work (fun () -> BindingGenerator.generateFromProjectDiagnosed cbPilot false false Types.LP64)
+                    |> refusedWith "FS9144" expectedTypeFragment
+
+                // Gate 4 (FS9154, duckdb.h:4393): pointer-to-handle release duckdb_destroy_data_chunk(duckdb_data_chunk*) does not match unary CHandle Value release.
+                let ptrReleasePilot = Path.Combine(work, "DuckdbPtrToHandleRelease.pilot.toml")
+                File.ReadAllText(pilotPath).Replace(
+                    "[[namespace]]",
+                    "[[options.bindings]]\nname = \"duckdb_fetch_chunk\"\nownership = \"caller_owns\"\nresource = { kind = \"owned_nullable_return\", release_binding = \"Fidelity.DuckDb.Database.duckdb_destroy_data_chunk\", release_parameter = 0, hypothesis = { identity = \"duckdb.fetch_chunk.resource\", version = \"1.5.6\", source = \"duckdb.h\" } }\n\n[[namespace]]")
+                |> writeUtf8 ptrReleasePilot
+                ScratchDirectory.within work (fun () -> BindingGenerator.generateFromProjectDiagnosed ptrReleasePilot false false Types.LP64)
+                |> refusedWith "FS9154" "unary matching CHandle Value parameter 0"
+
+                // Gate 5 (FS9231): emitted Clef purity guard rejects raw nativeptr leakage.
+                let (_, firstClef) = generatedFiles.Head
+                BindingGenerator.verifyEmittedClefPurity [ "ImpureDuckdb.clef", firstClef + "\nlet leaked (p: nativeptr<byte>) : unit = ()\n" ]
+                |> refusedWith "FS9231" "nativeptr"
+
+                // Gate 6 (FS9183, duckdb.h:126-138,6796): duckdb_string_t contains anonymous union duckdb_string_t_value and is refused as a Clef value_structs record.
+                let stringValueStructOut = Path.Combine(work, "gen-string-value-struct")
+                let stringValueStructPilot = Path.Combine(work, "DuckdbStringValueStruct.pilot.toml")
+                writeLines stringValueStructPilot
+                    [ "[library]"
+                      "name = \"duckdb\""
+                      "headers = [\"/usr/include/duckdb.h\"]"
+                      "include_paths = [\"/usr/include\"]"
+                      "[output]"
+                      "mode = \"fidelity\""
+                      "directory = " + quote stringValueStructOut
+                      "[options]"
+                      "c_header_mode = true"
+                      "abi_critical_structs = [\"typedef duckdb_string_t\"]"
+                      "value_structs = [\"duckdb_string_t\"]"
+                      "[[namespace]]"
+                      "name = \"Fidelity.DuckDb.Strings\""
+                      "library = \"duckdb\""
+                      "description = \"DuckDB string_t value_structs union gate\""
+                      "functions = [\"duckdb_string_is_inlined\"]" ]
+                ScratchDirectory.within work (fun () -> BindingGenerator.generateFromProjectDiagnosed stringValueStructPilot false false Types.LP64)
+                |> refusedWith "FS9183" "duckdb_string_t_value"
+            finally
+                Directory.Delete(work, true)
+
+    [<Fact>]
+    let ``structural boundary and shape formatters emit deterministic non-reflection text without %A`` () =
+        let work = TestHelpers.TestScratch.create "structural-formatters"
+        try
+            let headerA = Path.Combine(work, "probe_a.h")
+            let headerB = Path.Combine(work, "probe_b.h")
+            let headerC = Path.Combine(work, "probe_c.h")
+            File.WriteAllText(headerA,
+                "typedef unsigned int u32_aligned __attribute__((aligned(8)));\nstruct ProbeRec { int : 3; int flags : 5; u32_aligned single_val; unsigned int items[4]; };\nint probe_call(int fd, const char *buf, int len);\n")
+            File.WriteAllText(headerB,
+                "typedef unsigned int u32_aligned __attribute__((aligned(8)));\nstruct ProbeRec { int : 3; int flags : 5; u32_aligned single_val; unsigned int items[4]; };\nint probe_call(int fd, const char *buf, int len);\n")
+            File.WriteAllText(headerC,
+                "typedef unsigned int u32_aligned __attribute__((aligned(16)));\nstruct ProbeRec { int : 3; int flags : 6; u32_aligned single_val; unsigned int items[5]; };\nint probe_call(int fd, char *buf, int len);\n")
+            let parseH path =
+                match CppParser.parseHeader { HeaderFile = path; IncludePaths = [ work ]; SystemIncludePaths = []; Defines = []; Verbose = false; IncludeMacros = false; MacroPrefixes = []; IncludeRoot = None; CppMode = false } with
+                | Ok decls -> decls
+                | Error err -> failwith err
+            let declsA = parseH headerA
+            let declsB = parseH headerB
+            let declsC = parseH headerC
+            let unitMap = BindingGenerator.unitTypedefMaps (Map.ofList [ headerA, declsA; headerB, declsB ]) declsA [ headerA, declsA; headerB, declsB ] []
+            Assert.True(unitMap.ContainsKey(("struct", "ProbeRec")), "unitTypedefMaps should match ProbeRec declared shape structurally")
+            Assert.True(unitMap.ContainsKey(("function", "probe_call")), "unitTypedefMaps should match probe_call signature structurally")
+            // Non-identical shapes (bitfield width, array length, alignment, parameter constness) must not collapse.
+            Assert.True(Result.isError (BindingGenerator.agreeRecords [ headerA, declsA; headerC, declsC ]), "agreeRecords must refuse structurally different ProbeRec in headerC")
+            let unitMapSelectC = BindingGenerator.unitTypedefMaps (Map.ofList [ headerA, declsA; headerC, declsC ]) declsC [ headerA, declsA; headerC, declsC ] []
+            Assert.True((unitMapSelectC[("struct", "ProbeRec")].TypedefInfos["u32_aligned"].Attributes |> List.exists (fun a -> a.Args = [16])), "unitTypedefMaps must resolve ProbeRec to headerC rather than collapsing with headerA")
+
+            let source = Path.Combine(work, "Probe.clef")
+            let sourceText =
+                "module FormatterProbe\n"
+                + "[<FidelityExtern(\"probe_lib\", \"probe_call\")>]\n"
+                + "let probe_call (fd: int) (buf: string) (len: int) : int = NativeDefault.zeroed ()\n"
+            writeUtf8 source sourceText
+            let fidproj = Path.Combine(work, "FormatterProbe.fidproj")
+            writeLines fidproj
+                [ "[package]"
+                  "name = \"FormatterProbe\""
+                  "version = \"0.1.0\""
+                  "[build]"
+                  "sources = [\"Probe.clef\"]"
+                  "[platform]"
+                  "os = \"linux\""
+                  "arch = \"x86_64\""
+                  "[link]"
+                  "libraries = [\"probe_lib\"]" ]
+            let pilotPath = Path.Combine(work, "FormatterProbe.pilot.toml")
+            writeLines pilotPath
+                [ "[library]"
+                  "name = \"probe_lib\""
+                  "headers = [" + quote headerA + "]"
+                  "include_paths = [" + quote work + "]"
+                  "[output]"
+                  "mode = \"fidelity\""
+                  "directory = \"generated\""
+                  "[error_conventions]"
+                  "default = \"enum_error_code\""
+                  "error_type = \"int\""
+                  "success_value = \"0\""
+                  "[error_conventions.overrides]"
+                  "probe_call = \"return_code\""
+                  "[annotations.nonnull]"
+                  "probe_call = [1]"
+                  "[options]"
+                  "c_header_mode = true"
+                  "generate_descriptors = false"
+                  "value_structs = [\"ProbeRec\"]"
+                  "abi_critical_structs = [\"ProbeRec\"]"
+                  "[[options.bindings]]"
+                  "name = \"probe_call\""
+                  "ownership = \"borrowed\""
+                  "read_only_buffers = [{ parameter = 1, content = \"text\", extent = { count_parameter = 2 }, retention = { kind = \"during_call\" }, hypothesis = { identity = \"probe.buf\", version = \"1\", source = \"probe_a.h\" } }]"
+                  "[[namespace]]"
+                  "name = \"FormatterProbe\""
+                  "library = \"probe_lib\""
+                  "description = \"Formatter test\""
+                  "functions = [\"probe_call\"]" ]
+            let evidence =
+                SubstantiationBoundary.evaluate
+                    { FidprojPath = fidproj
+                      PackageName = "FormatterProbe"
+                      LinkLibraries = [| "probe_lib" |]
+                      LinkObjects = [||]
+                      PilotPath = Some pilotPath
+                      LinkProvenancePath = None
+                      Sources = [| source, sourceText |]
+                      WorkDirectory = work }
+                |> accepted
+            let contractHyp = evidence.RestsOn |> Array.find (fun h -> h.Family = "H-Contract")
+            Assert.Contains("error default=EnumErrorCode(int, 0, None, None); selected overrides={probe_call=ReturnCode}", contractHyp.Statement, StringComparison.Ordinal)
+            Assert.Contains("probe_call ownership=Borrowed", contractHyp.Statement, StringComparison.Ordinal)
+            Assert.Contains("extent=ExplicitCount(2); content=Text; retention=DuringCall", contractHyp.Statement, StringComparison.Ordinal)
+            Assert.Contains("nonnull parameters={probe_call:[1]}", contractHyp.Statement, StringComparison.Ordinal)
+            Assert.DoesNotContain("Some ", contractHyp.Statement, StringComparison.Ordinal)
+        finally
+            Directory.Delete(work, true)
+
+    [<Fact>]
+    let ``nested value_structs child records emit before enclosing parent records in Types.clef`` () =
+        let work = TestHelpers.TestScratch.create "nested-value-struct-order"
+        try
+            let header = Path.Combine(work, "nested.h")
+            File.WriteAllText(header,
+                "struct Outer { struct { int x; } inner; };\nstruct Outer take_outer(struct Outer value);\n")
+            let outDir = Path.Combine(work, "generated")
+            let pilotPath = Path.Combine(work, "Nested.pilot.toml")
+            writeLines pilotPath
+                [ "[library]"
+                  "name = \"nested\""
+                  "headers = [" + quote header + "]"
+                  "include_paths = [" + quote work + "]"
+                  "[output]"
+                  "mode = \"fidelity\""
+                  "directory = " + quote outDir
+                  "[options]"
+                  "c_header_mode = true"
+                  "descriptor_only_dependencies = true"
+                  "abi_critical_structs = [\"struct Outer\"]"
+                  "value_structs = [\"Outer\", \"Outer_inner\"]"
+                  "[[namespace]]"
+                  "name = \"Fidelity.Nested.Test\""
+                  "library = \"nested\""
+                  "description = \"Nested value struct ordering\""
+                  "functions = [\"take_outer\"]" ]
+            ScratchDirectory.within work (fun () -> BindingGenerator.generateFromProjectDiagnosed pilotPath false false Types.LP64)
+            |> accepted |> ignore
+            let typesCode = File.ReadAllText(Path.Combine(outDir, "Types.clef"))
+            let childRecordIdx = typesCode.IndexOf("type Outer_inner = {", StringComparison.Ordinal)
+            let childModuleIdx = typesCode.IndexOf("module Outer_inner =", StringComparison.Ordinal)
+            let parentRecordIdx = typesCode.IndexOf("type Outer = {", StringComparison.Ordinal)
+            Assert.True(childRecordIdx >= 0, "Types.clef must emit child record type Outer_inner")
+            Assert.True(childModuleIdx > childRecordIdx, "Types.clef must emit module Outer_inner")
+            Assert.True(parentRecordIdx > childModuleIdx, "Types.clef must emit Outer_inner record and Descriptor before type Outer =")
+        finally
+            Directory.Delete(work, true)
