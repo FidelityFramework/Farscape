@@ -21,7 +21,7 @@ let private quoted values = values |> List.map quote |> String.concat ", "
 
 let private accepted = function
     | Ok value -> value
-    | Error (refusal: Diagnostics.Refusal) -> failwithf "%s\n%A" refusal.Text refusal.Diagnostics
+    | Error (refusal: Diagnostics.Refusal) -> failwith refusal.Text
 
 let private withScratch label body =
     let work = TestHelpers.TestScratch.create ("libc-native-" + label)
@@ -176,7 +176,7 @@ let private substantiate fx =
 
 let private readReceipt = function
     | Ok value -> value
-    | Error reason -> failwithf "Discharge receipt refused: %A" reason
+    | Error reason -> failwith ("Discharge receipt refused: " + string reason)
 
 let private censusWithReceipt checkPremises (expectedReceiptOpt: (string * string) option) artifacts =
     let at name = requiredFile name (Path.Combine(artifacts, name))
@@ -273,7 +273,7 @@ let private verifyCompiledProbeProofs (sources: string list) (harness: string) (
               |> Array.map (fun dir -> Path.Combine(dir, "artifact-receipt.json"))
               |> Array.filter File.Exists with
         | [| single |] -> single
-        | found -> failwithf "Expected exactly one %s*/artifact-receipt.json alongside %s, found %A" prefix binary found
+        | found -> failwithf "Expected exactly one %s*/artifact-receipt.json alongside %s, found [%s]" prefix binary (String.concat "; " found)
     let intermediates = Path.Combine(probeDir, "targets", "intermediates")
     let summary = SubstantiationProof.evaluate (Array.ofList sources) harness intermediates |> accepted
     Assert.Equal(summary.TotalObligations, summary.DischargedUnsatCount)
@@ -673,7 +673,7 @@ let ``45 46 real libc multi-contract seams census and dossier reconcile with mal
             verifyCompiledProbeProofs fx.Sources probeEntryFor[retained.CheckId] retained.BinaryPath
         let callbackBinary = generated.Ledger.RetainedBinaries |> Array.find (fun item -> item.CheckId = "callback")
         let callbackWork = Path.GetDirectoryName callbackBinary.BinaryPath
-        inspectBinary callbackWork callbackBinary.BinaryPath [ "exit"; "_exit"; "atexit" ] |> ignore
+        inspectBinary callbackWork callbackBinary.BinaryPath [ "exit"; "_exit" ] |> ignore
         let callbackElf = SubstantiationSeams.inspectElfExecutable callbackBinary.BinaryPath |> accepted
         Assert.True(callbackElf.DefinedSymtab.Contains "atexit" || callbackElf.UndefinedDynsym.Contains "atexit",
                     "atexit must resolve either as a glibc nonshared wrapper or as a dynamic import")

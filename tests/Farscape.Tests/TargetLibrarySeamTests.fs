@@ -1456,7 +1456,7 @@ module TargetLibrarySeamScaffoldingTests =
                 match System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture with
                 | System.Runtime.InteropServices.Architecture.X64 -> "--target=x86_64-unknown-linux-gnu"
                 | System.Runtime.InteropServices.Architecture.Arm64 -> "--target=aarch64-unknown-linux-gnu"
-                | arch -> failwithf "Unsupported architecture for LTO target triple check: %A" arch
+                | arch -> failwith ("Unsupported architecture for LTO target triple check: " + string arch)
 
             run work "cc-used-lto" (ClangToolchain.startInfo [ ltoTargetFlag; "-O2"; "-flto"; "-DSQLITE_STATIC_LTO"; "-c"; usedC; "-o"; usedObj ]) |> ignore
             run work "ar-sqlite3" (ClangToolchain.arStartInfo [ "rcs"; archivePath; usedObj ]) |> ignore
@@ -1509,7 +1509,7 @@ module TargetLibrarySeamScaffoldingTests =
             let provenance =
                 match Directory.GetFiles(Path.Combine(work, "generated"), "*.link-provenance.toml", SearchOption.AllDirectories) with
                 | [| path |] -> path
-                | paths -> failwithf "expected one generated link provenance manifest, got %A" paths
+                | paths -> failwithf "expected one generated link provenance manifest, got [%s]" (String.concat "; " paths)
             let generatedSources =
                 [ Path.Combine(work, "generated", "Types.clef")
                   Path.Combine(work, "generated", "ReturnCode.clef")
