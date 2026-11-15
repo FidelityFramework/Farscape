@@ -289,13 +289,13 @@ module GeneratorDispatch =
             let generate () = FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts
             if invalid then
                 let expected = $"Struct '{name}' field '{field}' has byte extent {extent} at measured offset {offset}, ending at byte {ending} beyond the record size {size / 8}; a measured layout consistent with its field representation is required."
-                let error = Assert.Throws<System.InvalidOperationException>(fun () -> generate () |> ignore)
+                let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> generate () |> ignore)
                 Assert.Equal(expected, error.Message)
                 if scenario < 2 then
                     let record = declarations |> List.pick (function CppParser.Declaration.Struct s when s.Name = name -> Some s | _ -> None)
                     let source = attributeLayoutSource [record] layouts
                     DescriptorGenerator.layoutOf source 0 record |> ignore
-                    let direct = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source record |> ignore)
+                    let direct = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.structDecls source record |> ignore)
                     Assert.Equal(expected, direct.Message)
             else
                 if scenario <> 2 then Assert.Equal(measured.[name], layouts.[name])
@@ -349,7 +349,7 @@ module GeneratorDispatch =
             match expected with
             | Some reason ->
                 for run in [emit; generate] do
-                    let error = Assert.Throws<System.InvalidOperationException>(fun () -> run () |> ignore)
+                    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> run () |> ignore)
                     Assert.Equal(reason, error.Message)
             | None ->
                 for run in [emit; generate] do
@@ -369,7 +369,7 @@ module GeneratorDispatch =
             | _ -> [{ mkField "values" "int[2]" with IsArray = true; ArraySize = Some 1073741824 }], 64, [0], "Struct 'Probe' field 'values' extent has byte quantity 4294967296 outside the supported descriptor range 0..2147483647; a wider descriptor representation contract is required."
         let record = mkStruct "Probe" fields None
         let source = attributeLayoutSource [record] (Map.ofList ["Probe", mkLayout "Probe" size 32 offsets])
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source record |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.structDecls source record |> ignore)
         Assert.Equal(reason, error.Message)
 
     [<Theory>]
@@ -379,7 +379,7 @@ module GeneratorDispatch =
         withLayoutHeader "union Value { int first; int second; }; struct Probe { int payload; };" ["Probe"] (fun declarations _ ->
             let record = declarations |> List.pick (function CppParser.Declaration.Struct s when s.Name = "Value" -> Some s | _ -> None)
             let layouts = Map.ofList ["Value", mkLayout "Value" size 32 [0; 0]]
-            let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate [CppParser.Declaration.Struct record] "Test" "test" Types.LP64 layouts |> ignore)
+            let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate [CppParser.Declaration.Struct record] "Test" "test" Types.LP64 layouts |> ignore)
             Assert.Equal(expected, error.Message))
 
     [<Theory>]
@@ -401,7 +401,7 @@ module GeneratorDispatch =
             for emit in [ (fun () -> DescriptorGenerator.layoutOf source 0 record |> ignore)
                           (fun () -> DescriptorGenerator.structDecls source record |> ignore)
                           (fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts |> ignore) ] do
-                let error = Assert.Throws<System.InvalidOperationException>(fun () -> emit ())
+                let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> emit ())
                 Assert.Equal(expected, error.Message))
 
     [<Theory>]
@@ -433,7 +433,7 @@ module GeneratorDispatch =
                 Assert.DoesNotContain("let firstOffset", output)
                 Assert.DoesNotContain("let secondOffset", output)
             else
-                let error = Assert.Throws<System.InvalidOperationException>(fun () -> generate () |> ignore)
+                let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> generate () |> ignore)
                 Assert.Equal($"Measured layout 'Value' has size {sizeBits} bits, which is not whole bytes; a supported bit-precise descriptor representation is required.", error.Message))
 
     [<Theory>]
@@ -455,7 +455,7 @@ module GeneratorDispatch =
                 Assert.Equal(4, alignment)
                 Assert.Equal(TypeMapper.Measured, stratum)
             if invalidChild then
-                let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source outer |> ignore)
+                let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.structDecls source outer |> ignore)
                 Assert.Equal("Measured layout 'P' size has byte quantity -1 outside the supported descriptor range 0..2147483647; a wider descriptor representation contract is required.", error.Message)
             else
                 let output = DescriptorGenerator.structDecls source outer |> fun decls -> CodeRenderer.render (Module("Test", "test", decls))
@@ -480,7 +480,7 @@ module GeneratorDispatch =
         let record = mkStruct "Holder" fields None
         let layouts = Map.ofList ["Holder", mkLayout "Holder" size 32 offsets]
         let source = attributeLayoutSource [record] layouts
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 0 record |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.layoutOf source 0 record |> ignore)
         Assert.Equal(expected, error.Message)
 
     [<Fact>]
@@ -539,7 +539,7 @@ module GeneratorDispatch =
                 for emit in [ (fun () -> DescriptorGenerator.layoutOf source 0 record |> ignore)
                               (fun () -> DescriptorGenerator.structDecls source record |> ignore)
                               (fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore) ] do
-                    let error = Assert.Throws<System.InvalidOperationException>(fun () -> emit ())
+                    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> emit ())
                     Assert.Equal(expected, error.Message))
 
     [<Theory>]
@@ -560,7 +560,7 @@ module GeneratorDispatch =
             DescriptorGenerator.structDecls source ordinary |> ignore
             let output = FidelityCodeGenerator.generate [CppParser.Declaration.Struct ordinary] "Test" "test" Types.LP64 measurements
             Assert.Contains("let payloadOffset : int = 4", output)
-            let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore)
+            let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore)
             Assert.Equal("Struct 'P' carries layout attribute 'PackedAttr' that natural alignment cannot represent; a measured layout is required.", error.Message))
 
     [<Fact>]
@@ -568,7 +568,7 @@ module GeneratorDispatch =
         withLayoutHeader "typedef struct __attribute__((packed)) { char lead; int payload; } AnonPacked; struct Ordinary { int value; };" ["Ordinary"] (fun declarations _ ->
             let record = declarations |> List.pick (function CppParser.Declaration.Struct s when s.Name = "AnonPacked" -> Some s | _ -> None)
             Assert.Equal("PackedAttr", Assert.Single(record.Attributes).Kind)
-            let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore)
+            let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore)
             Assert.Equal("Struct 'AnonPacked' carries layout attribute 'PackedAttr' that natural alignment cannot represent; a measured layout is required.", error.Message))
 
     [<Theory>]
@@ -593,7 +593,7 @@ module GeneratorDispatch =
             let output = DescriptorGenerator.structDecls source outer |> fun decls -> CodeRenderer.render (Module("Test", "test", decls))
             Assert.Contains("Repr = Repr.U8; Count = 5", output)
         else
-            let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source outer |> ignore)
+            let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.structDecls source outer |> ignore)
             Assert.Equal("Struct 'P' carries layout attribute 'PackedAttr' that natural alignment cannot represent; a measured layout is required.", error.Message)
 
     [<Theory>]
@@ -610,14 +610,14 @@ module GeneratorDispatch =
             | _ -> {mkField "payload" "int" with IsArray = true; ArraySize = None}, "Struct 'P' field 'payload' is a flexible array member with no declared count source; an options.flexible_arrays entry naming its count field and count rule is required."
         let record = {mkStruct "P" [mkField "lead" "char"; field] None with Attributes = [mkAttr "PackedAttr" [] None]}
         let source = attributeLayoutSource [record] Map.empty
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 0 record |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.layoutOf source 0 record |> ignore)
         Assert.Equal(expected, error.Message)
 
     [<Fact>]
     let ``layout attribute refusal precedes the declared nesting limit`` () =
         let record = {mkStruct "P" [mkField "self" "struct P"] None with Attributes = [mkAttr "PackedAttr" [] None]}
         let source = attributeLayoutSource [record] Map.empty
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 16 record |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.layoutOf source 16 record |> ignore)
         Assert.Equal("Struct 'P' carries layout attribute 'PackedAttr' that natural alignment cannot represent; a measured layout is required.", error.Message)
 
     [<Theory>]
@@ -630,7 +630,7 @@ module GeneratorDispatch =
         if measured then
             DescriptorGenerator.structDecls source record |> ignore
         else
-            let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source record |> ignore)
+            let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.structDecls source record |> ignore)
             Assert.Equal("Struct 'P' field 'payload' carries attribute 'FutureAttr' with unclassified layout effect; a measured layout or a classified attribute contract is required.", error.Message)
 
     [<Fact>]
@@ -638,7 +638,7 @@ module GeneratorDispatch =
         let field = {mkField "payload" "int" with Attributes = [mkAttr "AlignedAttr" [16] None]}
         let record = {mkStruct "P" [field] None with Attributes = [mkAttr "PackedAttr" [] None]}
         let source = attributeLayoutSource [record] Map.empty
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 0 record |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.layoutOf source 0 record |> ignore)
         Assert.Equal("Struct 'P' carries layout attribute 'PackedAttr' that natural alignment cannot represent; a measured layout is required.", error.Message)
 
     [<Fact>]
@@ -661,7 +661,7 @@ module GeneratorDispatch =
     let ``generate refuses measured layouts with missing or extra field offsets`` count =
         let decls = [CppParser.Declaration.Struct (mkStruct "Point" [mkField "x" "int"; mkField "y" "int"] None)]
         let layouts = Map.ofList ["Point", mkLayout "Point" 64 32 (List.replicate count 0)]
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 layouts |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 layouts |> ignore)
         Assert.Equal($"Measured layout 'Point' has {count} field offsets for 2 fields.", error.Message)
 
     [<Fact>]
@@ -672,7 +672,7 @@ module GeneratorDispatch =
         Assert.Contains("let StorageOffset : int = 0", output)
         Assert.DoesNotContain("let aOffset", output)
         let malformed = Map.ofList ["Value", mkLayout "Value" 32 32 [0]]
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate [CppParser.Declaration.Struct union] "Test" "test" Types.LP64 malformed |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate [CppParser.Declaration.Struct union] "Test" "test" Types.LP64 malformed |> ignore)
         Assert.Equal("Measured layout 'Value' has 1 field offsets for 2 fields.", error.Message)
 
     [<Fact>]
@@ -710,7 +710,7 @@ module GeneratorDispatch =
         let fields = [mkBitField "ready" "unsigned int" (fst widths); mkBitField "mode" "unsigned int" (snd widths)]
         let decls = [CppParser.Declaration.Struct (mkStruct "Flags" fields None)]
         let layouts = if measured then Map.ofList ["Flags", mkLayout "Flags" 32 32 [0; secondOffset]] else Map.empty
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 layouts |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 layouts |> ignore)
         Assert.Equal("Struct 'Flags' field 'ready' is a bitfield; a supported bit-precise descriptor representation is required.", error.Message)
 
     [<Fact>]
@@ -740,13 +740,13 @@ module GeneratorDispatch =
     let ``unflagged field with a measured bit offset is refused instead of truncated`` () =
         let decls = [CppParser.Declaration.Struct (mkStruct "Flags" [mkField "ready" "unsigned int"; mkField "mode" "unsigned int"] None)]
         let layouts = Map.ofList ["Flags", mkLayout "Flags" 32 32 [0; 1]]
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 layouts |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate decls "Test" "test" Types.LP64 layouts |> ignore)
         Assert.Equal("Struct 'Flags' field 'mode' has measured bit offset 1, which is not byte-aligned; a supported bit-precise descriptor representation is required.", error.Message)
 
     [<Fact>]
     let ``unmeasured bitfield union is refused without an opaque storage measurement`` () =
         let union = {mkStruct "Bits" [mkBitField "flag" "unsigned int" 1; mkField "word" "unsigned int"] None with IsUnion = true}
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate [CppParser.Declaration.Struct union] "Test" "test" Types.LP64 Map.empty |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate [CppParser.Declaration.Struct union] "Test" "test" Types.LP64 Map.empty |> ignore)
         Assert.Equal("Struct 'Bits' field 'flag' is a bitfield; a supported bit-precise descriptor representation is required.", error.Message)
 
     [<Fact>]
@@ -766,14 +766,14 @@ module GeneratorDispatch =
     let ``unknown field representation is refused with its struct field and type`` measured cType unresolved =
         let holder = mkStruct "Holder" [mkField "payload" cType; mkField "tail" "int"] None
         let layouts = if measured then Map.ofList ["Holder", mkLayout "Holder" 96 32 [0; 64]] else Map.empty
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate [CppParser.Declaration.Struct holder] "Test" "test" Types.LP64 layouts |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate [CppParser.Declaration.Struct holder] "Test" "test" Types.LP64 layouts |> ignore)
         Assert.Equal($"Struct 'Holder' field 'payload' has no known representation for type '{unresolved}'; a complete C representation contract is required.", error.Message)
 
     [<Fact>]
     let ``unknown field in the middle refuses before returning a descriptor`` () =
         let holder = mkStruct "Holder" [mkField "head" "int"; mkField "payload" "struct Mystery"; mkField "tail" "int"] None
         let layouts = Map.ofList ["Holder", mkLayout "Holder" 128 32 [0; 32; 96]]
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate [CppParser.Declaration.Struct holder] "Test" "test" Types.LP64 layouts |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate [CppParser.Declaration.Struct holder] "Test" "test" Types.LP64 layouts |> ignore)
         Assert.Equal("Struct 'Holder' field 'payload' has no known representation for type 'Mystery'; a complete C representation contract is required.", error.Message)
 
     [<Theory>]
@@ -812,7 +812,7 @@ module GeneratorDispatch =
             Assert.Contains("Repr = Repr.U8; Count = 8", output)
             Assert.DoesNotContain("let payloadOffset", output)
         else
-            let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore)
+            let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore)
             Assert.Equal("Struct 'Variant' field 'payload' has no known representation for type 'mystery_t'; a complete C representation contract is required.", error.Message)
 
     [<Theory>]
@@ -826,7 +826,7 @@ module GeneratorDispatch =
               Model = Types.LP64
               FlexibleArrays = Map.empty
               Shape = fun _ -> DescriptorGenerator.StructField "Missing" }
-        let error = Assert.Throws<System.InvalidOperationException>(fun () ->
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () ->
             if measured then DescriptorGenerator.structDecls source holder |> ignore
             else DescriptorGenerator.layoutOf source 0 holder |> ignore)
         Assert.Equal("Struct 'Holder' field 'payload' has nested record type 'Missing' with no available declaration; a complete C representation contract is required.", error.Message)
@@ -839,7 +839,7 @@ module GeneratorDispatch =
         let holder = mkStruct "Holder" [mkField "payload" "struct Empty"; mkField "tail" "int"] None
         let layouts = if measured then Map.ofList ["Empty", mkLayout "Empty" 0 8 []; "Holder", mkLayout "Holder" 32 32 [0; 0]] else Map.empty
         let declarations = [CppParser.Declaration.Struct empty; CppParser.Declaration.Struct holder]
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts |> ignore)
         Assert.Equal("Struct 'Holder' field 'payload' has fieldless nested record type 'Empty'; a supported empty or opaque record representation contract is required.", error.Message)
 
     [<Fact>]
@@ -852,7 +852,7 @@ module GeneratorDispatch =
               Model = Types.LP64
               FlexibleArrays = Map.empty
               Shape = fun _ -> DescriptorGenerator.StructField "Empty" }
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source holder |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.structDecls source holder |> ignore)
         Assert.Equal("Struct 'Holder' field 'payload' has fieldless nested record type 'Empty'; a supported empty or opaque record representation contract is required.", error.Message)
 
     [<Fact>]
@@ -861,7 +861,7 @@ module GeneratorDispatch =
         let holder = mkStruct "Holder" [mkField "head" "int"; mkField "payload" "Empty"; mkField "tail" "int"] None
         let declarations = [CppParser.Declaration.Struct empty; CppParser.Declaration.Struct holder]
         let layouts = Map.ofList ["Empty", mkLayout "Empty" 0 8 []; "Holder", mkLayout "Holder" 64 32 [0; 32; 32]]
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts |> ignore)
         Assert.Equal("Struct 'Holder' field 'payload' has fieldless nested record type 'Empty'; a supported empty or opaque record representation contract is required.", error.Message)
 
     [<Theory>]
@@ -874,7 +874,7 @@ module GeneratorDispatch =
         let declarations = [CppParser.Declaration.Struct outer; CppParser.Declaration.Struct middle; CppParser.Declaration.Struct empty]
         // Positive outer storage reaches the intended nested representation refusal.
         let layouts = if measured then Map.ofList ["Empty", mkLayout "Empty" 0 8 []; "Mid", mkLayout "Mid" 0 8 [0]; "Outer", mkLayout "Outer" 8 8 [0]] else Map.empty
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts |> ignore)
         Assert.Equal("Struct 'Mid' field 'e' has fieldless nested record type 'Empty'; a supported empty or opaque record representation contract is required.", error.Message)
 
     [<Fact>]
@@ -888,7 +888,7 @@ module GeneratorDispatch =
               Model = Types.LP64
               FlexibleArrays = Map.empty
               Shape = fun name -> DescriptorGenerator.StructField name }
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 0 outer |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.layoutOf source 0 outer |> ignore)
         Assert.Equal("Struct 'Mid' field 'e' has fieldless nested record type 'Empty'; a supported empty or opaque record representation contract is required.", error.Message)
 
     [<Fact>]
@@ -897,7 +897,7 @@ module GeneratorDispatch =
         let field = {mkField "e" "struct Empty[4]" with IsArray = true; ArraySize = Some 4}
         let holder = mkStruct "Holder" [field] None
         let declarations = [CppParser.Declaration.Struct empty; CppParser.Declaration.Struct holder]
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore)
         Assert.Equal("Struct 'Holder' field 'e' has fieldless nested record type 'Empty'; a supported empty or opaque record representation contract is required.", error.Message)
 
     [<Theory>]
@@ -958,7 +958,7 @@ module GeneratorDispatch =
                 Assert.Contains("let Size : int = 8", output)
                 Assert.Contains("let dataOffset : int = 4", output)
             | _ ->
-                let error = Assert.Throws<System.InvalidOperationException>(fun () -> generate () |> ignore)
+                let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> generate () |> ignore)
                 let expected =
                     match count with
                     | None -> "Struct 'Payload' field 'data' is a flexible array member with no declared count source; an options.flexible_arrays entry naming its count field and count rule is required."
@@ -984,8 +984,8 @@ module GeneratorDispatch =
         let expected =
             if hasCount then $"Struct 'Payload' field 'data' has array element count {count}; a positive fixed element count is required."
             else "Struct 'Payload' field 'data' is a flexible array member with no declared count source; an options.flexible_arrays entry naming its count field and count rule is required."
-        let layoutError = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 0 record |> ignore)
-        let descriptorError = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source record |> ignore)
+        let layoutError = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.layoutOf source 0 record |> ignore)
+        let descriptorError = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.structDecls source record |> ignore)
         Assert.Equal(expected, layoutError.Message)
         Assert.Equal(expected, descriptorError.Message)
 
@@ -1000,7 +1000,7 @@ module GeneratorDispatch =
         let holder = mkStruct "Holder" [field] None
         let declarations = [CppParser.Declaration.Struct nested; CppParser.Declaration.Struct holder]
         let layouts = if measured then Map.ofList ["Mystery", mkLayout "Mystery" 32 32 [0]; "Holder", mkLayout "Holder" 32 32 [0]] else Map.empty
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts |> ignore)
         let expected =
             if hasCount then "Struct 'Holder' field 'arr' has array element count 0; a positive fixed element count is required."
             else "Struct 'Holder' field 'arr' is a flexible array member with no declared count source; an options.flexible_arrays entry naming its count field and count rule is required."
@@ -1013,7 +1013,7 @@ module GeneratorDispatch =
         let field = {mkField "data" (if fieldless then "struct Empty[]" else "mystery_t[]") with IsArray = true; ArraySize = None}
         let holder = mkStruct "Holder" [field] None
         let declarations = [CppParser.Declaration.Struct (mkStructSimple "Empty"); CppParser.Declaration.Struct holder]
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore)
         let expected =
             if fieldless then "Struct 'Holder' field 'data' has fieldless nested record type 'Empty'; a supported empty or opaque record representation contract is required."
             else "Struct 'Holder' field 'data' has no known representation for type 'mystery_t'; a complete C representation contract is required."
@@ -1047,7 +1047,7 @@ module GeneratorDispatch =
             Assert.Equal(spelling, field.Type)
             Assert.False(field.IsArray)
             Assert.Equal(None, field.ArraySize)
-            let error = Assert.Throws<System.InvalidOperationException>(fun () ->
+            let error = Assert.Throws<Diagnostics.RefusalException>(fun () ->
                 FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 (if measured then layouts else Map.empty) |> ignore)
             Assert.Equal($"Struct 'Holder' field 'payload' has array declarator '{spelling}'; a supported one-dimensional trailing array declarator or a complete declarator representation contract is required.", error.Message))
 
@@ -1065,8 +1065,8 @@ module GeneratorDispatch =
               FlexibleArrays = Map.empty
               Shape = fun _ -> Assert.Fail("Shape must not receive an unsupported declarator"); DescriptorGenerator.UnknownField "unreachable" }
         let expected = $"Struct 'Holder' field 'payload' has array declarator '{spelling}'; a supported one-dimensional trailing array declarator or a complete declarator representation contract is required."
-        let layoutError = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 0 holder |> ignore)
-        let descriptorError = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source holder |> ignore)
+        let layoutError = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.layoutOf source 0 holder |> ignore)
+        let descriptorError = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.structDecls source holder |> ignore)
         Assert.Equal(expected, layoutError.Message)
         Assert.Equal(expected, descriptorError.Message)
 
@@ -1091,7 +1091,7 @@ module GeneratorDispatch =
                 "Struct 'Holder' field 'first' has no known representation for type 'mystery_t'; a complete C representation contract is required."
         let holder = mkStruct "Holder" fields None
         let layouts = if measured then Map.ofList [holder.Name, mkLayout holder.Name 256 64 (List.replicate fields.Length 0)] else Map.empty
-        let error = Assert.Throws<System.InvalidOperationException>(fun () ->
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () ->
             FidelityCodeGenerator.generate [CppParser.Declaration.Struct holder] "Test" "test" Types.LP64 layouts |> ignore)
         Assert.Equal(expected, error.Message)
 
@@ -1099,7 +1099,7 @@ module GeneratorDispatch =
     let ``declarator refusal precedes a mismatched measured field count`` () =
         let holder = mkStruct "Holder" [mkField "payload" "int[2][3]"] None
         let layouts = Map.ofList [holder.Name, mkLayout holder.Name 192 32 []]
-        let error = Assert.Throws<System.InvalidOperationException>(fun () ->
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () ->
             FidelityCodeGenerator.generate [CppParser.Declaration.Struct holder] "Test" "test" Types.LP64 layouts |> ignore)
         Assert.Equal("Struct 'Holder' field 'payload' has array declarator 'int[2][3]'; a supported one-dimensional trailing array declarator or a complete declarator representation contract is required.", error.Message)
 
@@ -1135,7 +1135,7 @@ module GeneratorDispatch =
                 Assert.Contains("Repr = Repr.U8; Count = 24", output)
                 Assert.DoesNotContain("let matrixOffset", output)
             else
-                let error = Assert.Throws<System.InvalidOperationException>(fun () -> generate () |> ignore)
+                let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> generate () |> ignore)
                 Assert.Equal("Struct 'Opaque' field 'matrix' has array declarator 'int[2][3]'; a supported one-dimensional trailing array declarator or a complete declarator representation contract is required.", error.Message))
 
     // One chain fixture exercises the existing layout and emission entry points with the
@@ -1224,7 +1224,7 @@ module GeneratorDispatch =
               (fun () -> DescriptorGenerator.structDecls source root |> ignore)
               (fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore) ]
         for call in calls do
-            let error = Assert.Throws<System.InvalidOperationException>(fun () -> call ())
+            let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> call ())
             Assert.Equal(expected, error.Message)
 
     [<Theory>]
@@ -1232,7 +1232,7 @@ module GeneratorDispatch =
     [<InlineData(17)>]
     let ``direct layout entry refuses an unmeasured nested extent at the limit`` depth =
         let source, root = depthChain 1 None
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source depth root |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.layoutOf source depth root |> ignore)
         Assert.Equal("Struct 'R0' field 'payload' nests record type 'R1' beyond the supported declared-layout depth of 16; a measured layout or a shallower complete representation contract is required.", error.Message)
 
     [<Fact>]
@@ -1242,7 +1242,7 @@ module GeneratorDispatch =
         let _, size, _, stratum = DescriptorGenerator.layoutOf source 0 root
         Assert.Equal(76, size)
         Assert.Equal(TypeMapper.Measured, stratum)
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source root |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.structDecls source root |> ignore)
         Assert.Equal("Struct 'R16' field 'payload' nests record type 'R17' beyond the supported declared-layout depth of 16; a measured layout or a shallower complete representation contract is required.", error.Message)
 
     [<Fact>]
@@ -1250,7 +1250,7 @@ module GeneratorDispatch =
         let source, _ = depthChain 0 None
         let record = mkStruct "A" [mkField "a" "struct A"] None
         let source = {source with Structs = Map.ofList ["A", record]}
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 0 record |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.layoutOf source 0 record |> ignore)
         Assert.Equal("Struct 'A' field 'a' nests record type 'A' beyond the supported declared-layout depth of 16; a measured layout or a shallower complete representation contract is required.", error.Message)
 
     [<Theory>]
@@ -1270,7 +1270,7 @@ module GeneratorDispatch =
             | _ ->
                 source, {root with Fields = root.Fields @ [mkField "later" "mystery_t"]},
                 "Struct 'R0' field 'later' has no known representation for type 'mystery_t'; a complete C representation contract is required."
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 16 root |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.layoutOf source 16 root |> ignore)
         Assert.Equal(expected, error.Message)
 
     // Reuse parsed declarations across layout and emission without allocating the
@@ -1304,7 +1304,7 @@ module GeneratorDispatch =
                   (fun () -> DescriptorGenerator.structDecls source root |> ignore)
                   (fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore) ]
             for call in calls do
-                let error = Assert.Throws<System.InvalidOperationException>(fun () -> call ())
+                let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> call ())
                 Assert.Equal(expected, error.Message))
 
     [<Theory>]
@@ -1340,7 +1340,7 @@ module GeneratorDispatch =
             for call in [ (fun () -> DescriptorGenerator.layoutOf source 0 root |> ignore)
                           (fun () -> DescriptorGenerator.structDecls source root |> ignore)
                           (fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 Map.empty |> ignore) ] do
-                let error = Assert.Throws<System.InvalidOperationException>(fun () -> call ())
+                let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> call ())
                 Assert.Equal("Struct 'Holder' field 'values' extent has byte quantity 4294967296 outside the supported descriptor range 0..2147483647; a wider descriptor representation contract is required.", error.Message))
 
     [<Fact>]
@@ -1378,7 +1378,7 @@ module GeneratorDispatch =
             Assert.Equal(TypeMapper.Measured, stratum)
             for call in [ (fun () -> DescriptorGenerator.structDecls source root |> ignore)
                           (fun () -> FidelityCodeGenerator.generate declarations "Test" "test" Types.LP64 layouts |> ignore) ] do
-                let error = Assert.Throws<System.InvalidOperationException>(fun () -> call ())
+                let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> call ())
                 Assert.Equal("Struct 'Holder' field 'values' nested byte count has byte quantity 2147483648 outside the supported descriptor range 0..2147483647; a wider descriptor representation contract is required.", error.Message))
 
     [<Fact>]
@@ -1388,7 +1388,7 @@ module GeneratorDispatch =
             let source = {source with Layouts = Map.ofList ["Holder", mkLayout "Holder" 128 32 [0]]}
             let _, _, _, stratum = DescriptorGenerator.layoutOf source 0 root
             Assert.Equal(TypeMapper.Measured, stratum)
-            let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source root |> ignore)
+            let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.structDecls source root |> ignore)
             Assert.Equal("Struct 'Product' field 'values' extent has byte quantity 2147483648 outside the supported descriptor range 0..2147483647; a wider descriptor representation contract is required.", error.Message))
 
     [<Theory>]
@@ -1409,7 +1409,7 @@ module GeneratorDispatch =
             | _ ->
                 {root with Fields = [payload; {mkField "flags" "int" with IsBitfield = true}]}, 0,
                 "Struct 'R0' field 'flags' is a bitfield; a supported bit-precise descriptor representation is required."
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source depth root |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.layoutOf source depth root |> ignore)
         Assert.Equal(expected, error.Message)
 
     [<Fact>]
@@ -1522,7 +1522,7 @@ module DescriptorGen =
               Model = Types.LP64
               FlexibleArrays = Map.empty
               Shape = fun _ -> DescriptorGenerator.UnknownField "missing_t" }
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 0 structure |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.layoutOf source 0 structure |> ignore)
         Assert.Equal("Struct 'Unknown' field 'payload' has no known representation for type 'missing_t'; a complete C representation contract is required.", error.Message)
 
     [<Theory>]
@@ -1544,7 +1544,7 @@ module DescriptorGen =
               Shape = function
                 | "Inner" -> DescriptorGenerator.StructField "Inner"
                 | _ -> DescriptorGenerator.UnknownField "missing_t" }
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source outer |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.structDecls source outer |> ignore)
         Assert.Equal("Struct 'Inner' field 'payload' has no known representation for type 'missing_t'; a complete C representation contract is required.", error.Message)
 
     [<Theory>]
@@ -1559,7 +1559,7 @@ module DescriptorGen =
               Model = Types.LP64
               FlexibleArrays = Map.empty
               Shape = fun _ -> DescriptorGenerator.ScalarField (repr TypeMapper.Unsigned 32) }
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.layoutOf source 0 structure |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.layoutOf source 0 structure |> ignore)
         Assert.Equal("Struct 'Incomplete' field 'flag' is a bitfield; a supported bit-precise descriptor representation is required.", error.Message)
 
     [<Theory>]
@@ -1581,7 +1581,7 @@ module DescriptorGen =
               Shape = function
                 | "Inner" -> DescriptorGenerator.StructField "Inner"
                 | _ -> DescriptorGenerator.ScalarField (repr TypeMapper.Unsigned 32) }
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source outer |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.structDecls source outer |> ignore)
         Assert.Equal("Struct 'Inner' field 'flag' is a bitfield; a supported bit-precise descriptor representation is required.", error.Message)
 
     [<Fact>]
@@ -1596,7 +1596,7 @@ module DescriptorGen =
               Shape = function
                 | "Bits" -> DescriptorGenerator.StructField "Bits"
                 | _ -> DescriptorGenerator.ScalarField (repr TypeMapper.Unsigned 32) }
-        let error = Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls source outer |> ignore)
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.structDecls source outer |> ignore)
         Assert.Equal("Struct 'Bits' field 'flag' is a bitfield; a supported bit-precise descriptor representation is required.", error.Message)
 
     [<Fact>]

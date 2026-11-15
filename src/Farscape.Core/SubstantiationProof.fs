@@ -5,8 +5,8 @@ open System.Diagnostics
 open System.IO
 open System.Security.Cryptography
 open System.Text
-open System.Text.Json
 open System.Text.RegularExpressions
+open Fidelity.Data.JSON
 
 /// The retained Composer proof protocol consumed by library substantiation (#208).
 /// This checks published obligations; it neither creates nor settles compiler facts.
@@ -206,40 +206,43 @@ module SubstantiationProof =
                 position <- command.Finish
             builder.Append(query, position, query.Length - position).ToString())
 
-    let private property location name (owner: JsonElement) =
-        if owner.ValueKind <> JsonValueKind.Object then
-            fail Diagnostics.SubstantiationProofInvalid location $"'{name}' requires a JSON object."
-        match owner.TryGetProperty(name: string) with
-        | true, value -> value
-        | _ -> fail Diagnostics.SubstantiationProofInvalid location $"Required property '{name}' is absent."
+    let private parseJson location (json: string) =
+        match Json.parse json with
+        | Ok value -> value
+        | Error reason -> fail Diagnostics.SubstantiationProofInvalid location reason
+
+    let private property location name (owner: JsonValue) =
+        match owner with
+        | JsonValue.Object properties ->
+            match properties |> List.tryFind (fun (key, _) -> key = name) with
+            | Some (_, value) -> value
+            | None -> fail Diagnostics.SubstantiationProofInvalid location $"Required property '{name}' is absent."
+        | _ -> fail Diagnostics.SubstantiationProofInvalid location $"'{name}' requires a JSON object."
 
     let private text location name owner =
-        let value = property location name owner
-        if value.ValueKind <> JsonValueKind.String then
-            fail Diagnostics.SubstantiationProofInvalid location $"'{name}' must be a string."
-        value.GetString()
+        match property location name owner with
+        | JsonValue.String value -> value
+        | _ -> fail Diagnostics.SubstantiationProofInvalid location $"'{name}' must be a string."
 
     let private array location name owner =
-        let value = property location name owner
-        if value.ValueKind <> JsonValueKind.Array then
-            fail Diagnostics.SubstantiationProofInvalid location $"'{name}' must be an array."
-        value.EnumerateArray() |> Seq.toArray
+        match property location name owner with
+        | JsonValue.Array values -> Array.ofList values
+        | _ -> fail Diagnostics.SubstantiationProofInvalid location $"'{name}' must be an array."
 
-    let rec private uniqueProperties location (element: JsonElement) =
-        match element.ValueKind with
-        | JsonValueKind.Object ->
-            let properties = element.EnumerateObject() |> Seq.toArray
-            if (properties |> Array.map _.Name |> Set.ofArray |> Set.count) <> properties.Length then
+    let rec private uniqueProperties location (element: JsonValue) =
+        match element with
+        | JsonValue.Object properties ->
+            if (properties |> List.map fst |> Set.ofList |> Set.count) <> properties.Length then
                 fail Diagnostics.SubstantiationProofInvalid location "Duplicate JSON property names are not permitted."
-            properties |> Array.iter (fun property -> uniqueProperties location property.Value)
-        | JsonValueKind.Array -> element.EnumerateArray() |> Seq.iter (uniqueProperties location)
+            properties |> List.iter (fun (_, value) -> uniqueProperties location value)
+        | JsonValue.Array values -> values |> List.iter (uniqueProperties location)
         | _ -> ()
 
     let private obligationRows (json: string) =
-        use document = JsonDocument.Parse json
-        uniqueProperties "06a_obligations.json" document.RootElement
+        let root = parseJson "06a_obligations.json" json
+        uniqueProperties "06a_obligations.json" root
         let rows =
-            array "06a_obligations.json" "obligations" document.RootElement
+            array "06a_obligations.json" "obligations" root
             |> Array.map (fun row -> text "06a_obligations.json" "id" row, text "06a_obligations.json" "source" row)
         let ids = Array.map fst rows
         if ids.Length = 0 || (ids |> Array.exists String.IsNullOrWhiteSpace) || (ids |> Set.ofArray |> Set.count) <> ids.Length then
@@ -255,12 +258,12 @@ module SubstantiationProof =
     let internal obligationInventory (json: string) : Result<(string * string * string) array, Diagnostics.Refusal> =
         protect Diagnostics.SubstantiationProofInvalid "06a_obligations.json" (fun () ->
             let rows = obligationRows json
-            use document = JsonDocument.Parse json
+            let root = parseJson "06a_obligations.json" json
             let kinds =
-                array "06a_obligations.json" "obligations" document.RootElement
+                array "06a_obligations.json" "obligations" root
                 |> Array.map (fun row ->
-                    match row.TryGetProperty "kind" with
-                    | true, kind when kind.ValueKind = JsonValueKind.String -> kind.GetString()
+                    match Json.prop "kind" row with
+                    | Some (JsonValue.String kind) -> kind
                     | _ -> "")
             Array.map2 (fun (anchor, source) kind -> anchor, source, kind) rows kinds)
 
@@ -299,8 +302,9 @@ module SubstantiationProof =
         let tool = tools[0]
         let arguments =
             array location "Arguments" tool |> Array.map (fun argument ->
-                if argument.ValueKind <> JsonValueKind.String then invalid "Solver arguments must be strings."
-                argument.GetString())
+                match argument with
+                | JsonValue.String value -> value
+                | _ -> invalid "Solver arguments must be strings.")
         let solver =
             { Executable = text location "Executable" tool
               Sha256 = text location "Sha256" tool
@@ -323,8 +327,7 @@ module SubstantiationProof =
             let attribution = origins sourcePaths harnessPath obligations
             let ids = Array.map fst obligations
             let premises = extractPremises (List.ofArray ids) query |> unwrap
-            use document = JsonDocument.Parse receiptJson
-            let root = document.RootElement
+            let root = parseJson location receiptJson
             uniqueProperties location root
             if text location "Stage" root <> "psg" then invalid "The receipt is not the source PSG discharge stage."
             invocation location root |> ignore
@@ -365,8 +368,8 @@ module SubstantiationProof =
     /// Bind every compiler-owned conditional query and its retained receipt/output
     /// to the same source proof invocation and cvc5 identity as the discharge.
     let private inspectStages artifactsDirectory obligationsJson receiptJson solver =
-        use discharge = JsonDocument.Parse(receiptJson: string)
-        let expectedInvocation = invocation "06c_psg_discharge.json" discharge.RootElement
+        let dischargeRoot = parseJson "06c_psg_discharge.json" (receiptJson: string)
+        let expectedInvocation = invocation "06c_psg_discharge.json" dischargeRoot
         let obligations = obligationRows obligationsJson |> Map.ofArray
         let files =
             [| "06c_psg_premises_*"; "06c_psg_nonvacuity_*" |]
@@ -387,8 +390,7 @@ module SubstantiationProof =
             if not name.Success then invalid "Unexpected conditional proof receipt filename."
             let stage = "psg-" + name.Groups[1].Value
             let json = File.ReadAllText path
-            use document = JsonDocument.Parse json
-            let root = document.RootElement
+            let root = parseJson path json
             uniqueProperties path root
             if text path "Stage" root <> stage then invalid "The receipt's stage does not match its retained filename."
             if invocation path root <> expectedInvocation then invalid "The conditional receipt belongs to a different compiler invocation."

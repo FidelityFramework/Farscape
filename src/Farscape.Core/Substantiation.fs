@@ -5,9 +5,9 @@ open System.IO
 open System.Diagnostics
 open System.Security.Cryptography
 open System.Text
-open System.Text.Json
 open System.Text.RegularExpressions
 open Microsoft.FSharp.Reflection
+open Fidelity.Data.JSON
 open Fidelity.Data.TOML
 
 /// The library substantiation contract (#208). Compiler proof and foreign evidence retain
@@ -141,63 +141,238 @@ module Substantiation =
     let private digest path : FileDigest =
         { Path = Path.GetFullPath path; Sha256 = ClangToolchain.sha256 path }
 
-    let private jsonOptions = JsonSerializerOptions(WriteIndented = true)
-    let private canonical (manifest: Manifest) = JsonSerializer.Serialize({ manifest with IntegritySha256 = "" })
+    let rec internal toJsonValue (schema: Type) (value: obj) : JsonValue =
+        if isNull value then
+            Diagnostics.raiseRefusal (Diagnostics.uncoded "The substantiation schema admits no null or unsupported JSON value.")
+        elif FSharpType.IsRecord schema then
+            let fields = FSharpType.GetRecordFields schema
+            fields
+            |> Array.toList
+            |> List.map (fun field -> field.Name, toJsonValue field.PropertyType (FSharpValue.GetRecordField(value, field)))
+            |> JsonValue.Object
+        elif schema.IsArray then
+            let elemType = schema.GetElementType()
+            let arr = value :?> Array
+            [ for i in 0 .. arr.Length - 1 -> toJsonValue elemType (arr.GetValue i) ]
+            |> JsonValue.Array
+        elif schema = typeof<string> then
+            let s = value :?> string
+            if isNull s then
+                Diagnostics.raiseRefusal (Diagnostics.uncoded "The substantiation schema admits no null or unsupported JSON value.")
+            else
+                JsonValue.String s
+        elif schema = typeof<int> then
+            Json.ofInt64 (int64 (value :?> int))
+        elif schema = typeof<int64> then
+            Json.ofInt64 (value :?> int64)
+        elif schema = typeof<bool> then
+            JsonValue.Bool (value :?> bool)
+        else
+            Diagnostics.raiseRefusal (Diagnostics.uncoded $"Unadmitted schema type {schema.FullName}.")
+
+    /// Missing-field defaults are not an input contract. Require every
+    /// record field, including empty arrays, and reject unknown or duplicate fields first.
+    let rec internal requireUniqueJsonProperties (onDuplicate: unit -> unit) (element: JsonValue) : unit =
+        match element with
+        | JsonValue.Object properties ->
+            if (properties |> List.map fst |> Set.ofList |> Set.count) <> properties.Length then
+                onDuplicate ()
+            properties |> List.iter (fun (_, v) -> requireUniqueJsonProperties onDuplicate v)
+        | JsonValue.Array values ->
+            values |> List.iter (requireUniqueJsonProperties onDuplicate)
+        | _ -> ()
+
+    let rec internal deserializeJsonValue (schema: Type) (value: JsonValue) : Result<obj, string> =
+        if FSharpType.IsRecord schema then
+            match value with
+            | JsonValue.Object properties ->
+                let fields = FSharpType.GetRecordFields schema
+                let names = properties |> List.map fst |> List.toArray
+                if (names |> Array.distinct).Length <> names.Length then
+                    Error $"{schema.Name} has missing, duplicate or unknown fields."
+                else
+                    let propMap = Map.ofList properties
+                    let values = Array.zeroCreate<obj> fields.Length
+                    let mutable idx = 0
+                    let mutable err = None
+                    while idx < fields.Length && err.IsNone do
+                        let field = fields[idx]
+                        match Map.tryFind field.Name propMap with
+                        | None -> err <- Some $"Missing {schema.Name}.{field.Name}."
+                        | Some child ->
+                            match deserializeJsonValue field.PropertyType child with
+                            | Ok v ->
+                                values[idx] <- v
+                                idx <- idx + 1
+                            | Error e -> err <- Some e
+                    match err with
+                    | Some e -> Error e
+                    | None ->
+                        if names.Length <> fields.Length then
+                            Error $"{schema.Name} has missing, duplicate or unknown fields."
+                        else
+                            Ok (FSharpValue.MakeRecord(schema, values))
+            | _ -> Error $"Expected a {schema.Name} object."
+        elif schema.IsArray then
+            match value with
+            | JsonValue.Array items ->
+                let elemType = schema.GetElementType()
+                let arr = Array.CreateInstance(elemType, items.Length)
+                let mutable idx = 0
+                let mutable remaining = items
+                let mutable err = None
+                while not remaining.IsEmpty && err.IsNone do
+                    let head = remaining.Head
+                    remaining <- remaining.Tail
+                    match deserializeJsonValue elemType head with
+                    | Ok v ->
+                        arr.SetValue(v, idx)
+                        idx <- idx + 1
+                    | Error e -> err <- Some e
+                match err with
+                | Some e -> Error e
+                | None -> Ok (box arr)
+            | _ -> Error $"Expected an array of {schema.GetElementType().Name}."
+        elif schema = typeof<string> then
+            match value with
+            | JsonValue.String s -> Ok (box s)
+            | _ -> Error "Expected a string."
+        elif schema = typeof<int> then
+            match Json.tryAsInt64 value with
+            | Some n when n >= int64 Int32.MinValue && n <= int64 Int32.MaxValue -> Ok (box (int n))
+            | _ -> Error $"Expected a 32-bit integer for {schema.Name}."
+        elif schema = typeof<int64> then
+            match Json.tryAsInt64 value with
+            | Some n -> Ok (box n)
+            | None -> Error $"Expected a 64-bit integer for {schema.Name}."
+        elif schema = typeof<bool> then
+            match value with
+            | JsonValue.Bool b -> Ok (box b)
+            | _ -> Error $"Expected a boolean for {schema.Name}."
+        else
+            Error $"Unadmitted schema type {schema.FullName}."
+
+    let internal deserializeJson<'T> (text: string) : Result<'T, string> =
+        match Json.parse text with
+        | Error reason -> Error reason
+        | Ok root ->
+            deserializeJsonValue typeof<'T> root
+            |> Result.map (fun v -> v :?> 'T)
+
+    let private escapeJsonString (s: string) : string =
+        let sb = StringBuilder(s.Length + 2)
+        sb.Append('"') |> ignore
+        for c in s do
+            match c with
+            | '\\' -> sb.Append("\\\\") |> ignore
+            | '\b' -> sb.Append("\\b") |> ignore
+            | '\t' -> sb.Append("\\t") |> ignore
+            | '\n' -> sb.Append("\\n") |> ignore
+            | '\f' -> sb.Append("\\f") |> ignore
+            | '\r' -> sb.Append("\\r") |> ignore
+            | '"' | '&' | '\'' | '+' | '<' | '>' ->
+                sb.Append($"\\u{int c:X4}") |> ignore
+            | _ when int c = 0x60 || int c < 0x20 || int c >= 0x7F ->
+                sb.Append($"\\u{int c:X4}") |> ignore
+            | _ ->
+                sb.Append(c) |> ignore
+        sb.Append('"').ToString()
+
+    let rec private formatJsonCompact (value: JsonValue) : string =
+        match value with
+        | JsonValue.Null -> "null"
+        | JsonValue.Bool true -> "true"
+        | JsonValue.Bool false -> "false"
+        | JsonValue.Number _ | JsonValue.NumberLiteral _ -> Json.serialize value
+        | JsonValue.String s -> escapeJsonString s
+        | JsonValue.Array items ->
+            "[" + (items |> List.map formatJsonCompact |> String.concat ",") + "]"
+        | JsonValue.Object properties ->
+            "{" + (properties |> List.map (fun (k, v) -> escapeJsonString k + ":" + formatJsonCompact v) |> String.concat ",") + "}"
+
+    let rec private formatJsonPretty (indent: int) (value: JsonValue) : string =
+        let pad n = String(' ', n * 2)
+        match value with
+        | JsonValue.Null -> "null"
+        | JsonValue.Bool true -> "true"
+        | JsonValue.Bool false -> "false"
+        | JsonValue.Number _ | JsonValue.NumberLiteral _ -> Json.serialize value
+        | JsonValue.String s -> escapeJsonString s
+        | JsonValue.Array [] -> "[]"
+        | JsonValue.Array items ->
+            let inner =
+                items
+                |> List.map (fun item -> pad (indent + 1) + formatJsonPretty (indent + 1) item)
+                |> String.concat ",\n"
+            "[\n" + inner + "\n" + pad indent + "]"
+        | JsonValue.Object [] -> "{}"
+        | JsonValue.Object properties ->
+            let inner =
+                properties
+                |> List.map (fun (k, v) -> pad (indent + 1) + escapeJsonString k + ": " + formatJsonPretty (indent + 1) v)
+                |> String.concat ",\n"
+            "{\n" + inner + "\n" + pad indent + "}"
+
+    let internal serializeJsonCompact<'T> (value: 'T) : string =
+        formatJsonCompact (toJsonValue typeof<'T> (box value))
+
+    let internal serializeJsonPretty<'T> (value: 'T) : string =
+        formatJsonPretty 0 (toJsonValue typeof<'T> (box value))
+
+    let private canonical (manifest: Manifest) = serializeJsonCompact { manifest with IntegritySha256 = "" }
 
     /// Bind the manifest's metadata as well as the external file digests. This is integrity
     /// evidence, not a signature or an assertion that the hypotheses have been proved.
     let seal (manifest: Manifest) = { manifest with IntegritySha256 = shaText (canonical manifest) }
 
-    let toJson (manifest: Manifest) = JsonSerializer.Serialize(manifest, jsonOptions)
+    let toJson (manifest: Manifest) = serializeJsonPretty manifest
 
-    let rec private tomlOfJson (value: JsonElement) =
-        match value.ValueKind with
-        | JsonValueKind.Object ->
-            value.EnumerateObject() |> Seq.map (fun p -> p.Name, tomlOfJson p.Value) |> Map.ofSeq |> TomlValue.InlineTable
-        | JsonValueKind.Array -> value.EnumerateArray() |> Seq.map tomlOfJson |> List.ofSeq |> TomlValue.Array
-        | JsonValueKind.String -> TomlValue.String(value.GetString())
-        | JsonValueKind.Number -> TomlValue.Integer(value.GetInt64())
-        | JsonValueKind.True -> TomlValue.Boolean true
-        | JsonValueKind.False -> TomlValue.Boolean false
-        | _ -> invalidOp "The substantiation schema admits no null or unsupported JSON value."
+    let rec private tomlOfJson (value: JsonValue) =
+        match value with
+        | JsonValue.Object properties ->
+            properties |> List.map (fun (k, v) -> k, tomlOfJson v) |> Map.ofList |> TomlValue.InlineTable
+        | JsonValue.Array items ->
+            items |> List.map tomlOfJson |> TomlValue.Array
+        | JsonValue.String s -> TomlValue.String s
+        | JsonValue.NumberLiteral lit ->
+            match JsonNumberLiteral.tryAsInt64 lit with
+            | Some n -> TomlValue.Integer n
+            | None -> Diagnostics.raiseRefusal (Diagnostics.uncoded "The substantiation schema admits no null or unsupported JSON value.")
+        | JsonValue.Bool b -> TomlValue.Boolean b
+        | _ -> Diagnostics.raiseRefusal (Diagnostics.uncoded "The substantiation schema admits no null or unsupported JSON value.")
 
     let toToml (manifest: Manifest) =
-        use document = JsonDocument.Parse(toJson manifest)
-        match tomlOfJson document.RootElement with
+        match tomlOfJson (toJsonValue typeof<Manifest> (box manifest)) with
         | TomlValue.InlineTable table -> Toml.serialize table
-        | _ -> invalidOp "A substantiation manifest must be a table."
+        | _ -> Diagnostics.raiseRefusal (Diagnostics.uncoded "A substantiation manifest must be a table.")
 
-    let rec private objectOfToml = function
+    let rec private jsonOfToml = function
         | TomlValue.Table table | TomlValue.InlineTable table ->
-            table |> Map.toSeq |> Seq.map (fun (key, value) -> key, objectOfToml value) |> dict |> box
-        | TomlValue.Array values -> values |> List.map objectOfToml |> List.toArray |> box
-        | TomlValue.String text -> box text
-        | TomlValue.Integer number -> box number
-        | TomlValue.Boolean value -> box value
-        | _ -> invalidOp "The substantiation schema admits only tables, arrays, strings, integers and booleans."
-
-    /// System.Text.Json's missing-field defaults are not an input contract. Require every
-    /// record field, including empty arrays, and reject unknown or duplicate fields first.
-    let rec internal requireJsonShape (schema: Type) (value: JsonElement) =
-        if FSharpType.IsRecord schema then
-            if value.ValueKind <> JsonValueKind.Object then invalidOp $"Expected a {schema.Name} object."
-            let fields = FSharpType.GetRecordFields schema
-            let properties = value.EnumerateObject() |> Seq.toArray
-            if properties.Length <> fields.Length || (properties |> Array.map _.Name |> Array.distinct).Length <> fields.Length then
-                invalidOp $"{schema.Name} has missing, duplicate or unknown fields."
-            for field in fields do
-                match value.TryGetProperty field.Name with
-                | true, child -> requireJsonShape field.PropertyType child
-                | _ -> invalidOp $"Missing {schema.Name}.{field.Name}."
-        elif schema.IsArray then
-            if value.ValueKind <> JsonValueKind.Array then invalidOp $"Expected an array of {schema.GetElementType().Name}."
-            for child in value.EnumerateArray() do requireJsonShape (schema.GetElementType()) child
-        elif schema = typeof<string> then
-            if value.ValueKind <> JsonValueKind.String then invalidOp "Expected a string."
-        elif schema = typeof<int> then value.GetInt32() |> ignore
-        elif schema = typeof<int64> then value.GetInt64() |> ignore
-        elif schema = typeof<bool> then value.GetBoolean() |> ignore
-        else invalidOp $"Unadmitted schema type {schema.FullName}."
+            let mutable pairs = []
+            let mutable err = None
+            for KeyValue(key, value) in table do
+                if err.IsNone then
+                    match jsonOfToml value with
+                    | Ok v -> pairs <- (key, v) :: pairs
+                    | Error e -> err <- Some e
+            match err with
+            | Some e -> Error e
+            | None -> Ok (JsonValue.Object (List.rev pairs))
+        | TomlValue.Array values ->
+            let mutable items = []
+            let mutable err = None
+            for value in values do
+                if err.IsNone then
+                    match jsonOfToml value with
+                    | Ok v -> items <- v :: items
+                    | Error e -> err <- Some e
+            match err with
+            | Some e -> Error e
+            | None -> Ok (JsonValue.Array (List.rev items))
+        | TomlValue.String text -> Ok (JsonValue.String text)
+        | TomlValue.Integer number -> Ok (Json.ofInt64 number)
+        | TomlValue.Boolean value -> Ok (JsonValue.Bool value)
+        | _ -> Error "The substantiation schema admits only tables, arrays, strings, integers and booleans."
 
     let private validWarningCode code =
         not (isNull code) && Regex.IsMatch(code, @"\A[A-Z]+[0-9]+\z", RegexOptions.CultureInvariant)
@@ -275,16 +450,22 @@ module Substantiation =
 
     let parseJson (text: string) =
         protect Diagnostics.SubstantiationManifestMalformed "<substantiation.json>" (fun () ->
-            use document = JsonDocument.Parse text
-            requireJsonShape typeof<Manifest> document.RootElement
-            let manifest = JsonSerializer.Deserialize<Manifest>(text)
-            requireIntegrity manifest
-            manifest)
+            match deserializeJson<Manifest> text with
+            | Error reason -> refuse Diagnostics.SubstantiationManifestMalformed "<substantiation.json>" reason
+            | Ok manifest ->
+                requireIntegrity manifest
+                manifest)
 
     let parseToml (text: string) =
         protect Diagnostics.SubstantiationManifestMalformed "<substantiation.toml>" (fun () ->
-            let document = match Toml.parse text with Ok doc -> doc | Error reason -> invalidOp reason
-            objectOfToml (TomlValue.Table document) |> JsonSerializer.Serialize |> parseJson |> required)
+            let document =
+                match Toml.parse text with
+                | Ok doc -> doc
+                | Error reason -> refuse Diagnostics.SubstantiationManifestMalformed "<substantiation.toml>" reason
+            match jsonOfToml (TomlValue.Table document) with
+            | Error reason -> refuse Diagnostics.SubstantiationManifestMalformed "<substantiation.toml>" reason
+            | Ok jsonValue ->
+                Json.serialize jsonValue |> parseJson |> required)
 
     let private checkDigest (path: string) (expected: string) =
         if not (File.Exists path) || not (Regex.IsMatch(expected, "^[a-fA-F0-9]{64}$"))
@@ -293,8 +474,10 @@ module Substantiation =
 
     let private loadProject path =
         protect Diagnostics.SubstantiationProjectInvalid path (fun () ->
-            if not (File.Exists path) then invalidOp "The .fidproj file does not exist."
-            match Toml.parse(File.ReadAllText path) with Ok doc -> doc | Error reason -> invalidOp reason)
+            if not (File.Exists path) then refuse Diagnostics.SubstantiationProjectInvalid path "The .fidproj file does not exist."
+            match Toml.parse(File.ReadAllText path) with
+            | Ok doc -> doc
+            | Error reason -> refuse Diagnostics.SubstantiationProjectInvalid path reason)
 
     let private strings code path key document requiredField =
         match Toml.getValue key document with
@@ -332,8 +515,9 @@ module Substantiation =
 
     let private readSource (selectedMetadata: Set<string>) path =
         protect Diagnostics.SubstantiationSourceInvalid path (fun () ->
+            let failSource message = refuse Diagnostics.SubstantiationSourceInvalid path message
             ScratchDirectory.canonicalEvidencePath path |> ignore
-            if Path.GetExtension path <> ".clef" || not (File.Exists path) then invalidOp "Every build.sources entry must name an existing .clef source."
+            if Path.GetExtension path <> ".clef" || not (File.Exists path) then failSource "Every build.sources entry must name an existing .clef source."
             let bytes = File.ReadAllBytes path
             let decoded = UTF8Encoding(false, true).GetString bytes
             let text = if decoded.StartsWith("\uFEFF", StringComparison.Ordinal) then decoded.Substring(1) else decoded
@@ -358,7 +542,7 @@ module Substantiation =
             let lines = (String chars).Split('\n')
             let columns = lines |> Array.map (fun line -> line.Length - line.TrimStart().Length)
             for item in groups do
-                if item.DeclarationStart >= text.Length then invalidOp "Dangling declaration attributes at the end of a source."
+                if item.DeclarationStart >= text.Length then failSource "Dangling declaration attributes at the end of a source."
                 let declarationLine = lineAt item.DeclarationStart
                 if lineAt (item.GroupEndExclusive - 1) = declarationLine then
                     columns[declarationLine] <- min columns[declarationLine] (item.GroupStart - lineStarts[lineAt item.GroupStart])
@@ -381,10 +565,10 @@ module Substantiation =
                 |> Map.ofArray
             let mutable first = 0
             while first < lines.Length && String.IsNullOrWhiteSpace lines[first] do first <- first + 1
-            if first = lines.Length || columns[first] <> 0 then invalidOp "An exported file must declare a file-scoped module."
+            if first = lines.Length || columns[first] <> 0 then failSource "An exported file must declare a file-scoped module."
             let moduleLine = lines[first].Trim()
             let fileModule = Regex.Match(moduleLine, @"^module\s+(?:(?:rec|public|internal)\s+)*([A-Za-z_][A-Za-z0-9_'.]*)\s*$")
-            if not fileModule.Success then invalidOp "An exported file must declare exactly one file-scoped module."
+            if not fileModule.Success then failSource "An exported file must declare exactly one file-scoped module."
             let name = fileModule.Groups[1].Value
             let exports = ResizeArray<string>()
             let references = ResizeArray<string>()
@@ -430,13 +614,13 @@ module Substantiation =
                     let starts (token: string) = at + token.Length <= line.Length && String.CompareOrdinal(line, at, token, 0, token.Length) = 0
                     let push token count = closing.Add token; at <- at + count
                     let pop token count =
-                        if closing.Count = 0 || closing[closing.Count - 1] <> token then invalidOp "Mismatched delimiter in source declaration."
+                        if closing.Count = 0 || closing[closing.Count - 1] <> token then failSource "Mismatched delimiter in source declaration."
                         closing.RemoveAt(closing.Count - 1)
                         at <- at + count
                     while at < line.Length do
                         if starts "``" then
                             let ending = line.IndexOf("``", at + 2, StringComparison.Ordinal)
-                            if ending < 0 then invalidOp "A quoted identifier cannot span source lines."
+                            if ending < 0 then failSource "A quoted identifier cannot span source lines."
                             at <- ending + 2
                         elif starts "<@@" then push "@@>" 3
                         elif starts "<@" then push "@>" 2
@@ -467,7 +651,7 @@ module Substantiation =
                        || (columns[next] = bodyColumn && matchingClosingLine lines[next])) do
                     scan lines[next]
                     next <- next + 1
-                if closing.Count <> 0 then invalidOp "An unclosed declaration delimiter precedes another module statement."
+                if closing.Count <> 0 then failSource "An unclosed declaration delimiter precedes another module statement."
                 next
             let rec scope start finish bodyColumn parent parentPrivate =
                 let mutable group = ""
@@ -476,7 +660,7 @@ module Substantiation =
                     let line = lines[index]
                     if String.IsNullOrWhiteSpace line then index <- index + 1
                     else
-                        if columns[index] <> bodyColumn then invalidOp $"Unclassified source block at line {index + 1}."
+                        if columns[index] <> bodyColumn then failSource $"Unclassified source block at line {index + 1}."
                         let content = line.Trim()
                         let attached = declarationAttributes index
                         let blockEnd = declarationEnd index finish bodyColumn content
@@ -489,15 +673,15 @@ module Substantiation =
                             let firstChild = [| index + 1 .. blockEnd - 1 |] |> Array.tryFind (fun child -> not (String.IsNullOrWhiteSpace lines[child]))
                             match firstChild with
                             | Some child -> scope (index + 1) blockEnd columns[child] (parent + "." + nested.Groups[2].Value) (parentPrivate || isPrivate nested.Groups[1])
-                            | None -> invalidOp "A nested module must have an indented body."
+                            | None -> failSource "A nested module must have an indented body."
                         elif Regex.IsMatch(content, @"^open\s+(?:type\s+)?[A-Za-z_][A-Za-z0-9_'.]*\s*$") then
-                            if attached.Length <> 0 then invalidOp "Declaration attributes cannot attach to an open directive."
-                            if lines[index + 1 .. blockEnd - 1] |> Array.exists (String.IsNullOrWhiteSpace >> not) then invalidOp "An open directive cannot own an indented block."
+                            if attached.Length <> 0 then failSource "Declaration attributes cannot attach to an open directive."
+                            if lines[index + 1 .. blockEnd - 1] |> Array.exists (String.IsNullOrWhiteSpace >> not) then failSource "An open directive cannot own an indented block."
                             group <- ""
                         elif Regex.IsMatch(content, @"^type\s") || (group = "type" && Regex.IsMatch(content, @"^and\s")) then
                             group <- "type"
                             let declaration = Regex.Match(content, @"^(?:type|and)\s+(?:(private|internal|public)\s+)*(?:(?:'[A-Za-z_][A-Za-z0-9_']*|\(\s*'[A-Za-z_][A-Za-z0-9_']*(?:\s*,\s*'[A-Za-z_][A-Za-z0-9_']*)*\s*\))\s+)?(``[^`]+``|[A-Za-z_][A-Za-z0-9_']*)")
-                            if not declaration.Success then invalidOp "An exported type has an unsupported declaration header."
+                            if not declaration.Success then failSource "An exported type has an unsupported declaration header."
                             let spelling = declaration.Groups[2].Value.Trim([| '`' |])
                             allTypes.Add spelling
                             if scalarPatterns.ContainsKey spelling then
@@ -517,7 +701,7 @@ module Substantiation =
                                             unavailable (parent + "." + spelling + "." + memberDeclaration.Groups[2].Value)
                         elif Regex.IsMatch(content, @"^let\s") || (group = "let-rec" && Regex.IsMatch(content, @"^and\s")) then
                             let declaration = Regex.Match(content, @"^(let|and)\s+(?:(rec|inline|mutable|public|internal|private)\s+)*([A-Za-z_][A-Za-z0-9_']*|``[^`]+``)")
-                            if not declaration.Success then invalidOp "An exported value has an unsupported binding pattern; substantiation cannot silently omit it."
+                            if not declaration.Success then failSource "An exported value has an unsupported binding pattern; substantiation cannot silently omit it."
                             let modifiers = declaration.Groups[2].Captures |> Seq.cast<Capture> |> Seq.map _.Value |> Set.ofSeq
                             group <- if declaration.Groups[1].Value = "and" || modifiers.Contains "rec" then "let-rec" else ""
                             let bindingName = declaration.Groups[3].Value.Trim([| '`' |])
@@ -544,23 +728,23 @@ module Substantiation =
                                 let hasLiteral = attached |> Array.exists (fun item -> item.Head = "Literal")
                                 if foreign then
                                     if modifiers.Contains "mutable" then
-                                        invalidOp $"Foreign declaration {qualified} carries unsupported modifiers."
+                                        failSource $"Foreign declaration {qualified} carries unsupported modifiers."
                                     let signatureAndBody = Array.append [| tail |] lines[index + 1 .. blockEnd - 1] |> String.concat " "
                                     let equals = signatureAndBody.IndexOf('=')
-                                    if equals < 0 then invalidOp $"Foreign declaration {qualified} has no generated placeholder."
+                                    if equals < 0 then failSource $"Foreign declaration {qualified} has no generated placeholder."
                                     let body = signatureAndBody.Substring(equals + 1)
                                     if not (Regex.IsMatch(body, @"^\s*NativeDefault\.zeroed\s*\(\s*\)\s*$")) then
-                                        invalidOp $"Foreign declaration {qualified} has an authored or unrecognized body; it cannot be omitted from source checking."
+                                        failSource $"Foreign declaration {qualified} has an authored or unrecognized body; it cannot be omitted from source checking."
                                     foreignDeclarations.Add exportedName
                                     match (attached |> Array.find SubstantiationBoundary.hasFidelityExtern).Literals with
                                     | [| { IsString = true; Value = Some library }; { IsString = true; Value = Some symbol } |] ->
                                         foreignSymbols.Add(exportedName, (library, symbol))
-                                    | _ -> invalidOp $"Foreign declaration {qualified} has no library and symbol literal pair."
+                                    | _ -> failSource $"Foreign declaration {qualified} has no library and symbol literal pair."
                                 elif modifiers.Contains "mutable" then
                                     unavailable qualified
                                 elif hasLiteral then
                                     if attached.Length <> 1 || not (SubstantiationBoundary.isLiteralAttribute attached[0]) then
-                                        invalidOp $"Literal declaration {qualified} has unsupported attributes or arguments."
+                                        failSource $"Literal declaration {qualified} has unsupported attributes or arguments."
                                     if declaration.Groups[1].Value <> "let" || modifiers.Contains "rec" || modifiers.Contains "inline" then
                                         unavailable qualified
                                     let literalDecl = Regex.Match(tail, @"^\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
@@ -584,18 +768,18 @@ module Substantiation =
                                         Array.append [| loadingType.Groups[1].Value |] lines[index + 1 .. blockEnd - 1]
                                         |> String.concat "\n"
                                     if not (SubstantiationBoundary.isLiteralLoadingRecord contractBody) then
-                                        invalidOp $"Selected loading declaration {qualified} must have a literal contract body."
+                                        failSource $"Selected loading declaration {qualified} must have a literal contract body."
                                     descriptors.Add exportedName
                                 elif quoteType.Success then
                                     if attached.Length <> 0 || declaration.Groups[1].Value <> "let" || modifiers.Contains "rec" || modifiers.Contains "inline" then
                                         unavailable qualified
                                     let typeName = quoteType.Groups[1].Value.Split('.') |> Array.last
                                     if not (descriptorTypes.Contains typeName) || not ((initialBody quoteType.Groups[2].Value).StartsWith("<@", StringComparison.Ordinal)) then
-                                        invalidOp $"Compile-time declaration {qualified} has no admitted descriptor-reading owner."
+                                        failSource $"Compile-time declaration {qualified} has no admitted descriptor-reading owner."
                                     descriptors.Add exportedName
                                     if typeName = "FunctionDescriptor" then functionDescriptors.Add exportedName
                                 elif Regex.IsMatch(tail, @"^\s*=\s*<@") then
-                                    invalidOp $"Quotation {qualified} needs an explicit supported descriptor type."
+                                    failSource $"Quotation {qualified} needs an explicit supported descriptor type."
                                 else
                                     let activation = Regex.Match(tail, @"^\s*(\(\s*\))?\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*=")
                                     match activation.Success, scalarPatterns.TryFind activation.Groups[2].Value with
@@ -644,7 +828,7 @@ module Substantiation =
                                             exports.Add exportedName
                                             callbackAdapters.Add exportedName
                                         else unavailable qualified
-                        else invalidOp $"Unrecognized module statement at line {index + 1}; every source declaration must be classified."
+                        else failSource $"Unrecognized module statement at line {index + 1}; every source declaration must be classified."
                         index <- blockEnd
             scope (first + 1) lines.Length 0 name false
             if foreignDeclarations.Count <> externPairs.Length then
@@ -674,49 +858,80 @@ module Substantiation =
     let private verifyPsg0 path (sources: SourceInventory[]) (boundary: SubstantiationBoundary.BoundaryEvidence) : Result<PsgInspection, Diagnostics.Refusal> =
         protect Diagnostics.SubstantiationSourceInvalid path (fun () ->
             let fail message = refuse Diagnostics.SubstantiationSourceInvalid path message
-            use document = JsonDocument.Parse(File.ReadAllText path)
-            let nodes = document.RootElement.GetProperty("nodes").EnumerateArray() |> Seq.toArray
-            let ids = nodes |> Array.map (fun node -> node.GetProperty("id").GetInt32())
+            let root =
+                match Json.parse (File.ReadAllText path) with
+                | Ok value -> value
+                | Error reason -> fail reason
+            requireUniqueJsonProperties (fun () -> fail "Duplicate JSON property names are not permitted.") root
+            let reqProp (name: string) (el: JsonValue) =
+                match Json.prop name el with
+                | Some v -> v
+                | None -> fail $"Missing required PSG property '{name}'."
+            let reqString (name: string) (el: JsonValue) =
+                match reqProp name el with
+                | JsonValue.String s -> s
+                | _ -> fail $"PSG property '{name}' must be a string."
+            let reqNullableString (name: string) (el: JsonValue) =
+                match reqProp name el with
+                | JsonValue.String s -> s
+                | JsonValue.Null -> ""
+                | _ -> fail $"PSG property '{name}' must be a string."
+            let reqInt (name: string) (el: JsonValue) =
+                match Json.tryAsInt64 (reqProp name el) with
+                | Some n when n >= int64 Int32.MinValue && n <= int64 Int32.MaxValue -> int n
+                | _ -> fail $"PSG property '{name}' must be a 32-bit integer."
+            let reqArray (name: string) (el: JsonValue) =
+                match reqProp name el with
+                | JsonValue.Array items -> List.toArray items
+                | _ -> fail $"PSG property '{name}' must be an array."
+            let nodes = reqArray "nodes" root
+            let ids = nodes |> Array.map (reqInt "id")
             if Array.distinct ids |> Array.length <> ids.Length then fail "The compiler PSG contains duplicate node identities."
-            let nodeById = nodes |> Array.map (fun node -> node.GetProperty("id").GetInt32(), node) |> Map.ofArray
-            let named constructor (node: JsonElement) =
-                let found = Regex.Match(node.GetProperty("kind").GetString(), "^" + constructor + @"\s*\(\s*""([^""]+)""")
+            let nodeById = nodes |> Array.map (fun node -> reqInt "id" node, node) |> Map.ofArray
+            let named constructor (node: JsonValue) =
+                let found = Regex.Match(reqString "kind" node, "^" + constructor + @"\s*\(\s*""([^""]+)""")
                 if found.Success then Some found.Groups[1].Value else None
-            let parent (node: JsonElement) =
-                match node.TryGetProperty "parent" with
-                | true, value -> Some(value.GetInt32())
-                | _ -> None
+            let parent (node: JsonValue) =
+                match Json.prop "parent" node with
+                | None -> None
+                | Some value ->
+                    match Json.tryAsInt64 value with
+                    | Some n when n >= int64 Int32.MinValue && n <= int64 Int32.MaxValue -> Some(int n)
+                    | _ -> fail "PSG property 'parent' must be a 32-bit integer."
             let childrenOf =
                 nodes
-                |> Array.choose (fun node -> parent node |> Option.map (fun id -> id, node.GetProperty("id").GetInt32()))
+                |> Array.choose (fun node -> parent node |> Option.map (fun id -> id, reqInt "id" node))
                 |> Array.groupBy fst
                 |> Array.map (fun (id, children) -> id, children |> Array.map snd)
                 |> Map.ofArray
             let children id =
                 Map.tryFind id childrenOf |> Option.defaultValue [||] |> Array.map (fun child -> nodeById[child])
-            let foreignPlaceholder (binding: JsonElement) =
-                let bindingRange = binding.GetProperty("range").GetString()
-                let direct = children (binding.GetProperty("id").GetInt32())
+            let foreignPlaceholder (binding: JsonValue) =
+                let bindingRange = reqString "range" binding
+                let direct = children (reqInt "id" binding)
                 let bodies =
                     direct |> Array.collect (fun node ->
-                        if Regex.IsMatch(node.GetProperty("kind").GetString(), @"^Lambda\b") then
-                            children (node.GetProperty("id").GetInt32())
+                        if Regex.IsMatch(reqString "kind" node, @"^Lambda\b") then
+                            children (reqInt "id" node)
                         else [| node |])
                 bodies |> Array.exists (fun node ->
-                    if node.GetProperty("kind").GetString() <> "Literal Unit" then false
+                    if reqString "kind" node <> "Literal Unit" then false
                     else
-                        let typeText = node.GetProperty("type").GetString()
-                        node.GetProperty("range").GetString() = bindingRange
+                        let typeText = reqNullableString "type" node
+                        reqString "range" node = bindingRange
                         || (not (String.IsNullOrWhiteSpace typeText) && not (typeText.Contains("NTUunit", StringComparison.Ordinal))))
             let modules =
-                nodes |> Array.choose (fun node -> named "ModuleDef" node |> Option.map (fun name -> node.GetProperty("id").GetInt32(), (name, node)))
+                nodes |> Array.choose (fun node -> named "ModuleDef" node |> Option.map (fun name -> reqInt "id" node, (name, node)))
                 |> Map.ofArray
-            let sourcePath (node: JsonElement) =
-                match node.TryGetProperty "range" with
-                | true, value ->
-                    let found = Regex.Match(value.GetString(), @"^(.+):[0-9]+:[0-9]+$")
-                    if found.Success then Some(Path.GetFullPath found.Groups[1].Value) else None
-                | _ -> None
+            let sourcePath (node: JsonValue) =
+                match Json.prop "range" node with
+                | Some value ->
+                    match value with
+                    | JsonValue.String s ->
+                        let found = Regex.Match(s, @"^(.+):[0-9]+:[0-9]+$")
+                        if found.Success then Some(Path.GetFullPath found.Groups[1].Value) else None
+                    | _ -> fail "PSG property 'range' must be a string."
+                | None -> None
             let rec moduleIdentity visited id =
                 if Set.contains id visited then fail "The compiler PSG module parents contain a cycle."
                 let name, node = modules[id]
@@ -830,7 +1045,7 @@ module Substantiation =
                             if not (source.AllBindings.Contains qualified) then
                                 fail $"The compiler parsed module binding '{qualified}' that the source classifier did not inventory."
                             let firstPos, letPos, isForeign = source.BindingSpans[qualified]
-                            let range = Regex.Match(node.GetProperty("range").GetString(), @"^(.+):([0-9]+):([0-9]+)$")
+                            let range = Regex.Match(reqString "range" node, @"^(.+):([0-9]+):([0-9]+)$")
                             if not range.Success then fail $"The compiler published no valid source range for module binding '{qualified}'."
                             let rangeLine, rangeCol = Int32.Parse range.Groups[2].Value, Int32.Parse range.Groups[3].Value
                             // Composer includes XML documentation in binding ranges. Only
@@ -847,13 +1062,14 @@ module Substantiation =
                             if isForeign && not placeholder then
                                 refuse Diagnostics.SubstantiationExternUnresolved path $"Foreign declaration '{qualified}' was not lowered as a foreign binding by the compiler."
                             let firstLine, lastLine = source.BindingExtents[qualified]
+                            let nodeType = reqNullableString "type" node
                             libraryBindings.Add
-                                { Qualified = qualified; SourcePath = path; BindingNodeId = node.GetProperty("id").GetInt32()
-                                  Range = range.Value; Type = node.GetProperty("type").GetString()
+                                { Qualified = qualified; SourcePath = path; BindingNodeId = reqInt "id" node
+                                  Range = range.Value; Type = nodeType
                                   FirstLine = firstLine; LastLine = lastLine
                                   Foreign = Map.tryFind qualified source.ForeignSymbols
                                   Descriptor = DescriptorSymbol.NotDescriptor }
-                            bindings.Add(qualified, node.GetProperty("type").GetString())
+                            bindings.Add(qualified, nodeType)
                         | _, Some name ->
                             let simple = name.Split('.') |> Array.last
                             if not (source.AllTypes.Contains simple) then
@@ -907,10 +1123,10 @@ module Substantiation =
             let descriptorRecords =
                 nodes
                 |> Array.choose (fun node ->
-                    let kind = node.GetProperty("kind").GetString()
+                    let kind = reqString "kind" node
                     if not (Regex.IsMatch(kind, @"\ARecordExpr\b")) || not (cnameField.IsMatch kind) then None
                     else
-                        match resolved.TryGetValue(node.GetProperty("id").GetInt32()) with
+                        match resolved.TryGetValue(reqInt "id" node) with
                         | true, Some(PsgNodeOwner.Binding(binding, _)) -> Some(binding, node)
                         | _ -> None)
                 |> Array.groupBy fst
@@ -921,13 +1137,13 @@ module Substantiation =
                     match Map.tryFind declaration.BindingNodeId descriptorRecords with
                     | None -> DescriptorSymbol.Unestablished "the compiler PSG holds no record with a CName field below the binding."
                     | Some [| _, record |] ->
-                        let field = cnameField.Match(record.GetProperty("kind").GetString())
+                        let field = cnameField.Match(reqString "kind" record)
                         match Map.tryFind (Int32.Parse field.Groups[1].Value) nodeById with
-                        | Some literal when parent literal = Some(record.GetProperty("id").GetInt32()) ->
-                            let spelled = Regex.Match(literal.GetProperty("kind").GetString(), @"\ALiteral\s*\(\s*String\s+""([^""\\\r\n]+)""\s*\)\s*\z")
+                        | Some literal when parent literal = Some(reqInt "id" record) ->
+                            let spelled = Regex.Match(reqString "kind" literal, @"\ALiteral\s*\(\s*String\s+""([^""\\\r\n]+)""\s*\)\s*\z")
                             let position =
-                                match literal.TryGetProperty "range" with
-                                | true, value when value.ValueKind = JsonValueKind.String -> Regex.Match(value.GetString(), @"^(.+):([0-9]{1,9}):([0-9]{1,9})$")
+                                match Json.prop "range" literal with
+                                | Some (JsonValue.String s) -> Regex.Match(s, @"^(.+):([0-9]{1,9}):([0-9]{1,9})$")
                                 | _ -> Match.Empty
                             if not spelled.Success then
                                 DescriptorSymbol.Unestablished "the compiler PSG publishes its CName field as no plain string literal."
@@ -952,16 +1168,43 @@ module Substantiation =
     /// boundary node belongs to, and collect the witnessed definitions and proof obligations.
     let private verifyWitnessUnits witnessPath (psg: PsgInspection) (sources: SourceInventory[]) (boundary: SubstantiationBoundary.BoundaryEvidence) : Result<Correspondence, Diagnostics.Refusal> =
         protect Diagnostics.SubstantiationSourceInvalid witnessPath (fun () ->
-            use document = JsonDocument.Parse(File.ReadAllText witnessPath)
+            let fail message = refuse Diagnostics.SubstantiationSourceInvalid witnessPath message
+            let root =
+                match Json.parse (File.ReadAllText witnessPath) with
+                | Ok value -> value
+                | Error reason -> fail reason
+            requireUniqueJsonProperties (fun () -> fail "Duplicate JSON property names are not permitted.") root
+            let reqObject (kind: string) (el: JsonValue) =
+                match el with
+                | JsonValue.Object _ -> ()
+                | _ -> fail $"Witness {kind} must be an object."
+            let reqProp (name: string) (el: JsonValue) =
+                reqObject "node" el
+                match Json.prop name el with
+                | Some v -> v
+                | None -> fail $"Missing required witness property '{name}'."
+            let reqString (name: string) (el: JsonValue) =
+                match reqProp name el with
+                | JsonValue.String s -> s
+                | _ -> fail $"Witness property '{name}' must be a string."
+            let reqInt (name: string) (el: JsonValue) =
+                match Json.tryAsInt64 (reqProp name el) with
+                | Some n when n >= int64 Int32.MinValue && n <= int64 Int32.MaxValue -> int n
+                | _ -> fail $"Witness property '{name}' must be a 32-bit integer."
+            let reqArray (name: string) (el: JsonValue) =
+                match reqProp name el with
+                | JsonValue.Array items -> items
+                | _ -> fail $"Witness property '{name}' must be an array."
             let definitions = ResizeArray<WitnessedDefinition>()
             let imports = ResizeArray<WitnessedImport>()
             let boundaryDeclaration qualified =
                 sources |> Array.exists (fun source ->
                     Array.contains qualified source.Digest.ForeignDeclarations
                     || Array.contains qualified source.Digest.CompileTimeDeclarations)
-            let textOf (owner: JsonElement) (name: string) =
-                match owner.ValueKind, owner.TryGetProperty name with
-                | JsonValueKind.Object, (true, value) when value.ValueKind = JsonValueKind.String -> value.GetString()
+            let textOf (owner: JsonValue) (name: string) =
+                reqObject "node" owner
+                match Json.prop name owner with
+                | Some (JsonValue.String s) -> s
                 | _ -> ""
             let declarationsByNode = psg.Declarations |> Array.map (fun node -> node.BindingNodeId, node) |> Map.ofArray
             let attribute unitId resource declaration (library: string) (symbol: string) =
@@ -999,65 +1242,76 @@ module Substantiation =
                 | Some(PsgNodeOwner.Binding(_, qualified)) -> true, Some qualified
                 | Some PsgNodeOwner.NonBinding -> true, None
                 | None -> false, None
-            for unitNode in document.RootElement.GetProperty("units").EnumerateArray() do
+            for unitNode in reqArray "units" root do
+                reqObject "unit" unitNode
                 let unitId = textOf unitNode "id"
-                match unitNode.TryGetProperty "definitions" with
-                | true, values when values.ValueKind = JsonValueKind.Array ->
-                    for definition in values.EnumerateArray() do
-                        match definition.GetProperty("sourceNode"), definition.GetProperty("traversalRoot") with
-                        | sourceNode, traversalRoot when sourceNode.ValueKind = JsonValueKind.Number && traversalRoot.ValueKind = JsonValueKind.Number ->
-                            let sourceInLibrary, declaration = ownerOf (sourceNode.GetInt32())
-                            let rootInLibrary, _ = ownerOf (traversalRoot.GetInt32())
+                match Json.prop "definitions" unitNode with
+                | Some (JsonValue.Array values) ->
+                    for definition in values do
+                        reqObject "definition" definition
+                        match reqProp "sourceNode" definition, reqProp "traversalRoot" definition with
+                        | JsonValue.NumberLiteral _, JsonValue.NumberLiteral _ ->
+                            let srcId = reqInt "sourceNode" definition
+                            let rootId = reqInt "traversalRoot" definition
+                            let sourceInLibrary, declaration = ownerOf srcId
+                            let rootInLibrary, _ = ownerOf rootId
                             if sourceInLibrary || rootInLibrary then
                                 definitions.Add
-                                    { Unit = unitId; Symbol = definition.GetProperty("symbol").GetString()
-                                      SourceNode = sourceNode.GetInt32(); TraversalRoot = traversalRoot.GetInt32()
+                                    { Unit = unitId; Symbol = reqString "symbol" definition
+                                      SourceNode = srcId; TraversalRoot = rootId
                                       Declaration = declaration; SourceInLibrary = sourceInLibrary; RootInLibrary = rootInLibrary }
                         | _ -> ()
                 | _ -> ()
-                for importNode in unitNode.GetProperty("imports").EnumerateArray() do
-                    match importNode.TryGetProperty "sourceBoundary" with
-                    | true, sourceBoundary when sourceBoundary.ValueKind <> JsonValueKind.Null ->
-                        attribute unitId false (sourceBoundary.GetProperty("declaration").GetInt32())
-                            (sourceBoundary.GetProperty("library").GetString()) (importNode.GetProperty("symbol").GetString())
+                for importNode in reqArray "imports" unitNode do
+                    reqObject "import" importNode
+                    match Json.prop "sourceBoundary" importNode with
+                    | Some sourceBoundary when sourceBoundary <> JsonValue.Null ->
+                        attribute unitId false (reqInt "declaration" sourceBoundary)
+                            (reqString "library" sourceBoundary) (reqString "symbol" importNode)
                     | _ -> ()
                 // A resource import names its source boundary either as the PSG node identity
                 // or as an object carrying it. Its library and symbol must be present whenever
                 // the node is a library node; an absent value cannot match the retained boundary.
-                match unitNode.TryGetProperty "resourceImports" with
-                | true, values when values.ValueKind = JsonValueKind.Array ->
-                    for resourceNode in values.EnumerateArray() do
-                        match resourceNode.TryGetProperty "sourceBoundary" with
-                        | true, sourceBoundary when sourceBoundary.ValueKind = JsonValueKind.Number ->
-                            attribute unitId true (sourceBoundary.GetInt32()) (textOf resourceNode "library") (textOf resourceNode "symbol")
-                        | true, sourceBoundary when sourceBoundary.ValueKind = JsonValueKind.Object ->
+                match Json.prop "resourceImports" unitNode with
+                | Some (JsonValue.Array values) ->
+                    for resourceNode in values do
+                        reqObject "resourceImport" resourceNode
+                        match Json.prop "sourceBoundary" resourceNode with
+                        | Some (JsonValue.NumberLiteral _ as sourceBoundary) ->
+                            let declId =
+                                match Json.tryAsInt64 sourceBoundary with
+                                | Some n when n >= int64 Int32.MinValue && n <= int64 Int32.MaxValue -> int n
+                                | _ -> fail "Witness resourceImport sourceBoundary must be a 32-bit integer."
+                            attribute unitId true declId (textOf resourceNode "library") (textOf resourceNode "symbol")
+                        | Some (JsonValue.Object _ as sourceBoundary) ->
                             let library =
                                 match textOf sourceBoundary "library" with
                                 | "" -> textOf resourceNode "library"
                                 | named -> named
-                            attribute unitId true (sourceBoundary.GetProperty("declaration").GetInt32()) library (textOf resourceNode "symbol")
-                        | true, sourceBoundary when sourceBoundary.ValueKind <> JsonValueKind.Null ->
+                            attribute unitId true (reqInt "declaration" sourceBoundary) library (textOf resourceNode "symbol")
+                        | Some sourceBoundary when sourceBoundary <> JsonValue.Null ->
                             refuse Diagnostics.SubstantiationExternUnresolved witnessPath "A witnessed resource import has a source boundary that is neither a PSG node identity nor an object naming one."
                         | _ -> ()
                 | _ -> ()
             let sourceProof =
-                match document.RootElement.TryGetProperty "proof" with
-                | true, proof when proof.ValueKind = JsonValueKind.Object ->
-                    match proof.TryGetProperty "source" with
-                    | true, source when source.ValueKind = JsonValueKind.Object -> Some(textOf source "Invocation", textOf source "QuerySha256")
+                match Json.prop "proof" root with
+                | Some (JsonValue.Object _ as proof) ->
+                    match Json.prop "source" proof with
+                    | Some (JsonValue.Object _ as source) -> Some(textOf source "Invocation", textOf source "QuerySha256")
                     | _ -> None
                 | _ -> None
             let obligations =
-                match document.RootElement.TryGetProperty "proof" with
-                | true, proof when proof.ValueKind = JsonValueKind.Object ->
-                    match proof.TryGetProperty "obligations" with
-                    | true, values when values.ValueKind = JsonValueKind.Array ->
-                        values.EnumerateArray()
-                        |> Seq.map (fun entry ->
-                            { Anchor = entry.GetProperty("anchor").GetString()
-                              Source = entry.GetProperty("source").GetString()
-                              Kind = entry.GetProperty("kind").GetString() })
-                        |> Seq.toArray |> Some
+                match Json.prop "proof" root with
+                | Some (JsonValue.Object _ as proof) ->
+                    match Json.prop "obligations" proof with
+                    | Some (JsonValue.Array values) ->
+                        values
+                        |> List.toArray
+                        |> Array.map (fun entry ->
+                            { Anchor = reqString "anchor" entry
+                              Source = reqString "source" entry
+                              Kind = reqString "kind" entry })
+                        |> Some
                     | _ -> None
                 | _ -> None
             for source in sources do
@@ -1321,11 +1575,17 @@ module Substantiation =
             let work = Path.Combine(workRoot, Guid.NewGuid().ToString("N"))
             Directory.CreateDirectory work |> ignore
             let libraries = strings Diagnostics.SubstantiationProjectInvalid projectPath "link.libraries" document false
-            let archives = table projectPath "link.archives" document |> Map.map (fun name value ->
-                match value with
-                | TomlValue.String path -> TomlValue.String(absolute directory path)
-                | _ -> refuse Diagnostics.SubstantiationProjectInvalid projectPath $"link.archives.{name} must be a path.")
-            let objects = archives |> Map.toArray |> Array.map (fun (_, v) -> match v with TomlValue.String path -> path | _ -> invalidOp "archive path")
+            let archives, objects =
+                let pairs =
+                    table projectPath "link.archives" document
+                    |> Map.toArray
+                    |> Array.map (fun (name, value) ->
+                        match value with
+                        | TomlValue.String path ->
+                            let resolved = absolute directory path
+                            (name, TomlValue.String resolved), resolved
+                        | _ -> refuse Diagnostics.SubstantiationProjectInvalid projectPath $"link.archives.{name} must be a path.")
+                pairs |> Array.map fst |> Map.ofArray, pairs |> Array.map snd
             let pilot =
                 match request.PilotPath, Toml.getValue "substantiation.pilot" document with
                 | Some path, _ -> Some(evidencePath path)

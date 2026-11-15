@@ -991,14 +991,14 @@ module BindingGenerator =
 
     /// Resolve actual dependencies from the pilot/output tree or the running generator.
     /// Never publish a guessed path that cannot be loaded on regeneration.
-    let private resolveProjectDependency directory fileName siblingPath environmentVariable overridePath =
+    let private tryResolveProjectDependency directory fileName siblingPath environmentVariable overridePath : Result<string, Diagnostics.Refusal> =
         if not (System.String.IsNullOrWhiteSpace overridePath) then
             let path = Path.GetFullPath overridePath
-            if File.Exists path then path
-            else invalidOp $"{environmentVariable} names a missing dependency: {path}"
+            if File.Exists path then Ok path
+            else Error (Diagnostics.uncoded $"{environmentVariable} names a missing dependency: {path}")
         else
             match findProjectAbove directory fileName with
-            | Some path -> path
+            | Some path -> Ok path
             | None ->
                 let rec findSibling current =
                     let candidate = Path.Combine(current, siblingPath)
@@ -1006,10 +1006,14 @@ module BindingGenerator =
                     else
                         let parent = Directory.GetParent current
                         if isNull parent then None else findSibling parent.FullName
-                [directory; Path.GetDirectoryName(typeof<GenerationOptions>.Assembly.Location)]
-                |> List.tryPick findSibling
-                |> Option.defaultWith (fun () ->
-                    invalidOp $"Cannot locate {fileName}. Set {environmentVariable} to an existing project before generating bindings.")
+                match [directory; Path.GetDirectoryName(typeof<GenerationOptions>.Assembly.Location)] |> List.tryPick findSibling with
+                | Some path -> Ok path
+                | None ->
+                    Error (Diagnostics.uncoded $"Cannot locate {fileName}. Set {environmentVariable} to an existing project before generating bindings.")
+
+    let private resolveProjectDependency directory fileName siblingPath environmentVariable overridePath =
+        tryResolveProjectDependency directory fileName siblingPath environmentVariable overridePath
+        |> Result.defaultWith Diagnostics.raiseRefusal
 
     let private projectDirectoryForOutput outputDir =
         let fullPath = Path.GetFullPath outputDir
@@ -1019,38 +1023,44 @@ module BindingGenerator =
         if not (isNull parent) && parent.Name = "Bindings" then parent.Parent.FullName
         else fullPath
 
-    let private resolveProjectDependencies (project: PilotProject) directory =
+    let private tryResolveProjectDependencies (project: PilotProject) directory : Result<string option * string option * string, Diagnostics.Refusal> =
         let descriptorOnly = project.Options |> Option.exists (fun opts -> opts.DescriptorOnlyDependencies)
         // Retain the selected inputs once. Descriptor-only limits the BARE vocabulary;
         // it does not revoke an explicitly selected platform's graph declarations.
         let platformOverride = System.Environment.GetEnvironmentVariable "FIDELITY_PLATFORM_PROJECT"
         let metadataOverride = System.Environment.GetEnvironmentVariable "BAREWIRE_METADATA_PROJECT"
-        let platformPath =
-            if descriptorOnly && System.String.IsNullOrWhiteSpace platformOverride then None
+        let platformPathResult =
+            if descriptorOnly && System.String.IsNullOrWhiteSpace platformOverride then Ok None
             else
-                resolveProjectDependency directory "Fidelity.Platform.fidproj"
+                tryResolveProjectDependency directory "Fidelity.Platform.fidproj"
                     "Fidelity.Platform/Environments/Linux/x86_64/Fidelity.Platform.fidproj"
-                    "FIDELITY_PLATFORM_PROJECT" platformOverride |> Some
-        // The dependency is not a platform selection by itself. Copy only the
-        // description explicitly supplied by the selected project's manifest.
-        let platformDescription =
-            if System.String.IsNullOrWhiteSpace platformOverride then None
-            else
-                let path = platformPath |> Option.get
-                let document =
-                    Fidelity.Data.TOML.Toml.parse (File.ReadAllText path)
-                    |> function
-                        | Ok document -> document
-                        | Error reason -> invalidOp $"FIDELITY_PLATFORM_PROJECT has invalid TOML: {path}: {reason}"
-                match Fidelity.Data.TOML.Toml.getValue "platform.description" document with
-                | None -> None
-                | Some (Fidelity.Data.TOML.TomlValue.String description) when not (System.String.IsNullOrWhiteSpace description) -> Some description
-                | Some _ -> invalidOp $"FIDELITY_PLATFORM_PROJECT platform.description must be a nonempty string: {path}"
-        let metadataProject = if descriptorOnly then "BAREWire.BindingMetadata.fidproj" else "BAREWire.fidproj"
-        let metadataPath =
-            resolveProjectDependency directory metadataProject
-                (Path.Combine("BAREWire", "src", metadataProject)) "BAREWIRE_METADATA_PROJECT" metadataOverride
-        platformPath, platformDescription, metadataPath
+                    "FIDELITY_PLATFORM_PROJECT" platformOverride
+                |> Result.map Some
+        platformPathResult
+        |> Result.bind (fun platformPath ->
+            // The dependency is not a platform selection by itself. Copy only the
+            // description explicitly supplied by the selected project's manifest.
+            let platformDescriptionResult =
+                if System.String.IsNullOrWhiteSpace platformOverride then Ok None
+                else
+                    let path = platformPath |> Option.get
+                    match Fidelity.Data.TOML.Toml.parse (File.ReadAllText path) with
+                    | Error reason -> Error (Diagnostics.uncoded $"FIDELITY_PLATFORM_PROJECT has invalid TOML: {path}: {reason}")
+                    | Ok document ->
+                        match Fidelity.Data.TOML.Toml.getValue "platform.description" document with
+                        | None -> Ok None
+                        | Some (Fidelity.Data.TOML.TomlValue.String description) when not (System.String.IsNullOrWhiteSpace description) -> Ok (Some description)
+                        | Some _ -> Error (Diagnostics.uncoded $"FIDELITY_PLATFORM_PROJECT platform.description must be a nonempty string: {path}")
+            platformDescriptionResult
+            |> Result.bind (fun platformDescription ->
+                let metadataProject = if descriptorOnly then "BAREWire.BindingMetadata.fidproj" else "BAREWire.fidproj"
+                tryResolveProjectDependency directory metadataProject
+                    (Path.Combine("BAREWire", "src", metadataProject)) "BAREWIRE_METADATA_PROJECT" metadataOverride
+                |> Result.map (fun metadataPath -> platformPath, platformDescription, metadataPath)))
+
+    let private resolveProjectDependencies (project: PilotProject) directory =
+        tryResolveProjectDependencies project directory
+        |> Result.defaultWith Diagnostics.raiseRefusal
 
     /// Generate a canonical .fidproj file for the binding library.
     /// Fully automatic — derives everything from what Farscape already knows.
@@ -1531,7 +1541,7 @@ module BindingGenerator =
                 // (BAREWire #11); the struct's own layout then checks the member it names.
                 for declared in ctx.FlexibleArrays |> Map.toList |> List.map snd do
                     if not (ctx.Structs.ContainsKey declared.Record) then
-                        invalidOp $"options.flexible_arrays declares a count source for '{declared.Record}' field '{declared.Field}', but no parsed header declares struct '{declared.Record}'; a count source names a declared struct."
+                        Diagnostics.raiseRefusal (Diagnostics.uncoded $"options.flexible_arrays declares a count source for '{declared.Record}' field '{declared.Field}', but no parsed header declares struct '{declared.Record}'; a count source names a declared struct.")
 
                 // Derive common namespace prefix for the project
                 let nsPrefix = deriveNamespacePrefix project
@@ -1573,7 +1583,7 @@ module BindingGenerator =
                                         t.UnderlyingType.Contains("enum")
                                     | _ -> false)
                             if not enumExists then
-                                failwithf "error_conventions declares error_type '%s' but no matching enum or typedef found in declarations. Fix the pilot TOML or ensure the header is parsed correctly." errorType
+                                Diagnostics.raiseRefusal (Diagnostics.uncoded $"error_conventions declares error_type '{errorType}' but no matching enum or typedef found in declarations. Fix the pilot TOML or ensure the header is parsed correctly.")
 
                             let structName = EnumErrorModuleGenerator.deriveErrorStructName errorType
                             // Look up success value's integer — check named enum first, then any enum containing the value
@@ -1780,7 +1790,7 @@ module BindingGenerator =
                                 | _ -> []
                             | None -> []
                         | None ->
-                            failwithf "error_conventions declares error_type '%s' but enum values not found in declarations" errorType
+                            Diagnostics.raiseRefusal (Diagnostics.uncoded $"error_conventions declares error_type '{errorType}' but enum values not found in declarations")
                     | WrapperTypes.UseReturnCode (libPrefix, _) ->
                         // Generate ReturnCode.clef — simple describe function for int return codes
                         let rcNs = $"{nsPrefix}.ReturnCode"

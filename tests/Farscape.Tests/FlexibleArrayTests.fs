@@ -67,7 +67,7 @@ let ``glibc's cmsghdr is emitted at clang's layout with a trailing flexible arra
 
 [<Fact>]
 let ``glibc's cmsghdr without a declared count source is refused with its exact reason`` () =
-    let error = Assert.Throws<System.InvalidOperationException>(fun () -> generateWith (records ["cmsghdr"] (glibcSocket ())) [] |> ignore)
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> generateWith (records ["cmsghdr"] (glibcSocket ())) [] |> ignore)
     Assert.Equal(
         "Struct 'cmsghdr' field '__cmsg_data' is a flexible array member with no declared count source; an options.flexible_arrays entry naming its count field and count rule is required.",
         error.Message)
@@ -165,7 +165,7 @@ let private count record field countField = { Record = record; Field = field; Co
 let private packet = mkStruct "Packet" [mkField "length" "unsigned long"; flexible "data" "unsigned char"] None
 
 let private refusal (src: DescriptorGenerator.LayoutSource) (record: CppParser.StructDecl) =
-    (Assert.Throws<System.InvalidOperationException>(fun () -> DescriptorGenerator.structDecls src record |> ignore)).Message
+    (Assert.Throws<Diagnostics.RefusalException>(fun () -> DescriptorGenerator.structDecls src record |> ignore)).Message
 
 [<Fact>]
 let ``a flexible array member followed by a field is refused`` () =

@@ -80,11 +80,14 @@ module DescriptorGenerator =
         | Some (d: string) -> $"Some {quote d}"
         | None -> "None"
 
+    let private refuseUncoded (message: string) : 'T =
+        Diagnostics.raiseRefusal (Diagnostics.uncoded message)
+
     // Products have int operands; checked extents and offsets bound the next sum.
     // These int64 intermediates are therefore at most 2^62 before narrowing.
     let private descriptorInt subject (value: int64) =
         if value < 0L || value > 2147483647L then
-            invalidOp $"{subject} has byte quantity {value} outside the supported descriptor range 0..2147483647; a wider descriptor representation contract is required."
+            refuseUncoded $"{subject} has byte quantity {value} outside the supported descriptor range 0..2147483647; a wider descriptor representation contract is required."
         int value
 
     let private alignUp (offset: int64) (align: int64) =
@@ -95,16 +98,16 @@ module DescriptorGenerator =
         match CppParser.classifyFieldDeclarator f.Type with
         | CppParser.PlainFieldType element | CppParser.TrailingArrayType (element, _) -> element
         | CppParser.UnsupportedArrayType spelling ->
-            invalidOp $"Struct '{structName}' field '{f.Name}' has array declarator '{spelling}'; a supported one-dimensional trailing array declarator or a complete declarator representation contract is required."
+            refuseUncoded $"Struct '{structName}' field '{f.Name}' has array declarator '{spelling}'; a supported one-dimensional trailing array declarator or a complete declarator representation contract is required."
 
     let private elementCount structName (f: CppParser.FieldDecl) =
         match f.IsArray, f.ArraySize with
         | false, _ -> 1
         | true, Some count when count > 0 -> count
         | true, None ->
-            invalidOp $"Struct '{structName}' field '{f.Name}' is a flexible array member with no declared count source; an options.flexible_arrays entry naming its count field and count rule is required."
+            refuseUncoded $"Struct '{structName}' field '{f.Name}' is a flexible array member with no declared count source; an options.flexible_arrays entry naming its count field and count rule is required."
         | true, Some count ->
-            invalidOp $"Struct '{structName}' field '{f.Name}' has array element count {count}; a positive fixed element count is required."
+            refuseUncoded $"Struct '{structName}' field '{f.Name}' has array element count {count}; a positive fixed element count is required."
 
     /// A C flexible array member (C11 6.7.2.1p18): an array field with no element count.
     let isFlexibleArrayMember (f: CppParser.FieldDecl) = f.IsArray && f.ArraySize.IsNone
@@ -140,9 +143,9 @@ module DescriptorGenerator =
             let members =
                 if s.UnnamedBitFields.IsEmpty then $"{s.Fields.Length} fields"
                 else $"{s.Fields.Length} fields and {s.UnnamedBitFields.Length} unnamed bit-fields"
-            invalidOp $"Measured layout '{s.Name}' has {measured.FieldOffsetsBits.Length} field offsets for {members}."
+            refuseUncoded $"Measured layout '{s.Name}' has {measured.FieldOffsetsBits.Length} field offsets for {members}."
         if measured.SizeBits % 8 <> 0 then
-            invalidOp $"Measured layout '{s.Name}' has size {measured.SizeBits} bits, which is not whole bytes; a supported bit-precise descriptor representation is required."
+            refuseUncoded $"Measured layout '{s.Name}' has size {measured.SizeBits} bits, which is not whole bytes; a supported bit-precise descriptor representation is required."
         let size = descriptorInt $"Measured layout '{s.Name}' size" (int64 measured.SizeBits / 8L)
         // A record of only unnamed bit-fields (#183) clang may measure at 0 bytes: in C a
         // zero-width `int : 0` alone makes a GNU empty record.
@@ -152,11 +155,11 @@ module DescriptorGenerator =
             Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.PaddingOnlyRecordEmpty $"{kind} '{s.Name}' has no named field, only {CppParser.describeUnnamedBitField b}, and clang measures it at 0 bytes in its declaring unit (a GNU C empty record); a descriptor has no zero-byte record representation." s.Location.Location)
         | _ -> ()
         if size = 0 then
-            invalidOp $"Measured layout '{s.Name}' has size 0 bytes for {s.Fields.Length} fields; a supported empty or opaque record representation contract is required."
+            refuseUncoded $"Measured layout '{s.Name}' has size 0 bytes for {s.Fields.Length} fields; a supported empty or opaque record representation contract is required."
         if measured.AlignmentBits % 8 <> 0 then
-            invalidOp $"Measured layout '{s.Name}' has alignment {measured.AlignmentBits} bits, which is not whole bytes; a supported bit-precise descriptor representation is required."
+            refuseUncoded $"Measured layout '{s.Name}' has alignment {measured.AlignmentBits} bits, which is not whole bytes; a supported bit-precise descriptor representation is required."
         if measured.AlignmentBits <= 0 then
-            invalidOp $"Measured layout '{s.Name}' has alignment {measured.AlignmentBits} bits; a positive whole-byte measured alignment is required."
+            refuseUncoded $"Measured layout '{s.Name}' has alignment {measured.AlignmentBits} bits; a positive whole-byte measured alignment is required."
         size, measured.AlignmentBits / 8
 
     type private RepresentedFieldShape =
@@ -169,15 +172,15 @@ module DescriptorGenerator =
         | StructField name ->
             match Map.tryFind name src.Structs with
             | None ->
-                invalidOp $"Struct '{structName}' field '{field.Name}' has nested record type '{name}' with no available declaration; a complete C representation contract is required."
+                refuseUncoded $"Struct '{structName}' field '{field.Name}' has nested record type '{name}' with no available declaration; a complete C representation contract is required."
             // A record of only unnamed bit-fields is defined (#183): clang's layout places it.
             | Some nested when not (CppParser.isDefinedRecord nested) ->
-                invalidOp $"Struct '{structName}' field '{field.Name}' has fieldless nested record type '{name}'; a supported empty or opaque record representation contract is required."
+                refuseUncoded $"Struct '{structName}' field '{field.Name}' has fieldless nested record type '{name}'; a supported empty or opaque record representation contract is required."
             | Some nested when nested.Fields |> List.exists isFlexibleArrayMember ->
-                invalidOp $"Struct '{structName}' field '{field.Name}' holds record type '{name}' by value, which ends in a flexible array member; a record ending in a flexible array member has no fixed extent to hold by value."
+                refuseUncoded $"Struct '{structName}' field '{field.Name}' holds record type '{name}' by value, which ends in a flexible array member; a record ending in a flexible array member has no fixed extent to hold by value."
             | Some nested -> RepresentedStruct nested
         | UnknownField name ->
-            invalidOp $"Struct '{structName}' field '{field.Name}' has no known representation for type '{name}'; a complete C representation contract is required."
+            refuseUncoded $"Struct '{structName}' field '{field.Name}' has no known representation for type '{name}'; a complete C representation contract is required."
 
     /// The extent of one field of `s`. A flexible array member is admitted only as the last field
     /// of a struct, of scalar elements, with a declared count source naming a preceding integer
@@ -188,23 +191,23 @@ module DescriptorGenerator =
             match Map.tryFind s.Name src.FlexibleArrays with
             | None -> FixedCount (elementCount s.Name f)
             | Some declared when declared.Field <> f.Name ->
-                invalidOp $"Struct '{s.Name}' field '{f.Name}' is a flexible array member, but options.flexible_arrays declares the count source of '{s.Name}' for field '{declared.Field}'; a count source naming '{f.Name}' is required."
+                refuseUncoded $"Struct '{s.Name}' field '{f.Name}' is a flexible array member, but options.flexible_arrays declares the count source of '{s.Name}' for field '{declared.Field}'; a count source naming '{f.Name}' is required."
             | Some declared ->
                 if s.IsUnion then
-                    invalidOp $"Union '{s.Name}' field '{f.Name}' is a flexible array member; a flexible array member trails the fixed fields of a struct, and a union has none to trail."
+                    refuseUncoded $"Union '{s.Name}' field '{f.Name}' is a flexible array member; a flexible array member trails the fixed fields of a struct, and a union has none to trail."
                 let following = s.Fields |> List.skipWhile (fun field -> field.Name <> f.Name) |> List.tail
                 match following with
                 | next :: _ ->
-                    invalidOp $"Struct '{s.Name}' field '{f.Name}' is a flexible array member followed by field '{next.Name}'; a flexible array member must be the last field of its struct."
+                    refuseUncoded $"Struct '{s.Name}' field '{f.Name}' is a flexible array member followed by field '{next.Name}'; a flexible array member must be the last field of its struct."
                 | [] -> ()
                 match shape with
                 | RepresentedStruct nested ->
-                    invalidOp $"Struct '{s.Name}' flexible array member '{f.Name}' has elements of record type '{nested.Name}'; a flexible array member of scalar elements is required."
+                    refuseUncoded $"Struct '{s.Name}' flexible array member '{f.Name}' has elements of record type '{nested.Name}'; a flexible array member of scalar elements is required."
                 | RepresentedScalar _ -> ()
                 let preceding = s.Fields |> List.takeWhile (fun field -> field.Name <> f.Name)
                 match preceding |> List.tryFind (fun field -> field.Name = declared.CountField) with
                 | None ->
-                    invalidOp $"Struct '{s.Name}' flexible array member '{f.Name}' declares count field '{declared.CountField}', which names no preceding field of '{s.Name}'; a preceding integer field of the same struct is required."
+                    refuseUncoded $"Struct '{s.Name}' flexible array member '{f.Name}' declares count field '{declared.CountField}', which names no preceding field of '{s.Name}'; a preceding integer field of the same struct is required."
                 | Some counter ->
                     let integer =
                         not counter.IsArray && not counter.IsBitfield
@@ -212,7 +215,7 @@ module DescriptorGenerator =
                             | ScalarField r -> r.Family = Signed || r.Family = Unsigned
                             | _ -> false)
                     if not integer then
-                        invalidOp $"Struct '{s.Name}' flexible array member '{f.Name}' declares count field '{counter.Name}', which is not one integer scalar; a preceding integer field of the same struct is required."
+                        refuseUncoded $"Struct '{s.Name}' flexible array member '{f.Name}' declares count field '{counter.Name}', which is not one integer scalar; a preceding integer field of the same struct is required."
                 FlexibleCount declared
 
     /// A declared count source names the flexible array member of its struct: refused when the
@@ -220,7 +223,7 @@ module DescriptorGenerator =
     let private requireDeclaredFlexibleArray (src: LayoutSource) (s: CppParser.StructDecl) =
         match Map.tryFind s.Name src.FlexibleArrays with
         | Some declared when not (s.Fields |> List.exists isFlexibleArrayMember) ->
-            invalidOp $"options.flexible_arrays declares a count source for '{s.Name}' field '{declared.Field}', but '{s.Name}' has no flexible array member; a count source names the last, element-count-free field of its struct."
+            refuseUncoded $"options.flexible_arrays declares a count source for '{s.Name}' field '{declared.Field}', but '{s.Name}' has no flexible array member; a count source names the last, element-count-free field of its struct."
         | _ -> ()
 
     /// The layout-neutral attributes (`AttributeContracts.LayoutNeutral`) a record or its fields
@@ -237,7 +240,7 @@ module DescriptorGenerator =
         : int list * int * int * Stratum =
         match s.Fields |> List.tryFind (fun field -> field.IsBitfield) with
         | Some field ->
-            invalidOp $"Struct '{s.Name}' field '{field.Name}' is a bitfield; a supported bit-precise descriptor representation is required."
+            refuseUncoded $"Struct '{s.Name}' field '{field.Name}' is a bitfield; a supported bit-precise descriptor representation is required."
         | None -> ()
         let fields =
             s.Fields |> List.map (fun field ->
@@ -252,7 +255,7 @@ module DescriptorGenerator =
             | Some requested, Some parsed
                 when (requested.SizeBits, requested.AlignmentBits, requested.FieldOffsetsBits)
                      <> (parsed.SizeBits, parsed.AlignmentBits, parsed.FieldOffsetsBits) ->
-                invalidOp $"Struct '{s.Name}' has two clang measurements that disagree: the ABI-critical probe measured {requested.SizeBits / 8} bytes at alignment {requested.AlignmentBits / 8}, its declaring unit's parse {parsed.SizeBits / 8} bytes at alignment {parsed.AlignmentBits / 8}; one effective layout is required."
+                refuseUncoded $"Struct '{s.Name}' has two clang measurements that disagree: the ABI-critical probe measured {requested.SizeBits / 8} bytes at alignment {requested.AlignmentBits / 8}, its declaring unit's parse {parsed.SizeBits / 8} bytes at alignment {parsed.AlignmentBits / 8}; one effective layout is required."
             | Some requested, _ -> Some requested
             | None, parsed -> parsed
         // A layout-neutral attribute (`may_alias`) is admitted only when clang measures this
@@ -286,7 +289,7 @@ module DescriptorGenerator =
                 let unclassified subject (attributes: CppParser.AttributeData list) =
                     attributes |> List.iter (fun a ->
                         if (AttributeContracts.contractOf a.Kind).IsNone then
-                            invalidOp $"{subject} carries attribute '{a.Kind}' with unclassified layout effect; a measured layout or a classified attribute contract is required.")
+                            refuseUncoded $"{subject} carries attribute '{a.Kind}' with unclassified layout effect; a measured layout or a classified attribute contract is required.")
                 unclassified $"Struct '{s.Name}'" s.Attributes
                 s.Fields |> List.iter (fun f -> unclassified $"Struct '{s.Name}' field '{f.Name}'" f.Attributes)
                 let affecting =
@@ -315,12 +318,12 @@ module DescriptorGenerator =
                 Seq.zip s.Fields (CppParser.fieldOffsetsBits s measured)
                 |> Seq.map (fun (field, bits) ->
                     if bits % 8 <> 0 then
-                        invalidOp $"Struct '{s.Name}' field '{field.Name}' has measured bit offset {bits}, which is not byte-aligned; a supported bit-precise descriptor representation is required."
+                        refuseUncoded $"Struct '{s.Name}' field '{field.Name}' has measured bit offset {bits}, which is not byte-aligned; a supported bit-precise descriptor representation is required."
                     let offset = bits / 8
                     // A flexible array member adds no bytes: it may begin at the record's end.
                     let beyond = if isFlexibleArrayMember field then offset > size else offset >= size
                     if offset < 0 || beyond then
-                        invalidOp $"Struct '{s.Name}' field '{field.Name}' has measured byte offset {offset} outside the measured storage 0..{size - 1}; a measured layout consistent with its record size is required."
+                        refuseUncoded $"Struct '{s.Name}' field '{field.Name}' has measured byte offset {offset} outside the measured storage 0..{size - 1}; a measured layout consistent with its record size is required."
                     offset)
                 |> List.ofSeq
             confirmNeutral measured
@@ -332,11 +335,11 @@ module DescriptorGenerator =
                 attributes |> List.iter (fun attribute ->
                     match AttributeContracts.contractOf attribute.Kind with
                     | Some AttributeContracts.LayoutAffecting ->
-                        invalidOp $"{subject} carries layout attribute '{attribute.Kind}' that natural alignment cannot represent; a measured layout is required."
+                        refuseUncoded $"{subject} carries layout attribute '{attribute.Kind}' that natural alignment cannot represent; a measured layout is required."
                     // Unreachable: a record carrying one is refused above unless clang measured it.
                     | Some (AttributeContracts.LayoutNeutral _) -> ()
                     | None ->
-                        invalidOp $"{subject} carries attribute '{attribute.Kind}' with unclassified layout effect; a measured layout or a classified attribute contract is required.")
+                        refuseUncoded $"{subject} carries attribute '{attribute.Kind}' with unclassified layout effect; a measured layout or a classified attribute contract is required.")
             requireNaturalAttributes $"Struct '{s.Name}'" s.Attributes
             s.Fields |> List.iter (fun field -> requireNaturalAttributes $"Struct '{s.Name}' field '{field.Name}'" field.Attributes)
             // An unnamed bit-field pads the record, and a zero-width one moves the next member
@@ -359,11 +362,11 @@ module DescriptorGenerator =
                     let _, align = scalarExtent r
                     0, align
                 | FlexibleCount _, RepresentedStruct nested ->
-                    invalidOp $"Struct '{s.Name}' flexible array member '{fieldName}' has elements of record type '{nested.Name}'; a flexible array member of scalar elements is required."
+                    refuseUncoded $"Struct '{s.Name}' flexible array member '{fieldName}' has elements of record type '{nested.Name}'; a flexible array member of scalar elements is required."
                 | FixedCount count, RepresentedScalar r ->
                     scalarFieldExtent s.Name fieldName count r
                 | FixedCount _, RepresentedStruct nested when depth >= 16 && not (Map.containsKey nested.Name src.Layouts) ->
-                    invalidOp $"Struct '{s.Name}' field '{fieldName}' nests record type '{nested.Name}' beyond the supported declared-layout depth of 16; a measured layout or a shallower complete representation contract is required."
+                    refuseUncoded $"Struct '{s.Name}' field '{fieldName}' nests record type '{nested.Name}' beyond the supported declared-layout depth of 16; a measured layout or a shallower complete representation contract is required."
                 | FixedCount count, RepresentedStruct nested ->
                     let _, size, align, _ = layoutOf src (depth + 1) nested
                     descriptorInt $"Struct '{s.Name}' field '{fieldName}' extent" (int64 size * int64 count), align
@@ -393,7 +396,7 @@ module DescriptorGenerator =
                 "Repr.U8", string byteCount, $"nested struct {nested.Name} by value, as bytes; see {nested.Name}.Descriptor", byteCount
         let endOffset = int64 offset + int64 extent
         if endOffset > int64 size then
-            invalidOp $"Struct '{structName}' field '{f.Name}' has byte extent {extent} at {stratumName offsetStratum} offset {offset}, ending at byte {endOffset} beyond the record size {size}; a measured layout consistent with its field representation is required."
+            refuseUncoded $"Struct '{structName}' field '{f.Name}' has byte extent {extent} at {stratumName offsetStratum} offset {offset}, ending at byte {endOffset} beyond the record size {size}; a measured layout consistent with its field representation is required."
         // The fact of each layout-neutral attribute of a typedef the field's type reaches (#175).
         // Such a record is laid out only from clang's measurement, so the attribute's layout
         // effect is clang's; its fact belongs to the field's type, and is recorded here.
@@ -426,9 +429,9 @@ module DescriptorGenerator =
             match representedFieldShape src structName f with
             | RepresentedScalar r -> r
             | RepresentedStruct nested ->
-                invalidOp $"Struct '{structName}' flexible array member '{f.Name}' has elements of record type '{nested.Name}'; a flexible array member of scalar elements is required."
+                refuseUncoded $"Struct '{structName}' flexible array member '{f.Name}' has elements of record type '{nested.Name}'; a flexible array member of scalar elements is required."
         if offset > size then
-            invalidOp $"Struct '{structName}' flexible array member '{f.Name}' begins at {stratumName offsetStratum} offset {offset}, beyond the record size {size}; a measured layout consistent with its field representation is required."
+            refuseUncoded $"Struct '{structName}' flexible array member '{f.Name}' begins at {stratumName offsetStratum} offset {offset}, beyond the record size {size}; a measured layout consistent with its field representation is required."
         let rule, ruleText = countRuleSource declared.Rule
         let doc = $"offset {stratumName offsetStratum}; repr {stratumName r.Stratum}: {r.CType} under {src.Model}; flexible array member, count from '{declared.CountField}' ({ruleText}), declared by options.flexible_arrays: {declared.Source}"
         FunctionCall("", "Some", [

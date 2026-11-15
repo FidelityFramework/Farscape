@@ -5,8 +5,8 @@ open System.Collections.Generic
 open System.IO
 open System.Security.Cryptography
 open System.Text
-open System.Text.Json
 open System.Text.RegularExpressions
+open Fidelity.Data.JSON
 open Fidelity.Data.TOML
 
 /// The substantiation report of one substantiated library (#209): JSON, Markdown and HTML
@@ -385,13 +385,9 @@ module SubstantiationDossier =
     /// A record input with every field present exactly once, no unknown field and no null.
     let private parseStrict<'T> (label: string) (path: string) : 'T =
         let text = readText label path
-        try
-            use document = JsonDocument.Parse text
-            Substantiation.requireJsonShape typeof<'T> document.RootElement
-            JsonSerializer.Deserialize<'T> text
-        with
-        | :? Diagnostics.RefusalException -> reraise ()
-        | error -> fail Diagnostics.DossierInputMalformed path (label + " violates its required JSON schema: " + error.Message)
+        match Substantiation.deserializeJson<'T> text with
+        | Ok value -> value
+        | Error reason -> fail Diagnostics.DossierInputMalformed path (label + " violates its required JSON schema: " + reason)
 
     let private loadManifest (path: string) : Substantiation.Manifest =
         let text = readText "The substantiation manifest" path
@@ -449,55 +445,59 @@ module SubstantiationDossier =
     /// navigator's reader, an unknown field, a duplicate key, a null or an `assumptions` value
     /// other than "closed" or a nonempty string array is refused.
     let private loadFacts (path: string) : Facts =
-        let text = readText "The Rocq facts file" path
+        let raw = readText "The Rocq facts file" path
         let invalid message = fail Diagnostics.DossierInputMalformed path ("The Rocq facts file violates its required JSON schema: " + message)
-        try
-            use document = JsonDocument.Parse text
-            let members (label: string) (admitted: string list) (required: string list) (value: JsonElement) =
-                if value.ValueKind <> JsonValueKind.Object then invalid (label + " must be an object.")
-                let properties = value.EnumerateObject() |> Seq.toArray
-                let names = properties |> Array.map (fun property -> property.Name)
+        let root =
+            match Json.parse raw with
+            | Ok value -> value
+            | Error reason -> invalid reason
+        let members (label: string) (admitted: string list) (required: string list) (value: JsonValue) =
+            match value with
+            | JsonValue.Object properties ->
+                let pairs = List.toArray properties
+                let names = pairs |> Array.map fst
                 if (Array.distinct names).Length <> names.Length then invalid (label + " has a duplicate key.")
                 if not admitted.IsEmpty then
                     for name in names do
                         if not (List.contains name admitted) then invalid (label + " has unknown field '" + name + "'.")
                 for name in required do
                     if not (Array.contains name names) then invalid (label + " lacks required field '" + name + "'.")
-                properties
-            let text (label: string) (value: JsonElement) =
-                if value.ValueKind <> JsonValueKind.String || String.IsNullOrWhiteSpace(value.GetString()) then
-                    invalid (label + " must be a nonempty string.")
-                value.GetString()
-            let strings (label: string) (value: JsonElement) =
-                members label [] [] value |> Array.map (fun property -> property.Name, text (label + "." + property.Name) property.Value) |> Map.ofArray
-            let root = document.RootElement
-            members "The root" [ "rocqVersion"; "digests"; "symbols" ] [ "rocqVersion"; "digests"; "symbols" ] root |> ignore
-            let fact (name: string) (value: JsonElement) =
-                let label = "symbols." + name
-                members label [ "type"; "binders"; "assumptions" ] [ "binders" ] value |> ignore
-                strings (label + ".binders") (value.GetProperty "binders") |> ignore
-                let reportedType =
-                    match value.TryGetProperty "type" with
-                    | true, kind -> Some(text (label + ".type") kind)
-                    | _ -> None
-                let assumptions =
-                    match value.TryGetProperty "assumptions" with
-                    | true, assumptions when assumptions.ValueKind = JsonValueKind.String && assumptions.GetString() = "closed" -> Some Closed
-                    | true, assumptions when assumptions.ValueKind = JsonValueKind.Array && assumptions.GetArrayLength() > 0 ->
-                        assumptions.EnumerateArray() |> Seq.map (text (label + ".assumptions")) |> Seq.toArray |> RestsOn |> Some
-                    | true, _ -> invalid (label + ".assumptions must be \"closed\" or a nonempty array of axiom names.")
-                    | _ -> None
-                ({ Type = reportedType; Assumptions = assumptions } : SymbolFact)
-            let symbols =
-                members "symbols" [] [] (root.GetProperty "symbols")
-                |> Array.map (fun property -> property.Name, fact property.Name property.Value)
-                |> Map.ofArray
-            ({ RocqVersion = text "rocqVersion" (root.GetProperty "rocqVersion")
-               Digests = strings "digests" (root.GetProperty "digests")
-               Symbols = symbols } : Facts)
-        with
-        | :? Diagnostics.RefusalException -> reraise ()
-        | error -> invalid error.Message
+                pairs
+            | _ -> invalid (label + " must be an object.")
+        let text (label: string) (value: JsonValue) =
+            match value with
+            | JsonValue.String s when not (String.IsNullOrWhiteSpace s) -> s
+            | _ -> invalid (label + " must be a nonempty string.")
+        let strings (label: string) (value: JsonValue) =
+            members label [] [] value |> Array.map (fun (k, v) -> k, text (label + "." + k) v) |> Map.ofArray
+        let getProp (name: string) (value: JsonValue) =
+            match Json.prop name value with
+            | Some child -> child
+            | None -> invalid ("Missing required field '" + name + "'.")
+        members "The root" [ "rocqVersion"; "digests"; "symbols" ] [ "rocqVersion"; "digests"; "symbols" ] root |> ignore
+        let fact (name: string) (value: JsonValue) =
+            let label = "symbols." + name
+            members label [ "type"; "binders"; "assumptions" ] [ "binders" ] value |> ignore
+            strings (label + ".binders") (getProp "binders" value) |> ignore
+            let reportedType =
+                match Json.prop "type" value with
+                | Some kind -> Some(text (label + ".type") kind)
+                | None -> None
+            let assumptions =
+                match Json.prop "assumptions" value with
+                | Some (JsonValue.String "closed") -> Some Closed
+                | Some (JsonValue.Array items) when not items.IsEmpty ->
+                    items |> List.toArray |> Array.map (text (label + ".assumptions")) |> RestsOn |> Some
+                | Some _ -> invalid (label + ".assumptions must be \"closed\" or a nonempty array of axiom names.")
+                | None -> None
+            ({ Type = reportedType; Assumptions = assumptions } : SymbolFact)
+        let symbols =
+            members "symbols" [] [] (getProp "symbols" root)
+            |> Array.map (fun (k, v) -> k, fact k v)
+            |> Map.ofArray
+        ({ RocqVersion = text "rocqVersion" (getProp "rocqVersion" root)
+           Digests = strings "digests" (getProp "digests" root)
+           Symbols = symbols } : Facts)
 
     // =====================================================================
     // Live digests
@@ -688,10 +688,14 @@ module SubstantiationDossier =
         match correspondence.SourceProof with
         | Some(invocation, query) ->
             let receiptPath, receiptDigest = (proofArtifacts manifest)[2]
-            use receipt = JsonDocument.Parse(readVerified receiptPath receiptDigest)
+            let receipt =
+                match Json.parse (readVerified receiptPath receiptDigest) with
+                | Ok value -> value
+                | Error reason -> invalid receiptPath ("The discharge receipt is not valid JSON: " + reason)
+            Substantiation.requireUniqueJsonProperties (fun () -> invalid receiptPath "Duplicate JSON property names are not permitted.") receipt
             let field (name: string) =
-                match receipt.RootElement.TryGetProperty name with
-                | true, value when value.ValueKind = JsonValueKind.String -> value.GetString()
+                match Json.prop name receipt with
+                | Some (JsonValue.String value) -> value
                 | _ -> invalid receiptPath ("The discharge receipt has no string '" + name + "'.")
             if not (String.Equals(field "Invocation", invocation, StringComparison.OrdinalIgnoreCase))
                || not (String.Equals(field "QuerySha256", query, StringComparison.OrdinalIgnoreCase)) then
@@ -1115,25 +1119,24 @@ module SubstantiationDossier =
     // Assembly
     // =====================================================================
 
-    let private jsonOptions = JsonSerializerOptions(WriteIndented = true, NewLine = "\n")
-
-    let toJson (dossier: Dossier) : string = JsonSerializer.Serialize(dossier, jsonOptions) + "\n"
+    let toJson (dossier: Dossier) : string =
+        (Substantiation.serializeJsonPretty dossier).Replace("\r\n", "\n") + "\n"
 
     /// Parse a dossier JSON document. Every field is required exactly once; an unknown field,
     /// a null or another schema version is refused with FS9247.
     let parseDossierJson (text: string) : Result<Dossier, Diagnostics.Refusal> =
-        try
-            use document = JsonDocument.Parse text
-            Substantiation.requireJsonShape typeof<Dossier> document.RootElement
-            let dossier = JsonSerializer.Deserialize<Dossier> text
-            if dossier.SchemaVersion <> 1 then fail Diagnostics.DossierInputMalformed "<dossier.json>" "Unsupported dossier schema version."
-            Ok dossier
-        with
-        | :? Diagnostics.RefusalException as refused -> Error refused.Refusal
-        | error ->
-            Diagnostics.diagnostic Diagnostics.DossierInputMalformed ("The dossier violates its required JSON schema: " + error.Message)
+        match Substantiation.deserializeJson<Dossier> text with
+        | Error reason ->
+            Diagnostics.diagnostic Diagnostics.DossierInputMalformed ("The dossier violates its required JSON schema: " + reason)
                 (Diagnostics.inFile "<dossier.json>" "dossier document")
             |> Diagnostics.refusalOf |> Error
+        | Ok dossier ->
+            if dossier.SchemaVersion <> 1 then
+                Diagnostics.diagnostic Diagnostics.DossierInputMalformed "Unsupported dossier schema version."
+                    (Diagnostics.inFile "<dossier.json>" "dossier input or retained evidence")
+                |> Diagnostics.refusalOf |> Error
+            else
+                Ok dossier
 
     let private build (request: Request) : Dossier * string =
         // 1. Path policy.

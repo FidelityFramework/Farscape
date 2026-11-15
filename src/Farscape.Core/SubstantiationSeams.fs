@@ -7,8 +7,8 @@ open System.Diagnostics
 open System.IO
 open System.Security.Cryptography
 open System.Text
-open System.Text.Json
 open System.Text.RegularExpressions
+open Fidelity.Data.JSON
 open Fidelity.Data.TOML
 
 /// Physical ABI, link, lifecycle and refusal-control seam runner (#219).
@@ -196,14 +196,15 @@ module SubstantiationSeams =
 
     let private parseStrict<'T> label path : 'T =
         if not (File.Exists path) then receiptFail Diagnostics.DossierInputMalformed path (label + " does not exist.")
-        try
-            let text = File.ReadAllText(path, UTF8Encoding(false, true))
-            use document = JsonDocument.Parse text
-            Substantiation.requireJsonShape typeof<'T> document.RootElement
-            JsonSerializer.Deserialize<'T> text
-        with
-        | :? Diagnostics.RefusalException -> reraise ()
-        | error -> receiptFail Diagnostics.DossierInputMalformed path (label + " violates its required JSON schema: " + error.Message)
+        let text =
+            try Ok(File.ReadAllText(path, UTF8Encoding(false, true)))
+            with error -> Error error.Message
+        match text with
+        | Error reason -> receiptFail Diagnostics.DossierInputMalformed path (label + " violates its required JSON schema: " + reason)
+        | Ok raw ->
+            match Substantiation.deserializeJson<'T> raw with
+            | Ok value -> value
+            | Error reason -> receiptFail Diagnostics.DossierInputMalformed path (label + " violates its required JSON schema: " + reason)
 
     let private requireSeamChecks (manifest: Substantiation.Manifest) (path: string) (receipt: SeamChecksReceipt) =
         let invalid message = receiptFail Diagnostics.DossierCheckReceiptInvalid path message
@@ -285,14 +286,13 @@ module SubstantiationSeams =
         with error ->
             fail path (label + " cannot be read as UTF-8: " + error.Message)
 
-    let private jsonOptions = JsonSerializerOptions(WriteIndented = true)
-
     let private serializeVerified<'T> (path: string) (value: 'T) : string =
-        let json = JsonSerializer.Serialize(value, jsonOptions)
-        use document = JsonDocument.Parse json
-        Substantiation.requireJsonShape typeof<'T> document.RootElement
-        if String.IsNullOrWhiteSpace json then fail path "Serialized JSON receipt is empty."
-        json
+        let json = Substantiation.serializeJsonPretty value
+        match Substantiation.deserializeJson<'T> json with
+        | Error reason -> fail path ("Serialized JSON receipt violates its schema: " + reason)
+        | Ok _ ->
+            if String.IsNullOrWhiteSpace json then fail path "Serialized JSON receipt is empty."
+            json
 
     let private writeAtomic (destination: string) (contents: string) : unit =
         let directory = Path.GetDirectoryName destination
@@ -512,30 +512,33 @@ module SubstantiationSeams =
 
         let receiptText = readUtf8 "Retained discharge receipt" receiptPath
         let unsatCount, refutedCount, pendingCount =
-            try
-                use doc = JsonDocument.Parse receiptText
-                let root = doc.RootElement
-                let mutable stageProp = Unchecked.defaultof<JsonElement>
-                if not (root.TryGetProperty("Stage", &stageProp)) || stageProp.ValueKind <> JsonValueKind.String || stageProp.GetString() <> "psg" then
-                    fail receiptPath "06c_psg_discharge.json does not declare Stage = 'psg'."
-                let mutable outcomesProp = Unchecked.defaultof<JsonElement>
-                if not (root.TryGetProperty("Outcomes", &outcomesProp)) || outcomesProp.ValueKind <> JsonValueKind.Array then
-                    fail receiptPath "06c_psg_discharge.json lacks an Outcomes array."
-                let mutable unsat = 0
-                let mutable sat = 0
-                let mutable other = 0
-                for item in outcomesProp.EnumerateArray() do
-                    let mutable verdictProp = Unchecked.defaultof<JsonElement>
-                    if item.ValueKind <> JsonValueKind.Object || not (item.TryGetProperty("Verdict", &verdictProp)) || verdictProp.ValueKind <> JsonValueKind.String then
-                        fail receiptPath "An outcome in 06c_psg_discharge.json lacks a string Verdict."
-                    match verdictProp.GetString() with
-                    | "unsat" -> unsat <- unsat + 1
-                    | "sat" -> sat <- sat + 1
-                    | _ -> other <- other + 1
-                unsat, sat, other
-            with
-            | :? Diagnostics.RefusalException -> reraise ()
-            | error -> fail receiptPath ("06c_psg_discharge.json is malformed: " + error.Message)
+            let root =
+                match Json.parse receiptText with
+                | Ok value -> value
+                | Error reason -> fail receiptPath ("06c_psg_discharge.json is malformed: " + reason)
+            Substantiation.requireUniqueJsonProperties (fun () -> fail receiptPath "Duplicate JSON property names are not permitted.") root
+            match Json.prop "Stage" root with
+            | Some (JsonValue.String "psg") -> ()
+            | _ -> fail receiptPath "06c_psg_discharge.json does not declare Stage = 'psg'."
+            let outcomes =
+                match Json.prop "Outcomes" root with
+                | Some (JsonValue.Array items) -> items
+                | _ -> fail receiptPath "06c_psg_discharge.json lacks an Outcomes array."
+            let mutable unsat = 0
+            let mutable sat = 0
+            let mutable other = 0
+            for item in outcomes do
+                match item with
+                | JsonValue.Object _ ->
+                    match Json.prop "Verdict" item with
+                    | Some (JsonValue.String verdict) ->
+                        match verdict with
+                        | "unsat" -> unsat <- unsat + 1
+                        | "sat" -> sat <- sat + 1
+                        | _ -> other <- other + 1
+                    | _ -> fail receiptPath "An outcome in 06c_psg_discharge.json lacks a string Verdict."
+                | _ -> fail receiptPath "An outcome in 06c_psg_discharge.json lacks a string Verdict."
+            unsat, sat, other
 
         let premisesLines =
             (readUtf8 "Retained SAT(H) output" premisesPath).Split([| '\r'; '\n' |], StringSplitOptions.RemoveEmptyEntries)
@@ -1315,22 +1318,36 @@ module SubstantiationSeams =
         let witnessPath = Path.Combine(probeWork, "targets", "intermediates", "10_witness_units.json")
         if not (File.Exists witnessPath) then
             fail witnessPath "Composer did not retain 10_witness_units.json for physical seam probe."
-        use doc = JsonDocument.Parse(readUtf8 "Probe 10_witness_units.json" witnessPath)
+        let root =
+            match Json.parse (readUtf8 "Probe 10_witness_units.json" witnessPath) with
+            | Ok value -> value
+            | Error reason -> fail witnessPath ("Probe 10_witness_units.json is malformed: " + reason)
+        Substantiation.requireUniqueJsonProperties (fun () -> fail witnessPath "Duplicate JSON property names are not permitted.") root
         let symbols = HashSet<string>(StringComparer.Ordinal)
-        match doc.RootElement.TryGetProperty "units" with
-        | true, units when units.ValueKind = JsonValueKind.Array ->
-            for unitNode in units.EnumerateArray() do
-                for propName in [ "imports"; "resourceImports" ] do
-                    match unitNode.TryGetProperty propName with
-                    | true, arr when arr.ValueKind = JsonValueKind.Array ->
-                        for item in arr.EnumerateArray() do
-                            match item.TryGetProperty "symbol" with
-                            | true, sym when sym.ValueKind = JsonValueKind.String ->
-                                let name = sym.GetString()
-                                if not (String.IsNullOrWhiteSpace name) then
-                                    symbols.Add name |> ignore
-                            | _ -> ()
-                    | _ -> ()
+        match Json.prop "units" root with
+        | Some (JsonValue.Array units) ->
+            for unitNode in units do
+                match unitNode with
+                | JsonValue.Object _ ->
+                    for propName in [ "imports"; "resourceImports" ] do
+                        match Json.prop propName unitNode with
+                        | Some (JsonValue.Array items) ->
+                            for item in items do
+                                match item with
+                                | JsonValue.Object _ ->
+                                    match Json.prop "symbol" item with
+                                    | Some (JsonValue.String name) when not (String.IsNullOrWhiteSpace name) ->
+                                        symbols.Add name |> ignore
+                                    | Some (JsonValue.String _) | Some JsonValue.Null | None -> ()
+                                    | Some _ ->
+                                        fail witnessPath $"Probe 10_witness_units.json {propName} symbol must be a string."
+                                | _ ->
+                                    fail witnessPath $"Probe 10_witness_units.json {propName} entry must be a JSON object."
+                        | Some JsonValue.Null | None -> ()
+                        | Some _ ->
+                            fail witnessPath $"Probe 10_witness_units.json {propName} must be an array."
+                | _ ->
+                    fail witnessPath "Probe 10_witness_units.json unit entry must be a JSON object."
         | _ -> fail witnessPath "Probe 10_witness_units.json lacks a 'units' array."
         Set.ofSeq symbols
 
@@ -1517,13 +1534,9 @@ module SubstantiationSeams =
             let resolved = evidencePath path
             let text = readUtf8 "The seams ledger receipt" resolved
             let ledger =
-                try
-                    use doc = JsonDocument.Parse text
-                    Substantiation.requireJsonShape typeof<SeamsLedgerReceipt> doc.RootElement
-                    JsonSerializer.Deserialize<SeamsLedgerReceipt> text
-                with
-                | :? Diagnostics.RefusalException -> reraise ()
-                | error -> fail resolved ("The seams ledger receipt violates its required JSON schema: " + error.Message)
+                match Substantiation.deserializeJson<SeamsLedgerReceipt> text with
+                | Ok value -> value
+                | Error reason -> fail resolved ("The seams ledger receipt violates its required JSON schema: " + reason)
             if ledger.Schema <> LedgerSchema || ledger.SchemaVersion <> 1 then
                 fail resolved $"Unsupported seams ledger schema '{ledger.Schema}' version {ledger.SchemaVersion}."
             if ledger.SeamChecksSchema <> SeamChecksSchema || ledger.RefusalControlsSchema <> RefusalControlsSchema then
