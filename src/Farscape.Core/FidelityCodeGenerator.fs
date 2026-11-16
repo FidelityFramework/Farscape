@@ -2217,12 +2217,17 @@ module FidelityCodeGenerator =
             | Scalar _ | CEnum _ -> clefTypeOf element = Named spec.ElementClefType
             | Unresolved name when ctx.ValueStructs.Contains name -> name = spec.ElementClefType
             | _ -> false
+        let source = spec.Source |> Option.defaultValue (Diagnostics.Located.Unknown "No header location was supplied for the container element.")
         if not admittedElement then
-            let source = spec.Source |> Option.defaultValue (Diagnostics.Located.Unknown "No header location was supplied for the container element.")
             Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.CppContainerOutOfRange
                 $"C++ container '{spec.SafeName}': element '{spec.ElementType}' has no admitted value binding as '{spec.ElementClefType}'." source)
         let pointer = DescriptorGenerator.typeRefSource (TypeMapper.pointerRepr ctx.DataModel "void *")
-        let intRef = abiReprOf ctx.DataModel "int" (resolveIn ctx "int") |> Option.get |> DescriptorGenerator.typeRefSource
+        let intRef =
+            match abiReprOf ctx.DataModel "int" (resolveIn ctx "int") with
+            | Some r -> DescriptorGenerator.typeRefSource r
+            | None ->
+                Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.CppContainerOutOfRange
+                    $"C++ container '{spec.SafeName}': target ABI '{ctx.DataModel}' does not define a scalar representation for 'int'." source)
         let handle name = Generic("CHandle", Named name)
         let self = { Name = "self"; Type = handle spec.SafeName }, pointer
         let output name typ = { Name = name; Type = handle typ }, pointer
@@ -2277,7 +2282,7 @@ module FidelityCodeGenerator =
     /// Generate Fidelity.Platform and BAREWire zero-copy shared buffer declarations (#123).
     let generateSharedBufferDecls (ctx: GenerationContext)
                                   (spec: CppClassAnalysis.SharedBufferSpec) : FsDecl list =
-        CppClassAnalysis.validateSharedBufferContract ctx.StructLayouts spec
+        let facts = CppClassAnalysis.deriveSharedBufferPlacementFacts ctx.StructLayouts spec
         let source = spec.Source |> Option.defaultValue (Diagnostics.Located.Unknown "No header location was supplied for the shared buffer contract.")
         let resolvedFields =
             spec.Fields |> List.map (fun field ->
@@ -2289,7 +2294,12 @@ module FidelityCodeGenerator =
                     Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.SharedBufferContractInvalid
                         $"Shared buffer '{spec.SafeName}': field '{field.Name}' C type '{field.CType}' has no admitted {field.ByteWidth}-byte scalar representation as Clef type '{field.ClefType}'." source))
         let pointer = DescriptorGenerator.typeRefSource (TypeMapper.pointerRepr ctx.DataModel "void *")
-        let intRef = abiReprOf ctx.DataModel "int" (resolveIn ctx "int") |> Option.get |> DescriptorGenerator.typeRefSource
+        let intRef =
+            match abiReprOf ctx.DataModel "int" (resolveIn ctx "int") with
+            | Some r -> DescriptorGenerator.typeRefSource r
+            | None ->
+                Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.SharedBufferContractInvalid
+                    $"Shared buffer '{spec.SafeName}': target data model '{ctx.DataModel}' has no ABI representation for C 'int'." source)
         let handle name = Generic("CHandle", Named name)
         let self = { Name = "self"; Type = handle spec.SafeName }, pointer
         let output name typ = { Name = name; Type = handle typ }, pointer
@@ -2308,33 +2318,50 @@ module FidelityCodeGenerator =
                     "CallingConvention", Identifier "CDecl"
                     "OwnershipTransfer", Identifier ownership ]))
               BlankLine ]
+        // Fidelity.Platform@0b4df16 CompatibilityBudgets.clef (lines 515, 582, 646) declares RegionKind = MemoryRegionKind.SRAM for HostShared, DeviceUnified, and FileMapped.
         let spaceName, memoryRegionSource =
-            match spec.MemorySpace, spec.SpaceAccess with
-            | CppClassAnalysis.SharedMemorySpaceKind.HostShared, _ -> "Fidelity.Platform.HostShared", "MemoryRegionKind.SRAM"
-            | CppClassAnalysis.SharedMemorySpaceKind.DeviceUnified, _ -> "Fidelity.Platform.DeviceUnified", "MemoryRegionKind.DMA"
-            | CppClassAnalysis.SharedMemorySpaceKind.FileMapped, CppClassAnalysis.SharedAccessMode.SharedReadOnly -> "Fidelity.Platform.FileMapped", "MemoryRegionKind.Flash"
-            | CppClassAnalysis.SharedMemorySpaceKind.FileMapped, _ -> "Fidelity.Platform.FileMapped", "MemoryRegionKind.SRAM"
+            match spec.MemorySpace with
+            | CppClassAnalysis.SharedMemorySpaceKind.HostShared -> "Fidelity.Platform.HostShared", "MemoryRegionKind.SRAM"
+            | CppClassAnalysis.SharedMemorySpaceKind.DeviceUnified -> "Fidelity.Platform.DeviceUnified", "MemoryRegionKind.SRAM"
+            | CppClassAnalysis.SharedMemorySpaceKind.FileMapped -> "Fidelity.Platform.FileMapped", "MemoryRegionKind.SRAM"
         let accessName =
             match spec.SpaceAccess with
             | CppClassAnalysis.SharedAccessMode.SharedReadOnly -> "ReadOnly"
             | CppClassAnalysis.SharedAccessMode.SharedWriteOnly -> "WriteOnly"
             | CppClassAnalysis.SharedAccessMode.SharedReadWrite -> "ReadWrite"
             | CppClassAnalysis.SharedAccessMode.SharedExclusiveMutable -> "ExclusiveMutable"
+        // BAREWire.Hardware.AccessKind has 3 cases (ReadOnly, WriteOnly, ReadWrite);
+        // BAREWire.Platform.SharedBufferPlacement.viewAccessMatches (Description.fs:273-278) requires AccessKind.ReadWrite for ExclusiveMutable.
+        let viewAccessSource =
+            match spec.SpaceAccess with
+            | CppClassAnalysis.SharedAccessMode.SharedReadOnly -> "AccessKind.ReadOnly"
+            | CppClassAnalysis.SharedAccessMode.SharedWriteOnly -> "AccessKind.WriteOnly"
+            | CppClassAnalysis.SharedAccessMode.SharedReadWrite
+            | CppClassAnalysis.SharedAccessMode.SharedExclusiveMutable -> "AccessKind.ReadWrite"
+        // BAREWire.Platform.SharedBufferPlacement.viewElementFits (Description.fs:156-162) checks word-granularity view element width.
+        let viewElementReprSource =
+            if spec.MeasuredAlignment >= 8 && spec.MeasuredSize % 8 = 0 then "Repr.U64"
+            elif spec.MeasuredAlignment >= 4 && spec.MeasuredSize % 4 = 0 then "Repr.U32"
+            elif spec.MeasuredAlignment >= 2 && spec.MeasuredSize % 2 = 0 then "Repr.U16"
+            else "Repr.U8"
+        let normalizedByteOrder =
+            match spec.ByteOrder with
+            | "LittleEndian" | "little" -> "little"
+            | other ->
+                Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.SharedBufferContractInvalid
+                    $"shared buffer '{spec.SafeName}' byte order '{other}' is not admitted for the targeted library build." source)
+        let boolLiteral (value: bool) = if value then "true" else "false"
+        let hasRawPointerFields =
+            resolvedFields |> List.exists (fun (_, r, _, _) -> r.Family = TypeMapper.Pointer || r.CType.Contains("*"))
         let barewireFieldDescriptors =
             resolvedFields |> List.map (fun (field, r, _, repr) ->
-                let fieldAccess =
-                    match spec.SpaceAccess with
-                    | CppClassAnalysis.SharedAccessMode.SharedReadOnly -> "AccessKind.ReadOnly"
-                    | CppClassAnalysis.SharedAccessMode.SharedWriteOnly -> "AccessKind.WriteOnly"
-                    | CppClassAnalysis.SharedAccessMode.SharedReadWrite
-                    | CppClassAnalysis.SharedAccessMode.SharedExclusiveMutable -> "AccessKind.ReadWrite"
                 let doc = $"offset measured; repr {DescriptorGenerator.stratumName r.Stratum}: {r.CType} under {ctx.DataModel}"
                 RecordConstruction [
                     "Name", Literal (quoteString field.Name)
                     "Offset", Literal (string field.ByteOffset)
                     "Repr", Literal repr
                     "Count", Literal "1"
-                    "Access", Literal fieldAccess
+                    "Access", Literal viewAccessSource
                     "BitFields", Literal "[||]"
                     "Documentation", Literal ($"Some {quoteString doc}") ])
         let structDoc = $"measured from targeted library {spec.LibraryName} for {spaceName} zero-copy placement"
@@ -2343,41 +2370,108 @@ module FidelityCodeGenerator =
                 "Size", Literal (string spec.MeasuredSize)
                 "Alignment", Literal (string spec.MeasuredAlignment)
                 "Fields", ArrayBlock barewireFieldDescriptors ]
-        let structDescriptor =
-            Quoted(RecordBlock [
+        // StructDescriptor.MayAlias = false states that fields within this C struct do not overlap (non-union, Description.fs:221-242).
+        let structDescriptorRecordBlock =
+            RecordBlock [
                 "Name", Literal (quoteString spec.StructName)
                 "Layout", sharedLayoutBlock
                 "MayAlias", Literal "false"
                 "FlexibleArray", Literal "None"
-                "Documentation", Literal ($"Some {quoteString structDoc}") ])
+                "Documentation", Literal ($"Some {quoteString structDoc}") ]
+        let structDescriptor = Quoted structDescriptorRecordBlock
         let peripheralDescriptor =
             Quoted(RecordBlock [
                 "Name", Literal (quoteString spec.SafeName)
                 "Instances", Literal "[||]"
                 "Layout", sharedLayoutBlock
                 "MemoryRegion", Literal memoryRegionSource ])
-        let memorySpaceDescriptor =
-            Quoted(RecordBlock [
+        let memorySpaceRecordBlock =
+            RecordBlock [
                 "Space", Literal (quoteString spaceName)
                 "MemoryRegion", Literal memoryRegionSource
                 "Access", Literal (quoteString accessName)
-                "ByteOrder", Literal (quoteString spec.ByteOrder)
+                "ByteOrder", Literal (quoteString normalizedByteOrder)
                 "ElementSize", Literal (string spec.MeasuredSize)
                 "ElementCount", Literal (string spec.ElementCount)
                 "RegionByteExtent", Literal (string spec.RegionByteExtent)
                 "RegionAlignment", Literal (string spec.RegionAlignment)
                 "RegionLifetimeDepth", Literal (string spec.RegionLifetimeDepth)
-                "LibraryRetentionDepth", Literal (string spec.LibraryRetentionDepth) ])
+                "LibraryRetentionDepth", Literal (string spec.LibraryRetentionDepth) ]
+        let memorySpaceDescriptor = Quoted memorySpaceRecordBlock
+        let viewLayoutRecordBlock =
+            RecordBlock [
+                "Schema", Literal (quoteString spec.StructName)
+                "Element", Literal viewElementReprSource
+                "Alignment", Literal (string spec.MeasuredAlignment)
+                "Access", Literal viewAccessSource ]
+        let viewLayoutDescriptor = Quoted viewLayoutRecordBlock
+        // Farscape binds the foreign library contract and lifecycle envelope via PlacementDescriptor,
+        // RegionDescriptor, and the contract-fingerprint FidelityExtern binding below, while
+        // clef (SharedBufferTransfer.fs / PublishedFactRows.fs) verifies the consuming Clef program's
+        // PSG call graph against RegionDescriptor and emits SharedBufferPlacementObligation in Fidelity.PSG.
+        let placementDescriptor =
+            Quoted(RecordBlock [
+                "Name", Literal (quoteString spec.SafeName)
+                "SpaceDescriptor", memorySpaceRecordBlock
+                "SpaceOffset", Literal $"{spec.SpaceOffset}L"
+                "StructLayout", structDescriptorRecordBlock
+                "ViewLayout", viewLayoutRecordBlock
+                "MeasuredElementSize", Literal (string spec.MeasuredSize)
+                "LayoutAlignment", Literal (string spec.MeasuredAlignment)
+                "LayoutByteOrder", Literal (quoteString normalizedByteOrder)
+                "HasRawPointerFields", Literal (boolLiteral hasRawPointerFields)
+                "HasVerifiedExports", Literal (boolLiteral facts.HasVerifiedExports)
+                "MappedDepth", Literal (string facts.MappedDepth)
+                "FirstUseDepth", Literal (string facts.FirstUseDepth)
+                "LastUseDepth", Literal (string facts.LastUseDepth)
+                "LibraryRetentionEndDepth", Literal (string facts.LibraryRetentionEndDepth)
+                "UnmapDepth", Literal (string facts.UnmapDepth)
+                "LeakedAtExit", Literal (boolLiteral facts.LeakedAtExit)
+                "ConcurrentClefMutation", Literal (boolLiteral facts.ConcurrentClefMutation)
+                "LibraryMutatesBuffer", Literal (boolLiteral facts.LibraryMutatesBuffer)
+                "OverlappingMutableShare", Literal (boolLiteral facts.OverlappingMutableShare)
+                "MaxAccessedElementIndex", Literal (string facts.MaxAccessedElementIndex) ])
+        let contractSymbol = CppClassAnalysis.sharedBufferContractSymbol spec
+        let contractSuffix = contractSymbol.Substring(prefix.Length)
+        let regionDescriptor =
+            let releaseSymbol = quoteString (spec.Namespace + "." + spec.SafeName + "_unmap")
+            let foreignUsesExpr =
+                match spec.LibraryTransformSymbol with
+                | Some _ ->
+                    ArrayBlock [ Literal (quoteString (spec.Namespace + "." + spec.SafeName + "_library_transform_in_place")) ]
+                | None -> Literal "[||]"
+            Quoted(RecordBlock [
+                "Placement", Literal (quoteString spec.SafeName)
+                "Acquire", Literal (quoteString (spec.Namespace + "." + spec.SafeName + "_map"))
+                "Release", Literal ("Some " + releaseSymbol)
+                "Sync", ArrayBlock [
+                    Literal (quoteString (spec.Namespace + "." + spec.SafeName + "_share_to_library"))
+                    Literal (quoteString (spec.Namespace + "." + spec.SafeName + "_unshare_from_library"))
+                    Literal (quoteString (spec.Namespace + "." + spec.SafeName + contractSuffix)) ]
+                "ForeignUses", foreignUsesExpr ])
         let offsetLiterals =
             spec.Fields |> List.map (fun field -> LiteralBinding(field.Name + "Offset", Named "int", string field.ByteOffset))
         let fieldBindings =
             resolvedFields |> List.collect (fun (field, _, fieldRepr, _) ->
-                binding ("_clef_read_" + field.Name) "Borrowed"
-                    [ output "outValue" field.ClefType; self; { Name = "index"; Type = Named "int" }, intRef ]
+                let readBindings =
+                    if spec.SpaceAccess <> CppClassAnalysis.SharedAccessMode.SharedWriteOnly then
+                        binding ("_clef_read_" + field.Name) "Borrowed"
+                            [ output "outValue" field.ClefType; self; { Name = "index"; Type = Named "int" }, intRef ]
+                            (Named "int") intRef
+                    else []
+                let writeBindings =
+                    if spec.SpaceAccess <> CppClassAnalysis.SharedAccessMode.SharedReadOnly then
+                        binding ("_clef_write_" + field.Name) "Borrowed"
+                            [ self; { Name = "index"; Type = Named "int" }, intRef; { Name = "value"; Type = Named field.ClefType }, fieldRepr ]
+                            (Named "int") intRef
+                    else []
+                readBindings @ writeBindings)
+        let transformBindings =
+            if spec.LibraryTransformSymbol.IsSome then
+                binding "_library_transform_in_place" "Borrowed"
+                    [ self; { Name = "index"; Type = Named "int" }, intRef; { Name = "delta"; Type = Named "int" }, intRef ]
                     (Named "int") intRef
-                @ binding ("_clef_write_" + field.Name) "Borrowed"
-                    [ self; { Name = "index"; Type = Named "int" }, intRef; { Name = "value"; Type = Named field.ClefType }, fieldRepr ]
-                    (Named "int") intRef)
+            else []
         let mapParameters =
             match spec.MemorySpace with
             | CppClassAnalysis.FileMapped -> [ { Name = "fd"; Type = Named "int" }, intRef ]
@@ -2392,7 +2486,7 @@ module FidelityCodeGenerator =
                 LiteralBinding("RegionAlignment", Named "int", string spec.RegionAlignment)
                 LiteralBinding("MemorySpace", Named "string", quoteString spaceName)
                 LiteralBinding("SpaceAccess", Named "string", quoteString accessName)
-                LiteralBinding("ByteOrder", Named "string", quoteString spec.ByteOrder) ]
+                LiteralBinding("ByteOrder", Named "string", quoteString normalizedByteOrder) ]
               @ offsetLiterals
               @ [ LiteralBinding("StatusOk", Named "int", "0")
                   LiteralBinding("StatusNullHandle", Named "int", "-1")
@@ -2401,7 +2495,10 @@ module FidelityCodeGenerator =
                   LiteralBinding("StatusAccessConflict", Named "int", "6")
                   ValueBinding("Descriptor", Generic("Expr", Named "StructDescriptor"), structDescriptor)
                   ValueBinding("PeripheralDescriptor", Generic("Expr", Named "PeripheralDescriptor"), peripheralDescriptor)
-                  ValueBinding("MemorySpaceDescriptor", Generic("Expr", Named "MemorySpaceDescriptor"), memorySpaceDescriptor) ])
+                  ValueBinding("MemorySpaceDescriptor", Generic("Expr", Named "MemorySpaceDescriptor"), memorySpaceDescriptor)
+                  ValueBinding("ViewLayoutDescriptor", Generic("Expr", Named "ViewLayoutDescriptor"), viewLayoutDescriptor)
+                  ValueBinding("PlacementDescriptor", Generic("Expr", Named "SharedBufferPlacement"), placementDescriptor)
+                  ValueBinding("RegionDescriptor", Generic("Expr", Named "SharedBufferRegionDescriptor"), regionDescriptor) ])
           BlankLine ]
         @ binding "_unmap" "CalleeOwns" [ self ] (Named "int") intRef
         @ [ ValueBinding(spec.SafeName + "_mapResourceDescriptor", Generic("Expr", Named "ResourceDescriptor"),
@@ -2419,13 +2516,12 @@ module FidelityCodeGenerator =
             [ self; { Name = "accessMode"; Type = Named "int" }, intRef; { Name = "elementCount"; Type = Named "int" }, intRef ]
             (Named "int") intRef
         @ binding "_unshare_from_library" "Borrowed" [ self ] (Named "int") intRef
-        @ binding "_library_transform_in_place" "Borrowed"
-            [ self; { Name = "index"; Type = Named "int" }, intRef; { Name = "delta"; Type = Named "int" }, intRef ]
-            (Named "int") intRef
+        @ transformBindings
         @ binding "_clef_address_identity" "Borrowed" [ output "outAddress" "int"; self ] (Named "int") intRef
         @ binding "_library_address_identity" "Borrowed" [ output "outAddress" "int"; self ] (Named "int") intRef
         @ binding "_copy_count" "Borrowed" [ output "outCopies" "int"; self ] (Named "int") intRef
         @ binding "_memory_space_kind" "Borrowed" [ output "outSpaceKind" "int"; self ] (Named "int") intRef
+        @ binding contractSuffix "Borrowed" [ self ] (Named "int") intRef
         @ fieldBindings
 
     let generateSharedBufferModule (ctx: GenerationContext) (spec: CppClassAnalysis.SharedBufferSpec) =
@@ -2434,7 +2530,7 @@ module FidelityCodeGenerator =
             Module(
                 spec.Namespace,
                 "Fidelity.Platform and BAREWire zero-copy shared buffer operations",
-                OpenModule "BAREWire.Hardware" :: OpenModule "BAREWire.Descriptors" :: BlankLine :: declarations))
+                OpenModule "BAREWire.Hardware" :: OpenModule "BAREWire.Descriptors" :: OpenModule "BAREWire.Platform" :: BlankLine :: declarations))
 
     /// Marshaled class surface. C1/D1 identify the native operations; owned allocation
     /// and deallocation are realized by the companion native storage adapter.

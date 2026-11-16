@@ -1621,6 +1621,31 @@ let private sharedTileLayouts : Map<string, CppClassAnalysis.StructLayout> =
         "SharedTensorTile", mkLayout "SharedTensorTile" 192 64 [ 0; 64; 128; 160 ]
     ]
 
+let private sharedTileLifecycle : CppClassAnalysis.SharedBufferOperation list =
+    [ CppClassAnalysis.SharedBufferOperation.MapRegion
+      CppClassAnalysis.SharedBufferOperation.ClefWrite (0, "sequence")
+      CppClassAnalysis.SharedBufferOperation.ClefWrite (0, "accumulator")
+      CppClassAnalysis.SharedBufferOperation.ClefRead (0, "sequence")
+      CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedReadWrite, 4)
+      CppClassAnalysis.SharedBufferOperation.LibraryMutate 0
+      CppClassAnalysis.SharedBufferOperation.SyncFromLibrary 3
+      CppClassAnalysis.SharedBufferOperation.UnshareFromLibrary
+      CppClassAnalysis.SharedBufferOperation.ClefRead (0, "accumulator")
+      CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedReadOnly, 4)
+      CppClassAnalysis.SharedBufferOperation.ClefRead (0, "sequence")
+      CppClassAnalysis.SharedBufferOperation.UnshareFromLibrary
+      CppClassAnalysis.SharedBufferOperation.UnmapRegion
+      CppClassAnalysis.SharedBufferOperation.ScopeExit ]
+
+let private fileMappedLifecycle : CppClassAnalysis.SharedBufferOperation list =
+    [ CppClassAnalysis.SharedBufferOperation.MapRegion
+      CppClassAnalysis.SharedBufferOperation.ClefRead (0, "sequence")
+      CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedReadOnly, 4)
+      CppClassAnalysis.SharedBufferOperation.ClefRead (3, "accumulator")
+      CppClassAnalysis.SharedBufferOperation.UnshareFromLibrary
+      CppClassAnalysis.SharedBufferOperation.UnmapRegion
+      CppClassAnalysis.SharedBufferOperation.ScopeExit ]
+
 let private sharedTileSpec : CppClassAnalysis.SharedBufferSpec =
     { StructName = "SharedTensorTile"
       SafeName = "SharedTensorTileBuffer"
@@ -1630,6 +1655,7 @@ let private sharedTileSpec : CppClassAnalysis.SharedBufferSpec =
       MemorySpace = CppClassAnalysis.SharedMemorySpaceKind.HostShared
       SpaceAccess = CppClassAnalysis.SharedAccessMode.SharedReadWrite
       ByteOrder = "LittleEndian"
+      SpaceOffset = 0L
       MeasuredSize = 24
       MeasuredAlignment = 8
       ElementCount = 4
@@ -1637,6 +1663,8 @@ let private sharedTileSpec : CppClassAnalysis.SharedBufferSpec =
       RegionAlignment = 64
       RegionLifetimeDepth = 1
       LibraryRetentionDepth = 2
+      Lifecycle = sharedTileLifecycle
+      VerifiedLibraryPath = None
       Fields = sharedTileFields
       LibraryTransformSymbol = Some "shared_tile_library_transform_in_place"
       Source = Some (Diagnostics.Located.Unknown "shared buffer fixture") }
@@ -1645,7 +1673,9 @@ let private sharedBufferRefusal code action =
     let error = Assert.Throws<Diagnostics.RefusalException>(System.Action action)
     let diagnostic = only error.Refusal
     Assert.Equal(code, diagnostic.Code)
-    Assert.Equal(sharedTileSpec.Source.Value, diagnostic.Source)
+    match sharedTileSpec.Source with
+    | Some expectedSource -> Assert.Equal(expectedSource, diagnostic.Source)
+    | None -> Assert.Fail("Expected Source on sharedTileSpec")
     Assert.False(System.String.IsNullOrWhiteSpace diagnostic.Message)
 
 [<Fact>]
@@ -1665,10 +1695,17 @@ let sharedBufferContractRefusesUnmeasuredMismatchedLayoutAlignmentAndRawPointers
         sharedTileFields |> List.map (fun f -> if f.Name = "accumulator" then { f with ByteOffset = 4 } else f)
     sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
         CppClassAnalysis.validateSharedBufferContract sharedTileLayouts { sharedTileSpec with Fields = wrongOffsetFields })
-    // Placement alignment smaller than measured alignment or non-power-of-two, or byte-order mismatch
-    for badAlign in [ 0; 3; 4; 12; -8 ] do
+    // Placement alignment smaller than measured alignment, larger than 4096, or non-power-of-two, unaligned/negative space offset, lifecycle mutation mismatch, or byte-order mismatch
+    for badAlign in [ 0; 3; 4; 12; -8; 8192 ] do
         sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
             CppClassAnalysis.validateSharedBufferContract sharedTileLayouts { sharedTileSpec with RegionAlignment = badAlign })
+    for badOffset in [ -64L; 8L; 32L ] do
+        sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+            CppClassAnalysis.validateSharedBufferContract sharedTileLayouts { sharedTileSpec with SpaceOffset = badOffset })
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        CppClassAnalysis.validateSharedBufferContract sharedTileLayouts { sharedTileSpec with LibraryTransformSymbol = None })
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        CppClassAnalysis.validateSharedBufferContract sharedTileLayouts { sharedTileSpec with Lifecycle = fileMappedLifecycle })
     sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
         CppClassAnalysis.validateSharedBufferContract sharedTileLayouts { sharedTileSpec with ByteOrder = "BigEndian" })
     // Raw pointer/address tokens or empty names refused with FS9220
@@ -1676,10 +1713,12 @@ let sharedBufferContractRefusesUnmeasuredMismatchedLayoutAlignmentAndRawPointers
         let badFields = { sharedTileFields.Head with CType = badType } :: sharedTileFields.Tail
         sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
             CppClassAnalysis.validateSharedBufferContract sharedTileLayouts { sharedTileSpec with Fields = badFields })
+    // Unverified exports (VerifiedLibraryPath = None or missing binary) refused before emitting SharedBufferPlacement
     let ctx = FidelityCodeGenerator.buildGenerationContext [] Types.LP64 sharedTileLayouts
-    let mismatchedClefType = { sharedTileFields.Head with ClefType = "int64" } :: sharedTileFields.Tail
     sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
-        FidelityCodeGenerator.generateSharedBufferDecls ctx { sharedTileSpec with Fields = mismatchedClefType } |> ignore)
+        FidelityCodeGenerator.generateSharedBufferDecls ctx sharedTileSpec |> ignore)
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        FidelityCodeGenerator.generateSharedBufferDecls ctx { sharedTileSpec with VerifiedLibraryPath = Some "/nonexistent/libsharedtile.so" } |> ignore)
 
 [<Fact>]
 let sharedBufferExtentRefusesUnderallocatedOverflowingAndOutOfBoundsAccess () =
@@ -1689,7 +1728,24 @@ let sharedBufferExtentRefusesUnderallocatedOverflowingAndOutOfBoundsAccess () =
         { sharedTileSpec with MeasuredSize = 0 }
         { sharedTileSpec with ElementCount = System.Int32.MaxValue; RegionByteExtent = System.Int32.MaxValue }
         { sharedTileSpec with RegionByteExtent = 95 }
-        { sharedTileSpec with RegionByteExtent = 24 } ] do
+        { sharedTileSpec with RegionByteExtent = 24 }
+        { sharedTileSpec with SpaceOffset = System.Int64.MaxValue - 63L }
+        { sharedTileSpec with
+            Lifecycle =
+                [ CppClassAnalysis.SharedBufferOperation.MapRegion
+                  CppClassAnalysis.SharedBufferOperation.ClefRead (-1, "sequence")
+                  CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedReadWrite, 4)
+                  CppClassAnalysis.SharedBufferOperation.LibraryMutate 0
+                  CppClassAnalysis.SharedBufferOperation.UnshareFromLibrary
+                  CppClassAnalysis.SharedBufferOperation.UnmapRegion ] }
+        { sharedTileSpec with
+            Lifecycle =
+                [ CppClassAnalysis.SharedBufferOperation.MapRegion
+                  CppClassAnalysis.SharedBufferOperation.ClefWrite (4, "sequence")
+                  CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedReadWrite, 4)
+                  CppClassAnalysis.SharedBufferOperation.LibraryMutate 0
+                  CppClassAnalysis.SharedBufferOperation.UnshareFromLibrary
+                  CppClassAnalysis.SharedBufferOperation.UnmapRegion ] } ] do
         sharedBufferRefusal Diagnostics.SharedBufferExtentInvalid (fun () ->
             CppClassAnalysis.validateSharedBufferContract sharedTileLayouts badSpec)
     let verify ops = CppClassAnalysis.verifySharedBufferLifecycle sharedTileLayouts sharedTileSpec ops
@@ -1722,8 +1778,21 @@ let sharedBufferExtentRefusesUnderallocatedOverflowingAndOutOfBoundsAccess () =
 
 [<Fact>]
 let sharedBufferLifetimeRefusesShortRetentionPrematureUnmapUseAfterUnmapAndLeaks () =
-    sharedBufferRefusal Diagnostics.SharedBufferLifetimeInvalid (fun () ->
-        CppClassAnalysis.validateSharedBufferContract sharedTileLayouts { sharedTileSpec with RegionLifetimeDepth = 3; LibraryRetentionDepth = 1 })
+    for badLifetimeSpec in [
+        { sharedTileSpec with RegionLifetimeDepth = 0 }
+        { sharedTileSpec with LibraryRetentionDepth = 0 }
+        { sharedTileSpec with RegionLifetimeDepth = 3; LibraryRetentionDepth = 1 }
+        { sharedTileSpec with Lifecycle = [] }
+        { sharedTileSpec with
+            Lifecycle =
+                [ CppClassAnalysis.SharedBufferOperation.MapRegion
+                  CppClassAnalysis.SharedBufferOperation.UnmapRegion ] }
+        { sharedTileSpec with
+            Lifecycle =
+                [ CppClassAnalysis.SharedBufferOperation.MapRegion
+                  CppClassAnalysis.SharedBufferOperation.ClefRead (0, "sequence") ] } ] do
+        sharedBufferRefusal Diagnostics.SharedBufferLifetimeInvalid (fun () ->
+            CppClassAnalysis.validateSharedBufferContract sharedTileLayouts badLifetimeSpec)
     let verify ops = CppClassAnalysis.verifySharedBufferLifecycle sharedTileLayouts sharedTileSpec ops
     for badLifecycle in [
         // Use before MapRegion
@@ -1755,6 +1824,15 @@ let sharedBufferLifetimeRefusesShortRetentionPrematureUnmapUseAfterUnmapAndLeaks
         [ CppClassAnalysis.SharedBufferOperation.MapRegion
           CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedReadOnly, 2)
           CppClassAnalysis.SharedBufferOperation.ScopeExit ]
+        // Missing ShareToLibrary/UnshareFromLibrary window or LastUseDepth exceeding LibraryRetentionEndDepth
+        [ CppClassAnalysis.SharedBufferOperation.MapRegion
+          CppClassAnalysis.SharedBufferOperation.ClefWrite (0, "sequence")
+          CppClassAnalysis.SharedBufferOperation.UnmapRegion ]
+        [ CppClassAnalysis.SharedBufferOperation.MapRegion
+          CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedReadOnly, 2)
+          CppClassAnalysis.SharedBufferOperation.UnshareFromLibrary
+          CppClassAnalysis.SharedBufferOperation.ClefRead (0, "sequence")
+          CppClassAnalysis.SharedBufferOperation.UnmapRegion ]
         // Operations after terminal ScopeExit
         [ CppClassAnalysis.SharedBufferOperation.MapRegion
           CppClassAnalysis.SharedBufferOperation.UnmapRegion
@@ -1765,6 +1843,8 @@ let sharedBufferLifetimeRefusesShortRetentionPrematureUnmapUseAfterUnmapAndLeaks
 [<Fact>]
 let sharedBufferAccessRefusesConcurrentClefMutationReadOnlyMutationAndOverlappingShares () =
     let verify spec ops = CppClassAnalysis.verifySharedBufferLifecycle sharedTileLayouts spec ops
+    sharedBufferRefusal Diagnostics.SharedBufferConflictingAccess (fun () ->
+        CppClassAnalysis.validateSharedBufferContract sharedTileLayouts { sharedTileSpec with SpaceAccess = CppClassAnalysis.SharedAccessMode.SharedReadOnly })
     // Valid bidirectional lifecycle (Clef -> Library -> Clef + concurrent read-only share)
     verify sharedTileSpec [
         CppClassAnalysis.SharedBufferOperation.MapRegion
@@ -1817,7 +1897,11 @@ let sharedBufferAccessRefusesConcurrentClefMutationReadOnlyMutationAndOverlappin
           CppClassAnalysis.SharedBufferOperation.UnmapRegion ] ] do
         sharedBufferRefusal Diagnostics.SharedBufferConflictingAccess (fun () -> verify sharedTileSpec badOps)
     // SharedReadOnly placement refuses ClefWrite and mutable ShareToLibrary
-    let readOnlySpec = { sharedTileSpec with SpaceAccess = CppClassAnalysis.SharedAccessMode.SharedReadOnly }
+    let readOnlySpec =
+        { sharedTileSpec with
+            SpaceAccess = CppClassAnalysis.SharedAccessMode.SharedReadOnly
+            Lifecycle = fileMappedLifecycle
+            LibraryTransformSymbol = None }
     sharedBufferRefusal Diagnostics.SharedBufferConflictingAccess (fun () ->
         verify readOnlySpec [
             CppClassAnalysis.SharedBufferOperation.MapRegion
@@ -1856,14 +1940,24 @@ extern "C" int shared_tile_library_transform_in_place(
     std::uintptr_t* out_library_addr,
     int* inout_copy_count) noexcept;
 
+extern "C" int shared_tile_library_copy_and_transform(
+    const SharedTensorTile* src,
+    int count,
+    int index,
+    int delta,
+    std::uintptr_t* out_library_addr,
+    int* inout_copy_count) noexcept;
+
 extern "C" int shared_tile_library_observed_copies() noexcept;
 extern "C" std::uintptr_t shared_tile_library_last_address() noexcept;
     """)
     File.WriteAllText(path "shared_tile.cpp", """
 #include "shared_tile.hpp"
+#include <cstring>
 
 static int g_observed_copies = 0;
 static std::uintptr_t g_last_address = 0;
+static SharedTensorTile g_staging_copy[16];
 
 extern "C" int shared_tile_library_transform_in_place(
     SharedTensorTile* base,
@@ -1874,7 +1968,10 @@ extern "C" int shared_tile_library_transform_in_place(
     int* inout_copy_count) noexcept {
     if (!base || !out_library_addr || !inout_copy_count) return -1;
     if (index < 0 || index >= count) return 4;
-    // Mutate the shared buffer directly in place without copying.
+    if (base == g_staging_copy) {
+        ++g_observed_copies;
+        ++(*inout_copy_count);
+    }
     g_last_address = reinterpret_cast<std::uintptr_t>(base);
     *out_library_addr = g_last_address;
     SharedTensorTile& tile = base[index];
@@ -1882,6 +1979,19 @@ extern "C" int shared_tile_library_transform_in_place(
     tile.accumulator += static_cast<std::int64_t>(delta) * static_cast<std::int64_t>(tile.scale);
     tile.checksum = tile.sequence ^ static_cast<std::uint32_t>(tile.accumulator & 0xFFFFFFFFLL);
     return 0;
+}
+
+extern "C" int shared_tile_library_copy_and_transform(
+    const SharedTensorTile* src,
+    int count,
+    int index,
+    int delta,
+    std::uintptr_t* out_library_addr,
+    int* inout_copy_count) noexcept {
+    if (!src || !out_library_addr || !inout_copy_count) return -1;
+    if (count <= 0 || count > 16 || index < 0 || index >= count) return 4;
+    std::memcpy(g_staging_copy, src, static_cast<std::size_t>(count) * sizeof(SharedTensorTile));
+    return shared_tile_library_transform_in_place(g_staging_copy, count, index, delta, out_library_addr, inout_copy_count);
 }
 
 extern "C" int shared_tile_library_observed_copies() noexcept {
@@ -1896,25 +2006,158 @@ extern "C" std::uintptr_t shared_tile_library_last_address() noexcept {
     let measuredLayouts =
         match CppParser.extractStructLayouts headerPath [] [] [ "SharedTensorTile" ] false with
         | Ok layouts -> layouts
-        | Error err -> failwith $"Failed to extract clang layout for SharedTensorTile: {err}"
+        | Error err ->
+            Assert.Fail($"Failed to extract clang layout for SharedTensorTile: {err}")
+            Map.empty
     let measuredTile = measuredLayouts["SharedTensorTile"]
     Assert.Equal(192, measuredTile.SizeBits)
     Assert.Equal(64, measuredTile.AlignmentBits)
     Assert.Equal<int list>([ 0; 64; 128; 160 ], measuredTile.FieldOffsetsBits)
-    let hostSpec = { sharedTileSpec with HeaderFile = headerPath }
-    let deviceSpec =
-        { hostSpec with
+    let baseHostSpec = { sharedTileSpec with HeaderFile = headerPath }
+    let deviceBoundedLifecycle =
+        [ CppClassAnalysis.SharedBufferOperation.MapRegion
+          CppClassAnalysis.SharedBufferOperation.ClefWrite (0, "sequence")
+          CppClassAnalysis.SharedBufferOperation.ClefWrite (1, "sequence")
+          CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedReadWrite, 2)
+          CppClassAnalysis.SharedBufferOperation.LibraryMutate 1
+          CppClassAnalysis.SharedBufferOperation.SyncFromLibrary 1
+          CppClassAnalysis.SharedBufferOperation.UnshareFromLibrary
+          CppClassAnalysis.SharedBufferOperation.ClefRead (1, "sequence")
+          CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedReadOnly, 2)
+          CppClassAnalysis.SharedBufferOperation.ClefRead (1, "sequence")
+          CppClassAnalysis.SharedBufferOperation.UnshareFromLibrary
+          CppClassAnalysis.SharedBufferOperation.UnmapRegion
+          CppClassAnalysis.SharedBufferOperation.ScopeExit ]
+    let baseDeviceSpec =
+        { baseHostSpec with
             SafeName = "DeviceTensorTileBuffer"
             Namespace = "Test.DeviceSharedBuffers"
             MemorySpace = CppClassAnalysis.SharedMemorySpaceKind.DeviceUnified
-            SpaceAccess = CppClassAnalysis.SharedAccessMode.SharedReadWrite }
-    let fileMappedSpec =
-        { hostSpec with
+            SpaceAccess = CppClassAnalysis.SharedAccessMode.SharedReadWrite
+            Lifecycle = deviceBoundedLifecycle }
+    let baseFileMappedSpec =
+        { baseHostSpec with
             SafeName = "FileTensorTileBuffer"
             Namespace = "Test.FileSharedBuffers"
             MemorySpace = CppClassAnalysis.SharedMemorySpaceKind.FileMapped
-            SpaceAccess = CppClassAnalysis.SharedAccessMode.SharedReadOnly }
+            SpaceAccess = CppClassAnalysis.SharedAccessMode.SharedReadOnly
+            SpaceOffset = 64L
+            Lifecycle = fileMappedLifecycle
+            LibraryTransformSymbol = None }
+    let hostShimSource = CppClassAnalysis.renderSharedBufferZeroCopyShimC baseHostSpec
+    let deviceShimSource = CppClassAnalysis.renderSharedBufferZeroCopyShimC baseDeviceSpec
+    let fileShimSource = CppClassAnalysis.renderSharedBufferZeroCopyShimC baseFileMappedSpec
+    Assert.DoesNotContain("MAP_ANONYMOUS", fileShimSource)
+    Assert.Contains("MAP_SHARED, fd, 0", fileShimSource)
+    Assert.DoesNotContain("FileTensorTileBuffer_library_transform_in_place", fileShimSource)
+    Assert.DoesNotContain("4096u", hostShimSource)
+    File.WriteAllText(path "shim_host.cpp", hostShimSource)
+    File.WriteAllText(path "shim_device.cpp", deviceShimSource)
+    File.WriteAllText(path "shim_file.cpp", fileShimSource)
+    let library = path "libsharedtile.so"
+    // First compile without shims to verify validateSharedBufferLibraryExports and generateSharedBufferDecls refuse missing FFI exports with FS9220
+    let incompleteLibrary = path "libsharedtile_incomplete.so"
+    run "/usr/bin/clang++" [ "-std=c++17"; "-shared"; "-fPIC"; path "shared_tile.cpp"; "-o"; incompleteLibrary ] |> ignore
     let ctx = FidelityCodeGenerator.buildGenerationContext [] Types.LP64 measuredLayouts
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        CppClassAnalysis.validateSharedBufferLibraryExports incompleteLibrary measuredLayouts baseHostSpec)
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        FidelityCodeGenerator.generateSharedBufferDecls ctx { baseHostSpec with VerifiedLibraryPath = Some incompleteLibrary } |> ignore)
+    // Compile targeted library with generated HostShared, DeviceUnified and FileMapped zero-copy shims so libsharedtile.so exports all FidelityExtern symbols
+    run "/usr/bin/clang++" [ "-std=c++17"; "-shared"; "-fPIC"; path "shared_tile.cpp"; path "shim_host.cpp"; path "shim_device.cpp"; path "shim_file.cpp"; "-o"; library ] |> ignore
+    let hostSpec = { baseHostSpec with VerifiedLibraryPath = Some library }
+    let deviceSpec = { baseDeviceSpec with VerifiedLibraryPath = Some library }
+    let fileMappedSpec = { baseFileMappedSpec with VerifiedLibraryPath = Some library }
+    CppClassAnalysis.validateSharedBufferLibraryExports library measuredLayouts hostSpec
+    CppClassAnalysis.validateSharedBufferLibraryExports library measuredLayouts deviceSpec
+    CppClassAnalysis.validateSharedBufferLibraryExports library measuredLayouts fileMappedSpec
+    // Isolated filename-stem, version-suffix, truncated/malformed ELF, and unavailable symbol-tool checks
+    let wrongStemLibrary = path "libwrongstem.so"
+    let badSuffixLibrary = path "libsharedtile.so.bak"
+    let validVersionedLibrary = path "libsharedtile.so.1.2"
+    let truncatedLibrary = path "libsharedtile_trunc.so"
+    let invalidMagicLibrary = path "libsharedtile_badmagic.so"
+    let malformedElfLibrary = path "libsharedtile_malformed.so"
+    File.Copy(library, wrongStemLibrary, true)
+    File.Copy(library, badSuffixLibrary, true)
+    File.Copy(library, validVersionedLibrary, true)
+    File.WriteAllBytes(truncatedLibrary, [| 0x7Fuy; 0x45uy; 0x4Cuy |])
+    File.WriteAllBytes(invalidMagicLibrary, System.Text.Encoding.ASCII.GetBytes("NOT_AN_ELF_FILE!"))
+    File.WriteAllBytes(malformedElfLibrary, [| 0x7Fuy; 0x45uy; 0x4Cuy; 0x46uy; 0xFFuy; 0xFFuy; 0xFFuy; 0xFFuy; 0uy; 0uy; 0uy; 0uy; 0uy; 0uy; 0uy; 0uy |])
+    CppClassAnalysis.validateSharedBufferLibraryExports validVersionedLibrary measuredLayouts hostSpec
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        CppClassAnalysis.validateSharedBufferLibraryExports wrongStemLibrary measuredLayouts hostSpec)
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        CppClassAnalysis.validateSharedBufferLibraryExports badSuffixLibrary measuredLayouts hostSpec)
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        CppClassAnalysis.validateSharedBufferLibraryExports truncatedLibrary measuredLayouts hostSpec)
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        CppClassAnalysis.validateSharedBufferLibraryExports invalidMagicLibrary measuredLayouts hostSpec)
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        CppClassAnalysis.validateSharedBufferLibraryExports malformedElfLibrary measuredLayouts hostSpec)
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        CppClassAnalysis.validateSharedBufferLibraryExportsWithTool "/nonexistent/readelf" library measuredLayouts hostSpec)
+    // Contract fingerprint and library stem binding refuses a spec whose LibraryName, SpaceOffset, access mode, lifecycle, or field IsVolatile flag disagrees with the compiled shim
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        CppClassAnalysis.validateSharedBufferLibraryExports library measuredLayouts { hostSpec with LibraryName = "wronglib" })
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        FidelityCodeGenerator.generateSharedBufferDecls ctx { hostSpec with LibraryName = "wronglib" } |> ignore)
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        CppClassAnalysis.validateSharedBufferLibraryExports library measuredLayouts { fileMappedSpec with SpaceOffset = 0L })
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        FidelityCodeGenerator.generateSharedBufferDecls ctx { fileMappedSpec with SpaceOffset = 0L } |> ignore)
+    let alteredFileLifecycle =
+        [ CppClassAnalysis.SharedBufferOperation.MapRegion
+          CppClassAnalysis.SharedBufferOperation.ClefRead (0, "sequence")
+          CppClassAnalysis.SharedBufferOperation.ShareToLibrary (CppClassAnalysis.SharedAccessMode.SharedReadOnly, 2)
+          CppClassAnalysis.SharedBufferOperation.ClefRead (1, "accumulator")
+          CppClassAnalysis.SharedBufferOperation.UnshareFromLibrary
+          CppClassAnalysis.SharedBufferOperation.UnmapRegion
+          CppClassAnalysis.SharedBufferOperation.ScopeExit ]
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        CppClassAnalysis.validateSharedBufferLibraryExports library measuredLayouts { fileMappedSpec with Lifecycle = alteredFileLifecycle })
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        FidelityCodeGenerator.generateSharedBufferDecls ctx { fileMappedSpec with Lifecycle = alteredFileLifecycle } |> ignore)
+    let volatileMismatchFields = { sharedTileFields.Head with IsVolatile = true } :: sharedTileFields.Tail
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        CppClassAnalysis.validateSharedBufferLibraryExports library measuredLayouts { hostSpec with Fields = volatileMismatchFields })
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        FidelityCodeGenerator.generateSharedBufferDecls ctx { hostSpec with Fields = volatileMismatchFields } |> ignore)
+    let hostFacts = CppClassAnalysis.deriveSharedBufferPlacementFacts measuredLayouts hostSpec
+    Assert.Equal(1, hostFacts.MappedDepth)
+    Assert.Equal(2, hostFacts.FirstUseDepth)
+    Assert.Equal(11, hostFacts.LastUseDepth)
+    Assert.Equal(12, hostFacts.LibraryRetentionEndDepth)
+    Assert.Equal(13, hostFacts.UnmapDepth)
+    Assert.Equal(false, hostFacts.LeakedAtExit)
+    Assert.Equal(false, hostFacts.ConcurrentClefMutation)
+    Assert.Equal(true, hostFacts.LibraryMutatesBuffer)
+    Assert.Equal(false, hostFacts.OverlappingMutableShare)
+    Assert.Equal(3, hostFacts.MaxAccessedElementIndex)
+    Assert.Equal(true, hostFacts.HasVerifiedExports)
+    let deviceFacts = CppClassAnalysis.deriveSharedBufferPlacementFacts measuredLayouts deviceSpec
+    Assert.Equal(1, deviceFacts.MappedDepth)
+    Assert.Equal(2, deviceFacts.FirstUseDepth)
+    Assert.Equal(10, deviceFacts.LastUseDepth)
+    Assert.Equal(11, deviceFacts.LibraryRetentionEndDepth)
+    Assert.Equal(12, deviceFacts.UnmapDepth)
+    Assert.Equal(1, deviceFacts.MaxAccessedElementIndex)
+    Assert.Equal(true, deviceFacts.HasVerifiedExports)
+    let fileFacts = CppClassAnalysis.deriveSharedBufferPlacementFacts measuredLayouts fileMappedSpec
+    Assert.Equal(1, fileFacts.MappedDepth)
+    Assert.Equal(2, fileFacts.FirstUseDepth)
+    Assert.Equal(4, fileFacts.LastUseDepth)
+    Assert.Equal(5, fileFacts.LibraryRetentionEndDepth)
+    Assert.Equal(6, fileFacts.UnmapDepth)
+    Assert.Equal(false, fileFacts.LeakedAtExit)
+    Assert.Equal(false, fileFacts.ConcurrentClefMutation)
+    Assert.Equal(false, fileFacts.LibraryMutatesBuffer)
+    Assert.Equal(false, fileFacts.OverlappingMutableShare)
+    Assert.Equal(3, fileFacts.MaxAccessedElementIndex)
+    Assert.Equal(true, fileFacts.HasVerifiedExports)
+    let mismatchedClefType = { sharedTileFields.Head with ClefType = "int64" } :: sharedTileFields.Tail
+    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
+        FidelityCodeGenerator.generateSharedBufferDecls ctx { hostSpec with Fields = mismatchedClefType } |> ignore)
     let declarations = FidelityCodeGenerator.generateSharedBufferDecls ctx hostSpec
     Assert.Contains(CodeAST.OpaqueMarker "SharedTensorTileBuffer", declarations)
     Assert.DoesNotContain(declarations, function CodeAST.RecordType _ -> true | _ -> false)
@@ -1930,17 +2173,34 @@ extern "C" std::uintptr_t shared_tile_library_last_address() noexcept {
     File.WriteAllText(path "DeviceSharedBuffers.clef", deviceClefSource)
     File.WriteAllText(path "FileSharedBuffers.clef", fileClefSource)
     for source in [ clefSource; deviceClefSource; fileClefSource ] do
-        for forbidden in [ "nativeint"; "nativeptr"; "Ptr<"; "box "; "box("; ": obj"; "obj array"; "null"; "FidelityExtern.invoke"; "DllImport"; "Marshal"; "UnmanagedFunctionPointer" ] do
+        for forbidden in [ "nativeint"; "nativeptr"; "Ptr<"; "box "; "box("; ": obj"; "obj array"; "null"; "FidelityExtern.invoke"; "DllImport"; "Marshal"; "UnmanagedFunctionPointer"; "\"LittleEndian\"" ] do
             Assert.DoesNotContain(forbidden, source)
         Assert.Contains("NativeDefault.zeroed ()", source)
+    Assert.Contains(CppClassAnalysis.sharedBufferContractSymbol hostSpec, clefSource)
+    Assert.Contains(CppClassAnalysis.sharedBufferContractSymbol deviceSpec, deviceClefSource)
+    Assert.Contains(CppClassAnalysis.sharedBufferContractSymbol fileMappedSpec, fileClefSource)
     for expected in [
         "open BAREWire.Hardware"
         "open BAREWire.Descriptors"
+        "open BAREWire.Platform"
         "Fidelity.Platform.HostShared"
         "MemoryRegionKind.SRAM"
+        "ByteOrder = \"little\""
+        "LayoutByteOrder = \"little\""
+        "LibraryMutatesBuffer = true"
+        "SpaceOffset = 0L\n"
+        "MappedDepth = 1\n"
+        "FirstUseDepth = 2\n"
+        "LastUseDepth = 11\n"
+        "LibraryRetentionEndDepth = 12\n"
+        "UnmapDepth = 13\n"
+        "MaxAccessedElementIndex = 3 }"
         "PeripheralDescriptor"
         "MemorySpaceDescriptor"
         "StructDescriptor"
+        "ViewLayoutDescriptor"
+        "SharedBufferPlacement"
+        "SharedBufferRegionDescriptor"
         "Count = 1"
         "BitFields = [||]"
         "sequenceOffset : int = 0"
@@ -1958,42 +2218,56 @@ extern "C" std::uintptr_t shared_tile_library_last_address() noexcept {
         Assert.Contains(expected, clefSource)
     for expected in [
         "Fidelity.Platform.DeviceUnified"
-        "MemoryRegionKind.DMA"
+        "MemoryRegionKind.SRAM"
+        "ByteOrder = \"little\""
+        "LayoutByteOrder = \"little\""
+        "LibraryMutatesBuffer = true"
+        "MaxAccessedElementIndex = 1 }"
         "DeviceTensorTileBuffer_map"
         "DeviceTensorTileBuffer_memory_space_kind" ] do
         Assert.Contains(expected, deviceClefSource)
+    Assert.DoesNotContain("MemoryRegionKind.DMA", deviceClefSource)
     for expected in [
         "Fidelity.Platform.FileMapped"
-        "MemoryRegionKind.Flash"
+        "MemoryRegionKind.SRAM"
         "Access = \"ReadOnly\""
         "AccessKind.ReadOnly"
+        "ByteOrder = \"little\""
+        "LayoutByteOrder = \"little\""
+        "LibraryMutatesBuffer = false"
+        "SpaceOffset = 64L\n"
+        "MappedDepth = 1\n"
+        "FirstUseDepth = 2\n"
+        "LastUseDepth = 4\n"
+        "LibraryRetentionEndDepth = 5\n"
+        "UnmapDepth = 6\n"
+        "MaxAccessedElementIndex = 3 }"
+        "ForeignUses = [||]"
         "FileTensorTileBuffer_map"
         "let FileTensorTileBuffer_map (fd: int)"
         "Name = \"fd\""
-        "FileTensorTileBuffer_memory_space_kind" ] do
+        "FileTensorTileBuffer_memory_space_kind"
+        "FileTensorTileBuffer_clef_read_accumulator" ] do
         Assert.Contains(expected, fileClefSource)
-    let hostShimSource = CppClassAnalysis.renderSharedBufferZeroCopyShimC hostSpec
-    let deviceShimSource = CppClassAnalysis.renderSharedBufferZeroCopyShimC deviceSpec
-    let fileShimSource = CppClassAnalysis.renderSharedBufferZeroCopyShimC fileMappedSpec
-    Assert.DoesNotContain("MAP_ANONYMOUS", fileShimSource)
-    Assert.Contains("MAP_SHARED, fd, 0", fileShimSource)
-    File.WriteAllText(path "shim_host.cpp", hostShimSource)
-    File.WriteAllText(path "shim_device.cpp", deviceShimSource)
-    File.WriteAllText(path "shim_file.cpp", fileShimSource)
-    let library = path "libsharedtile.so"
-    // First compile without shims to verify validateSharedBufferLibraryExports refuses missing FFI exports with FS9220
-    let incompleteLibrary = path "libsharedtile_incomplete.so"
-    run "/usr/bin/clang++" [ "-std=c++17"; "-shared"; "-fPIC"; path "shared_tile.cpp"; "-o"; incompleteLibrary ] |> ignore
-    sharedBufferRefusal Diagnostics.SharedBufferContractInvalid (fun () ->
-        CppClassAnalysis.validateSharedBufferLibraryExports incompleteLibrary measuredLayouts hostSpec)
-    // Compile targeted library with generated HostShared, DeviceUnified and FileMapped zero-copy shims so libsharedtile.so exports all FidelityExtern symbols
-    run "/usr/bin/clang++" [ "-std=c++17"; "-shared"; "-fPIC"; path "shared_tile.cpp"; path "shim_host.cpp"; path "shim_device.cpp"; path "shim_file.cpp"; "-o"; library ] |> ignore
-    CppClassAnalysis.validateSharedBufferLibraryExports library measuredLayouts hostSpec
-    CppClassAnalysis.validateSharedBufferLibraryExports library measuredLayouts deviceSpec
-    CppClassAnalysis.validateSharedBufferLibraryExports library measuredLayouts fileMappedSpec
+    Assert.DoesNotContain("MemoryRegionKind.Flash", fileClefSource)
+    Assert.DoesNotContain("FileTensorTileBuffer_clef_write_", fileClefSource)
+    Assert.DoesNotContain("FileTensorTileBuffer_library_transform_in_place", fileClefSource)
+    for (generatedPath, modulePrefix) in [
+        path "SharedBuffers.clef", "Test.SharedBuffers.SharedTensorTileBuffer"
+        path "DeviceSharedBuffers.clef", "Test.DeviceSharedBuffers.DeviceTensorTileBuffer"
+        path "FileSharedBuffers.clef", "Test.FileSharedBuffers.FileTensorTileBuffer" ] do
+        match Substantiation.inspectSource Set.empty generatedPath with
+        | Ok digest ->
+            Assert.NotEmpty(digest.CompileTimeDeclarations)
+            Assert.NotEmpty(digest.ForeignDeclarations)
+            for descSym in [ "Descriptor"; "PeripheralDescriptor"; "MemorySpaceDescriptor"; "ViewLayoutDescriptor"; "PlacementDescriptor"; "RegionDescriptor" ] do
+                Assert.Contains(modulePrefix + "." + descSym, digest.CompileTimeDeclarations)
+        | Error refusal ->
+            Assert.Fail(refusal.Text)
 
     let shortBackingPath = (path "short_tile.bin").Replace("\\", "/")
     let validBackingPath = (path "valid_tile.bin").Replace("\\", "/")
+    let hostContractSymbol = CppClassAnalysis.sharedBufferContractSymbol hostSpec
     let runnerSource =
         ("""
 #include "shared_tile.hpp"
@@ -2005,6 +2279,7 @@ extern "C" std::uintptr_t shared_tile_library_last_address() noexcept {
 
 extern "C" void* farscape_shared_buffer_SharedTensorTileBuffer_map() noexcept;
 extern "C" int farscape_shared_buffer_SharedTensorTileBuffer_unmap(void*) noexcept;
+extern "C" int __HOST_CONTRACT_SYM__(void*) noexcept;
 extern "C" int farscape_shared_buffer_SharedTensorTileBuffer_clef_write_sequence(void*, int, std::uint32_t) noexcept;
 extern "C" int farscape_shared_buffer_SharedTensorTileBuffer_clef_read_sequence(std::uint32_t*, void*, int) noexcept;
 extern "C" int farscape_shared_buffer_SharedTensorTileBuffer_clef_write_accumulator(void*, int, std::int64_t) noexcept;
@@ -2024,6 +2299,14 @@ extern "C" int farscape_shared_buffer_SharedTensorTileBuffer_memory_space_kind(i
 extern "C" void* farscape_shared_buffer_DeviceTensorTileBuffer_map() noexcept;
 extern "C" int farscape_shared_buffer_DeviceTensorTileBuffer_unmap(void*) noexcept;
 extern "C" int farscape_shared_buffer_DeviceTensorTileBuffer_memory_space_kind(int*, void*) noexcept;
+extern "C" int farscape_shared_buffer_DeviceTensorTileBuffer_clef_write_sequence(void*, int, std::uint32_t) noexcept;
+extern "C" int farscape_shared_buffer_DeviceTensorTileBuffer_clef_read_sequence(std::uint32_t*, void*, int) noexcept;
+extern "C" int farscape_shared_buffer_DeviceTensorTileBuffer_share_to_library(void*, int, int) noexcept;
+extern "C" int farscape_shared_buffer_DeviceTensorTileBuffer_unshare_from_library(void*) noexcept;
+extern "C" int farscape_shared_buffer_DeviceTensorTileBuffer_library_transform_in_place(void*, int, int) noexcept;
+extern "C" int farscape_shared_buffer_DeviceTensorTileBuffer_clef_address_identity(std::uintptr_t*, void*) noexcept;
+extern "C" int farscape_shared_buffer_DeviceTensorTileBuffer_library_address_identity(std::uintptr_t*, void*) noexcept;
+extern "C" int farscape_shared_buffer_DeviceTensorTileBuffer_copy_count(int*, void*) noexcept;
 
 extern "C" void* farscape_shared_buffer_FileTensorTileBuffer_map(int) noexcept;
 extern "C" int farscape_shared_buffer_FileTensorTileBuffer_unmap(void*) noexcept;
@@ -2042,22 +2325,42 @@ extern "C" int farscape_shared_buffer_FileTensorTileBuffer_copy_count(int*, void
 int main() {
     void* h = farscape_shared_buffer_SharedTensorTileBuffer_map();
     CHECK(h != nullptr);
+    CHECK(__HOST_CONTRACT_SYM__(h) == 0);
     int space_kind = 0;
     CHECK(farscape_shared_buffer_SharedTensorTileBuffer_memory_space_kind(&space_kind, h) == 0 && space_kind == 1);
 
     void* dev_h = farscape_shared_buffer_DeviceTensorTileBuffer_map();
     CHECK(dev_h != nullptr);
     int dev_space_kind = 0;
+    std::uint32_t dev_seq1 = 0u;
+    std::uintptr_t devClefAddr = 0, devLibAddr = 0;
+    int devCopies = -1;
     CHECK(farscape_shared_buffer_DeviceTensorTileBuffer_memory_space_kind(&dev_space_kind, dev_h) == 0 && dev_space_kind == 2);
-    CHECK(farscape_shared_buffer_DeviceTensorTileBuffer_unmap(dev_h) == 0);
+    CHECK(farscape_shared_buffer_DeviceTensorTileBuffer_clef_write_sequence(dev_h, 0, 10u) == 0);
+    CHECK(farscape_shared_buffer_DeviceTensorTileBuffer_clef_write_sequence(dev_h, 1, 55u) == 0);
+    CHECK(farscape_shared_buffer_DeviceTensorTileBuffer_clef_write_sequence(dev_h, 2, 55u) == 4);
+    CHECK(farscape_shared_buffer_DeviceTensorTileBuffer_share_to_library(dev_h, 3, 3) == 4);
+    CHECK(farscape_shared_buffer_DeviceTensorTileBuffer_share_to_library(dev_h, 3, 2) == 0);
+    CHECK(farscape_shared_buffer_DeviceTensorTileBuffer_library_transform_in_place(dev_h, 1, 3) == 0);
+    CHECK(farscape_shared_buffer_DeviceTensorTileBuffer_unshare_from_library(dev_h) == 0);
+    CHECK(farscape_shared_buffer_DeviceTensorTileBuffer_clef_read_sequence(&dev_seq1, dev_h, 1) == 0 && dev_seq1 == 58u);
+    CHECK(farscape_shared_buffer_DeviceTensorTileBuffer_share_to_library(dev_h, 1, 2) == 0);
+    CHECK(farscape_shared_buffer_DeviceTensorTileBuffer_clef_read_sequence(&dev_seq1, dev_h, 1) == 0 && dev_seq1 == 58u);
+    CHECK(farscape_shared_buffer_DeviceTensorTileBuffer_unshare_from_library(dev_h) == 0);
+    CHECK(farscape_shared_buffer_DeviceTensorTileBuffer_clef_address_identity(&devClefAddr, dev_h) == 0);
+    CHECK(farscape_shared_buffer_DeviceTensorTileBuffer_library_address_identity(&devLibAddr, dev_h) == 0);
+    CHECK(farscape_shared_buffer_DeviceTensorTileBuffer_copy_count(&devCopies, dev_h) == 0);
+    CHECK(devClefAddr != 0 && devClefAddr == devLibAddr && devCopies == 0);
 
-    // FileMapped requires a real file descriptor whose fstat size covers RegionByteExtent (4 * sizeof(SharedTensorTile)).
+    // FileMapped requires a real file descriptor whose fstat size covers SpaceOffset (64) + RegionByteExtent (4 * sizeof(SharedTensorTile) = 96) = 160 bytes.
     CHECK(farscape_shared_buffer_FileTensorTileBuffer_map(-1) == nullptr);
     {
+        // A 96-byte file covers RegionByteExtent alone but is smaller than SpaceOffset (64) + RegionByteExtent (96) = 160 bytes.
         int short_wfd = ::open("__SHORT_BACKING__", O_CREAT | O_TRUNC | O_WRONLY, 0600);
         CHECK(short_wfd >= 0);
-        std::uint32_t tiny = 7u;
-        CHECK(::write(short_wfd, &tiny, sizeof(tiny)) == static_cast<ssize_t>(sizeof(tiny)));
+        SharedTensorTile short_tiles[4];
+        std::memset(short_tiles, 0x55, sizeof(short_tiles));
+        CHECK(::write(short_wfd, short_tiles, sizeof(short_tiles)) == static_cast<ssize_t>(sizeof(short_tiles)));
         ::close(short_wfd);
         int short_rfd = ::open("__SHORT_BACKING__", O_RDONLY);
         CHECK(short_rfd >= 0);
@@ -2065,14 +2368,18 @@ int main() {
         ::close(short_rfd);
     }
     {
+        unsigned char prefix_pad[64];
+        std::memset(prefix_pad, 0xAA, sizeof(prefix_pad));
         SharedTensorTile backing_tiles[4];
         std::memset(backing_tiles, 0, sizeof(backing_tiles));
         backing_tiles[0].sequence = 4242u;
         backing_tiles[0].accumulator = 9001LL;
         backing_tiles[1].sequence = 8484u;
         backing_tiles[1].accumulator = -333LL;
+        backing_tiles[3].accumulator = 7777LL;
         int valid_wfd = ::open("__VALID_BACKING__", O_CREAT | O_TRUNC | O_WRONLY, 0600);
         CHECK(valid_wfd >= 0);
+        CHECK(::write(valid_wfd, prefix_pad, sizeof(prefix_pad)) == static_cast<ssize_t>(sizeof(prefix_pad)));
         CHECK(::write(valid_wfd, backing_tiles, sizeof(backing_tiles)) == static_cast<ssize_t>(sizeof(backing_tiles)));
         ::close(valid_wfd);
 
@@ -2082,26 +2389,34 @@ int main() {
         CHECK(file_h != nullptr);
         int file_space_kind = 0;
         std::uint32_t file_seq0 = 0u;
-        std::uint32_t file_seq1 = 0u;
-        std::int64_t file_acc0 = 0LL;
+        std::int64_t file_acc3 = 0LL;
         CHECK(farscape_shared_buffer_FileTensorTileBuffer_memory_space_kind(&file_space_kind, file_h) == 0 && file_space_kind == 3);
+        // Negative refusal check (does not mutate state): read-only FileMapped space rejects writes with StatusAccessConflict (6).
         CHECK(farscape_shared_buffer_FileTensorTileBuffer_clef_write_sequence(file_h, 0, 1u) == 6);
+        // Step 2 of fileMappedLifecycle: ClefRead(0, "sequence") before ShareToLibrary.
         CHECK(farscape_shared_buffer_FileTensorTileBuffer_clef_read_sequence(&file_seq0, file_h, 0) == 0 && file_seq0 == 4242u);
-        CHECK(farscape_shared_buffer_FileTensorTileBuffer_clef_read_accumulator(&file_acc0, file_h, 0) == 0 && file_acc0 == 9001LL);
-        CHECK(farscape_shared_buffer_FileTensorTileBuffer_clef_read_sequence(&file_seq1, file_h, 1) == 0 && file_seq1 == 8484u);
+        // Step 3 of fileMappedLifecycle: ShareToLibrary(SharedReadOnly, 4).
         CHECK(farscape_shared_buffer_FileTensorTileBuffer_share_to_library(file_h, 1, 4) == 0);
+        // Step 4 of fileMappedLifecycle: ClefRead(3, "accumulator") inside the read-only share window (LastUseDepth = 4).
+        CHECK(farscape_shared_buffer_FileTensorTileBuffer_clef_read_accumulator(&file_acc3, file_h, 3) == 0 && file_acc3 == 7777LL);
         std::uintptr_t fileClefAddr = 0, fileLibAddr = 0;
         int fileCopies = -1;
         CHECK(farscape_shared_buffer_FileTensorTileBuffer_clef_address_identity(&fileClefAddr, file_h) == 0);
         CHECK(farscape_shared_buffer_FileTensorTileBuffer_library_address_identity(&fileLibAddr, file_h) == 0);
         CHECK(farscape_shared_buffer_FileTensorTileBuffer_copy_count(&fileCopies, file_h) == 0);
+        const auto* mapped_tiles = reinterpret_cast<const SharedTensorTile*>(fileClefAddr);
+        CHECK(mapped_tiles[0].sequence == 4242u && mapped_tiles[1].sequence == 8484u && mapped_tiles[3].accumulator == 7777LL);
         CHECK(fileClefAddr == fileLibAddr);
         CHECK(fileClefAddr != 0);
+        CHECK((fileClefAddr & 63u) == 0u);
+        CHECK((fileClefAddr & 4095u) == 64u);
         CHECK(fileCopies == 0);
+        // Step 5 of fileMappedLifecycle: UnshareFromLibrary (LibraryRetentionEndDepth = 5).
         CHECK(farscape_shared_buffer_FileTensorTileBuffer_unshare_from_library(file_h) == 0);
+        // Step 6 of fileMappedLifecycle: UnmapRegion (UnmapDepth = 6).
         CHECK(farscape_shared_buffer_FileTensorTileBuffer_unmap(file_h) == 0);
         ::close(valid_rfd);
-    }""").Replace("__SHORT_BACKING__", shortBackingPath).Replace("__VALID_BACKING__", validBackingPath)
+    }""").Replace("__SHORT_BACKING__", shortBackingPath).Replace("__VALID_BACKING__", validBackingPath).Replace("__HOST_CONTRACT_SYM__", hostContractSymbol)
     File.WriteAllText(path "runner.cpp", runnerSource + """
 
     // 1. Clef writes initial values into tile 0 and tile 1 in the HostShared region.
@@ -2159,7 +2474,8 @@ int main() {
     CHECK(farscape_shared_buffer_SharedTensorTileBuffer_library_transform_in_place(h, 0, 1) == 6);
     CHECK(farscape_shared_buffer_SharedTensorTileBuffer_unshare_from_library(h) == 0);
 
-    // 7. Verify zero copies and identical address identity between Clef and targeted library.
+    // 7. Verify zero copies and identical address identity between Clef and targeted library,
+    // and then verify that the staging-copy control increments both copy counters and yields a distinct address.
     std::uintptr_t clef_addr = 0, lib_addr = 0;
     int copies = -1;
     CHECK(farscape_shared_buffer_SharedTensorTileBuffer_clef_address_identity(&clef_addr, h) == 0);
@@ -2168,6 +2484,15 @@ int main() {
     CHECK(clef_addr != 0 && clef_addr == lib_addr && clef_addr == shared_tile_library_last_address());
     CHECK((clef_addr % 64u) == 0u);
     CHECK(copies == 0 && shared_tile_library_observed_copies() == 0);
+    std::uintptr_t copy_control_addr = 0;
+    int copy_control_copies = 0;
+    CHECK(shared_tile_library_copy_and_transform(reinterpret_cast<const SharedTensorTile*>(clef_addr), 4, 0, 1, &copy_control_addr, &copy_control_copies) == 0);
+    CHECK(copy_control_copies == 1 && shared_tile_library_observed_copies() == 1 && copy_control_addr != clef_addr);
+    std::uintptr_t dev_copy_control_addr = 0;
+    int dev_copy_control_copies = 0;
+    CHECK(shared_tile_library_copy_and_transform(reinterpret_cast<const SharedTensorTile*>(devClefAddr), 2, 0, 1, &dev_copy_control_addr, &dev_copy_control_copies) == 0);
+    CHECK(dev_copy_control_copies == 1 && shared_tile_library_observed_copies() == 2 && dev_copy_control_addr != devClefAddr);
+    CHECK(farscape_shared_buffer_DeviceTensorTileBuffer_unmap(dev_h) == 0);
 
     // 8. Unmap region and verify use-after-unmap is refused with StatusLifetimeError (5).
     CHECK(farscape_shared_buffer_SharedTensorTileBuffer_unmap(h) == 0);
@@ -2181,6 +2506,16 @@ int main() {
     return 0;
 }
     """)
+    let mismatchDir = Path.Combine(directory, "mismatch")
+    Directory.CreateDirectory(mismatchDir) |> ignore
+    let mismatchShimPath = Path.Combine(mismatchDir, "shim_host_mismatch.cpp")
+    let mismatchLibPath = Path.Combine(mismatchDir, "libsharedtile.so")
+    File.WriteAllText(mismatchShimPath, CppClassAnalysis.renderSharedBufferZeroCopyShimC { baseHostSpec with SpaceOffset = 64L })
+    run "/usr/bin/clang++" [ "-std=c++17"; "-I" + directory; "-shared"; "-fPIC"; path "shared_tile.cpp"; mismatchShimPath; path "shim_device.cpp"; path "shim_file.cpp"; "-o"; mismatchLibPath ] |> ignore
+    let linkFailure =
+        Assert.ThrowsAny<System.Exception>(fun () ->
+            run "/usr/bin/clang++" [ "-std=c++17"; path "runner.cpp"; "-L" + mismatchDir; "-lsharedtile"; "-o"; Path.Combine(mismatchDir, "runner_mismatch") ] |> ignore)
+    Assert.Contains(hostContractSymbol, linkFailure.Message)
     let runner = path "runner"
     run "/usr/bin/clang++" [ "-std=c++17"; path "runner.cpp"; "-L" + directory; "-lsharedtile"; "-Wl,-rpath,$ORIGIN"; "-o"; runner ] |> ignore
     let result = run runner []

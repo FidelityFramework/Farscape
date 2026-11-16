@@ -443,18 +443,66 @@ module TargetLibrarySeamScaffoldingTests =
         let work = TestHelpers.TestScratch.create "descriptor-quotation-admission"
         try
             let admittedPath = Path.Combine(work, "AdmittedDescriptors.clef")
+            let admittedDescriptors =
+                [ "d01", "StructDescriptor"
+                  "d02", "PeripheralDescriptor"
+                  "d03", "MemorySpaceDescriptor"
+                  "d04", "FunctionDescriptor"
+                  "d05", "ResultRangeDescriptor"
+                  "d06", "ResourceDescriptor"
+                  "d07", "WritableBufferDescriptor"
+                  "d08", "ReadOnlyBufferDescriptor"
+                  "d09", "BufferAbsenceContract"
+                  "d10", "CallbackInvocationContract"
+                  "d11", "CallbackDescriptor"
+                  "d12", "ClosedCallbackDescriptor"
+                  "d13", "ScopedCallbackDescriptor"
+                  "d14", "RetainedCallbackDescriptor"
+                  "d15", "ProcessExitCallbackDescriptor"
+                  "d16", "CallbackAbsenceContract"
+                  "d17", "CallbackContextDescriptor"
+                  "d18", "CountedEntryArrayDescriptor"
+                  "d19", "BorrowedResultViewDescriptor"
+                  "d20", "ViewLayoutDescriptor"
+                  "d21", "SharedBufferPlacement"
+                  "d22", "SharedBufferRegionDescriptor"
+                  "d23", "FlexibleArrayDescriptor"
+                  "d24", "MappedReturnDescriptor" ]
             writeLines admittedPath
-                [ "module Fidelity.DescriptorAdmission.Test"
-                  "let memSpace : Expr<MemorySpaceDescriptor> = <@ () @>"
-                  "let viewLayout : Expr<ViewLayoutDescriptor> = <@ () @>"
-                  "let closedCb : Expr<ClosedCallbackDescriptor> = <@ () @>"
-                  "let borrowedView : Expr<BorrowedResultViewDescriptor> = <@ () @>"
-                  "let readBuf : Expr<ReadOnlyBufferDescriptor> = <@ () @>"
-                  "let bufAbs : Expr<BufferAbsenceContract> = <@ () @>"
-                  "let countedArr : Expr<CountedEntryArrayDescriptor> = <@ () @>" ]
+                ("module Fidelity.DescriptorAdmission.Test"
+                 :: (admittedDescriptors |> List.map (fun (sym, ty) -> $"let {sym} : Expr<{ty}> = <@ () @>")))
             let digest = Substantiation.inspectSource Set.empty admittedPath |> accepted
-            for sym in [ "memSpace"; "viewLayout"; "closedCb"; "borrowedView"; "readBuf"; "bufAbs"; "countedArr" ] do
+            for (sym, _) in admittedDescriptors do
                 Assert.Contains("Fidelity.DescriptorAdmission.Test." + sym, digest.CompileTimeDeclarations)
+
+            // Both SharedBufferPlacement and SharedBufferRegionDescriptor independently activate the ZeroCopy boundary stratum.
+            let fidproj = Path.Combine(work, "AdmittedDescriptors.fidproj")
+            writeLines fidproj
+                [ "[package]"
+                  "name = \"AdmittedDescriptors\""
+                  "version = \"0.1.0\""
+                  "[build]"
+                  "sources = [\"AdmittedDescriptors.clef\"]"
+                  "[platform]"
+                  "os = \"linux\""
+                  "arch = \"x86_64\"" ]
+            for descType in [ "SharedBufferPlacement"; "SharedBufferRegionDescriptor" ] do
+                let descPath = Path.Combine(work, descType + "Probe.clef")
+                let descText = $"module Fidelity.DescriptorAdmission.{descType}Probe\nlet d : Expr<{descType}> = <@ () @>\n"
+                writeUtf8 descPath descText
+                let evidence =
+                    SubstantiationBoundary.evaluate
+                        { FidprojPath = fidproj
+                          PackageName = "AdmittedDescriptors"
+                          LinkLibraries = [||]
+                          LinkObjects = [||]
+                          PilotPath = None
+                          LinkProvenancePath = None
+                          Sources = [| descPath, descText |]
+                          WorkDirectory = work }
+                    |> accepted
+                Assert.True(evidence.Strata.ZeroCopy, $"Expected ZeroCopy stratum to be active for {descType}")
+                Assert.Contains("barewire-zero-copy", evidence.RequiredSeamChecks)
 
             // Stale un-owned descriptor spelling must be refused with FS9233.
             let stalePath = Path.Combine(work, "StaleBorrowedDescriptor.clef")

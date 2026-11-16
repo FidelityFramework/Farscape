@@ -1059,7 +1059,7 @@ module SubstantiationBoundary =
                     { ForeignCalls = externPairs.Length > 0; MeasuredRecords = (layouts |> Array.exists (fun l -> l.Kind = "record" && emitted l.Name)) || not requiredMeasuredRecords.IsEmpty
                       StaticArchive = hasStatic; ErrorConventions = errors
                       Ownership = (bindings |> List.exists (fun b -> b.Resource.IsSome || b.Ownership = Some PilotTypes.CallerOwns || b.Ownership = Some PilotTypes.CalleeOwns)) || Regex.IsMatch(sourceCode, @"\bOwnershipTransfer\s*=\s*(CallerOwns|CalleeOwns)\b")
-                      ZeroCopy = not mappedReturns.IsEmpty || not flexibleArrays.IsEmpty || (bindings |> List.exists (fun b -> b.BorrowedResult.IsSome || not b.WritableBuffers.IsEmpty || not b.ReadOnlyBuffers.IsEmpty)) || Regex.IsMatch(sourceCode, @"\b(StructDescriptor|BorrowedView|MappedRegion)\b")
+                      ZeroCopy = not mappedReturns.IsEmpty || not flexibleArrays.IsEmpty || (bindings |> List.exists (fun b -> b.BorrowedResult.IsSome || not b.WritableBuffers.IsEmpty || not b.ReadOnlyBuffers.IsEmpty)) || Regex.IsMatch(sourceCode, @"\b(StructDescriptor|BorrowedView|MappedRegion|SharedBufferPlacement|SharedBufferRegionDescriptor)\b")
                       Callbacks = callbacks
                       Nullability = (pilot |> Option.bind _.Nonnull |> Option.exists (fun n -> (n.Parameters |> Map.exists (fun name _ -> usedSymbol name)) || (n.Returns |> Set.exists usedSymbol))) || Regex.IsMatch(sourceCode, @"\b(Nullable|CNullable|NonNull)\b") }
                 let origin = String.concat ";" (Array.append [|request.FidprojPath|] (layoutFiles |> Array.filter (fun f -> f.Kind = "pilot" || f.Kind = "header") |> Array.map _.Path))
