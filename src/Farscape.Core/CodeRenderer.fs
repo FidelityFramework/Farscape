@@ -182,6 +182,20 @@ module CodeRenderer =
             sb.AppendLine($"{prefix}}}") |> ignore
             sb.AppendLine() |> ignore
 
+        | MutableRecordType (name, fields, doc, attributes) ->
+            let name = sourceSyntax true name
+            match doc with
+            | Some d -> sb.AppendLine($"{prefix}/// {d}") |> ignore
+            | None -> ()
+            for attr in attributes do
+                sb.AppendLine($"{prefix}[<{attr}>]") |> ignore
+            sb.AppendLine($"{prefix}type {name} = {{") |> ignore
+            for (isMutable, fname, ftype) in fields do
+                let mutPrefix = if isMutable then "mutable " else ""
+                sb.AppendLine($"{prefix}    {mutPrefix}{cleanParamName fname}: {renderType ftype}") |> ignore
+            sb.AppendLine($"{prefix}}}") |> ignore
+            sb.AppendLine() |> ignore
+
         | EnumType (name, values, doc, isFlags) ->
             let name = sourceSyntax true name
             match doc with

@@ -2288,8 +2288,18 @@ module FidelityCodeGenerator =
             spec.Fields |> List.map (fun field ->
                 let resolved = resolveIn ctx field.CType
                 match resolved with
-                | Scalar r | CEnum (_, r) when clefTypeOf resolved = Named field.ClefType && (r.Bits + 7) / 8 = field.ByteWidth ->
-                    field, r, DescriptorGenerator.typeRefSource r, DescriptorGenerator.reprSource r
+                | Scalar r | CEnum (_, r)
+                    when (clefTypeOf resolved = Named field.ClefType
+                          || (r.Family = TypeMapper.Unsigned && field.ClefType = "uint"))
+                         && (r.Bits + 7) / 8 = field.ByteWidth ->
+                    // Under CS-12 (TypeMapper.clefSpelling and clef CCS8706), 'int' is the sole Clef integer source type
+                    // (NTUKind.NTUint), which BoundaryRecipes.fs:4508-4515 pairs with Repr.I8/I16/I32/I64 while keeping
+                    // the measured C type (e.g. uint32_t) in the field documentation provenance.
+                    let sharedFieldRepr =
+                        match r.Family with
+                        | TypeMapper.Unsigned -> DescriptorGenerator.reprSource { r with Family = TypeMapper.Signed }
+                        | _ -> DescriptorGenerator.reprSource r
+                    field, r, DescriptorGenerator.typeRefSource r, sharedFieldRepr
                 | _ ->
                     Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.SharedBufferContractInvalid
                         $"Shared buffer '{spec.SafeName}': field '{field.Name}' C type '{field.CType}' has no admitted {field.ByteWidth}-byte scalar representation as Clef type '{field.ClefType}'." source))
@@ -2300,9 +2310,11 @@ module FidelityCodeGenerator =
             | None ->
                 Diagnostics.refuse (Diagnostics.diagnostic Diagnostics.SharedBufferContractInvalid
                     $"Shared buffer '{spec.SafeName}': target data model '{ctx.DataModel}' has no ABI representation for C 'int'." source)
-        let handle name = Generic("CHandle", Named name)
-        let self = { Name = "self"; Type = handle spec.SafeName }, pointer
-        let output name typ = { Name = name; Type = handle typ }, pointer
+        // clef BoundaryRecipes resolves SharedBufferPlacement.StructLayout.Name to exactly one Clef record
+        // type; the region's Acquire returns that record by address and every region call receives it, so
+        // Clef reads and writes the mapped element by direct field projection with no intermediate copy.
+        let viewRecord = Named spec.StructName
+        let self = { Name = "self"; Type = viewRecord }, pointer
         let prefix = "farscape_shared_buffer_" + spec.SafeName
         let binding suffix ownership (parameters: (FsParam * string) list) returnType returnRef =
             let name = spec.SafeName + suffix
@@ -2406,14 +2418,14 @@ module FidelityCodeGenerator =
                 "Access", Literal viewAccessSource ]
         let viewLayoutDescriptor = Quoted viewLayoutRecordBlock
         // Farscape binds the foreign library contract and lifecycle envelope via PlacementDescriptor,
-        // RegionDescriptor, and the contract-fingerprint FidelityExtern binding below, while
-        // clef (SharedBufferTransfer.fs / PublishedFactRows.fs) verifies the consuming Clef program's
+        // RegionDescriptor, and the ContractSymbol literal binding below, while
+        // clef (BoundaryRecipes.fs) verifies the consuming Clef program's
         // PSG call graph against RegionDescriptor and emits SharedBufferPlacementObligation in Fidelity.PSG.
         let placementDescriptor =
             Quoted(RecordBlock [
                 "Name", Literal (quoteString spec.SafeName)
                 "SpaceDescriptor", memorySpaceRecordBlock
-                "SpaceOffset", Literal $"{spec.SpaceOffset}L"
+                "SpaceOffset", Literal (string spec.SpaceOffset)
                 "StructLayout", structDescriptorRecordBlock
                 "ViewLayout", viewLayoutRecordBlock
                 "MeasuredElementSize", Literal (string spec.MeasuredSize)
@@ -2432,7 +2444,6 @@ module FidelityCodeGenerator =
                 "OverlappingMutableShare", Literal (boolLiteral facts.OverlappingMutableShare)
                 "MaxAccessedElementIndex", Literal (string facts.MaxAccessedElementIndex) ])
         let contractSymbol = CppClassAnalysis.sharedBufferContractSymbol spec
-        let contractSuffix = contractSymbol.Substring(prefix.Length)
         let regionDescriptor =
             let releaseSymbol = quoteString (spec.Namespace + "." + spec.SafeName + "_unmap")
             let foreignUsesExpr =
@@ -2446,26 +2457,23 @@ module FidelityCodeGenerator =
                 "Release", Literal ("Some " + releaseSymbol)
                 "Sync", ArrayBlock [
                     Literal (quoteString (spec.Namespace + "." + spec.SafeName + "_share_to_library"))
-                    Literal (quoteString (spec.Namespace + "." + spec.SafeName + "_unshare_from_library"))
-                    Literal (quoteString (spec.Namespace + "." + spec.SafeName + contractSuffix)) ]
+                    Literal (quoteString (spec.Namespace + "." + spec.SafeName + "_unshare_from_library")) ]
                 "ForeignUses", foreignUsesExpr ])
         let offsetLiterals =
             spec.Fields |> List.map (fun field -> LiteralBinding(field.Name + "Offset", Named "int", string field.ByteOffset))
-        let fieldBindings =
-            resolvedFields |> List.collect (fun (field, _, fieldRepr, _) ->
-                let readBindings =
-                    if spec.SpaceAccess <> CppClassAnalysis.SharedAccessMode.SharedWriteOnly then
-                        binding ("_clef_read_" + field.Name) "Borrowed"
-                            [ output "outValue" field.ClefType; self; { Name = "index"; Type = Named "int" }, intRef ]
-                            (Named "int") intRef
-                    else []
-                let writeBindings =
-                    if spec.SpaceAccess <> CppClassAnalysis.SharedAccessMode.SharedReadOnly then
-                        binding ("_clef_write_" + field.Name) "Borrowed"
-                            [ self; { Name = "index"; Type = Named "int" }, intRef; { Name = "value"; Type = Named field.ClefType }, fieldRepr ]
-                            (Named "int") intRef
-                    else []
-                readBindings @ writeBindings)
+        // The Clef record whose name is StructLayout.Name. Its fields carry the measured C field names in
+        // declaration order; clef (BoundaryRecipes, FS9220) checks them against StructLayout and the settled
+        // record layout, and the StructDescriptor `Descriptor` below seeds their declared representations.
+        let isWritableView = spec.SpaceAccess <> CppClassAnalysis.SharedReadOnly
+        let viewRecordDecl =
+            MutableRecordType(
+                spec.StructName,
+                resolvedFields |> List.map (fun (field: CppClassAnalysis.SharedBufferFieldSpec, _, _, _) ->
+                    let recordFieldType =
+                        if field.ClefType = "uint" then Named "int" else Named field.ClefType
+                    isWritableView, field.Name, recordFieldType),
+                Some $"Element of the {spaceName} shared buffer '{spec.SafeName}', projected in place from the mapped region.",
+                [])
         let transformBindings =
             if spec.LibraryTransformSymbol.IsSome then
                 binding "_library_transform_in_place" "Borrowed"
@@ -2477,7 +2485,7 @@ module FidelityCodeGenerator =
             | CppClassAnalysis.FileMapped -> [ { Name = "fd"; Type = Named "int" }, intRef ]
             | CppClassAnalysis.HostShared
             | CppClassAnalysis.DeviceUnified -> []
-        [ OpaqueMarker spec.SafeName
+        [ viewRecordDecl
           SubModule(spec.SafeName,
               [ LiteralBinding("Size", Named "int", string spec.MeasuredSize)
                 LiteralBinding("Alignment", Named "int", string spec.MeasuredAlignment)
@@ -2486,7 +2494,8 @@ module FidelityCodeGenerator =
                 LiteralBinding("RegionAlignment", Named "int", string spec.RegionAlignment)
                 LiteralBinding("MemorySpace", Named "string", quoteString spaceName)
                 LiteralBinding("SpaceAccess", Named "string", quoteString accessName)
-                LiteralBinding("ByteOrder", Named "string", quoteString normalizedByteOrder) ]
+                LiteralBinding("ByteOrder", Named "string", quoteString normalizedByteOrder)
+                LiteralBinding("ContractSymbol", Named "string", quoteString contractSymbol) ]
               @ offsetLiterals
               @ [ LiteralBinding("StatusOk", Named "int", "0")
                   LiteralBinding("StatusNullHandle", Named "int", "-1")
@@ -2501,28 +2510,15 @@ module FidelityCodeGenerator =
                   ValueBinding("RegionDescriptor", Generic("Expr", Named "SharedBufferRegionDescriptor"), regionDescriptor) ])
           BlankLine ]
         @ binding "_unmap" "CalleeOwns" [ self ] (Named "int") intRef
-        @ [ ValueBinding(spec.SafeName + "_mapResourceDescriptor", Generic("Expr", Named "ResourceDescriptor"),
-              Quoted(RecordBlock [
-                  "Resource", FunctionCall("", "OwnedNullableReturn", [ RecordConstruction [
-                      "Binding", Literal (quoteString (spec.Namespace + "." + spec.SafeName + "_unmap"))
-                      "Parameter", Literal "0" ] ])
-                  "Hypothesis", RecordBlock [
-                      "Identity", Literal (quoteString spec.StructName)
-                      "Version", Literal (quoteString "1.0")
-                      "Source", Literal (quoteString (prefix + "_map")) ] ]))
-            BlankLine ]
-        @ binding "_map" "CallerOwns" mapParameters (Generic("option", handle spec.SafeName)) pointer
+        // Per clef BoundaryRecipes (FS9220/FS9222, lines 745-764, 5036-5078), Alex Types (lines 1507-1535),
+        // and Composer LLVM Lowering (BoundaryBufferCall -> memref<Nxi8>), SharedBufferRegionDescriptor.Acquire
+        // returns the non-nullable viewRecord carrier whose acquisition scope dominates all projections and Release.
+        @ binding "_map" "CallerOwns" mapParameters viewRecord pointer
         @ binding "_share_to_library" "Borrowed"
             [ self; { Name = "accessMode"; Type = Named "int" }, intRef; { Name = "elementCount"; Type = Named "int" }, intRef ]
             (Named "int") intRef
         @ binding "_unshare_from_library" "Borrowed" [ self ] (Named "int") intRef
         @ transformBindings
-        @ binding "_clef_address_identity" "Borrowed" [ output "outAddress" "int"; self ] (Named "int") intRef
-        @ binding "_library_address_identity" "Borrowed" [ output "outAddress" "int"; self ] (Named "int") intRef
-        @ binding "_copy_count" "Borrowed" [ output "outCopies" "int"; self ] (Named "int") intRef
-        @ binding "_memory_space_kind" "Borrowed" [ output "outSpaceKind" "int"; self ] (Named "int") intRef
-        @ binding contractSuffix "Borrowed" [ self ] (Named "int") intRef
-        @ fieldBindings
 
     let generateSharedBufferModule (ctx: GenerationContext) (spec: CppClassAnalysis.SharedBufferSpec) =
         let declarations = generateSharedBufferDecls ctx spec
@@ -2916,7 +2912,12 @@ module FidelityCodeGenerator =
             | Unit -> []
             | FunctionType (args, ret) -> List.collect referencedNames (ret :: args)
         let definedNames (decls: FsDecl list) =
-            let recordNames = decls |> List.choose (function RecordType (name, _, _, _) -> Some name | _ -> None)
+            let recordNames =
+                decls
+                |> List.choose (function
+                    | RecordType (name, _, _, _)
+                    | MutableRecordType (name, _, _, _) -> Some name
+                    | _ -> None)
             if not recordNames.IsEmpty then recordNames
             else decls |> List.choose (function SubModule (name, _) -> Some name | _ -> None)
         let definedIndex =
@@ -2928,6 +2929,7 @@ module FidelityCodeGenerator =
             groupArr[idx]
             |> List.collect (function
                 | RecordType (_, fields, _, _) -> fields |> List.collect (snd >> referencedNames)
+                | MutableRecordType (_, fields, _, _) -> fields |> List.collect (fun (_, _, t) -> referencedNames t)
                 | _ -> [])
             |> List.choose (fun name ->
                 match definedIndex.TryFind name with

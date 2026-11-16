@@ -304,7 +304,16 @@ module SubstantiationDossier =
           "ResourceCleanup", "Owned foreign resource is released along every execution path"
           "SnapshotBorrowBound", "Borrowed memory view access stays within proven byte capacity and lifetime"
           "OptionalEntryArgumentConversion", "Optional foreign argument conversion preserves presence and pointer validity"
-          "OptionalEntryAbsenceArgumentConversion", "Absent optional foreign argument passes the exact null/sentinel representation" ]
+          "OptionalEntryAbsenceArgumentConversion", "Absent optional foreign argument passes the exact null/sentinel representation"
+          "SharedBufferLayoutInvalid", "Shared-memory struct layout, alignment, byte order, and pointer-free fields match the target ABI"
+          "SharedBufferAlignmentInvalid", "Shared-memory struct layout, alignment, byte order, and pointer-free fields match the target ABI"
+          "FS9220", "Shared-memory struct layout, alignment, byte order, and pointer-free fields match the target ABI"
+          "SharedBufferExtentInvalid", "Shared-memory region extent fits the declared memory space and all element accesses stay in bounds"
+          "FS9221", "Shared-memory region extent fits the declared memory space and all element accesses stay in bounds"
+          "SharedBufferLifetimeInvalid", "Shared-memory region acquisition, synchronization, and release bracket all uses and library retention"
+          "FS9222", "Shared-memory region acquisition, synchronization, and release bracket all uses and library retention"
+          "SharedBufferConflictingAccess", "Shared-memory access permissions exclude concurrent or read-only mutation conflicts"
+          "FS9223", "Shared-memory access permissions exclude concurrent or read-only mutation conflicts" ]
 
     /// The reader text of one Composer obligation kind. `None` is a witness manifest without
     /// a proof obligation list. Composer writes kinds in kebab-case (`foreign-result-coverage`);
@@ -637,6 +646,150 @@ module SubstantiationDossier =
             | [| _ |] -> ()
             | _ -> invalid ("Witnessed import " + pair + " names '" + import.Declaration + "', which is no unique module binding of the library.")
 
+    let internal attributeDossierObligations
+        (obligationsPath: string)
+        (sourceModules: Map<string, string>)
+        (declarations: Substantiation.DeclarationNode[])
+        (kinds: Map<string, string> option)
+        (trustScope: string)
+        (libSourcePaths: string[])
+        (harnessFullPath: string)
+        (fidprojPath: string)
+        (inventory: (string * string * string)[])
+        : DossierObligation[] =
+        let invalid (path: string) (message: string) = fail Diagnostics.DossierCorrespondenceInvalid path message
+        let excludedPaths = Set.add harnessFullPath (Set.ofArray libSourcePaths)
+        let libPlacements =
+            lazy (SubstantiationProof.sharedBufferPlacementDeclarations libSourcePaths)
+        let harnessPlacements =
+            lazy (SubstantiationProof.sharedBufferPlacementDeclarations [| harnessFullPath |])
+        let platformPlacements =
+            lazy (SubstantiationProof.platformSharedBufferPlacements excludedPaths (Array.append libSourcePaths [| harnessFullPath; fidprojPath |]))
+        let buildDossierObligation anchor source path moduleName line =
+            let enclosing =
+                declarations
+                |> Array.filter (fun declaration -> declaration.SourcePath = path && declaration.FirstLine <= line && line <= declaration.LastLine)
+            let declaration, moduleLevel =
+                match enclosing with
+                | [||] -> moduleName, true
+                | [| declaration |] -> declaration.Qualified, false
+                | _ -> invalid obligationsPath ("Obligation '" + anchor + "' lies in more than one module binding.")
+            let kind = kinds |> Option.map (fun byAnchor -> byAnchor[anchor])
+            ({ Declaration = declaration; ModuleLevel = moduleLevel; Anchor = anchor; Source = source
+               Kind = Option.defaultValue "" kind; Guarantee = guaranteeOf kind; TrustScope = trustScope } : DossierObligation)
+        let verifyUniquePlacementNames () =
+            let libNames = libPlacements.Value |> Array.map (fun (_, _, pName, _) -> pName)
+            let harnessNamesArr = harnessPlacements.Value |> Array.map (fun (_, _, pName, _) -> pName)
+            let platformNamesArr = platformPlacements.Value |> Array.map (fun (_, _, pName, _) -> pName)
+            let harnessNames = Set.ofArray harnessNamesArr
+            let platformNames = Set.ofArray platformNamesArr
+            match libNames |> Array.countBy id |> Array.tryFind (fun (_, count) -> count > 1) with
+            | Some (dupName, _) ->
+                invalid obligationsPath ("Shared-buffer placement '" + dupName + "' is declared multiple times in library sources.")
+            | None -> ()
+            match harnessNamesArr |> Array.countBy id |> Array.tryFind (fun (_, count) -> count > 1) with
+            | Some (dupName, _) ->
+                invalid obligationsPath ("Shared-buffer placement '" + dupName + "' is declared multiple times in harness sources.")
+            | None -> ()
+            match platformNamesArr |> Array.countBy id |> Array.tryFind (fun (_, count) -> count > 1) with
+            | Some (dupName, _) ->
+                invalid obligationsPath ("Shared-buffer placement '" + dupName + "' is declared multiple times in platform sources.")
+            | None -> ()
+            match libNames |> Array.tryFind harnessNames.Contains with
+            | Some dupName ->
+                invalid obligationsPath ("Shared-buffer placement '" + dupName + "' is ambiguous between library and harness placements.")
+            | None -> ()
+            match libNames |> Array.tryFind platformNames.Contains with
+            | Some dupName ->
+                invalid obligationsPath ("Shared-buffer placement '" + dupName + "' is ambiguous between library and platform placements.")
+            | None -> ()
+            match harnessNames |> Seq.tryFind platformNames.Contains with
+            | Some dupName ->
+                invalid obligationsPath ("Shared-buffer placement '" + dupName + "' is ambiguous between harness and platform placements.")
+            | None -> ()
+        inventory
+        |> Array.choose (fun (anchor, source, _) ->
+            let location = sourceLocation.Match source
+            if location.Success then
+                let path = Path.GetFullPath location.Groups["path"].Value
+                match Map.tryFind path sourceModules with
+                | None -> None
+                | Some moduleName ->
+                    let line = Int32.Parse location.Groups["line"].Value
+                    Some (buildDossierObligation anchor source path moduleName line)
+            else
+                match SubstantiationProof.matchSharedBufferObligation anchor source with
+                | None ->
+                    invalid obligationsPath ("Obligation '" + anchor + "' has no file:line:column source.")
+                | Some (isSpace, subject) ->
+                    verifyUniquePlacementNames ()
+                    let matches (_, _, pName, pSpace) = if isSpace then pSpace = subject else pName = subject
+                    let matched = libPlacements.Value |> Array.filter matches
+                    let harnessMatched = harnessPlacements.Value |> Array.filter matches
+                    let platformMatched = platformPlacements.Value |> Array.filter matches
+                    if not isSpace then
+                        if matched.Length > 1 then
+                            invalid obligationsPath ("Shared-buffer obligation '" + anchor + "' matches multiple library placements named '" + subject + "'.")
+                        if matched.Length > 0 && harnessMatched.Length > 0 then
+                            invalid obligationsPath ("Shared-buffer obligation '" + anchor + "' is ambiguous between library and harness placements for '" + subject + "'.")
+                        if matched.Length > 0 && platformMatched.Length > 0 then
+                            invalid obligationsPath ("Shared-buffer obligation '" + anchor + "' is ambiguous between library and platform placements for '" + subject + "'.")
+                        if harnessMatched.Length > 0 && platformMatched.Length > 0 then
+                            invalid obligationsPath ("Shared-buffer obligation '" + anchor + "' is ambiguous between harness and platform placements for '" + subject + "'.")
+                        match matched with
+                        | [| (path, line, _, _) |] ->
+                            match Map.tryFind path sourceModules with
+                            | None -> None
+                            | Some moduleName -> Some (buildDossierObligation anchor source path moduleName line)
+                        | _ ->
+                            if harnessMatched.Length = 1 || platformMatched.Length = 1 then
+                                None
+                            else
+                                invalid obligationsPath ("Shared-buffer obligation '" + anchor + "' does not match any library, harness, or platform compatibility placement for '" + subject + "'.")
+                    else
+                        if matched.Length > 0 && harnessMatched.Length > 0 then
+                            invalid obligationsPath ("Shared-buffer obligation '" + anchor + "' is ambiguous between library and harness placements for '" + subject + "'.")
+                        if matched.Length >= 1 then
+                            let (path, line, _, _) = matched[0]
+                            match Map.tryFind path sourceModules with
+                            | None -> None
+                            | Some moduleName -> Some (buildDossierObligation anchor source path moduleName line)
+                        elif harnessMatched.Length > 0 && platformMatched.Length > 0 then
+                            invalid obligationsPath ("Shared-buffer obligation '" + anchor + "' is ambiguous between harness and platform placements for '" + subject + "'.")
+                        elif harnessMatched.Length > 0 || platformMatched.Length > 0 then
+                            None
+                        else
+                            invalid obligationsPath ("Shared-buffer obligation '" + anchor + "' does not match any library, harness, or platform compatibility placement for '" + subject + "'."))
+
+    let internal inspectDossierObligations
+        (libSourcePaths: string[])
+        (harnessPath: string)
+        (obligationsJson: string)
+        : Result<DossierObligation[], Diagnostics.Refusal> =
+        let canonicalLibs = libSourcePaths |> Array.map Path.GetFullPath
+        let canonicalHarness = Path.GetFullPath harnessPath
+        let sourceModules =
+            canonicalLibs
+            |> Array.map (fun p -> p, Path.GetFileNameWithoutExtension p)
+            |> Map.ofArray
+        try
+            match SubstantiationProof.obligationInventory obligationsJson with
+            | Error refusal -> Error (recoded (fun _ -> Diagnostics.DossierCorrespondenceInvalid) refusal)
+            | Ok inventory ->
+                Ok(
+                    attributeDossierObligations
+                        "06a_psg_obligations.json"
+                        sourceModules
+                        [||]
+                        None
+                        "compiler-proof"
+                        canonicalLibs
+                        canonicalHarness
+                        canonicalHarness
+                        inventory)
+        with
+        | :? Diagnostics.RefusalException as ex -> Error ex.Refusal
+
     /// Reconcile the exported declarations, the PSG bindings, the obligation inventory, the
     /// witnessed definitions and imports, and the link provenance of one validated manifest.
     let private reconcileCompiler
@@ -703,28 +856,20 @@ module SubstantiationDossier =
         | None -> ()
         // Each library obligation belongs to the module binding whose source lines hold it.
         let sourceModules = manifest.Sources |> Array.map (fun source -> Path.GetFullPath source.Path, source.ModuleName) |> Map.ofArray
+        let libSourcePaths = manifest.Sources |> Array.map (fun s -> Path.GetFullPath s.Path)
+        let harnessFullPath = Path.GetFullPath manifest.Harness.Path
         let trustScope = compilerTrustScope boundary.RestsOn
         let obligations =
-            inventory |> Array.choose (fun (anchor, source, _) ->
-                let location = sourceLocation.Match source
-                if not location.Success then invalid obligationsPath ("Obligation '" + anchor + "' has no file:line:column source.")
-                let path = Path.GetFullPath location.Groups["path"].Value
-                match Map.tryFind path sourceModules with
-                | None -> None
-                | Some moduleName ->
-                    let line = Int32.Parse location.Groups["line"].Value
-                    let enclosing =
-                        correspondence.Declarations
-                        |> Array.filter (fun declaration -> declaration.SourcePath = path && declaration.FirstLine <= line && line <= declaration.LastLine)
-                    let declaration, moduleLevel =
-                        match enclosing with
-                        | [||] -> moduleName, true
-                        | [| declaration |] -> declaration.Qualified, false
-                        | _ -> invalid obligationsPath ("Obligation '" + anchor + "' lies in more than one module binding.")
-                    let kind = kinds |> Option.map (fun byAnchor -> byAnchor[anchor])
-                    Some
-                        ({ Declaration = declaration; ModuleLevel = moduleLevel; Anchor = anchor; Source = source
-                           Kind = Option.defaultValue "" kind; Guarantee = guaranteeOf kind; TrustScope = trustScope } : DossierObligation))
+            attributeDossierObligations
+                obligationsPath
+                sourceModules
+                correspondence.Declarations
+                kinds
+                trustScope
+                libSourcePaths
+                harnessFullPath
+                manifest.FidprojPath
+                inventory
         if obligations.Length <> manifest.Proof.LibraryObligations then
             invalid obligationsPath ("The obligation inventory attributes " + string obligations.Length + " obligations to the library sources and the manifest records " + string manifest.Proof.LibraryObligations + ".")
         // Witnessed definitions and imports. A definition below no module binding (a private
@@ -1744,6 +1889,24 @@ module SubstantiationDossier =
     // Entry point
     // =====================================================================
 
+    let private writeGeneratedDossier (dossier: Dossier) (output: string) : Result<Generated, Diagnostics.Refusal> =
+        try
+            let jsonPath = Path.Combine(output, dossier.Package + ".dossier.json")
+            let markdownPath = Path.Combine(output, dossier.Package + ".dossier.md")
+            let htmlPath = Path.Combine(output, dossier.Package + ".dossier.html")
+            let files =
+                [ jsonPath, toJson dossier
+                  markdownPath, toMarkdown dossier
+                  htmlPath, toHtml dossier ]
+            Directory.CreateDirectory output |> ignore
+            for path, content in files do File.WriteAllText(evidencePath path, content, UTF8Encoding false)
+            Ok { Dossier = dossier; JsonPath = jsonPath; MarkdownPath = markdownPath; HtmlPath = htmlPath }
+        with
+        | :? Diagnostics.RefusalException as refused -> Error refused.Refusal
+        | error ->
+            Diagnostics.diagnostic Diagnostics.DossierOutputFailure ("The dossier could not be written: " + error.Message) (Diagnostics.inFile output "dossier output directory")
+            |> Diagnostics.refusalOf |> Error
+
     /// Validate every input, then write `<Package>.dossier.json`, `.md` and `.html`. Nothing
     /// is written when any validation refuses.
     let generate (request: Request) : Result<Generated, Diagnostics.Refusal> =
@@ -1756,20 +1919,70 @@ module SubstantiationDossier =
                 |> Diagnostics.refusalOf |> Error
         match built with
         | Error refusal -> Error refusal
-        | Ok(dossier, output) ->
-            try
-                let jsonPath = Path.Combine(output, dossier.Package + ".dossier.json")
-                let markdownPath = Path.Combine(output, dossier.Package + ".dossier.md")
-                let htmlPath = Path.Combine(output, dossier.Package + ".dossier.html")
-                let files =
-                    [ jsonPath, toJson dossier
-                      markdownPath, toMarkdown dossier
-                      htmlPath, toHtml dossier ]
-                Directory.CreateDirectory output |> ignore
-                for path, content in files do File.WriteAllText(evidencePath path, content, UTF8Encoding false)
-                Ok { Dossier = dossier; JsonPath = jsonPath; MarkdownPath = markdownPath; HtmlPath = htmlPath }
+        | Ok(dossier, output) -> writeGeneratedDossier dossier output
+
+    type StaticLinkDossierRequest =
+        { ManifestPath: string
+          SpecPath: string
+          SeamsOutputDirectory: string option
+          SeamsWorkDirectory: string option
+          DossierOutputDirectory: string option
+          Verbose: bool }
+
+    type StaticLinkDossierReconciliation =
+        { Manifest: Substantiation.Manifest
+          Seams: SubstantiationSeams.Generated
+          Dossier: Generated }
+
+    /// Reconcile a static-archive substantiation manifest against its physical seam checks,
+    /// refusal controls, and generated substantiation dossier (#204, #205, #206).
+    let reconcileStaticLinkDossier (request: StaticLinkDossierRequest) : Result<StaticLinkDossierReconciliation, Diagnostics.Refusal> =
+        let loaded =
+            try Ok(loadManifest request.ManifestPath)
             with
             | :? Diagnostics.RefusalException as refused -> Error refused.Refusal
             | error ->
-                Diagnostics.diagnostic Diagnostics.DossierOutputFailure ("The dossier could not be written: " + error.Message) (Diagnostics.inFile output "dossier output directory")
+                Diagnostics.diagnostic Diagnostics.DossierInputMalformed error.Message (Diagnostics.inFile request.ManifestPath "substantiation manifest")
                 |> Diagnostics.refusalOf |> Error
+        loaded
+        |> Result.bind (fun manifest ->
+            if manifest.Boundary.LinkMode <> "static-archive" || not manifest.Boundary.Strata.StaticArchive then
+                Diagnostics.diagnostic Diagnostics.DossierInputMalformed
+                    $"reconcileStaticLinkDossier requires a static-archive manifest (got LinkMode = '{manifest.Boundary.LinkMode}')."
+                    (Diagnostics.inFile request.ManifestPath "static-link dossier reconciliation")
+                |> Diagnostics.refusalOf
+                |> Error
+            else
+                SubstantiationSeams.evaluate
+                    { ManifestPath = request.ManifestPath
+                      SpecPath = request.SpecPath
+                      OutputDirectory = request.SeamsOutputDirectory
+                      WorkDirectory = request.SeamsWorkDirectory
+                      Verbose = request.Verbose }
+                |> Result.bind (fun evaluated ->
+                    let dossierRequest =
+                        { ManifestPath = request.ManifestPath
+                          OutputDirectory = request.DossierOutputDirectory
+                          RocqProjectPath = None
+                          RocqFactsPath = None
+                          RocqConfigPath = None
+                          SeamChecksReceiptPath = Some evaluated.SeamChecksPath
+                          RefusalControlsReceiptPath = Some evaluated.RefusalControlsPath }
+                    let built =
+                        try Ok(build dossierRequest)
+                        with
+                        | :? Diagnostics.RefusalException as refused -> Error refused.Refusal
+                        | error ->
+                            Diagnostics.diagnostic Diagnostics.DossierInputMalformed error.Message (Diagnostics.inFile request.ManifestPath "dossier input or retained evidence")
+                            |> Diagnostics.refusalOf |> Error
+                    built
+                    |> Result.bind (fun (dossier, output) ->
+                        if dossier.Counts.Open <> 0 || dossier.Counts.PendingSeamCategories <> 0 then
+                            Diagnostics.diagnostic Diagnostics.DossierCorrespondenceInvalid
+                                $"Static-link dossier reconciliation left Open = {dossier.Counts.Open} or PendingSeamCategories = {dossier.Counts.PendingSeamCategories}."
+                                (Diagnostics.inFile request.ManifestPath "static-link dossier reconciliation")
+                            |> Diagnostics.refusalOf
+                            |> Error
+                        else
+                            writeGeneratedDossier dossier output
+                            |> Result.map (fun generated -> { Manifest = manifest; Seams = evaluated; Dossier = generated }))))

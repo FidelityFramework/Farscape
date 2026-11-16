@@ -1613,8 +1613,7 @@ module CppClassAnalysis =
         let topStrings = [ spec.StructName; spec.SafeName; spec.Namespace; spec.LibraryName; spec.HeaderFile; spec.ByteOrder ] @ Option.toList spec.LibraryTransformSymbol
         if topStrings |> List.exists (fun s -> System.String.IsNullOrWhiteSpace s || rawTokens |> List.exists s.Contains) then
             refuseSharedBuffer spec Diagnostics.SharedBufferContractInvalid "empty names and raw pointer/address tokens are forbidden in shared buffer contracts."
-        let cleanStruct = spec.StructName.Replace("struct ", "").Trim()
-        if not (cleanStruct.Split([| "::" |], System.StringSplitOptions.None) |> Array.forall identifier)
+        if not (identifier spec.StructName)
            || not (identifier spec.SafeName)
            || not (spec.Namespace.Split('.') |> Array.forall identifier)
            || (spec.LibraryTransformSymbol |> Option.exists (identifier >> not)) then
@@ -1680,16 +1679,18 @@ module CppClassAnalysis =
                 "SharedReadOnly memory space placement cannot declare a mutating LibraryTransformSymbol."
         let lifecycleFacts = verifySharedBufferLifecycleCore spec spec.Lifecycle
         let _, _, _, _, _, _, libMutates = lifecycleFacts
-        if libMutates <> spec.LibraryTransformSymbol.IsSome then
+        let hasForeignCall =
+            libMutates
+            || (spec.Lifecycle |> List.exists (function SharedBufferOperation.SyncFromLibrary _ -> true | _ -> false))
+        if (libMutates && spec.LibraryTransformSymbol.IsNone) || (not hasForeignCall && spec.LibraryTransformSymbol.IsSome) then
             refuseSharedBuffer spec Diagnostics.SharedBufferContractInvalid
                 $"shared buffer lifecycle mutation evidence (LibraryMutate={libMutates}) disagrees with LibraryTransformSymbol ({spec.LibraryTransformSymbol.IsSome})."
         lifecycleFacts
 
     let private validateSharedBufferContractCore (measuredStructs: Map<string, StructLayout>) (spec: SharedBufferSpec) =
         let lifecycleFacts = validateSharedBufferSpecShape spec
-        let cleanStruct = spec.StructName.Replace("struct ", "").Trim()
         let measured =
-            match Map.tryFind spec.StructName measuredStructs |> Option.orElseWith (fun () -> Map.tryFind cleanStruct measuredStructs) with
+            match Map.tryFind spec.StructName measuredStructs with
             | Some m -> m
             | None ->
                 refuseSharedBuffer spec Diagnostics.SharedBufferContractInvalid
@@ -1742,7 +1743,9 @@ module CppClassAnalysis =
             if spec.ByteOrder = "LittleEndian" || spec.ByteOrder = "little" then "little" else spec.ByteOrder
         let fieldsPayload =
             spec.Fields
-            |> List.map (fun f -> $"{f.Name}:{f.CType}:{f.ClefType}:{f.ByteOffset}:{f.ByteWidth}:{f.IsVolatile}")
+            |> List.map (fun f ->
+                let normalizedClefType = if f.ClefType = "uint" then "int" else f.ClefType
+                $"{f.Name}:{f.CType}:{normalizedClefType}:{f.ByteOffset}:{f.ByteWidth}:{f.IsVolatile}")
             |> String.concat ";"
         let lifecyclePayload =
             spec.Lifecycle
@@ -1823,12 +1826,20 @@ module CppClassAnalysis =
         let lines (text: string) = text.Split('\n', System.StringSplitOptions.RemoveEmptyEntries) |> Array.toList
         let exported =
             if archive then
-                let output = runInspectionTool "nm" ["--extern-only"; "--defined-only"; "--format=posix"; "--"; resolved]
-                lines output
-                |> List.choose (fun line ->
-                    let columns = line.Split([|' '; '\t'|], System.StringSplitOptions.RemoveEmptyEntries)
-                    if columns.Length >= 2 then Some columns.[0] else None)
-                |> Set.ofList
+                match toolOverride with
+                | None ->
+                    match ArchiveInspection.inspect resolved (Some sha256) with
+                    | Ok provenance -> provenance.Symbols |> Map.keys |> Set.ofSeq
+                    | Error refusal ->
+                        refuseSharedBuffer spec Diagnostics.SharedBufferContractInvalid
+                            $"verified shared-buffer archive '{resolved}' inspection failed: {refusal.Text}"
+                | Some _ ->
+                    let output = runInspectionTool "nm" ["--extern-only"; "--defined-only"; "--format=posix"; "--"; resolved]
+                    lines output
+                    |> List.choose (fun line ->
+                        let columns = line.Split([|' '; '\t'|], System.StringSplitOptions.RemoveEmptyEntries)
+                        if columns.Length >= 2 then Some columns.[0] else None)
+                    |> Set.ofList
             else
                 let output = runInspectionTool "readelf" ["--dyn-syms"; "--wide"; "--"; resolved]
                 lines output
@@ -1901,7 +1912,7 @@ module CppClassAnalysis =
 
     /// Render the companion extern "C" C++ zero-copy shim for a BAREWire / Fidelity.Platform shared buffer (#123).
     let renderSharedBufferZeroCopyShimC (spec: SharedBufferSpec) : string =
-        let _, _, _, _, _, maxAccessedIdx, _ = validateSharedBufferSpecShape spec
+        let _, _, _, _, _, maxAccessedIdx, libMutates = validateSharedBufferSpecShape spec
         let prefix = "farscape_shared_buffer_" + spec.SafeName
         let escapedHeader = spec.HeaderFile.Replace("\\", "\\\\").Replace("\"", "\\\"")
         let memorySpaceCode =
@@ -1926,9 +1937,9 @@ module CppClassAnalysis =
         let fieldAccessors =
             spec.Fields |> List.collect (fun f ->
                 [ $"extern \"C\" int {prefix}_clef_write_{f.Name}(void* self, int index, {f.CType} value) noexcept {{"
-                  "  if (!self) return StatusNullHandle;"
-                  "  auto* region = static_cast<SharedRegionState*>(self);"
-                  "  if (!region->mapped || !region->elements) return StatusLifetimeError;"
+                  "  RegionLockGuard lock;"
+                  "  auto* region = find_region(self);"
+                  "  if (!region) return self ? StatusLifetimeError : StatusNullHandle;"
                   "  if (region->space_access == AccessReadOnly || region->share_mode != AccessNone) return StatusAccessConflict;"
                   $"  if (index < 0 || index > {maxAccessedIdx} || index >= {spec.ElementCount}) return StatusOutOfRange;"
                   $"  region->elements[index].{f.Name} = value;"
@@ -1936,9 +1947,10 @@ module CppClassAnalysis =
                   "  return StatusOk;"
                   "}"
                   $"extern \"C\" int {prefix}_clef_read_{f.Name}({f.CType}* outValue, void* self, int index) noexcept {{"
-                  "  if (!outValue || !self) return StatusNullHandle;"
-                  "  auto* region = static_cast<SharedRegionState*>(self);"
-                  "  if (!region->mapped || !region->elements) return StatusLifetimeError;"
+                  "  if (!outValue) return StatusNullHandle;"
+                  "  RegionLockGuard lock;"
+                  "  auto* region = find_region(self);"
+                  "  if (!region) return self ? StatusLifetimeError : StatusNullHandle;"
                   "  if (region->space_access == AccessWriteOnly || region->share_mode == AccessReadWrite || region->share_mode == AccessExclusiveMutable || region->share_mode == AccessWriteOnly) return StatusAccessConflict;"
                   $"  if (index < 0 || index > {maxAccessedIdx} || index >= {spec.ElementCount}) return StatusOutOfRange;"
                   $"  *outValue = region->elements[index].{f.Name};"
@@ -1948,13 +1960,37 @@ module CppClassAnalysis =
         let transformEntrySource =
             match spec.LibraryTransformSymbol with
             | Some sym ->
+                let shareCheck =
+                    if libMutates then
+                        "region->space_access == AccessReadOnly || (region->share_mode != AccessReadWrite && region->share_mode != AccessExclusiveMutable && region->share_mode != AccessWriteOnly)"
+                    else
+                        "region->share_mode == AccessNone"
                 [ $"extern \"C\" int {prefix}_library_transform_in_place(void* self, int index, int delta) noexcept {{"
-                  "  if (!self) return StatusNullHandle;"
-                  "  auto* region = static_cast<SharedRegionState*>(self);"
-                  "  if (!region->mapped || !region->elements) return StatusLifetimeError;"
-                  "  if (region->space_access == AccessReadOnly || (region->share_mode != AccessReadWrite && region->share_mode != AccessExclusiveMutable && region->share_mode != AccessWriteOnly)) return StatusAccessConflict;"
-                  $"  if (index < 0 || index >= region->shared_count || index > {maxAccessedIdx} || index >= {spec.ElementCount}) return StatusOutOfRange;"
-                  $"  return {sym}(&region->elements[0], region->shared_count, index, delta, &region->library_addr, &region->copy_count);"
+                  "  SharedElement* elem_base = nullptr;"
+                  "  int shared_cnt = 0;"
+                  "  std::uintptr_t obs_lib_addr = 0;"
+                  "  int obs_copies = 0;"
+                  "  {"
+                  "    RegionLockGuard lock;"
+                  "    auto* region = find_region(self);"
+                  "    if (!region) return self ? StatusLifetimeError : StatusNullHandle;"
+                  $"    if ({shareCheck}) return StatusAccessConflict;"
+                  $"    if (index < 0 || index >= region->shared_count || index > {maxAccessedIdx} || index >= {spec.ElementCount}) return StatusOutOfRange;"
+                  "    region->clef_addr = reinterpret_cast<std::uintptr_t>(self);"
+                  "    elem_base = &region->elements[0];"
+                  "    shared_cnt = region->shared_count;"
+                  "    obs_lib_addr = region->library_addr;"
+                  "    obs_copies = region->copy_count;"
+                  "  }"
+                  $"  int rc = {sym}(elem_base, shared_cnt, index, delta, &obs_lib_addr, &obs_copies);"
+                  "  RegionLockGuard lock;"
+                  "  auto* region = find_region(self);"
+                  "  if (!region) return self ? StatusLifetimeError : StatusNullHandle;"
+                  "  region->library_addr = obs_lib_addr;"
+                  "  region->copy_count = obs_copies;"
+                  "  if (rc != StatusOk) return rc;"
+                  "  if (region->library_addr != region->clef_addr || region->copy_count != 0) return StatusAccessConflict;"
+                  "  return StatusOk;"
                   "}" ]
             | None -> []
         let requiredSpanBytes = uint64 (spec.SpaceOffset + int64 spec.RegionByteExtent)
@@ -1963,8 +1999,8 @@ module CppClassAnalysis =
             match spec.MemorySpace with
             | FileMapped ->
                 [ $"extern \"C\" int {contractSymbol}(void* self) noexcept;"
-                  $"extern \"C\" void* {prefix}_map(int fd) noexcept {{"
-                  "  if (fd < 0 || g_next_region >= 16) return nullptr;"
+                  $"extern \"C\" void* {prefix}_try_map(int fd) noexcept {{"
+                  "  if (fd < 0) return nullptr;"
                   "  long page = ::sysconf(_SC_PAGESIZE);"
                   $"  if (page <= 0 || static_cast<std::size_t>(page) < {spec.RegionAlignment}u || (static_cast<std::size_t>(page) & ({spec.RegionAlignment}u - 1u)) != 0u) return nullptr;"
                   "  struct ::stat st{};"
@@ -1974,28 +2010,37 @@ module CppClassAnalysis =
                   "  void* mem = ::mmap(nullptr, map_bytes, init_prot, MAP_SHARED, fd, 0);"
                   "  if (mem == MAP_FAILED || !mem) return nullptr;"
                   $"  auto* elem_base = reinterpret_cast<SharedElement*>(static_cast<char*>(mem) + {spec.SpaceOffset}LL);"
-                  "  auto& slot = g_regions[g_next_region++];"
-                  "  std::memset(&slot, 0, sizeof(SharedRegionState));"
-                  "  slot.mapped_base = mem;"
-                  "  slot.elements = elem_base;"
-                  "  slot.mapped_bytes = map_bytes;"
-                  "  slot.backing_fd = fd;"
-                  "  slot.mapped = true;"
-                  $"  slot.memory_space = {memorySpaceCode};"
-                  $"  slot.space_access = {spaceAccessCode};"
-                  "  slot.share_mode = AccessNone;"
-                  "  slot.shared_count = 0;"
-                  "  slot.clef_addr = reinterpret_cast<std::uintptr_t>(&slot.elements[0]);"
-                  "  slot.library_addr = 0;"
-                  "  slot.copy_count = 0;"
-                  $"  if ({contractSymbol}(&slot) != StatusOk) return nullptr;"
-                  "  return &slot;"
+                  "  SharedRegionState* slot_ptr = nullptr;"
+                  "  {"
+                  "    RegionLockGuard lock;"
+                  "    slot_ptr = alloc_region();"
+                  "    if (!slot_ptr) { ::munmap(mem, map_bytes); return nullptr; }"
+                  "    auto& slot = *slot_ptr;"
+                  "    slot.mapped_base = mem;"
+                  "    slot.elements = elem_base;"
+                  "    slot.mapped_bytes = map_bytes;"
+                  "    slot.backing_fd = fd;"
+                  "    slot.mapped = true;"
+                  $"    slot.memory_space = {memorySpaceCode};"
+                  $"    slot.space_access = {spaceAccessCode};"
+                  "    slot.share_mode = AccessNone;"
+                  "    slot.shared_count = 0;"
+                  "    slot.clef_addr = 0;"
+                  "    slot.library_addr = 0;"
+                  "    slot.copy_count = 0;"
+                  "  }"
+                  $"  if ({contractSymbol}(elem_base) != StatusOk) {{ RegionLockGuard lock; (void)::mmap(mem, map_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0); slot_ptr->mapped = false; return nullptr; }}"
+                  "  return elem_base;"
+                  "}"
+                  $"extern \"C\" void* {prefix}_map(int fd) noexcept {{"
+                  $"  void* p = {prefix}_try_map(fd);"
+                  "  if (!p) ::abort();"
+                  "  return p;"
                   "}" ]
             | HostShared
             | DeviceUnified ->
                 [ $"extern \"C\" int {contractSymbol}(void* self) noexcept;"
-                  $"extern \"C\" void* {prefix}_map() noexcept {{"
-                  "  if (g_next_region >= 16) return nullptr;"
+                  $"extern \"C\" void* {prefix}_try_map() noexcept {{"
                   "  long page = ::sysconf(_SC_PAGESIZE);"
                   $"  if (page <= 0 || static_cast<std::size_t>(page) < {spec.RegionAlignment}u || (static_cast<std::size_t>(page) & ({spec.RegionAlignment}u - 1u)) != 0u) return nullptr;"
                   $"  std::size_t map_bytes = align_page_extent(static_cast<std::size_t>({requiredSpanBytes}ULL), {spec.RegionAlignment}u);"
@@ -2004,28 +2049,45 @@ module CppClassAnalysis =
                   "  void* mem = ::mmap(nullptr, map_bytes, init_prot, MAP_SHARED | MAP_ANONYMOUS, -1, 0);"
                   "  if (mem == MAP_FAILED || !mem) return nullptr;"
                   $"  auto* elem_base = reinterpret_cast<SharedElement*>(static_cast<char*>(mem) + {spec.SpaceOffset}LL);"
-                  "  auto& slot = g_regions[g_next_region++];"
-                  "  std::memset(&slot, 0, sizeof(SharedRegionState));"
-                  "  slot.mapped_base = mem;"
-                  "  slot.elements = elem_base;"
-                  "  slot.mapped_bytes = map_bytes;"
-                  "  slot.backing_fd = -1;"
-                  "  slot.mapped = true;"
-                  $"  slot.memory_space = {memorySpaceCode};"
-                  $"  slot.space_access = {spaceAccessCode};"
-                  "  slot.share_mode = AccessNone;"
-                  "  slot.shared_count = 0;"
-                  "  slot.clef_addr = reinterpret_cast<std::uintptr_t>(&slot.elements[0]);"
-                  "  slot.library_addr = 0;"
-                  "  slot.copy_count = 0;"
-                  $"  if ({contractSymbol}(&slot) != StatusOk) return nullptr;"
-                  "  return &slot;"
+                  "  SharedRegionState* slot_ptr = nullptr;"
+                  "  {"
+                  "    RegionLockGuard lock;"
+                  "    slot_ptr = alloc_region();"
+                  "    if (!slot_ptr) { ::munmap(mem, map_bytes); return nullptr; }"
+                  "    auto& slot = *slot_ptr;"
+                  "    slot.mapped_base = mem;"
+                  "    slot.elements = elem_base;"
+                  "    slot.mapped_bytes = map_bytes;"
+                  "    slot.backing_fd = -1;"
+                  "    slot.mapped = true;"
+                  $"    slot.memory_space = {memorySpaceCode};"
+                  $"    slot.space_access = {spaceAccessCode};"
+                  "    slot.share_mode = AccessNone;"
+                  "    slot.shared_count = 0;"
+                  "    slot.clef_addr = 0;"
+                  "    slot.library_addr = 0;"
+                  "    slot.copy_count = 0;"
+                  "  }"
+                  $"  if ({contractSymbol}(elem_base) != StatusOk) {{ RegionLockGuard lock; (void)::mmap(mem, map_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0); slot_ptr->mapped = false; return nullptr; }}"
+                  "  return elem_base;"
+                  "}"
+                  $"extern \"C\" void* {prefix}_map() noexcept {{"
+                  $"  void* p = {prefix}_try_map();"
+                  "  if (!p) ::abort();"
+                  "  return p;"
                   "}" ]
+        let setLibAddrOnShare =
+            if spec.LibraryTransformSymbol.IsNone then
+                "  region->library_addr = reinterpret_cast<std::uintptr_t>(&region->elements[0]);"
+            else
+                "  // library_addr is populated by the foreign transform symbol upon in-place access."
         String.concat "\n" (
             [ $"#include \"{escapedHeader}\""
               "#include <cstddef>"
               "#include <cstdint>"
+              "#include <cstdlib>"
               "#include <cstring>"
+              "#include <pthread.h>"
               "#include <sys/mman.h>"
               "#include <sys/stat.h>"
               "#include <unistd.h>"
@@ -2036,6 +2098,7 @@ module CppClassAnalysis =
               "enum { SpaceHostShared = 1, SpaceDeviceUnified = 2, SpaceFileMapped = 3 };" ]
             @ staticAsserts
             @ [ "struct SharedRegionState {"
+                "  SharedRegionState* next;"
                 "  void* mapped_base;"
                 "  SharedElement* elements;"
                 "  std::size_t mapped_bytes;"
@@ -2049,8 +2112,28 @@ module CppClassAnalysis =
                 "  std::uintptr_t library_addr;"
                 "  int copy_count;"
                 "};"
-                "static SharedRegionState g_regions[16];"
-                "static int g_next_region = 0;"
+                "static pthread_mutex_t g_regions_mutex = PTHREAD_MUTEX_INITIALIZER;"
+                "struct RegionLockGuard {"
+                "  RegionLockGuard() noexcept { ::pthread_mutex_lock(&g_regions_mutex); }"
+                "  ~RegionLockGuard() noexcept { ::pthread_mutex_unlock(&g_regions_mutex); }"
+                "  RegionLockGuard(const RegionLockGuard&) = delete;"
+                "  RegionLockGuard& operator=(const RegionLockGuard&) = delete;"
+                "};"
+                "static SharedRegionState* g_regions_head = nullptr;"
+                "static SharedRegionState* alloc_region() noexcept {"
+                "  auto* fresh = static_cast<SharedRegionState*>(::calloc(1u, sizeof(SharedRegionState)));"
+                "  if (!fresh) return nullptr;"
+                "  fresh->next = g_regions_head;"
+                "  g_regions_head = fresh;"
+                "  return fresh;"
+                "}"
+                "static SharedRegionState* find_region(void* self) noexcept {"
+                "  if (!self) return nullptr;"
+                "  for (auto* slot = g_regions_head; slot != nullptr; slot = slot->next) {"
+                "    if (slot->mapped && slot->elements == self) return slot;"
+                "  }"
+                "  return nullptr;"
+                "}"
                 "[[maybe_unused]] static std::size_t align_page_extent(std::size_t bytes, std::size_t req_align) noexcept {"
                 "  long page = ::sysconf(_SC_PAGESIZE);"
                 "  if (page <= 0) return 0u;"
@@ -2061,21 +2144,21 @@ module CppClassAnalysis =
                 "}" ]
             @ mapEntrySource
             @ [ $"extern \"C\" int {prefix}_unmap(void* self) noexcept {{"
-                "  if (!self) return StatusNullHandle;"
-                "  auto* region = static_cast<SharedRegionState*>(self);"
-                "  if (!region->mapped || !region->mapped_base || !region->elements || region->share_mode != AccessNone) return StatusLifetimeError;"
-                "  if (::munmap(region->mapped_base, region->mapped_bytes) != 0) return StatusLifetimeError;"
-                "  region->mapped_base = nullptr;"
-                "  region->elements = nullptr;"
+                "  RegionLockGuard lock;"
+                "  auto* region = find_region(self);"
+                "  if (!region) return self ? StatusLifetimeError : StatusNullHandle;"
+                "  if (!region->mapped_base || region->share_mode != AccessNone) return StatusLifetimeError;"
+                "  if (::mmap(region->mapped_base, region->mapped_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED) return StatusLifetimeError;"
                 "  region->backing_fd = -1;"
                 "  region->mapped = false;"
                 "  return StatusOk;"
                 "}" ]
             @ fieldAccessors
             @ [ $"extern \"C\" int {prefix}_share_to_library(void* self, int accessMode, int elementCount) noexcept {{"
-                "  if (!self) return StatusNullHandle;"
-                "  auto* region = static_cast<SharedRegionState*>(self);"
-                "  if (!region->mapped || !region->mapped_base || !region->elements) return StatusLifetimeError;"
+                "  RegionLockGuard lock;"
+                "  auto* region = find_region(self);"
+                "  if (!region) return self ? StatusLifetimeError : StatusNullHandle;"
+                "  if (!region->mapped_base) return StatusLifetimeError;"
                 "  if (region->share_mode != AccessNone) return StatusAccessConflict;"
                 "  if (accessMode < AccessReadOnly || accessMode > AccessExclusiveMutable) return StatusAccessConflict;"
                 "  if (region->space_access == AccessReadOnly && accessMode != AccessReadOnly) return StatusAccessConflict;"
@@ -2084,49 +2167,56 @@ module CppClassAnalysis =
                 "  if (accessMode == AccessReadOnly && ::mprotect(region->mapped_base, region->mapped_bytes, PROT_READ) != 0) return StatusAccessConflict;"
                 "  region->share_mode = accessMode;"
                 "  region->shared_count = elementCount;"
-                "  region->library_addr = reinterpret_cast<std::uintptr_t>(&region->elements[0]);"
+                "  region->clef_addr = reinterpret_cast<std::uintptr_t>(self);"
+                setLibAddrOnShare
                 "  return StatusOk;"
                 "}"
                 $"extern \"C\" int {prefix}_unshare_from_library(void* self) noexcept {{"
-                "  if (!self) return StatusNullHandle;"
-                "  auto* region = static_cast<SharedRegionState*>(self);"
-                "  if (!region->mapped || !region->mapped_base || !region->elements || region->share_mode == AccessNone) return StatusLifetimeError;"
+                "  RegionLockGuard lock;"
+                "  auto* region = find_region(self);"
+                "  if (!region) return self ? StatusLifetimeError : StatusNullHandle;"
+                "  if (!region->mapped_base || region->share_mode == AccessNone) return StatusLifetimeError;"
                 "  int restore_prot = (region->space_access == AccessReadOnly) ? PROT_READ : (PROT_READ | PROT_WRITE);"
                 "  if (::mprotect(region->mapped_base, region->mapped_bytes, restore_prot) != 0) return StatusAccessConflict;"
+                "  region->clef_addr = reinterpret_cast<std::uintptr_t>(self);"
                 "  region->share_mode = AccessNone;"
                 "  region->shared_count = 0;"
                 "  return StatusOk;"
                 "}" ]
             @ transformEntrySource
             @ [ $"extern \"C\" int {prefix}_clef_address_identity(std::uintptr_t* outAddr, void* self) noexcept {{"
-                "  if (!outAddr || !self) return StatusNullHandle;"
-                "  auto* region = static_cast<SharedRegionState*>(self);"
-                "  if (!region->mapped || !region->elements) return StatusLifetimeError;"
+                "  if (!outAddr) return StatusNullHandle;"
+                "  RegionLockGuard lock;"
+                "  auto* region = find_region(self);"
+                "  if (!region) return self ? StatusLifetimeError : StatusNullHandle;"
                 "  *outAddr = region->clef_addr;"
                 "  return StatusOk;"
                 "}"
                 $"extern \"C\" int {prefix}_library_address_identity(std::uintptr_t* outAddr, void* self) noexcept {{"
-                "  if (!outAddr || !self) return StatusNullHandle;"
-                "  auto* region = static_cast<SharedRegionState*>(self);"
-                "  if (!region->mapped || !region->elements) return StatusLifetimeError;"
+                "  if (!outAddr) return StatusNullHandle;"
+                "  RegionLockGuard lock;"
+                "  auto* region = find_region(self);"
+                "  if (!region) return self ? StatusLifetimeError : StatusNullHandle;"
                 "  *outAddr = region->library_addr;"
                 "  return StatusOk;"
                 "}"
                 $"extern \"C\" int {prefix}_copy_count(int* outCopies, void* self) noexcept {{"
-                "  if (!outCopies || !self) return StatusNullHandle;"
-                "  auto* region = static_cast<SharedRegionState*>(self);"
-                "  if (!region->mapped || !region->elements) return StatusLifetimeError;"
+                "  if (!outCopies) return StatusNullHandle;"
+                "  RegionLockGuard lock;"
+                "  auto* region = find_region(self);"
+                "  if (!region) return self ? StatusLifetimeError : StatusNullHandle;"
                 "  *outCopies = region->copy_count;"
                 "  return StatusOk;"
                 "}"
                 $"extern \"C\" int {prefix}_memory_space_kind(int* outSpaceKind, void* self) noexcept {{"
-                "  if (!outSpaceKind || !self) return StatusNullHandle;"
-                "  auto* region = static_cast<SharedRegionState*>(self);"
-                "  if (!region->mapped || !region->elements) return StatusLifetimeError;"
+                "  if (!outSpaceKind) return StatusNullHandle;"
+                "  RegionLockGuard lock;"
+                "  auto* region = find_region(self);"
+                "  if (!region) return self ? StatusLifetimeError : StatusNullHandle;"
                 "  *outSpaceKind = region->memory_space;"
                 "  return StatusOk;"
                 "}"
-                $"extern \"C\" int {contractSymbol}(void* self) noexcept {{ return self ? StatusOk : StatusNullHandle; }}"
+                $"extern \"C\" int {contractSymbol}(void* self) noexcept {{ RegionLockGuard lock; return find_region(self) ? StatusOk : (self ? StatusLifetimeError : StatusNullHandle); }}"
                 "" ])
 
     // =========================================================================

@@ -272,6 +272,239 @@ module SubstantiationProof =
 
     type private ObligationOrigin = Library | Harness | Dependency
 
+    let internal sharedBufferAnchor =
+        Regex(@"^(?:fs9220_(?<form>layout)|fs9221_(?<form>extent|space)|fs9222_(?<form>lifetime)|fs9223_(?<form>exclusivity))_(?<slug>[A-Za-z0-9_]+)$", RegexOptions.Compiled)
+
+    let internal sharedBufferSource =
+        Regex(@"^(?<platform>[A-Za-z_][A-Za-z0-9_.-]*):(?<subject>[A-Za-z_][A-Za-z0-9_.-]*)$", RegexOptions.Compiled)
+
+    let private placementHeaderPattern =
+        Regex(@"(?:^|\n)[ \t]*let\s+(?:(?:public|internal|private)\s+)?(?:``[^`]+``|[A-Za-z_][A-Za-z0-9_']*)\s*:\s*Expr\s*<\s*(?:[A-Za-z_][A-Za-z0-9_.]*\.)?SharedBufferPlacement\s*>\s*=", RegexOptions.Compiled)
+
+    let private placementNamePattern =
+        Regex(@"\bName\s*=\s*""([^""]+)""", RegexOptions.Compiled)
+
+    let private placementSpaceDescriptorPattern =
+        Regex(@"\bSpaceDescriptor\s*=\s*\{", RegexOptions.Compiled)
+
+    let private placementSpacePattern =
+        Regex(@"\bSpace\s*=\s*""([^""]+)""", RegexOptions.Compiled)
+
+    let private braceDepthAt (text: string) (targetIdx: int) : int =
+        let limit = min targetIdx text.Length
+        let rec loop i inString depth =
+            if i >= limit then depth
+            else
+                let c = text[i]
+                if inString then
+                    if c = '\\' && i + 1 < limit then loop (i + 2) true depth
+                    elif c = '"' then loop (i + 1) false depth
+                    else loop (i + 1) true depth
+                elif c = '"' then loop (i + 1) true depth
+                elif c = '{' then loop (i + 1) false (depth + 1)
+                elif c = '}' then loop (i + 1) false (max 0 (depth - 1))
+                else loop (i + 1) false depth
+        loop 0 false 0
+
+    let private extractPlacementNameAndSpace (block: string) : (string * string) option =
+        let topLevelName =
+            placementNamePattern.Matches block
+            |> Seq.cast<Match>
+            |> Seq.tryFind (fun m -> braceDepthAt block m.Index = 1)
+            |> Option.map (fun m -> m.Groups[1].Value)
+        let spaceDescOpenIdx =
+            placementSpaceDescriptorPattern.Matches block
+            |> Seq.cast<Match>
+            |> Seq.tryFind (fun m -> braceDepthAt block m.Index = 1)
+            |> Option.map (fun m -> m.Index + m.Length - 1)
+        let spaceName =
+            match spaceDescOpenIdx with
+            | Some openBraceIdx ->
+                let rec findClosingBrace i inString depth =
+                    if i >= block.Length then block.Length
+                    else
+                        let c = block[i]
+                        if inString then
+                            if c = '\\' && i + 1 < block.Length then findClosingBrace (i + 2) true depth
+                            elif c = '"' then findClosingBrace (i + 1) false depth
+                            else findClosingBrace (i + 1) true depth
+                        elif c = '"' then findClosingBrace (i + 1) true depth
+                        elif c = '{' then findClosingBrace (i + 1) false (depth + 1)
+                        elif c = '}' then
+                            if depth = 1 then i else findClosingBrace (i + 1) false (depth - 1)
+                        else findClosingBrace (i + 1) false depth
+                let closeBraceIdx = findClosingBrace (openBraceIdx + 1) false 1
+                placementSpacePattern.Matches block
+                |> Seq.cast<Match>
+                |> Seq.tryFind (fun m -> m.Index > openBraceIdx && m.Index < closeBraceIdx && braceDepthAt block m.Index = 2)
+                |> Option.map (fun m -> m.Groups[1].Value)
+            | None -> None
+        match topLevelName, spaceName with
+        | Some pName, Some pSpace -> Some (pName, pSpace)
+        | _ -> None
+
+    /// Compute the BAREWire obligation slug of a placement or space name (lower-case ASCII
+    /// alphanumerics, with every non-alphanumeric run collapsed to a single underscore).
+    let internal sharedBufferSlug (value: string) : string =
+        let sb, _ =
+            value
+            |> Seq.fold
+                (fun (acc: StringBuilder, lastUnderscore) ch ->
+                    if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') then
+                        acc.Append(ch), false
+                    elif ch >= 'A' && ch <= 'Z' then
+                        acc.Append(Char.ToLowerInvariant ch), false
+                    elif not lastUnderscore then
+                        acc.Append('_'), true
+                    else
+                        acc, true)
+                (StringBuilder(value.Length), false)
+        sb.ToString()
+
+    let internal matchSharedBufferObligation (anchor: string) (source: string) : (bool * string) option =
+        let aMatch = sharedBufferAnchor.Match anchor
+        let sMatch = sharedBufferSource.Match source
+        if not (aMatch.Success && sMatch.Success) then None
+        else
+            let subject = sMatch.Groups["subject"].Value
+            let expectedSlug = sharedBufferSlug subject
+            let actualSlug = aMatch.Groups["slug"].Value
+            let isSpace = aMatch.Groups["form"].Value = "space"
+            let slugMatches =
+                actualSlug = expectedSlug
+                || (isSpace && Regex.IsMatch(actualSlug, "^" + Regex.Escape(expectedSlug) + "_[0-9]+$"))
+            if not slugMatches then None
+            else Some (isSpace, subject)
+
+    /// Blank out F# line (`//`) and block (`(* ... *)`) comments while preserving newlines and
+    /// string literals so line numbers and quotation boundaries remain exact.
+    let private stripCommentsPreservingLines (source: string) : string =
+        let len = source.Length
+        let sb = StringBuilder(len)
+        let rec loop i inString blockDepth =
+            if i >= len then
+                sb.ToString()
+            else
+                let c = source[i]
+                let next = if i + 1 < len then source[i + 1] else '\000'
+                if blockDepth > 0 then
+                    if c = '(' && next = '*' then
+                        sb.Append("  ") |> ignore
+                        loop (i + 2) inString (blockDepth + 1)
+                    elif c = '*' && next = ')' then
+                        sb.Append("  ") |> ignore
+                        loop (i + 2) inString (blockDepth - 1)
+                    else
+                        sb.Append(if c = '\n' || c = '\r' then c else ' ') |> ignore
+                        loop (i + 1) inString blockDepth
+                elif inString then
+                    if c = '\\' && i + 1 < len then
+                        sb.Append(c).Append(next) |> ignore
+                        loop (i + 2) true 0
+                    elif c = '"' then
+                        sb.Append(c) |> ignore
+                        loop (i + 1) false 0
+                    else
+                        sb.Append(c) |> ignore
+                        loop (i + 1) true 0
+                elif c = '"' then
+                    sb.Append(c) |> ignore
+                    loop (i + 1) true 0
+                elif c = '/' && next = '/' then
+                    let rec skipLine j =
+                        if j >= len || source[j] = '\n' || source[j] = '\r' then
+                            loop j false 0
+                        else
+                            sb.Append(' ') |> ignore
+                            skipLine (j + 1)
+                    skipLine i
+                elif c = '(' && next = '*' then
+                    sb.Append("  ") |> ignore
+                    loop (i + 2) false 1
+                else
+                    sb.Append(c) |> ignore
+                    loop (i + 1) false 0
+        loop 0 false 0
+
+    /// Extract `(canonicalPath, 1-based declaration line, placementName, spaceName)` for every
+    /// quoted `Expr<SharedBufferPlacement>` binding in the given source files (#205).
+    let internal sharedBufferPlacementDeclarations (paths: seq<string>) : (string * int * string * string) array =
+        [| for rawPath in paths do
+               if not (String.IsNullOrWhiteSpace rawPath) && File.Exists rawPath then
+                   let fullPath = Path.GetFullPath rawPath
+                   let cleaned = stripCommentsPreservingLines (File.ReadAllText fullPath)
+                   for headerMatch in placementHeaderPattern.Matches cleaned do
+                       let startOffset =
+                           if cleaned[headerMatch.Index] = '\n' then headerMatch.Index + 1 else headerMatch.Index
+                       let declLine =
+                           1 + (seq { 0 .. startOffset - 1 } |> Seq.sumBy (fun k -> if cleaned[k] = '\n' then 1 else 0))
+                       let afterHeader = headerMatch.Index + headerMatch.Length
+                       let openIdx = cleaned.IndexOf("<@", afterHeader, StringComparison.Ordinal)
+                       if openIdx >= 0 then
+                           let closeIdx = cleaned.IndexOf("@>", openIdx + 2, StringComparison.Ordinal)
+                           if closeIdx > openIdx then
+                               let block = cleaned.Substring(openIdx, closeIdx - openIdx + 2)
+                               match extractPlacementNameAndSpace block with
+                               | Some (pName, pSpace) ->
+                                   yield fullPath, declLine, pName, pSpace
+                               | None -> () |]
+
+    let private fidprojDescPathPattern =
+        Regex(@"""?description""?\s*=\s*\{\s*path\s*=\s*""([^""]+)""", RegexOptions.Compiled)
+
+    let private fidprojSourcesArrayPattern =
+        Regex(@"\bsources\s*=\s*\[([^\]]*)\]", RegexOptions.Compiled)
+
+    let private quotedStringPattern =
+        Regex(@"""([^""]+)""", RegexOptions.Compiled)
+
+    /// Resolve `.clef` files belonging to the active `Fidelity.Platform` profile description
+    /// declared via `[dependencies] description = { path = "..." }` in the project's `.fidproj`
+    /// and extract their `Expr<SharedBufferPlacement>` declarations (#205).
+    let internal platformSharedBufferPlacements (excludedPaths: Set<string>) (anchorPaths: seq<string>) : (string * int * string * string) array =
+        let candidateFidprojDirs =
+            [| for rawAnchor in anchorPaths do
+                   if not (String.IsNullOrWhiteSpace rawAnchor) then
+                       let dir =
+                           if Directory.Exists rawAnchor then Path.GetFullPath rawAnchor
+                           else Path.GetDirectoryName (Path.GetFullPath rawAnchor)
+                       if not (String.IsNullOrWhiteSpace dir) && Directory.Exists dir then
+                           yield dir
+                           let parent = Path.GetDirectoryName dir
+                           if not (String.IsNullOrWhiteSpace parent) && Directory.Exists parent then
+                               yield parent |]
+            |> Array.distinct
+        let platformFiles =
+            [| for dir in candidateFidprojDirs do
+                   for fidproj in Directory.GetFiles(dir, "*.fidproj") do
+                       let text = File.ReadAllText fidproj
+                       for m in fidprojDescPathPattern.Matches text do
+                           let rawDesc = m.Groups[1].Value
+                           let descProj =
+                               if Path.IsPathRooted rawDesc then Path.GetFullPath rawDesc
+                               else Path.GetFullPath (Path.Combine(dir, rawDesc))
+                           let descDir = Path.GetDirectoryName descProj
+                           if File.Exists descProj && not (String.IsNullOrWhiteSpace descDir) && Directory.Exists descDir then
+                               let descText = File.ReadAllText descProj
+                               let declaredSources =
+                                   [| for sm in fidprojSourcesArrayPattern.Matches descText do
+                                          for qm in quotedStringPattern.Matches sm.Groups[1].Value do
+                                              let rel = qm.Groups[1].Value
+                                              let fullClef =
+                                                  if Path.IsPathRooted rel then Path.GetFullPath rel
+                                                  else Path.GetFullPath (Path.Combine(descDir, rel))
+                                              if File.Exists fullClef && not (excludedPaths.Contains fullClef) then
+                                                  yield fullClef |]
+                               if declaredSources.Length > 0 then
+                                   yield! declaredSources
+                               else
+                                   for clefFile in Directory.GetFiles(descDir, "*.clef") do
+                                       let fullClef = Path.GetFullPath clefFile
+                                       if not (excludedPaths.Contains fullClef) then
+                                           yield fullClef |]
+            |> Array.distinct
+        sharedBufferPlacementDeclarations platformFiles
+
     let private origins (sourcePaths: string array) (harnessPath: string) (obligations: (string * string) array) =
         let canonical location (path: string) =
             if String.IsNullOrWhiteSpace path || not (Path.IsPathFullyQualified path) then
@@ -281,13 +514,82 @@ module SubstantiationProof =
         let harness = canonical "SubstantiationRoot.clef" harnessPath
         if libraryPaths.Contains harness then
             fail Diagnostics.SubstantiationProofInvalid harness "The generated harness cannot also be a library source."
+        let excluded = Set.add harness libraryPaths
+        let libPlacements = lazy (sharedBufferPlacementDeclarations libraryPaths)
+        let harnessPlacements = lazy (sharedBufferPlacementDeclarations [ harness ])
+        let platformPlacements = lazy (platformSharedBufferPlacements excluded (Seq.append libraryPaths [ harness ]))
+        let verifyUniquePlacementNames source =
+            let libNames = libPlacements.Value |> Array.map (fun (_, _, pName, _) -> pName)
+            let harnessNamesArr = harnessPlacements.Value |> Array.map (fun (_, _, pName, _) -> pName)
+            let platformNamesArr = platformPlacements.Value |> Array.map (fun (_, _, pName, _) -> pName)
+            let harnessNames = Set.ofArray harnessNamesArr
+            let platformNames = Set.ofArray platformNamesArr
+            match libNames |> Array.countBy id |> Array.tryFind (fun (_, count) -> count > 1) with
+            | Some (dupName, _) ->
+                fail Diagnostics.SubstantiationProofInvalid source $"Shared-buffer placement '{dupName}' is declared multiple times in library sources."
+            | None -> ()
+            match harnessNamesArr |> Array.countBy id |> Array.tryFind (fun (_, count) -> count > 1) with
+            | Some (dupName, _) ->
+                fail Diagnostics.SubstantiationProofInvalid source $"Shared-buffer placement '{dupName}' is declared multiple times in harness sources."
+            | None -> ()
+            match platformNamesArr |> Array.countBy id |> Array.tryFind (fun (_, count) -> count > 1) with
+            | Some (dupName, _) ->
+                fail Diagnostics.SubstantiationProofInvalid source $"Shared-buffer placement '{dupName}' is declared multiple times in platform sources."
+            | None -> ()
+            match libNames |> Array.tryFind harnessNames.Contains with
+            | Some dupName ->
+                fail Diagnostics.SubstantiationProofInvalid source $"Shared-buffer placement '{dupName}' is ambiguous between library and harness placements."
+            | None -> ()
+            match libNames |> Array.tryFind platformNames.Contains with
+            | Some dupName ->
+                fail Diagnostics.SubstantiationProofInvalid source $"Shared-buffer placement '{dupName}' is ambiguous between library and platform placements."
+            | None -> ()
+            match harnessNames |> Seq.tryFind platformNames.Contains with
+            | Some dupName ->
+                fail Diagnostics.SubstantiationProofInvalid source $"Shared-buffer placement '{dupName}' is ambiguous between harness and platform placements."
+            | None -> ()
         obligations
         |> Array.map (fun (anchor, source) ->
             let location = Regex.Match(source, @"^(?<path>.+):[0-9]+:[0-9]+$")
-            if not location.Success then
-                fail Diagnostics.SubstantiationProofInvalid source "An obligation source must retain its file:line:column location."
-            let path = canonical source location.Groups["path"].Value
-            anchor, if libraryPaths.Contains path then Library elif path = harness then Harness else Dependency)
+            if location.Success then
+                let path = canonical source location.Groups["path"].Value
+                anchor, if libraryPaths.Contains path then Library elif path = harness then Harness else Dependency
+            else
+                match matchSharedBufferObligation anchor source with
+                | None ->
+                    fail Diagnostics.SubstantiationProofInvalid source "An obligation source must retain its file:line:column location."
+                | Some (isSpace, subject) ->
+                    verifyUniquePlacementNames source
+                    let matches (_, _, pName, pSpace) = if isSpace then pSpace = subject else pName = subject
+                    let libMatched = libPlacements.Value |> Array.filter matches
+                    let harnessMatched = harnessPlacements.Value |> Array.filter matches
+                    let platformMatched = platformPlacements.Value |> Array.filter matches
+                    if not isSpace then
+                        if libMatched.Length > 1 then
+                            fail Diagnostics.SubstantiationProofInvalid source $"Shared-buffer obligation '{anchor}' matches multiple library placements named '{subject}'."
+                        if libMatched.Length > 0 && harnessMatched.Length > 0 then
+                            fail Diagnostics.SubstantiationProofInvalid source $"Shared-buffer obligation '{anchor}' is ambiguous between library and harness placements for '{subject}'."
+                        if libMatched.Length > 0 && platformMatched.Length > 0 then
+                            fail Diagnostics.SubstantiationProofInvalid source $"Shared-buffer obligation '{anchor}' is ambiguous between library and platform placements for '{subject}'."
+                        if harnessMatched.Length > 0 && platformMatched.Length > 0 then
+                            fail Diagnostics.SubstantiationProofInvalid source $"Shared-buffer obligation '{anchor}' is ambiguous between harness and platform placements for '{subject}'."
+                        let origin =
+                            if libMatched.Length = 1 then Library
+                            elif harnessMatched.Length = 1 then Harness
+                            elif platformMatched.Length = 1 then Dependency
+                            else fail Diagnostics.SubstantiationProofInvalid source $"Shared-buffer obligation '{anchor}' does not match any library, harness, or platform compatibility placement for '{subject}'."
+                        anchor, origin
+                    else
+                        if libMatched.Length > 0 && harnessMatched.Length > 0 then
+                            fail Diagnostics.SubstantiationProofInvalid source $"Shared-buffer obligation '{anchor}' is ambiguous between library and harness placements for '{subject}'."
+                        let origin =
+                            if libMatched.Length >= 1 then Library
+                            elif harnessMatched.Length > 0 && platformMatched.Length > 0 then
+                                fail Diagnostics.SubstantiationProofInvalid source $"Shared-buffer obligation '{anchor}' is ambiguous between harness and platform placements for '{subject}'."
+                            elif harnessMatched.Length > 0 then Harness
+                            elif platformMatched.Length > 0 then Dependency
+                            else fail Diagnostics.SubstantiationProofInvalid source $"Shared-buffer obligation '{anchor}' does not match any library, harness, or platform compatibility placement for '{subject}'."
+                        anchor, origin)
         |> Map.ofArray
 
     let private invocation location root =

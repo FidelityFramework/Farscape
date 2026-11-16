@@ -87,6 +87,9 @@ module CodeAST =
         /// type Name = { field1: type1; field2: type2 }
         /// Attributes are rendered as [<Attr>] lines before the type.
         | RecordType of name: string * fields: (string * FsType) list * doc: string option * attributes: string list
+        /// type Name = { mutable field1: type1; field2: type2 }
+        /// Carries a typed mutability flag per field for zero-copy writable shared-buffer views.
+        | MutableRecordType of name: string * fields: (bool * string * FsType) list * doc: string option * attributes: string list
         /// type Name = | Case1 = 0L | Case2 = 1L
         /// When isFlags is true, renders with [<System.Flags>] attribute.
         | EnumType of name: string * values: (string * int64) list * doc: string option * isFlags: bool
