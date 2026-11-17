@@ -25,6 +25,18 @@ let ``CountOrError wrapper without error convention generates direct passthrough
     Assert.DoesNotContain("if result", output)
 
 [<Fact>]
+let ``descriptor backed passthrough preserves source declaration identity and native status`` () =
+    let declarations = [mkDecl "retire" "int" [("owner", "void *")] []]
+    let context = FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty
+    let output = WrapperCodeGenerator.generateWithContext (Some context) false Set.empty declarations
+                    "Wrappers.Test" "testlib" "Platform.Bindings.Test" NoErrors Types.LP64 None
+    Assert.Contains("let retire :", output)
+    Assert.Contains("-> int =\n    Platform.Bindings.Test.retire", output)
+    Assert.DoesNotContain("let retire (", output)
+    Assert.DoesNotContain("Region.release", output)
+    Assert.DoesNotContain("withFinalize", output)
+
+[<Fact>]
 let ``AllocatedPointer wrapper without error convention generates direct passthrough`` () =
     let output = generateSingle "malloc" "void *"
                     [("size", "size_t")]

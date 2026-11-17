@@ -488,6 +488,16 @@ module WrapperCodeGenerator =
             |> List.choose (function WFunc f -> Some f | WNone -> None)
             |> List.distinctBy (fun f -> f.Name)
             |> List.collect (generateWrapperDecls asyncSelections resolveModule signatureContext passthroughFunctions typedefMap model opaqueHandles bindingsModule errorHandling nonnullAnnotations)
+            |> List.map (function
+                | LetBinding(name, parameters, ret, FunctionCall(moduleName, target, arguments), [])
+                    when sourceContext.IsSome && errorHandling = NoErrors && moduleName = bindingsModule
+                         && target = name && arguments = (parameters |> List.map (fun parameter -> Identifier parameter.Name)) ->
+                    // A pure re-export preserves the original declaration and its
+                    // boundary descriptors. Eta expansion creates new callback
+                    // formals and loses the caller's literal Some/None selection.
+                    let inputs = if parameters.IsEmpty then [Named "unit"] else parameters |> List.map _.Type
+                    ValueBinding(name, FunctionType(inputs, ret), Identifier(moduleName + "." + target))
+                | declaration -> declaration)
 
         // Phase 4: Build typed FsDecl tree; wrapper module opens the bindings module
         let bindingOpens =

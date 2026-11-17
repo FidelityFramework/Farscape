@@ -1177,6 +1177,7 @@ module BindingGenerator =
     /// When generateWrappers is true, also generates Layer 2 idiomatic wrappers.
     let private generateFromProjectCore (aliasRows: string -> TypeMapper.AbiRepr option) (projectPath: string) (verbose: bool) (generateWrappers: bool) (dataModel: PlatformABI) : Result<GenerationResult, Diagnostics.Refusal> =
         let uncoded = Diagnostics.uncoded
+        let wrappersRequested (project: PilotTypes.PilotProject) = generateWrappers || project.Output.Mode = "fidelity-wrappers"
         match PilotSerializer.loadFromFileDiagnosed projectPath with
         | Error refusal -> Error (Diagnostics.prefixed "Failed to load project: " refusal)
         | Ok _ when dataModel <> PlatformABI.LP64 ->
@@ -1187,11 +1188,12 @@ module BindingGenerator =
         | Ok project when not project.Library.XmlProtocols.IsEmpty
                           && not (project.Options |> Option.exists (fun opts -> opts.TypedProtocol)) ->
             Error (uncoded "XML protocol generation requires options.typed_protocol = true. The legacy protocol generator exposes pointer operations in Clef source. No bindings were written.")
-        | Ok project when generateWrappers && (project.ErrorConventions |> Option.exists (fun spec -> spec.Default = PilotTypes.Errno)) ->
+        | Ok project when wrappersRequested project && (project.ErrorConventions |> Option.exists (fun spec -> spec.Default = PilotTypes.Errno)) ->
             Error (uncoded "errno wrappers require a declared native scalar accessor; an opaque errno handle cannot be dereferenced in Clef. No bindings were written.")
-        | Ok project when generateWrappers && (project.ErrorConventions |> Option.exists (fun spec -> match spec.Default with PilotTypes.NullWithReason _ -> true | _ -> false)) ->
+        | Ok project when wrappersRequested project && (project.ErrorConventions |> Option.exists (fun spec -> match spec.Default with PilotTypes.NullWithReason _ -> true | _ -> false)) ->
             Error (uncoded "null_with_reason wrappers require the declared reason return type and a native text extent/ownership projection. An assumed error-text handle is not an admitted contract. No bindings were written.")
         | Ok project ->
+            let generateWrappers = wrappersRequested project
             // Each define reaches clang as one -D argument; a define that is not NAME or
             // NAME=VALUE is refused before any header is parsed (#178).
             match CppParser.requireWellFormedDefines project.Library.Defines with
