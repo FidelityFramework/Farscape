@@ -21,7 +21,8 @@ module CallbackWrapperGenerator =
         else cName
 
     /// The module resolver identifies the owner of the entry's source contract.
-    let generateTypedWithModules
+    let generateTypedWithAsyncModules
+        (asyncSelections: Map<string, WrapperTypes.AsyncSelection>)
         (spec: CallbackSpec) (declarations: CppParser.Declaration list)
         (namespace': string) (ctx: FidelityCodeGenerator.GenerationContext)
         (openModules: string list) (resolveModule: string -> string) : string option =
@@ -71,13 +72,21 @@ module CallbackWrapperGenerator =
                 FidelityCodeGenerator.generateDeclaredFunctionDecls ctx "" (resolveModule f.Name) f
                 |> List.choose (function
                     | LetBinding(name, parameters, returnType, _, _) when name = f.Name ->
-                        Some (LetBinding(toWrapperName f.Name, parameters, returnType,
-                            FunctionCall(resolveModule f.Name, f.Name, parameters |> List.map (fun p -> Identifier p.Name)), []))
+                        match asyncSelections.TryFind f.Name with
+                        | Some selection ->
+                            let parameters, returnType, body = WrapperCodeGenerator.generateAsyncBody selection resolveModule parameters f
+                            Some (LetBinding(selection.Contract.Name, parameters, returnType, body, []))
+                        | None ->
+                            Some (LetBinding(toWrapperName f.Name, parameters, returnType,
+                                FunctionCall(resolveModule f.Name, f.Name, parameters |> List.map (fun p -> Identifier p.Name)), []))
                     | _ -> None))
         if wrappers.IsEmpty then None
         else
             Some (CodeRenderer.render (Module(namespace', "Layer 2 callbacks: declared entries and explicit environments",
                 (openModules |> List.map OpenModule) @ wrappers)))
+
+    let generateTypedWithModules spec declarations namespace' ctx openModules resolveModule =
+        generateTypedWithAsyncModules Map.empty spec declarations namespace' ctx openModules resolveModule
 
     let tryGenerateTyped spec declarations namespace' ctx openModules : Result<string option, Diagnostics.Refusal> =
         match openModules |> List.tryLast with

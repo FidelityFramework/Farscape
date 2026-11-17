@@ -52,7 +52,11 @@ module CodeRenderer =
         | TypeConversion (target, expr) -> $"{sourceSyntax true target} ({renderExpr indent expr})"
         | MethodCall (expr, method') -> $"{method'} ({renderExpr indent expr})"
         | IfThenElse (cond, thenE, elseE) ->
-            $"if {renderExpr indent cond} then {renderExpr indent thenE}\n{indent}else {renderExpr indent elseE}"
+            match thenE, elseE with
+            | (Return _ | ReturnBang _ | LetBang _ | DoBang _), _ | _, (Return _ | ReturnBang _ | LetBang _ | DoBang _ | LetIn _) ->
+                let inner = indent + "    "
+                $"if {renderExpr indent cond} then\n{inner}{renderExpr inner thenE}\n{indent}else\n{inner}{renderExpr inner elseE}"
+            | _ -> $"if {renderExpr indent cond} then {renderExpr indent thenE}\n{indent}else {renderExpr indent elseE}"
         | Comparison (left, op, right) -> $"{renderExpr indent left} {op} {renderExpr indent right}"
         | Literal s -> sourceSyntax false s
         | ResultOk expr ->
@@ -72,6 +76,19 @@ module CodeRenderer =
                 $"let {name} =\n{innerIndent}{renderExpr innerIndent binding}\n{indent}{renderExpr indent body}"
             | _ ->
                 $"let {name} = {renderExpr indent binding}\n{indent}{renderExpr indent body}"
+        | Async body ->
+            let inner = indent + "    "
+            $"async {{\n{inner}{renderExpr inner body}\n{indent}}}"
+        | LetBang (name, binding, body) ->
+            $"let! {name} = {renderExpr indent binding}\n{indent}{renderExpr indent body}"
+        | DoBang (binding, body) ->
+            $"do! {renderExpr indent binding}\n{indent}{renderExpr indent body}"
+        | Return value -> $"return {renderExpr indent value}"
+        | ReturnBang value -> $"return! {renderExpr indent value}"
+        | Sequential (first, body) -> $"{renderExpr indent first}\n{indent}{renderExpr indent body}"
+        | LetRecIn (name, body, continuation) ->
+            let inner = indent + "    "
+            $"let rec {name} () =\n{inner}{renderExpr inner body}\n{indent}{renderExpr indent continuation}"
         | RecordConstruction fields ->
             let fieldStr =
                 fields

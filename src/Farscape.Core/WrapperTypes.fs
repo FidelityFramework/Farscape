@@ -121,6 +121,15 @@ module WrapperTypes =
     // Complete Wrapper Pattern
     // =========================================================================
 
+    [<RequireQualifiedAccess>]
+    type AsyncLayer = Layer2 | Layer3
+
+    /// Constructed only after checking declared protocol and lifetime references.
+    type AsyncSelection = internal AsyncSelection of PilotTypes.AsyncWrapper * AsyncLayer
+        with
+            member this.Contract = let (AsyncSelection(contract, _)) = this in contract
+            member this.Layer = let (AsyncSelection(_, layer)) = this in layer
+
     /// Complete wrapper pattern for a function, computed from attributes + types.
     /// This is the input to the wrapper code generator.
     type WrapperPattern = {
@@ -140,4 +149,5 @@ module WrapperTypes =
         NeedsResourceCleanup: bool
         /// Whether the function is side-effect free.
         IsPure: bool
+        Async: AsyncSelection option
     }

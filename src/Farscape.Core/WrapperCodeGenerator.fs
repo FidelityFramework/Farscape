@@ -237,6 +237,62 @@ module WrapperCodeGenerator =
         | NeverReturns       -> neverReturnsBody bindingsModule funcName paramNames
         | VoidReturn         -> voidReturnBody bindingsModule funcName paramNames
 
+    /// A cold canonical workflow over flat synchronous native declarations. The wait
+    /// source owns readiness/correlation delivery; no host queue or address conversion
+    /// is synthesized here. Cancellation must drain the declared completion before return.
+    let internal generateAsyncBody (selection: AsyncSelection) (resolveModule: string -> string)
+                                  (parameters: FsParam list) (native: CppParser.FunctionDecl) =
+        let contract = selection.Contract
+        let names = parameters |> List.map _.Name
+        let fresh name =
+            let rec choose value = if List.contains value (contract.Wait.Binding :: names) then choose (value + "_") else value
+            choose ("farscape" + name)
+        let result, status, completion, retry = fresh "Result", fresh "Status", fresh "Completion", fresh "Retry"
+        // Contract ordinals refer to native parameters, before fixed arguments are removed.
+        let argument ordinal = Identifier (cleanParamName (fst native.Parameters[ordinal]))
+        let wait =
+            let args = contract.Wait.Arguments |> List.map argument
+            FunctionCall(contract.Wait.Module, contract.Wait.Binding, if args.IsEmpty then [Literal "()"] else args)
+        let inRange value (range: PilotTypes.AsyncStatusRange) =
+            Comparison(Comparison(value, ">=", Literal (string range.Lower)), "&&",
+                       Comparison(value, "<=", Literal (string range.Upper)))
+        let captureStatus =
+            match contract.StatusSource with
+            | PilotTypes.AsyncStatusSource.ReturnValue -> Identifier result
+            | PilotTypes.AsyncStatusSource.ScalarAccessor binding -> FunctionCall(resolveModule binding, binding, [Literal "()"])
+        let nativeCall = buildRawCall (resolveModule native.Name) native.Name names
+        let body =
+            match contract.Protocol with
+            | PilotTypes.AsyncProtocol.Readiness pending ->
+                let pendingTest = pending |> List.map (inRange (Identifier status)) |> List.reduce (fun a b -> Comparison(a, "||", b))
+                let attempt = Async (LetIn(result, nativeCall,
+                    IfThenElse(inRange (Identifier result) contract.Success,
+                        Return (ResultOk (Identifier result)),
+                        LetIn(status, captureStatus,
+                            IfThenElse(pendingTest,
+                                DoBang(wait, ReturnBang (FunctionCall("", retry, [Literal "()"]))),
+                                Return (ResultError (Identifier status)))))))
+                LetRecIn(retry, attempt, ReturnBang (FunctionCall("", retry, [Literal "()"])))
+            | PilotTypes.AsyncProtocol.SubmissionCompletion | PilotTypes.AsyncProtocol.CallbackCompletion _ ->
+                let retirement = contract.Retirement.Value
+                let release = FunctionCall(resolveModule retirement.Binding, retirement.Binding, [argument retirement.OwnerParameter])
+                LetIn(result, nativeCall,
+                    IfThenElse(inRange (Identifier result) contract.Success,
+                        LetBang(completion, wait,
+                            Sequential(release,
+                                IfThenElse(inRange (Identifier completion) contract.CompletionSuccess.Value,
+                                    Return (ResultOk (Identifier completion)), Return (ResultError (Identifier completion))))),
+                        LetIn(status, captureStatus, Return (ResultError (Identifier status)))))
+        let waitParameters =
+            if contract.Wait.Module <> "" then []
+            else
+                let types = contract.Wait.Arguments |> List.map (fun ordinal ->
+                    let name = cleanParamName (fst native.Parameters[ordinal])
+                    parameters |> List.find (fun p -> p.Name = name) |> _.Type)
+                let waitResult = match contract.Protocol with PilotTypes.AsyncProtocol.Readiness _ -> Unit | _ -> Named "int"
+                [{ Name = contract.Wait.Binding; Type = FunctionType(types, Generic("Async", waitResult)) }]
+        parameters @ waitParameters, Generic("Async", Generic2("Result", Named "int", Named "int")), Async body
+
     // =========================================================================
     // Declaration Generation
     // =========================================================================
@@ -258,6 +314,8 @@ module WrapperCodeGenerator =
 
     /// Generate FsDecl list for a single wrapper function.
     let private generateWrapperDecls
+        (asyncSelections: Map<string, AsyncSelection>)
+        (resolveModule: string -> string)
         (sourceContext: FidelityCodeGenerator.GenerationContext option)
         (passthroughFunctions: Set<string>)
         (typedefMap: Map<string, string>)
@@ -277,7 +335,7 @@ module WrapperCodeGenerator =
             | Some facts -> facts.Typedefs, facts.OpaqueHandles
             | None -> typedefMap, opaqueHandles
         let mapType = FidelityCodeGenerator.mapCTypeToFidelityType typedefMap model opaqueHandles Map.empty
-        let pattern = WrapperPatternAnalyzer.analyze func typedefMap
+        let pattern = { WrapperPatternAnalyzer.analyze func typedefMap with Async = asyncSelections.TryFind func.Name }
 
         // Collect proven-nonnull parameter indices (same logic as FidelityCodeGenerator)
         let clangNonnull =
@@ -352,16 +410,16 @@ module WrapperCodeGenerator =
             match baseRetType with
             | Generic("CHandle", Named name) when opaqueHandles.Contains name -> Some baseRetType
             | _ -> None
-        let retType = wrapperReturnType semantic rawRetType errorHandling resolvedHandleType
-
-        let paramNames = parameters |> List.map (fun p -> p.Name)
-        let comparisonType = "int"
-        let body = generateBody bindingsModule func.Name paramNames semantic errorHandling comparisonType
-
-        formatDocDecls func @
-        [
-            LetBinding(func.Name, parameters, retType, body, [])
-        ]
+        let name, parameters, retType, body =
+            match pattern.Async with
+            | Some selection ->
+                let parameters, retType, body = generateAsyncBody selection resolveModule parameters func
+                selection.Contract.Name, parameters, retType, body
+            | None ->
+                let retType = wrapperReturnType semantic rawRetType errorHandling resolvedHandleType
+                let paramNames = parameters |> List.map _.Name
+                func.Name, parameters, retType, generateBody bindingsModule func.Name paramNames semantic errorHandling "int"
+        formatDocDecls func @ [ LetBinding(name, parameters, retType, body, []) ]
 
     // =========================================================================
     // Catamorphism-Based Generation
@@ -387,7 +445,10 @@ module WrapperCodeGenerator =
     /// Generate a complete wrapper module from parsed declarations.
     /// Architecture: Catamorphism → WrapperPattern → FsExpr tree → FsDecl → CodeRenderer.render
     /// PlatformABI determines concrete widths for C int/long in NTU output.
-    let generateWithContext
+    let generateWithAsyncModules
+        (openModules: string list option)
+        (asyncSelections: Map<string, AsyncSelection>)
+        (resolveModule: string -> string)
         (sourceContext: FidelityCodeGenerator.GenerationContext option)
         (nativePointerSurface: bool)
         (passthroughFunctions: Set<string>)
@@ -402,10 +463,8 @@ module WrapperCodeGenerator =
 
         if nativePointerSurface then
             Diagnostics.raiseRefusal (Diagnostics.uncoded "experimental_native_pointer_surface cannot emit Clef wrappers: raw address carriers violate the FFI boundary contract.")
-        match errorHandling with
-        | UseErrno _ -> rejectErrno ()
-        | UseNullWithReason reasonFn -> rejectNullWithReason reasonFn
-        | _ -> ()
+        // Per-function validation keeps the legacy errno refusal on synchronous paths.
+        // Explicit async status accessors are validated before this generator is called.
 
         // Phase 1: Build typedef resolution map (shared with FidelityCodeGenerator)
         let typedefMap = FidelityCodeGenerator.buildTypedefMap declarations
@@ -428,14 +487,18 @@ module WrapperCodeGenerator =
             groups
             |> List.choose (function WFunc f -> Some f | WNone -> None)
             |> List.distinctBy (fun f -> f.Name)
-            |> List.collect (generateWrapperDecls signatureContext passthroughFunctions typedefMap model opaqueHandles bindingsModule errorHandling nonnullAnnotations)
+            |> List.collect (generateWrapperDecls asyncSelections resolveModule signatureContext passthroughFunctions typedefMap model opaqueHandles bindingsModule errorHandling nonnullAnnotations)
 
         // Phase 4: Build typed FsDecl tree; wrapper module opens the bindings module
-        let openDecl = Comment $"open {bindingsModule}"
+        let bindingOpens =
+            match openModules with
+            | Some modules -> modules |> List.distinct |> List.map OpenModule
+            | None -> [OpenModule bindingsModule]
 
         // Error handling support: generate captureError helper based on strategy
         let errorDecls =
             match errorHandling with
+            | UseErrno _ when not asyncSelections.IsEmpty -> []
             | UseErrno _ -> rejectErrno ()
             | UseEnumError (enumType, _, errorStructName, describeModuleName) ->
                 let openErrorModule = Comment $"open {describeModuleName}"
@@ -466,14 +529,20 @@ module WrapperCodeGenerator =
             | NoErrors -> []
 
         let typeOpens =
-            if sourceContext.IsSome && bindingsModule.Contains('.') then
+            if openModules.IsNone && sourceContext.IsSome && bindingsModule.Contains('.') then
                 [ OpenModule (bindingsModule.Substring(0, bindingsModule.LastIndexOf('.')) + ".Types") ]
             else []
-        let allDecls = typeOpens @ (openDecl :: errorDecls @ BlankLine :: functions)
+        let allDecls = typeOpens @ bindingOpens @ errorDecls @ (BlankLine :: functions)
         let moduleDecl = Module(wrapperNamespace, libraryName, allDecls)
 
         // Phase 5: Render to string (the ONLY StringBuilder, in CodeRenderer)
         CodeRenderer.render moduleDecl
+
+    let generateWithAsyncContext asyncSelections resolveModule sourceContext nativePointerSurface passthroughFunctions declarations wrapperNamespace libraryName bindingsModule errorHandling model nonnullAnnotations =
+        generateWithAsyncModules None asyncSelections resolveModule sourceContext nativePointerSurface passthroughFunctions declarations wrapperNamespace libraryName bindingsModule errorHandling model nonnullAnnotations
+
+    let generateWithContext sourceContext nativePointerSurface passthroughFunctions declarations wrapperNamespace libraryName bindingsModule errorHandling model nonnullAnnotations =
+        generateWithAsyncContext Map.empty (fun _ -> bindingsModule) sourceContext nativePointerSurface passthroughFunctions declarations wrapperNamespace libraryName bindingsModule errorHandling model nonnullAnnotations
 
     let generateWithOverrides nativePointerSurface passthroughFunctions declarations wrapperNamespace libraryName bindingsModule errorHandling model nonnullAnnotations =
         generateWithContext None nativePointerSurface passthroughFunctions declarations wrapperNamespace libraryName bindingsModule errorHandling model nonnullAnnotations

@@ -102,7 +102,7 @@ let ``XML-only whole project validates complete protocol before changing output`
         Namespaces = [{Name="Fidelity.Wayland.Protocol"; Description="Whole XML project"; Library="wayland-client"; Prefixes=[]; Functions=[]; XmlInterfaces=["wl_callback"]; Signals=[]}]
         ErrorConventions=(if shape = "constructor-string-errno" then Some {Default=PilotTypes.Errno; Overrides=Map.empty} else None)
         Callbacks=None; Nonnull=None; ProtocolConfig=None; Layer3=None; CppConfig=None
-        Options=Some {AbiCriticalStructs=["union wl_argument"; "struct wl_message"; "struct wl_interface"]; GenerateDescriptors=true; NativePointerSurface=false; CHeaderMode=true; Bindings=[]; DescriptorOnlyDependencies=true; ValueStructs=[]; TypedProtocol=true; LinkLibraries=false; MappedReturns=[]; FlexibleArrays=[]} }
+        Options=Some {AbiCriticalStructs=["union wl_argument"; "struct wl_message"; "struct wl_interface"]; GenerateDescriptors=true; NativePointerSurface=false; CHeaderMode=true; Bindings=[]; DescriptorOnlyDependencies=true; ValueStructs=[]; TypedProtocol=true; LinkLibraries=false; MappedReturns=[]; FlexibleArrays=[]; AsyncWrappers=[]} }
     let pilot = Path.Combine(directory, "xml.pilot.toml")
     PilotSerializer.saveToFile pilot project |> function Ok () -> () | Error error -> failwith error
     Directory.CreateDirectory output |> ignore
@@ -156,7 +156,7 @@ let ``each typed protocol refusal carries its code, its location and the typed_p
         Output = {Mode="fidelity"; Directory=output}
         Namespaces = [{Name="Fidelity.Wayland.Protocol"; Description="Whole XML project"; Library="wayland-client"; Prefixes=[]; Functions=[]; XmlInterfaces=["wl_callback"]; Signals=[]}]
         ErrorConventions=None; Callbacks=None; Nonnull=None; ProtocolConfig=None; Layer3=None; CppConfig=None
-        Options=Some {AbiCriticalStructs=critical; GenerateDescriptors=true; NativePointerSurface=false; CHeaderMode=true; Bindings=[]; DescriptorOnlyDependencies=true; ValueStructs=[]; TypedProtocol=true; LinkLibraries=false; MappedReturns=[]; FlexibleArrays=[]} }
+        Options=Some {AbiCriticalStructs=critical; GenerateDescriptors=true; NativePointerSurface=false; CHeaderMode=true; Bindings=[]; DescriptorOnlyDependencies=true; ValueStructs=[]; TypedProtocol=true; LinkLibraries=false; MappedReturns=[]; FlexibleArrays=[]; AsyncWrappers=[]} }
     let pilot = Path.Combine(directory, "xml.pilot.toml")
     PilotSerializer.saveToFile pilot project |> function Ok () -> () | Error error -> failwith error
     match BindingGenerator.generateFromProjectDiagnosed pilot false false Types.LP64 with

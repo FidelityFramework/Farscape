@@ -1019,3 +1019,122 @@ let ``a field typed through a qualified typedef link to a union no pilot declara
             Error "Binding generation failed: Struct 'fx_far_u_holder' field 'link' has no known representation for type 'fx_far_u_alias_t'; a complete C representation contract is required.",
             result |> Result.map ignore)
         Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``async workflow placement preserves flat externs and isolates cross-library dependencies`` crossLibrary =
+    let dir = TestScratch.create "async-placement"
+    let header = System.IO.Path.Combine(dir, "async.h")
+    System.IO.File.WriteAllText(header, "int perform(int owner, int token);\nint status_value(void);\nvoid retire(int owner);\n")
+    try
+        let contract =
+            if crossLibrary then
+                { AsyncFixture.submission with Wait = { AsyncFixture.submission.Wait with Library = "Fidelity.Completion"; Module = "Fidelity.Completion.Ring"; Project = Some "../Completion.fidproj" } }
+            else AsyncFixture.readiness
+        withPilotGenerating (fun path ->
+            let project = PilotSerializer.loadFromFile path |> Result.defaultWith failwith
+            let project = { project with Options = Some { project.Options.Value with AsyncWrappers = [contract] } }
+            PilotSerializer.saveToFile path project |> Result.defaultWith failwith
+            BindingGenerator.generateFromProject path false true Types.LP64)
+            [header] [] ["c_header_mode = true"; "generate_descriptors = true"; "descriptor_only_dependencies = true"]
+            ["perform"; "status_value"; "retire"] [] [] (fun result _ ->
+                let generated = result |> Result.defaultWith failwith
+                let source = generated.OutputFiles |> List.filter (fun p -> p.EndsWith(".clef")) |> List.map (fun p -> p, System.IO.File.ReadAllText p)
+                let native = source |> List.find (fun (p, _) -> p.EndsWith("/Fixture.clef")) |> snd
+                Assert.Contains("NativeDefault.zeroed ()", native)
+                Assert.DoesNotContain("async {", native)
+                Assert.DoesNotContain("let!", native)
+                let projects = generated.OutputFiles |> List.filter (fun p -> p.EndsWith(".fidproj"))
+                let baseProject = projects |> List.find (fun p -> not (p.EndsWith(".Bridge.fidproj"))) |> System.IO.File.ReadAllText
+                Assert.DoesNotContain("Fidelity.Completion", baseProject)
+                Assert.DoesNotContain("Async.clef", baseProject)
+                let asyncSource = source |> List.find (fun (_, text) -> text.Contains("let performAsync")) |> snd
+                Assert.Contains("Async<Result<int, int>>", asyncSource)
+                let emittedModules =
+                    source |> List.collect (fun (_, text) -> text.Split('\n') |> Array.choose (fun line -> if line.StartsWith("module ") then Some (line.Substring(7).Trim()) else None) |> Array.toList)
+                for line in asyncSource.Split('\n') do
+                    if line.StartsWith("open ") then Assert.Contains(line.Substring(5).Trim(), emittedModules)
+                if crossLibrary then
+                    let bridge = projects |> List.find (fun p -> p.EndsWith(".Bridge.fidproj")) |> System.IO.File.ReadAllText
+                    Assert.Contains("\"Fidelity.Completion\"", bridge)
+                    Assert.Contains("Completion.fidproj", bridge)
+                    Assert.Contains("Fidelity.Completion.Ring.awaitCompletion token", asyncSource)
+                    for path, text in source do
+                        if path.EndsWith("Api.clef") then Assert.DoesNotContain("Fidelity.Completion", text)
+                else Assert.Single(projects) |> ignore)
+    finally
+        System.IO.Directory.Delete(dir, true)
+
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``async suspension preserves DuringCall RetainedUntil and InvalidatedBy inputs to CCS8424 CCS8425`` retained =
+    let dir = TestScratch.create "async-lifetimes"
+    let header = System.IO.Path.Combine(dir, "lifetimes.h")
+    System.IO.File.WriteAllText(header, "struct owner;\nint perform(struct owner *owner, int token, const unsigned char *bytes, int count);\nint status_value(void);\nvoid retire(struct owner *owner);\nconst unsigned char *column_text(struct owner *owner);\nint reset(struct owner *owner);\n")
+    try
+        let retention =
+            if retained then PilotTypes.BindingBufferRetention.RetainedUntil(0, [0; 1], [{ Binding = "Test.Fixture.retire"; Parameter = 0 }])
+            else PilotTypes.BindingBufferRetention.DuringCall
+        let buffer : PilotTypes.BindingReadOnlyBuffer =
+            { Parameter = 2; Extent = PilotTypes.BindingReadOnlyBufferExtent.ExplicitCount 3; Content = PilotTypes.BorrowedContent.Bytes
+              Retention = retention; Identity = "async-input"; Version = "1"; Source = "fixture contract" }
+        let view : PilotTypes.BindingBorrowedResult =
+            { Content = PilotTypes.BorrowedContent.Text; OwnerParameter = 0; Extent = PilotTypes.BorrowedExtent.NulTerminated
+              InvalidatedBy = [PilotTypes.BorrowInvalidation.OwnerCall("Test.Fixture.reset", 0); PilotTypes.BorrowInvalidation.OwnerCall("Test.Fixture.retire", 0)]
+              Identity = "row-view"; Version = "1"; Source = "fixture contract" }
+        let bindings =
+            [ { AsyncFixture.projection "perform" with ReadOnlyBuffers = [buffer]; ReadOnlyReferenceParameters = [2] }
+              { AsyncFixture.projection "column_text" with BorrowedResult = Some view } ]
+        let contract = { (if retained then AsyncFixture.submission else AsyncFixture.readiness) with BufferParameters = [2]; BorrowedResults = ["column_text"] }
+        withPilotGenerating (fun path ->
+            let project = PilotSerializer.loadFromFile path |> Result.defaultWith failwith
+            let project = { project with Options = Some { project.Options.Value with AsyncWrappers = [contract]; Bindings = bindings } }
+            PilotSerializer.saveToFile path project |> Result.defaultWith failwith
+            BindingGenerator.generateFromProject path false true Types.LP64)
+            [header] [] ["c_header_mode = true"; "generate_descriptors = true"; "descriptor_only_dependencies = true"]
+            ["perform"; "status_value"; "retire"; "column_text"; "reset"] [] [] (fun result _ ->
+                let generated = result |> Result.defaultWith failwith
+                let source = generated.OutputFiles |> List.filter (fun p -> p.EndsWith(".clef")) |> List.map System.IO.File.ReadAllText |> String.concat "\n"
+                Assert.Contains("Expr<ReadOnlyBufferDescriptor>", source)
+                Assert.Contains((if retained then "RetainedUntil" else "Retention = DuringCall"), source)
+                Assert.Contains("Expr<BorrowedResultViewDescriptor>", source)
+                Assert.Contains("InvalidatedBy", source)
+                Assert.Contains("OwnerCall ({ Binding = \"Test.Fixture.reset\"; Parameter = 0 })", source)
+                Assert.Contains("OwnerCall ({ Binding = \"Test.Fixture.retire\"; Parameter = 0 })", source)
+                Assert.Contains("NativeDefault.zeroed ()", source)
+                Assert.Contains("async {", source)
+                Assert.Contains("Test.Fixture.perform owner token bytes count", source)
+                Assert.DoesNotContain("Region.copy", source))
+    finally
+        System.IO.Directory.Delete(dir, true)
+
+[<Theory>]
+[<InlineData(false, false)>]
+[<InlineData(true, false)>]
+[<InlineData(false, true)>]
+[<InlineData(true, true)>]
+let ``async status endpoint uses its own declaring unit alias`` pointerAccessor reverseHeaders =
+    let dir = TestScratch.create "async-unit-authority"
+    let accessor = System.IO.Path.Combine(dir, "accessor.h")
+    let operation = System.IO.Path.Combine(dir, "operation.h")
+    let accessorType, unrelatedType = if pointerAccessor then "void *", "int" else "int", "void *"
+    System.IO.File.WriteAllText(accessor, $"typedef {accessorType} status_t;\nstatus_t status_value(void);\n")
+    System.IO.File.WriteAllText(operation, $"typedef {unrelatedType} status_t;\nint perform(int owner, int token);\nvoid retire(int owner);\n")
+    try
+        withPilotGenerating (fun path ->
+            let project = PilotSerializer.loadFromFile path |> Result.defaultWith failwith
+            PilotSerializer.saveToFile path { project with Options = Some { project.Options.Value with AsyncWrappers = [AsyncFixture.readiness] } } |> Result.defaultWith failwith
+            BindingGenerator.generateFromProject path false true Types.LP64)
+            (if reverseHeaders then [operation; accessor] else [accessor; operation]) [] ["c_header_mode = true"; "generate_descriptors = true"; "descriptor_only_dependencies = true"]
+            ["perform"; "status_value"; "retire"] [] [] (fun result _ ->
+                if pointerAccessor then
+                    match result with
+                    | Error reason -> Assert.Contains("FS9201", reason); Assert.Contains("zero-argument signed scalar", reason)
+                    | Ok _ -> Assert.Fail "pointer accessor was admitted using another unit's integer alias"
+                else
+                    let generated = result |> Result.defaultWith failwith
+                    Assert.NotEmpty(generated.OutputFiles))
+    finally
+        System.IO.Directory.Delete(dir, true)

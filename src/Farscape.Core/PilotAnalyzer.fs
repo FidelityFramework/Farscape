@@ -615,7 +615,12 @@ module PilotAnalyzer =
             | Some spec -> not spec.Registrations.IsEmpty || not spec.ListenerStructs.IsEmpty
             | None -> false
 
-        if not hasProtocol && not hasCallbacks then None
+        let asyncDependencies =
+            project.Options |> Option.map _.AsyncWrappers |> Option.defaultValue []
+            |> List.choose (fun wrapper ->
+                if wrapper.Wait.Library = project.Library.Name then None
+                else wrapper.Wait.Project |> Option.map (fun path -> AsyncLibrary(wrapper.Wait.Library, path)))
+        if not hasProtocol && not hasCallbacks && asyncDependencies.IsEmpty then None
         else
             let deps =
                 [ if hasProtocol then
@@ -623,6 +628,7 @@ module PilotAnalyzer =
                     yield LibcMemory
                   if hasCallbacks then
                     yield LibcDynamicLink ]
+                |> fun dependencies -> dependencies @ asyncDependencies
                 |> List.distinct
             Some {
                 Dependencies = deps

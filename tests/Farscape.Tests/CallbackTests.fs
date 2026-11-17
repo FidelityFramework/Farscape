@@ -444,3 +444,47 @@ module BoundaryGenerationTests =
         let empty : CallbackSpec = { Registrations = []; ListenerStructs = [] }
         Assert.True((CallbackWrapperGenerator.generate empty [] "Test.Callbacks" LP64 [] "Test.Listeners").IsNone)
         Assert.True((CallbackWrapperGenerator.generateL2 empty [] "Test.Listeners" []).IsNone)
+
+module AsyncCompletionTests =
+    open PilotTypes
+
+    [<Fact>]
+    let ``declared callback completion forwards typed entry and awaits correlated retirement`` () =
+        let declarations = AsyncFixture.callbackDeclarations
+        let bindings = Map.ofList ["perform", AsyncFixture.callbackBinding]
+        let selection = AsyncFixture.select declarations bindings AsyncFixture.callbackContract
+        let ctx = { FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty with Bindings = bindings }
+        let spec = { Registrations = [{ Function = "perform"; CallbackParam = "handler"; DataParam = None }]; ListenerStructs = [] }
+        let output = CallbackWrapperGenerator.generateTypedWithAsyncModules (Map.ofList ["perform", selection]) spec declarations "Test.Callbacks" ctx [] (fun _ -> "Test.Native") |> Option.get
+        Assert.Contains("(handler: Callback_", output)
+        Assert.Contains("Test.Native.perform owner token handler", output)
+        Assert.Contains("let! farscapeCompletion = awaitCompletion token", output)
+        Assert.Contains("Test.Native.retire owner", output)
+        Assert.DoesNotContain("dlsym", output)
+
+    [<Fact>]
+    let ``async callback completion still refuses an unbacked retained environment`` () =
+        let declarations = AsyncFixture.callbackDeclarations |> List.map (function
+            | CppParser.Declaration.Function f when f.Name = "perform" -> CppParser.Declaration.Function { f with Parameters = f.Parameters @ ["data", "void *"] }
+            | d -> d)
+        let bindings = Map.ofList ["perform", AsyncFixture.callbackBinding]
+        let selection = AsyncFixture.select declarations bindings AsyncFixture.callbackContract
+        let ctx = { FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty with Bindings = bindings }
+        let spec = { Registrations = [{ Function = "perform"; CallbackParam = "handler"; DataParam = Some "data" }]; ListenerStructs = [] }
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            CallbackWrapperGenerator.generateTypedWithAsyncModules (Map.ofList ["perform", selection]) spec declarations "Test.Callbacks" ctx [] (fun _ -> "Test.Native") |> ignore)
+        Assert.Equal(Diagnostics.RetainedCallbackCaptures, error.Refusal.Diagnostics.Head.Code)
+
+    [<Fact>]
+    let ``general async generation refuses declared retained context without callbacks configuration`` () =
+        let declarations = AsyncFixture.callbackDeclarations |> List.map (function
+            | CppParser.Declaration.Function f when f.Name = "perform" ->
+                CppParser.Declaration.Function { f with Parameters = ["owner", "struct owner *"; "token", "int"; "handler", "void (*)(int, void *)"; "data", "void *"] }
+            | d -> d)
+        let callback = { AsyncFixture.callback with Context = Some { Argument = 1; Parameter = 3 } }
+        let binding = { AsyncFixture.callbackBinding with CallbackInvocations = [callback] }
+        let error = Assert.Throws<Diagnostics.RefusalException>(fun () ->
+            AsyncFixture.render declarations (Map.ofList ["perform", binding]) AsyncFixture.callbackContract |> ignore)
+        Assert.Equal(Diagnostics.RetainedCallbackCaptures, error.Refusal.Diagnostics.Head.Code)
+        Assert.Equal(Some 3, error.Refusal.Diagnostics.Head.Pilot.Value.Parameter)
+        Assert.Contains("capture-free", error.Message)

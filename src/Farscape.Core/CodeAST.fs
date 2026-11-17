@@ -44,6 +44,14 @@ module CodeAST =
         | ResultError of FsExpr
         /// Let binding in expression: let result = binding in body
         | LetIn of name: string * binding: FsExpr * body: FsExpr
+        /// Canonical Clef computation expression, kept typed through rendering.
+        | Async of body: FsExpr
+        | LetBang of name: string * binding: FsExpr * body: FsExpr
+        | DoBang of binding: FsExpr * body: FsExpr
+        | Return of value: FsExpr
+        | ReturnBang of computation: FsExpr
+        | Sequential of first: FsExpr * body: FsExpr
+        | LetRecIn of name: string * body: FsExpr * continuation: FsExpr
         /// Record/struct construction: { Field1 = expr1; Field2 = expr2 }
         | RecordConstruction of fields: (string * FsExpr) list
         /// Match expression: match scrutinee with | pattern1 -> body1 | pattern2 -> body2

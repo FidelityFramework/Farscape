@@ -367,6 +367,51 @@ module PilotTypes =
         Source: string
     }
 
+    /// Inclusive scalar status range, supplied by the library contract, never inferred.
+    type AsyncStatusRange = { Lower: int; Upper: int }
+
+    [<RequireQualifiedAccess>]
+    type AsyncProtocol =
+        | Readiness of pending: AsyncStatusRange list
+        | SubmissionCompletion
+        | CallbackCompletion of callbackParameter: int
+
+    [<RequireQualifiedAccess>]
+    type AsyncStatusSource =
+        | ReturnValue
+        /// A declared, synchronous, zero-argument native scalar accessor.
+        | ScalarAccessor of binding: string
+
+    /// A correlated suspension source. An empty Module makes Binding a typed function
+    /// parameter; otherwise it names a declared Clef async endpoint. Project is required
+    /// for another library and belongs exclusively to the composition package.
+    type AsyncWaitEndpoint = {
+        Library: string
+        Module: string
+        Binding: string
+        Project: string option
+        Arguments: int list
+    }
+
+    type AsyncRetirement = { Binding: string; OwnerParameter: int }
+
+    /// Layer 2/3 protocol selection. BufferParameters reference the native binding's
+    /// existing descriptors; BorrowedResults references existing InvalidatedBy contracts.
+    /// Neither field asserts region domination: CCS/Baker own CCS8424/CCS8425 proofs.
+    type AsyncWrapper = {
+        Binding: string
+        Name: string
+        Protocol: AsyncProtocol
+        StatusSource: AsyncStatusSource
+        Success: AsyncStatusRange
+        CompletionSuccess: AsyncStatusRange option
+        Wait: AsyncWaitEndpoint
+        CorrelationParameter: int
+        Retirement: AsyncRetirement option
+        BufferParameters: int list
+        BorrowedResults: string list
+    }
+
     /// Generation options from [options] section of .pilot.toml
     type ProjectOptions = {
         /// Struct names requiring ABI-exact layout (e.g., ioctl args, DMA descriptors)
@@ -386,6 +431,7 @@ module PilotTypes =
         MappedReturns: MappedReturnProjection list
         /// Declared count sources of flexible array members (`[[options.flexible_arrays]]`).
         FlexibleArrays: FlexibleArrayCount list
+        AsyncWrappers: AsyncWrapper list
     }
 
     // =========================================================================
@@ -507,6 +553,8 @@ module PilotTypes =
         | LibcDynamicLink
         /// malloc/free for protocol argument arrays
         | LibcMemory
+        /// Explicit async endpoint package, admitted only in Layer 3.
+        | AsyncLibrary of library: string * project: string
 
     /// Layer 2 marshaling requirement analysis — determines whether a Bridge package is needed.
     type Layer3Requirement = {

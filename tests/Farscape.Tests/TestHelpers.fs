@@ -307,3 +307,51 @@ let declarationText (text: string) (name: string) =
     let finish = text.IndexOf("\n\n", start)
     text.Substring(start, (if finish < 0 then text.Length else finish) - start)
 
+
+/// Declared protocol fixtures shared by the five async generation boundary tests.
+module AsyncFixture =
+    open PilotTypes
+    let declarations =
+        [ mkDecl "perform" "int" ["owner", "int"; "token", "int"] []
+          mkDecl "status_value" "int" [] []
+          mkDecl "retire" "void" ["owner", "int"] [] ]
+    let readiness : AsyncWrapper =
+        { Binding = "perform"; Name = "performAsync"
+          Protocol = AsyncProtocol.Readiness [{ Lower = 11; Upper = 11 }; { Lower = 35; Upper = 35 }]
+          StatusSource = AsyncStatusSource.ScalarAccessor "status_value"
+          Success = { Lower = 0; Upper = 2147483647 }; CompletionSuccess = None
+          Wait = { Library = "fixture"; Module = ""; Binding = "awaitReady"; Project = None; Arguments = [1] }
+          CorrelationParameter = 1; Retirement = None; BufferParameters = []; BorrowedResults = [] }
+    let submission =
+        { readiness with Protocol = AsyncProtocol.SubmissionCompletion
+                         CompletionSuccess = Some { Lower = 0; Upper = 2147483647 }
+                         Wait = { readiness.Wait with Binding = "awaitCompletion" }
+                         Retirement = Some { Binding = "retire"; OwnerParameter = 0 } }
+    let options wrappers : ProjectOptions =
+        { AbiCriticalStructs = []; GenerateDescriptors = true; NativePointerSurface = false
+          CHeaderMode = true; Bindings = []; DescriptorOnlyDependencies = true; ValueStructs = []
+          TypedProtocol = false; LinkLibraries = false; MappedReturns = []; FlexibleArrays = []
+          AsyncWrappers = wrappers }
+    let projection name : BindingProjection =
+        { Name = name; Symbol = name; ReferenceParameters = []; ReadOnlyReferenceParameters = []
+          ReferenceElements = []; ConstantParameters = []; StringParameters = []; NonnullCallbacks = []
+          ParameterHandles = []; ReturnHandle = None; Ownership = None; ResultRange = None; Resource = None
+          WritableBuffers = []; CallbackInvocations = []; BorrowedResult = None; ReadOnlyBuffers = []; BufferAbsences = [] }
+    let callback : BindingCallbackInvocation =
+        { Parameter = 2; Identity = "completion-entry"; Version = "1"; Source = "fixture contract"
+          Scope = "retained"; ExitBinding = None; SuccessStatus = None; AbsenceHypothesis = None
+          Context = None; CountedArrays = []
+          Retention = Some { OwnerParameter = 0; RedefinedBy = [0; 1]; Releases = [{ Binding = "retire"; Parameter = 0 }] } }
+    let callbackDeclarations =
+        [ mkDecl "perform" "int" ["owner", "struct owner *"; "token", "int"; "handler", "void (*)(int)"] [mkAttr "NonNullAttr" [2] None]
+          mkDecl "status_value" "int" [] []
+          mkDecl "retire" "void" ["owner", "struct owner *"] [] ]
+    let callbackBinding = { projection "perform" with CallbackInvocations = [callback]; NonnullCallbacks = [2] }
+    let callbackContract = { submission with Protocol = AsyncProtocol.CallbackCompletion 2 }
+    let select declarations bindings contract = WrapperPatternAnalyzer.selectAsync "fixture" declarations bindings contract
+    let render declarations bindings contract =
+        let selection = select declarations bindings contract
+        let ctx = { FidelityCodeGenerator.buildGenerationContext declarations Types.LP64 Map.empty with Bindings = bindings }
+        let operations = declarations |> List.filter (function CppParser.Declaration.Function f -> f.Name = contract.Binding | _ -> false)
+        WrapperCodeGenerator.generateWithAsyncContext (Map.ofList [contract.Binding, selection]) (fun _ -> "Test.Native")
+            (Some ctx) false Set.empty operations "Test.Api" "fixture" "Test.Native" WrapperTypes.NoErrors Types.LP64 None

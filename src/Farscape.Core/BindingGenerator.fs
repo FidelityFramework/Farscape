@@ -1566,6 +1566,39 @@ module BindingGenerator =
                 let ctx = { ctx with PhantomMarkers = Set.union ctx.PhantomMarkers signalTypes }
                 let signalCode = TypedSignalGenerator.render nsPrefix signals declarations ctx
 
+                let asyncContracts = project.Options |> Option.map _.AsyncWrappers |> Option.defaultValue []
+                let functionModules =
+                    project.Namespaces |> List.collect (fun ns ->
+                        PilotAnalyzer.filterDeclarationsForNamespace ns declarations
+                        |> List.choose (function CppParser.Declaration.Function f -> Some (f.Name, ns.Name) | _ -> None))
+                    |> Map.ofList
+                let asyncModule binding =
+                    functionModules.TryFind binding |> Option.defaultWith (fun () ->
+                        Diagnostics.raiseRefusal (Diagnostics.uncoded $"Async native endpoint '{binding}' is not emitted by any namespace."))
+                let asyncType func typ =
+                    let unit = FidelityCodeGenerator.inFunctionUnit ctx func
+                    FidelityCodeGenerator.resolveCType unit.TypedefMap unit.DataModel unit.OpaqueHandles unit.Delegates unit.Enums typ
+                let asyncScalarFamily func typ =
+                    match asyncType func typ with FidelityCodeGenerator.Scalar representation -> Some representation.Family | _ -> None
+                let asyncSelections =
+                    asyncContracts |> List.map (fun contract ->
+                        contract.Binding, WrapperPatternAnalyzer.selectAsyncWithFacts (fun name -> asyncModule name + "." + name)
+                                              asyncScalarFamily (fun left lt right rt -> asyncType left lt = asyncType right rt)
+                                              project.Library.Name declarations ctx.Bindings contract)
+                    |> Map.ofList
+                let asyncDependencies =
+                    asyncContracts |> List.choose (fun c -> c.Wait.Project |> Option.map (fun path -> c.Wait.Library, Path.GetFullPath(path, Path.GetDirectoryName(Path.GetFullPath projectPath))))
+                    |> List.distinct
+                for library, paths in asyncDependencies |> List.groupBy fst do
+                    if paths.Length <> 1 || library = nsPrefix || library = "Fidelity.Platform" then
+                        Diagnostics.raiseRefusal (Diagnostics.uncoded $"Async dependency '{library}' has conflicting package ownership or paths.")
+                for contract in asyncContracts do
+                    asyncModule contract.Binding |> ignore
+                    match contract.StatusSource with AsyncStatusSource.ScalarAccessor binding -> asyncModule binding |> ignore | _ -> ()
+                    contract.Retirement |> Option.iter (fun release -> asyncModule release.Binding |> ignore)
+                let layer2Async = asyncSelections |> Map.filter (fun _ selection -> selection.Layer = WrapperTypes.AsyncLayer.Layer2)
+                let layer3Async = asyncSelections |> Map.filter (fun _ selection -> selection.Layer = WrapperTypes.AsyncLayer.Layer3)
+
                 // Determine error handling strategy from convention configuration
                 let errorHandling =
                     match project.ErrorConventions with
@@ -1691,13 +1724,16 @@ module BindingGenerator =
                         let funcCode = funcCode + "\n" + (mappedDecls |> List.map CodeRenderer.render |> String.concat "\n")
                         let wrapperCode =
                             if not generateWrappers then None else
-                            let allNsDecls = PilotAnalyzer.filterDeclarationsForNamespace ns declarations
+                            let allNsDecls =
+                                PilotAnalyzer.filterDeclarationsForNamespace ns declarations
+                                |> List.filter (function CppParser.Declaration.Function f -> not (layer3Async.ContainsKey f.Name) | _ -> true)
                             let passthroughFunctions =
                                 project.ErrorConventions
                                 |> Option.map (fun spec -> spec.Overrides |> Map.toList |> List.choose (fun (name, convention) ->
                                     if convention = PilotTypes.NoErrorConvention then Some name else None) |> Set.ofList)
                                 |> Option.defaultValue Set.empty
-                            Some (WrapperCodeGenerator.generateWithContext (Some ctx) ctx.NativePointerSurface passthroughFunctions
+                            let wrapperOpens = [sharedTypesNs; ns.Name] @ (if localCode.IsSome then [ns.Name + ".Types"] else [])
+                            Some (WrapperCodeGenerator.generateWithAsyncModules (Some wrapperOpens) layer2Async asyncModule (Some ctx) ctx.NativePointerSurface passthroughFunctions
                                       allNsDecls $"{ns.Name}.Api" ns.Library ns.Name errorHandling dataModel project.Nonnull)
                         ns, localTypeNames.Count, localCode, funcCount, funcCode, wrapperCode)
 
@@ -1857,7 +1893,21 @@ module BindingGenerator =
                         |> List.distinct
                     constructed |> List.filter (fun n -> not (Set.contains n withDestroy))
 
-                let layer3Req = if typedProtocol then None else PilotAnalyzer.analyzeLayer3Requirements project callbackSpec unpairedConstructors
+                let layer3Req =
+                    if typedProtocol && layer3Async.IsEmpty then None
+                    else PilotAnalyzer.analyzeLayer3Requirements project callbackSpec unpairedConstructors
+                let asyncCompositionContent =
+                    if not generateWrappers || layer3Async.IsEmpty then None
+                    else
+                        let operations = declarations |> List.filter (function CppParser.Declaration.Function f -> layer3Async.ContainsKey f.Name | _ -> false)
+                        let compositionOpens =
+                            [ yield sharedTypesNs
+                              for (ns, _, localCode, _, _, _) in namespaceCode do
+                                  if localCode.IsSome then yield ns.Name + ".Types"
+                              for KeyValue(binding, _) in layer3Async do yield asyncModule binding ]
+                        Some (WrapperCodeGenerator.generateWithAsyncModules (Some compositionOpens) layer3Async asyncModule (Some ctx) ctx.NativePointerSurface Set.empty
+                                  operations ($"{nsPrefix}.Bridge.Async") project.Library.Name nsPrefix WrapperTypes.NoErrors dataModel project.Nonnull)
+
 
                 let callbackWrapperContent =
                     match layer3Req with
@@ -1883,11 +1933,12 @@ module BindingGenerator =
                             let callbackOpens =
                                 [ $"{nsPrefix}.Types" ] @ registrationModules
                                 |> List.distinct
-                            CallbackWrapperGenerator.generateTypedWithModules spec declarations callbackNs ctx callbackOpens resolveModule
+                            CallbackWrapperGenerator.generateTypedWithAsyncModules (if generateWrappers then asyncSelections else Map.empty) spec declarations callbackNs ctx callbackOpens resolveModule
                         | _ -> None
 
                 let emittedTexts =
-                    [ yield "Types.clef", sharedCode
+                    [ for code in Option.toList asyncCompositionContent do yield "Bridge/Async.clef", code
+                      yield "Types.clef", sharedCode
                       for (fileName, _, errorOutput) in errorModulePlan do
                           yield fileName, errorOutput
                       for (ns, _, localCode, _, funcCode, wrapperCode) in namespaceCode do
@@ -2050,7 +2101,14 @@ module BindingGenerator =
                                 [callbackPath]
                             | None -> []
 
-                        let bridgeFiles = callbackFiles
+                        let asyncFiles =
+                            match asyncCompositionContent with
+                            | None -> []
+                            | Some output ->
+                                let path = Path.Combine(bridgeDir, "Async.clef")
+                                File.WriteAllText(path, output)
+                                [path]
+                        let bridgeFiles = callbackFiles @ asyncFiles
 
                         // Generate Bridge fidproj
                         if not bridgeFiles.IsEmpty then
@@ -2066,7 +2124,7 @@ module BindingGenerator =
                             sb.AppendLine("[package]") |> ignore
                             sb.AppendLine($"name = \"{bridgeName}\"") |> ignore
                             sb.AppendLine("version = \"0.1.0\"") |> ignore
-                            sb.AppendLine($"description = \"Layer 2 marshaling for {project.Library.Name} — protocol dispatch and callback wrappers.\"") |> ignore
+                            sb.AppendLine($"description = \"Layer 3 composition for {project.Library.Name} — declared async workflows and callbacks.\"") |> ignore
                             sb.AppendLine() |> ignore
                             sb.AppendLine("[compilation]") |> ignore
                             sb.AppendLine("target = \"cpu\"") |> ignore
@@ -2099,6 +2157,11 @@ module BindingGenerator =
                             let libDep = Path.GetRelativePath(fidprojDir, fidprojFile).Replace('\\', '/')
                             sb.AppendLine($"\"{nsPrefix}\" = {{ path = \"{libDep}\" }}") |> ignore
 
+                            if generateWrappers then
+                                for library, dependencyPath in asyncDependencies do
+                                    let relative = Path.GetRelativePath(fidprojDir, dependencyPath).Replace('\\', '/')
+                                    let quote value = Fidelity.Data.TOML.Toml.serializeValue (Fidelity.Data.TOML.TomlValue.String value)
+                                    sb.AppendLine($"{quote library} = {{ path = {quote relative} }}") |> ignore
                             let bridgeFidprojPath = Path.Combine(fidprojDir, $"{bridgeName}.fidproj")
                             File.WriteAllText(bridgeFidprojPath, sb.ToString())
                             logVerbose $"Generated L2 marshaling fidproj: {bridgeFidprojPath}" verbose

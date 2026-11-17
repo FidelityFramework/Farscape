@@ -256,8 +256,43 @@ module PilotSerializer =
                 "version", TomlValue.String absence.Version
                 "source", TomlValue.String absence.Source ]) ])
 
+    let private serializeAsyncWrapper (wrapper: AsyncWrapper) =
+        let range (r: AsyncStatusRange) =
+            TomlValue.InlineTable (Map.ofList ["lower", TomlValue.Integer (int64 r.Lower); "upper", TomlValue.Integer (int64 r.Upper)])
+        let indices values = TomlValue.Array (values |> List.map (int64 >> TomlValue.Integer))
+        let protocol, pending, callback =
+            match wrapper.Protocol with
+            | AsyncProtocol.Readiness pending -> "readiness", pending, None
+            | AsyncProtocol.SubmissionCompletion -> "submission_completion", [], None
+            | AsyncProtocol.CallbackCompletion parameter -> "callback_completion", [], Some parameter
+        TomlValue.Table (Map.ofList [
+            "binding", TomlValue.String wrapper.Binding
+            "name", TomlValue.String wrapper.Name
+            "protocol", TomlValue.String protocol
+            "success", range wrapper.Success
+            "status", TomlValue.String (match wrapper.StatusSource with AsyncStatusSource.ReturnValue -> "return_value" | AsyncStatusSource.ScalarAccessor _ -> "scalar_accessor")
+            match wrapper.StatusSource with
+            | AsyncStatusSource.ScalarAccessor binding -> "status_binding", TomlValue.String binding
+            | _ -> ()
+            if not pending.IsEmpty then "pending", TomlValue.Array (pending |> List.map range)
+            for parameter in Option.toList callback do "callback_parameter", TomlValue.Integer (int64 parameter)
+            for completed in Option.toList wrapper.CompletionSuccess do "completion_success", range completed
+            "wait", TomlValue.InlineTable (Map.ofList [
+                "library", TomlValue.String wrapper.Wait.Library
+                "module", TomlValue.String wrapper.Wait.Module
+                "binding", TomlValue.String wrapper.Wait.Binding
+                "arguments", indices wrapper.Wait.Arguments
+                for project in Option.toList wrapper.Wait.Project do "project", TomlValue.String project ])
+            "correlation_parameter", TomlValue.Integer (int64 wrapper.CorrelationParameter)
+            for release in Option.toList wrapper.Retirement do
+                "retirement", TomlValue.InlineTable (Map.ofList ["binding", TomlValue.String release.Binding; "owner_parameter", TomlValue.Integer (int64 release.OwnerParameter)])
+            "buffer_parameters", indices wrapper.BufferParameters
+            "borrowed_results", TomlValue.Array (wrapper.BorrowedResults |> List.map TomlValue.String) ])
+
     let private serializeOptions (opts: ProjectOptions) : TomlValue =
-        let table = TomlTable.empty
+        let table =
+            if opts.AsyncWrappers.IsEmpty then TomlTable.empty
+            else TomlTable.empty |> TomlTable.add "async_wrappers" (TomlValue.Array (opts.AsyncWrappers |> List.map serializeAsyncWrapper))
         let table =
             if opts.AbiCriticalStructs.IsEmpty then table
             else TomlTable.add "abi_critical_structs" (TomlValue.Array (opts.AbiCriticalStructs |> List.map TomlValue.String)) table
@@ -510,6 +545,97 @@ module PilotSerializer =
         | Some (TomlValue.Integer _) -> refuse Diagnostics.PilotValueUnadmitted $"{key}.{name}" message
         | Some _ -> refuse Diagnostics.PilotValueType $"{key}.{name}" message
         | None -> refuse Diagnostics.PilotKeyMissing $"{key}.{name}" message
+
+    /// Strict shape validation for the opt-in async vocabulary. Declaration ordinals and
+    /// endpoint signatures are checked by WrapperPatternAnalyzer against the parsed unit.
+    let private deserializeAsyncWrappers (options: TomlTable) =
+        let root = "options.async_wrappers"
+        let range key value : AsyncStatusRange =
+            let table = tableAt key "async status range requires a table" value
+            onlyKeys key "async range admits lower and upper" ["lower"; "upper"] table
+            let number name =
+                match Map.tryFind name table with
+                | Some (TomlValue.Integer n) when n >= int64 System.Int32.MinValue && n <= int64 System.Int32.MaxValue -> int n
+                | Some (TomlValue.Integer _) -> refuse Diagnostics.PilotValueUnadmitted (key + "." + name) "async range endpoint exceeds a scalar int"
+                | Some _ -> refuse Diagnostics.PilotValueType (key + "." + name) "async range endpoint requires an integer"
+                | None -> refuse Diagnostics.PilotKeyMissing (key + "." + name) "async range endpoint is required"
+            let lower, upper = number "lower", number "upper"
+            if lower > upper then refuse Diagnostics.PilotValueUnadmitted key "async range lower exceeds upper"
+            { Lower = lower; Upper = upper }
+        let required key name table =
+            Map.tryFind name table |> Option.defaultWith (fun () -> refuse Diagnostics.PilotKeyMissing (key + "." + name) "async contract field is required")
+        let indices key name table =
+            match required key name table with
+            | TomlValue.Array values ->
+                let result = values |> List.map (fun v -> indexAt key "async arguments require nonnegative ordinals" name (Map.ofList [name, v]))
+                if List.distinct result <> result then refuse Diagnostics.PilotEntryRepeated (key + "." + name) "async ordinals must be distinct"
+                result
+            | _ -> refuse Diagnostics.PilotValueType (key + "." + name) "async ordinals require an array"
+        match Map.tryFind "async_wrappers" options with
+        | None -> []
+        | Some (TomlValue.Array entries) ->
+            let wrappers = entries |> List.map (fun value ->
+                let table = tableAt root "async_wrappers requires tables" value
+                let binding = nonemptyText root "async binding is required" "binding" table
+                let key = $"{root}[{binding}]"
+                let text name = nonemptyText key "async contract requires a nonempty string" name table
+                let protocol = text "protocol"
+                let protocolKeys =
+                    match protocol with
+                    | "readiness" -> ["pending"]
+                    | "submission_completion" -> ["completion_success"; "retirement"]
+                    | "callback_completion" -> ["completion_success"; "retirement"; "callback_parameter"]
+                    | _ -> refuse Diagnostics.PilotValueUnadmitted (key + ".protocol") "unknown async protocol"
+                let status =
+                    match text "status" with
+                    | "return_value" -> AsyncStatusSource.ReturnValue
+                    | "scalar_accessor" -> AsyncStatusSource.ScalarAccessor (text "status_binding")
+                    | _ -> refuse Diagnostics.PilotValueUnadmitted (key + ".status") "async status must be return_value or scalar_accessor"
+                let statusKeys = match status with AsyncStatusSource.ScalarAccessor _ -> ["status_binding"] | _ -> []
+                onlyKeys key "unknown or inapplicable async contract key"
+                    (["binding"; "name"; "protocol"; "success"; "status"; "wait"; "correlation_parameter"; "buffer_parameters"; "borrowed_results"] @ protocolKeys @ statusKeys) table
+                let protocol =
+                    match protocol with
+                    | "readiness" ->
+                        match required key "pending" table with
+                        | TomlValue.Array (_ :: _ as ranges) -> AsyncProtocol.Readiness (ranges |> List.map (range (key + ".pending")))
+                        | _ -> refuse Diagnostics.PilotValueUnadmitted (key + ".pending") "readiness requires nonempty pending status ranges"
+                    | "callback_completion" -> AsyncProtocol.CallbackCompletion (indexAt key "callback_parameter requires a native ordinal" "callback_parameter" table)
+                    | _ -> AsyncProtocol.SubmissionCompletion
+                let waitKey = key + ".wait"
+                let wait = tableAt waitKey "async wait requires an endpoint table" (required key "wait" table)
+                onlyKeys waitKey "unknown async wait endpoint key" ["library"; "module"; "binding"; "project"; "arguments"] wait
+                let moduleName =
+                    match required waitKey "module" wait with
+                    | TomlValue.String name -> name
+                    | _ -> refuse Diagnostics.PilotValueType (waitKey + ".module") "async wait module requires a string (empty for a parameter)"
+                let retirement =
+                    match protocol with
+                    | AsyncProtocol.Readiness _ -> None
+                    | _ ->
+                        let releaseKey = key + ".retirement"
+                        let release = tableAt releaseKey "async retirement requires an endpoint" (required key "retirement" table)
+                        onlyKeys releaseKey "unknown async retirement key" ["binding"; "owner_parameter"] release
+                        Some { Binding = nonemptyText releaseKey "retirement binding required" "binding" release
+                               OwnerParameter = indexAt releaseKey "retirement requires a native owner ordinal" "owner_parameter" release }
+                let borrowed =
+                    match required key "borrowed_results" table with
+                    | TomlValue.Array values -> values |> List.map (fun value -> nonemptyText key "borrowed_results requires binding names" "borrowed_results" (Map.ofList ["borrowed_results", value]))
+                    | _ -> refuse Diagnostics.PilotValueType (key + ".borrowed_results") "borrowed_results requires an array"
+                { Binding = binding; Name = text "name"; Protocol = protocol; StatusSource = status
+                  Success = range (key + ".success") (required key "success" table)
+                  CompletionSuccess = match protocol with AsyncProtocol.Readiness _ -> None | _ -> Some (range (key + ".completion_success") (required key "completion_success" table))
+                  Wait = { Library = nonemptyText waitKey "wait library required" "library" wait; Module = moduleName
+                           Binding = nonemptyText waitKey "wait binding required" "binding" wait
+                           Project = Map.tryFind "project" wait |> Option.map (fun _ -> nonemptyText waitKey "wait project required" "project" wait)
+                           Arguments = indices waitKey "arguments" wait }
+                  CorrelationParameter = indexAt key "correlation_parameter requires a native ordinal" "correlation_parameter" table
+                  Retirement = retirement; BufferParameters = indices key "buffer_parameters" table; BorrowedResults = borrowed })
+            for selector in [ (fun (w: AsyncWrapper) -> w.Binding); (fun w -> w.Name) ] do
+                if wrappers |> List.countBy selector |> List.exists (fun (_, n) -> n > 1) then
+                    refuse Diagnostics.PilotEntryRepeated root "async wrappers require unique operation bindings and names"
+            wrappers
+        | Some _ -> refuse Diagnostics.PilotValueType root "async_wrappers requires an array of tables"
 
     /// Helper: require a string field from a TomlTable.
     let private requireString (fieldName: string) (sectionName: string) (table: TomlTable) : string =
@@ -1143,6 +1269,7 @@ module PilotSerializer =
                    TypedProtocol = TomlTable.tryFind "typed_protocol" table = Some (TomlValue.Boolean true)
                    MappedReturns = mappedReturns
                    FlexibleArrays = flexibleArrays
+                   AsyncWrappers = deserializeAsyncWrappers table
                    ValueStructs =
                        match TomlTable.tryFind "value_structs" table with
                        | Some (TomlValue.Array values) -> values |> List.map (function TomlValue.String name -> name | _ -> refuse Diagnostics.PilotValueType "options.value_structs" "value_structs requires type names")

@@ -1465,7 +1465,7 @@ generate_descriptors = true
             Output = { Mode = "fidelity"; Directory = "./out" }
             Namespaces = []
             ErrorConventions = None
-            Options = Some { AbiCriticalStructs = ["drm_mode_create_dumb"]; GenerateDescriptors = true; NativePointerSurface = false; CHeaderMode = false; Bindings = []; DescriptorOnlyDependencies = false; ValueStructs = []; TypedProtocol = false; LinkLibraries = false; MappedReturns = []; FlexibleArrays = [] }
+            Options = Some { AbiCriticalStructs = ["drm_mode_create_dumb"]; GenerateDescriptors = true; NativePointerSurface = false; CHeaderMode = false; Bindings = []; DescriptorOnlyDependencies = false; ValueStructs = []; TypedProtocol = false; LinkLibraries = false; MappedReturns = []; FlexibleArrays = []; AsyncWrappers = [] }
             Callbacks = None
             Nonnull = None
             ProtocolConfig = None

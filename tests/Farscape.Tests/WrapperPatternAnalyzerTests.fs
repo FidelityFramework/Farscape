@@ -191,3 +191,61 @@ let ``analyze abs with PureAttr produces PureValue pattern`` () =
     Assert.Equal(PureValue, pattern.ReturnSemantic)
     Assert.False(pattern.NeedsResultWrap)
     Assert.True(pattern.IsPure)
+
+[<Fact>]
+let ``async selection is explicit even for conventional read and submit names`` () =
+    for name in ["read"; "io_uring_submit"; "register_callback"] do
+        let pattern = WrapperPatternAnalyzer.analyze (mkFunc name "int" ["fd", "int"]) Map.empty
+        Assert.True(pattern.Async.IsNone)
+    let selected = AsyncFixture.select AsyncFixture.declarations Map.empty AsyncFixture.readiness
+    Assert.Equal(AsyncLayer.Layer2, selected.Layer)
+    let cross = { AsyncFixture.readiness with Wait = { AsyncFixture.readiness.Wait with Library = "Fidelity.Libc"; Module = "Fidelity.Libc.Readiness"; Project = Some "../libc.fidproj" } }
+    Assert.Equal(AsyncLayer.Layer3, (AsyncFixture.select AsyncFixture.declarations Map.empty cross).Layer)
+
+[<Theory>]
+[<InlineData("correlation")>]
+[<InlineData("range")>]
+[<InlineData("accessor")>]
+[<InlineData("retirement")>]
+[<InlineData("dependency")>]
+[<InlineData("buffer")>]
+[<InlineData("borrowed")>]
+let ``async selection rejects unbound contract endpoints`` mutation =
+    let original = AsyncFixture.readiness
+    let changed, reason =
+        match mutation with
+        | "correlation" -> { original with Wait = { original.Wait with Arguments = [0] } }, "correlation"
+        | "range" -> { original with Protocol = PilotTypes.AsyncProtocol.Readiness [{ Lower = 12; Upper = 11 }] }, "lower exceeds upper"
+        | "accessor" -> { original with StatusSource = PilotTypes.AsyncStatusSource.ScalarAccessor "retire" }, "zero-argument"
+        | "retirement" -> { AsyncFixture.submission with Retirement = Some { Binding = "status_value"; OwnerParameter = 0 } }, "retirement"
+        | "dependency" -> { original with Wait = { original.Wait with Library = "Other"; Module = "Other.Readiness" } }, ".fidproj"
+        | "buffer" -> { original with BufferParameters = [0] }, "buffer descriptor"
+        | _ -> { original with BorrowedResults = ["column_blob"] }, "InvalidatedBy"
+    let error = Assert.Throws<Diagnostics.RefusalException>(fun () -> AsyncFixture.select AsyncFixture.declarations Map.empty changed |> ignore)
+    Assert.Equal(Diagnostics.PilotValueUnadmitted, error.Refusal.Diagnostics.Head.Code)
+    Assert.Contains(reason, error.Message)
+
+[<Fact>]
+let ``async retirement is bound to the existing retained buffer owner and release`` () =
+    let declarations =
+        [ mkDecl "perform" "int" ["owner", "struct owner *"; "token", "int"; "bytes", "const unsigned char *"; "count", "int"] []
+          mkDecl "status_value" "int" [] []
+          mkDecl "retire" "void" ["owner", "struct owner *"] [] ]
+    let buffer : PilotTypes.BindingReadOnlyBuffer =
+        { Parameter = 2; Extent = PilotTypes.BindingReadOnlyBufferExtent.ExplicitCount 3; Content = PilotTypes.BorrowedContent.Bytes
+          Retention = PilotTypes.BindingBufferRetention.RetainedUntil(0, [], [{ Binding = "retire"; Parameter = 0 }])
+          Identity = "in-flight"; Version = "1"; Source = "fixture contract" }
+    let projection = { AsyncFixture.projection "perform" with ReadOnlyBuffers = [buffer] }
+    let contract = { AsyncFixture.submission with BufferParameters = [2] }
+    AsyncFixture.select declarations (Map.ofList ["perform", projection]) contract |> ignore
+    let changed = { projection with ReadOnlyBuffers = [{ buffer with Retention = PilotTypes.BindingBufferRetention.RetainedUntil(0, [], [{ Binding = "other_release"; Parameter = 0 }]) }] }
+    let refusal = Assert.Throws<Diagnostics.RefusalException>(fun () -> AsyncFixture.select declarations (Map.ofList ["perform", changed]) contract |> ignore)
+    Assert.Equal(Diagnostics.PilotValueUnadmitted, refusal.Refusal.Diagnostics.Head.Code)
+    Assert.Contains("RetainedUntil owner and release", refusal.Message)
+
+[<Fact>]
+let ``async callback protocol requires its retained completion entry`` () =
+    let selection = AsyncFixture.select AsyncFixture.callbackDeclarations (Map.ofList ["perform", AsyncFixture.callbackBinding]) AsyncFixture.callbackContract
+    Assert.Equal(AsyncLayer.Layer2, selection.Layer)
+    let refusal = Assert.Throws<Diagnostics.RefusalException>(fun () -> AsyncFixture.select AsyncFixture.callbackDeclarations Map.empty AsyncFixture.callbackContract |> ignore)
+    Assert.Contains("existing retained callback contract", refusal.Message)

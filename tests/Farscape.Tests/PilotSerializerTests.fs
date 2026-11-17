@@ -766,3 +766,37 @@ let ``read-only buffer and absence pilot deserialization refuses malformed contr
     match PilotSerializer.deserialize (Fidelity.Data.TOML.Toml.parseOrFail (roPilot roVal absVal)) with
     | Error error -> Assert.Contains(reason, error)
     | Ok _ -> failwith "Invalid read_only_buffers/buffer_absences contract was admitted"
+
+[<Theory>]
+[<InlineData("readiness")>]
+[<InlineData("submission")>]
+[<InlineData("callback")>]
+let ``async protocol metadata round trips without changing native contracts`` shape =
+    let contract = match shape with "readiness" -> TestHelpers.AsyncFixture.readiness | "submission" -> TestHelpers.AsyncFixture.submission | _ -> TestHelpers.AsyncFixture.callbackContract
+    let project = { sampleProject with Options = Some (TestHelpers.AsyncFixture.options [contract]) }
+    let document = PilotSerializer.toTomlString project |> Fidelity.Data.TOML.Toml.parse |> Result.defaultWith failwith
+    let restored = PilotSerializer.deserialize document |> Result.defaultWith failwith
+    Assert.Equal<PilotTypes.AsyncWrapper list>([contract], restored.Options.Value.AsyncWrappers)
+
+[<Theory>]
+[<InlineData("correlation_parameter = 1", "correlation_parameter = -1", "FS9201")>]
+[<InlineData("correlation_parameter = 1", "correlation_parameter = 2147483648", "FS9201")>]
+[<InlineData("correlation_parameter = 1", "correlation_parameter = true", "FS9199")>]
+[<InlineData("correlation_parameter = 1", "correlation_typo = 1", "FS9200")>]
+[<InlineData("lower = 11", "lower = 12", "FS9201")>]
+[<InlineData("awaitReady", "", "FS9201")>]
+let ``async metadata refuses malformed ordinals endpoints ranges and unknown keys`` (before: string) (after: string) code =
+    let project = { sampleProject with Options = Some (TestHelpers.AsyncFixture.options [TestHelpers.AsyncFixture.readiness]) }
+    let toml = (PilotSerializer.toTomlString project).Replace(before, after)
+    let doc = Fidelity.Data.TOML.Toml.parse toml |> Result.defaultWith failwith
+    match PilotSerializer.deserializeDiagnosed doc with
+    | Ok _ -> Assert.Fail "malformed async contract was accepted"
+    | Error refusal -> Assert.Equal(code, refusal.Diagnostics.Head.Code)
+
+[<Fact>]
+let ``absent async metadata preserves synchronous defaults`` () =
+    let project = { sampleProject with Options = Some (TestHelpers.AsyncFixture.options []) }
+    let toml = PilotSerializer.toTomlString project
+    Assert.DoesNotContain("async_wrappers", toml)
+    let restored = Fidelity.Data.TOML.Toml.parse toml |> Result.defaultWith failwith |> PilotSerializer.deserialize |> Result.defaultWith failwith
+    Assert.Empty(restored.Options.Value.AsyncWrappers)

@@ -860,10 +860,8 @@ module FidelityCodeGenerator =
         | UserMacro when m.Name.StartsWith "_" -> unemitted UnemittedMacroKind.ReservedName
         | UserMacro ->
             let integerMacroLiteral (value: int64) =
-                if value >= int64 System.Int32.MinValue && value <= int64 System.Int32.MaxValue then
-                    LiteralBinding(m.Name, Named "int", string value)
-                else
-                    LiteralBinding(m.Name, Named "int64", string value + "L")
+                // Clef selects representation from the literal's observable range.
+                LiteralBinding(m.Name, Named "int", string value)
             match m.Kind with
             | CppParser.SimpleValue "" -> unemitted UnemittedMacroKind.EmptyDefinition
             | CppParser.SimpleValue (IntegerLiteral n) -> EmittedConstant [ integerMacroLiteral n ]
@@ -2062,7 +2060,10 @@ module FidelityCodeGenerator =
     /// declaration is emitted there, so no exit or release binding is resolved.
     let private declaredFunctionDecls (ctx: GenerationContext) namespace' (anchors: Map<string, string * CppParser.FunctionDecl * FsDecl list> option) (func: CppParser.FunctionDecl) (entries: (int * string * FsDecl list) list) (raw: FsDecl list) =
         let ctx = inFunctionUnit ctx func
-        let resourceAnchors = anchors |> Option.defaultValue Map.empty
+        let resourceDeclarations nativeName =
+            match anchors with
+            | Some selected -> resourceDecls ctx namespace' selected func nativeName raw
+            | None -> []
         // A borrowed result's descriptor names selected declarations: emitted only where they are (#196).
         let borrowedDecls nativeName =
             match anchors with
@@ -2071,7 +2072,7 @@ module FidelityCodeGenerator =
         if entries.IsEmpty then
             let nativeName = raw |> List.pick (function LetBinding(name, _, _, _, attrs) when not attrs.IsEmpty -> Some name | _ -> None)
             callbackInvocationDecls ctx namespace' anchors func nativeName |> ignore
-            raw @ resultRangeDecls ctx namespace' func nativeName false @ resourceDecls ctx namespace' resourceAnchors func nativeName raw @ writableBufferDecls ctx namespace' func nativeName false
+            raw @ resultRangeDecls ctx namespace' func nativeName false @ resourceDeclarations nativeName @ writableBufferDecls ctx namespace' func nativeName false
             @ readOnlyBufferDecls ctx namespace' anchors func nativeName false
             @ bufferAbsenceDecls ctx namespace' func nativeName false
             @ borrowedDecls nativeName
@@ -2105,7 +2106,7 @@ module FidelityCodeGenerator =
             | LetBinding(name, _, _, _, []) when name = func.Name -> None
             | declaration -> Some declaration)
         let adapter = if needsAdapter then [LetBinding(func.Name, publicParameters, returnType, FunctionCall("", emittedName, callArguments), [])] else []
-        declarations @ invocationDeclarations @ resourceDecls ctx namespace' resourceAnchors func emittedName raw @ readOnlyBufferDecls ctx namespace' anchors func emittedName needsAdapter @ bufferAbsenceDecls ctx namespace' func emittedName needsAdapter @ borrowedDecls emittedName @ adapter
+        declarations @ invocationDeclarations @ resourceDeclarations emittedName @ readOnlyBufferDecls ctx namespace' anchors func emittedName needsAdapter @ bufferAbsenceDecls ctx namespace' func emittedName needsAdapter @ borrowedDecls emittedName @ adapter
 
     let generateDeclaredFunctionDecls (ctx: GenerationContext) libraryName namespace' (func: CppParser.FunctionDecl) =
         let ctx = inFunctionUnit ctx func

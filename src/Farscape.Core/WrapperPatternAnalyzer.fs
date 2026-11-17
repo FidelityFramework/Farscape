@@ -308,4 +308,147 @@ module WrapperPatternAnalyzer =
             NeedsResultWrap = needsResultWrap
             NeedsResourceCleanup = needsResourceCleanup
             IsPure = isPure
+            Async = None
         }
+
+    /// Protocol admission uses pilot contracts and parsed declarations, independently of
+    /// the synchronous name/type heuristics above. Region domination remains compiler-owned.
+    let selectAsyncWithFacts (qualifiedBinding: string -> string)
+                            (scalarFamily: CppParser.FunctionDecl -> string -> TypeMapper.Family option)
+                            (sameType: CppParser.FunctionDecl -> string -> CppParser.FunctionDecl -> string -> bool)
+                            (library: string) (declarations: CppParser.Declaration list)
+                            (bindings: Map<string, PilotTypes.BindingProjection>) (contract: PilotTypes.AsyncWrapper) =
+        let key = $"options.async_wrappers[{contract.Binding}]"
+        let refuse field message =
+            Diagnostics.diagnostic Diagnostics.PilotValueUnadmitted message (Diagnostics.Located.Unknown "async pilot contract")
+            |> Diagnostics.withPilotKey (key + "." + field) None |> Diagnostics.refuse
+        let identifier field (value: string) =
+            if not (System.Text.RegularExpressions.Regex.IsMatch(value, "^[A-Za-z_][A-Za-z0-9_]*$")) then
+                refuse field "async endpoint requires a source identifier"
+        let functions =
+            DeclarationAlgebra.cataDeclarations
+                { OnFunction = Some
+                  OnStruct = fun _ -> None
+                  OnEnum = fun _ -> None
+                  OnTypedef = fun _ -> None
+                  OnMacro = fun _ -> None
+                  OnNamespace = fun _ -> None
+                  OnClass = fun _ -> None
+                  OnDelegate = fun _ -> None } declarations
+            |> List.choose id
+        let find field name =
+            functions |> List.tryFind (fun f -> f.Name = name)
+            |> Option.defaultWith (fun () -> refuse field $"async endpoint '{name}' is not a declared native binding")
+        let native = find "binding" contract.Binding
+        let ordinal field index =
+            if index < 0 || index >= native.Parameters.Length then refuse field $"async parameter ordinal {index} is outside '{native.Name}'"
+            let constant = bindings.TryFind native.Name |> Option.bind (fun b -> List.tryItem index b.ConstantParameters)
+            if constant |> Option.exists ((<>) "") then refuse field "async endpoint cannot reference a projected-away constant parameter"
+        let validRange field (range: PilotTypes.AsyncStatusRange) =
+            if range.Lower > range.Upper then refuse field "async range lower exceeds upper"
+        identifier "name" contract.Name
+        if contract.Name <> contract.Binding && functions |> List.exists (fun f -> f.Name = contract.Name) then
+            refuse "name" "async wrapper name collides with another native wrapper"
+        identifier "wait.binding" contract.Wait.Binding
+        if scalarFamily native native.ReturnType <> Some TypeMapper.Signed then refuse "binding" "async native operation requires a declared signed scalar status/result"
+        validRange "success" contract.Success
+        match contract.StatusSource with
+        | PilotTypes.AsyncStatusSource.ReturnValue -> ()
+        | PilotTypes.AsyncStatusSource.ScalarAccessor accessor ->
+            let f = find "status_binding" accessor
+            if not f.Parameters.IsEmpty || scalarFamily f f.ReturnType <> Some TypeMapper.Signed then
+                refuse "status_binding" "async status accessor must be a synchronous zero-argument signed scalar binding"
+        ordinal "correlation_parameter" contract.CorrelationParameter
+        contract.Wait.Arguments |> List.iter (ordinal "wait.arguments")
+        if not (List.contains contract.CorrelationParameter contract.Wait.Arguments) then
+            refuse "wait.arguments" "async wait must receive the declared completion/readiness correlation parameter"
+        if List.distinct contract.Wait.Arguments <> contract.Wait.Arguments then refuse "wait.arguments" "async wait arguments must be distinct"
+        if System.String.IsNullOrWhiteSpace contract.Wait.Library then refuse "wait.library" "async wait library is required"
+        if contract.Wait.Module <> "" then
+            contract.Wait.Module.Split('.') |> Array.iter (identifier "wait.module")
+        elif contract.Wait.Library <> library || contract.Wait.Project.IsSome then
+            refuse "wait" "a caller-supplied async wait parameter belongs to the current library and has no package dependency"
+        let layer = if contract.Wait.Library = library then AsyncLayer.Layer2 else AsyncLayer.Layer3
+        if layer = AsyncLayer.Layer3 then
+            match contract.Wait.Project with
+            | Some path when not (System.String.IsNullOrWhiteSpace path) && path.EndsWith(".fidproj") -> ()
+            | _ -> refuse "wait.project" "cross-library async wait requires its explicit .fidproj dependency"
+        elif contract.Wait.Project.IsSome then
+            refuse "wait.project" "single-library async wrappers cannot introduce a package dependency"
+        if contract.Wait.Module = "" && native.Parameters |> List.exists (fun (name, _) -> name = contract.Wait.Binding) then
+            refuse "wait.binding" "async wait parameter collides with a native parameter"
+        let projection = bindings.TryFind native.Name
+        // Both the general wrapper path and callback forwarding consume this selection.
+        // A declared retained environment must never bypass the capture refusal merely
+        // because the pilot has no separate [callbacks] registrations entry.
+        for callback in projection |> Option.map _.CallbackInvocations |> Option.defaultValue [] do
+            match callback.Scope, callback.Context with
+            | "retained", Some context ->
+                Diagnostics.diagnostic Diagnostics.RetainedCallbackCaptures
+                    "Async retained callback completion cannot capture an unbacked environment; the declared entry must be capture-free."
+                    native.Location.Location
+                |> Diagnostics.withPilotKey (key + ".callback_parameter") (Some context.Parameter)
+                |> Diagnostics.refuse
+            | _ -> ()
+        for parameter in contract.BufferParameters do
+            ordinal "buffer_parameters" parameter
+            if not (projection |> Option.exists (fun b ->
+                b.ReadOnlyBuffers |> List.exists (fun buffer -> buffer.Parameter = parameter) ||
+                b.WritableBuffers |> List.exists (fun buffer -> buffer.Parameter = parameter))) then
+                refuse "buffer_parameters" "async buffer reference requires the operation's existing read-only or writable buffer descriptor"
+        let declaredBuffers = projection |> Option.map (fun b -> (b.ReadOnlyBuffers |> List.map _.Parameter) @ (b.WritableBuffers |> List.map _.Parameter)) |> Option.defaultValue [] |> Set.ofList
+        if Set.ofList contract.BufferParameters <> declaredBuffers || List.distinct contract.BufferParameters <> contract.BufferParameters then
+            refuse "buffer_parameters" "async buffer references must cover each declared operation buffer exactly once"
+        for binding in contract.BorrowedResults do
+            if not (bindings.TryFind binding |> Option.bind _.BorrowedResult |> Option.exists (fun view -> not view.InvalidatedBy.IsEmpty)) then
+                refuse "borrowed_results" $"async borrowed-result reference '{binding}' requires an existing InvalidatedBy contract"
+        match contract.Protocol, contract.CompletionSuccess, contract.Retirement with
+        | PilotTypes.AsyncProtocol.Readiness pending, None, None ->
+            if pending.IsEmpty then refuse "pending" "readiness requires pending status ranges"
+            pending |> List.iter (validRange "pending")
+            let ordered = pending |> List.sortBy _.Lower
+            if ordered |> List.pairwise |> List.exists (fun (a, b) -> a.Upper >= b.Lower) then
+                refuse "pending" "readiness pending ranges must not overlap"
+            if contract.StatusSource = PilotTypes.AsyncStatusSource.ReturnValue && pending |> List.exists (fun r -> r.Lower <= contract.Success.Upper && r.Upper >= contract.Success.Lower) then
+                refuse "pending" "readiness pending range overlaps native success"
+        | (PilotTypes.AsyncProtocol.SubmissionCompletion | PilotTypes.AsyncProtocol.CallbackCompletion _), Some success, Some retirement ->
+            validRange "completion_success" success
+            ordinal "retirement.owner_parameter" retirement.OwnerParameter
+            let release = find "retirement.binding" retirement.Binding
+            if release.Parameters.Length <> 1 || not (sameType release (snd release.Parameters.Head) native (snd native.Parameters[retirement.OwnerParameter])) || scalarFamily release release.ReturnType <> Some TypeMapper.Void then
+                refuse "retirement" "async retirement must be a void native endpoint taking exactly the declared owner"
+            for buffer in projection |> Option.map _.ReadOnlyBuffers |> Option.defaultValue [] do
+                match buffer.Retention with
+                | PilotTypes.BindingBufferRetention.DuringCall -> () // The compiler must prove backing-region domination across the cut.
+                | PilotTypes.BindingBufferRetention.RetainedUntil(owner, _, releases) ->
+                    if owner <> retirement.OwnerParameter || not (releases |> List.exists (fun r -> r.Binding = qualifiedBinding retirement.Binding && r.Parameter = 0)) then
+                        refuse "retirement" "async retirement must match the buffer's RetainedUntil owner and release endpoint"
+            match contract.Protocol with
+            | PilotTypes.AsyncProtocol.CallbackCompletion parameter ->
+                ordinal "callback_parameter" parameter
+                let callback = projection |> Option.bind (fun b -> b.CallbackInvocations |> List.tryFind (fun c -> c.Parameter = parameter && c.Scope = "retained"))
+                match callback |> Option.bind _.Retention with
+                | Some retention when retention.OwnerParameter = retirement.OwnerParameter && retention.Releases |> List.exists (fun r -> r.Binding = qualifiedBinding retirement.Binding && r.Parameter = 0) -> ()
+                | _ -> refuse "callback_parameter" "async callback completion requires an existing retained callback contract with matching owner and retirement"
+            | _ -> ()
+        | _ -> refuse "protocol" "async protocol has missing or inapplicable completion/retirement metadata"
+        AsyncSelection(contract, layer)
+
+    /// Single-unit convenience API. Project generation supplies the existing source
+    /// context's per-function type resolver to selectAsyncWithFacts instead.
+    let selectAsyncWithModules qualifiedBinding library declarations bindings contract =
+        let typedefs =
+            DeclarationAlgebra.cataDeclarations DeclarationAlgebra.typedefAlgebra declarations
+            |> List.choose id |> Map.ofList
+        let rec resolve seen name =
+            if Set.contains name seen then name
+            else match Map.tryFind name typedefs with Some next -> resolve (Set.add name seen) next | None -> name
+        let family _ typ = TypeMapper.tryScalar Types.LP64 (resolve Set.empty typ) |> Option.map _.Family
+        let same _ left _ right = resolve Set.empty left = resolve Set.empty right
+        selectAsyncWithFacts qualifiedBinding family same library declarations bindings contract
+
+    let selectAsync library declarations bindings contract =
+        selectAsyncWithModules id library declarations bindings contract
+
+    let analyzeWithAsync library declarations bindings contract func typedefMap =
+        { analyze func typedefMap with Async = Some (selectAsync library declarations bindings contract) }
