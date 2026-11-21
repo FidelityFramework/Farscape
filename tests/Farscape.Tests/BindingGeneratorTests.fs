@@ -1021,9 +1021,18 @@ let ``a field typed through a qualified typedef link to a union no pilot declara
         Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
 
 [<Theory>]
-[<InlineData(false)>]
-[<InlineData(true)>]
-let ``async workflow placement preserves flat externs and isolates cross-library dependencies`` crossLibrary =
+[<InlineData(false, "", "output", "output", "Types.clef", "", "")>]
+[<InlineData(true, "", "output", "output", "Types.clef", "", "")>]
+[<InlineData(false, "", "src", "", "src/Types.clef", "", "")>]
+[<InlineData(true, "", "src", "", "src/Types.clef", "src", "")>]
+[<InlineData(true, "", "src/Native/", "", "src/Native/Types.clef", "src", "Bindings")>]
+[<InlineData(true, "", "$root/src/.", "", "src/Types.clef", "src", "")>]
+[<InlineData(true, "", "Bindings/", "", "Bindings/Types.clef", "Bindings", "Bindings")>]
+[<InlineData(true, "", "Bindings/Native/", "", "Bindings/Native/Types.clef", "Bindings/Native", "Bindings/Native")>]
+[<InlineData(true, "src", "generated/", "src/generated", "Types.clef", ".", ".")>]
+[<InlineData(false, "src", ".", "src", "Types.clef", "", "")>]
+let ``async workflow placement preserves flat externs and isolates cross-library dependencies``
+    crossLibrary pilotFolder (destination: string) manifestFolder (expectedTypes: string) bridgeFolder reportFolder =
     let dir = TestScratch.create "async-placement"
     let header = System.IO.Path.Combine(dir, "async.h")
     System.IO.File.WriteAllText(header, "int perform(int owner, int token);\nint status_value(void);\nvoid retire(int owner);\n")
@@ -1034,11 +1043,16 @@ let ``async workflow placement preserves flat externs and isolates cross-library
             else AsyncFixture.readiness
         withPilotGenerating (fun path ->
             let project = PilotSerializer.loadFromFile path |> Result.defaultWith failwith
-            let project = { project with Options = Some { project.Options.Value with AsyncWrappers = [contract] } }
+            let root = System.IO.Path.GetDirectoryName(path: string)
+            let pilotDir = System.IO.Path.Combine(root, pilotFolder)
+            System.IO.Directory.CreateDirectory(pilotDir) |> ignore
+            let path = System.IO.Path.Combine(pilotDir, System.IO.Path.GetFileName path)
+            let project = { project with Output = { project.Output with Directory = destination.Replace("$root", root) }
+                                         Options = Some { project.Options.Value with AsyncWrappers = [contract] } }
             PilotSerializer.saveToFile path project |> Result.defaultWith failwith
             BindingGenerator.generateFromProject path false true Types.LP64)
             [header] [] ["c_header_mode = true"; "generate_descriptors = true"; "descriptor_only_dependencies = true"]
-            ["perform"; "status_value"; "retire"] [] [] (fun result _ ->
+            ["perform"; "status_value"; "retire"] [] [] (fun result output ->
                 let generated = result |> Result.defaultWith failwith
                 let source = generated.OutputFiles |> List.filter (fun p -> p.EndsWith(".clef")) |> List.map (fun p -> p, System.IO.File.ReadAllText p)
                 let native = source |> List.find (fun (p, _) -> p.EndsWith("/Fixture.clef")) |> snd
@@ -1046,10 +1060,13 @@ let ``async workflow placement preserves flat externs and isolates cross-library
                 Assert.DoesNotContain("async {", native)
                 Assert.DoesNotContain("let!", native)
                 let projects = generated.OutputFiles |> List.filter (fun p -> p.EndsWith(".fidproj"))
+                let packageRoot = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(output: string), manifestFolder)
+                for path in projects do Assert.Equal(packageRoot, System.IO.Path.GetDirectoryName(path: string))
                 let baseProject = projects |> List.find (fun p -> not (p.EndsWith(".Bridge.fidproj"))) |> System.IO.File.ReadAllText
+                Assert.Contains($"\"{expectedTypes}\"", baseProject)
                 Assert.DoesNotContain("Fidelity.Completion", baseProject)
                 Assert.DoesNotContain("Async.clef", baseProject)
-                let asyncSource = source |> List.find (fun (_, text) -> text.Contains("let performAsync")) |> snd
+                let asyncFile, asyncSource = source |> List.find (fun (_, text) -> text.Contains("let performAsync"))
                 Assert.Contains("Async<Result<int, int>>", asyncSource)
                 let emittedModules =
                     source |> List.collect (fun (_, text) -> text.Split('\n') |> Array.choose (fun line -> if line.StartsWith("module ") then Some (line.Substring(7).Trim()) else None) |> Array.toList)
@@ -1057,6 +1074,16 @@ let ``async workflow placement preserves flat externs and isolates cross-library
                     if line.StartsWith("open ") then Assert.Contains(line.Substring(5).Trim(), emittedModules)
                 if crossLibrary then
                     let bridge = projects |> List.find (fun p -> p.EndsWith(".Bridge.fidproj")) |> System.IO.File.ReadAllText
+                    if destination <> "output" then
+                        let expectedAsync = System.IO.Path.GetFullPath(System.IO.Path.Combine(packageRoot, bridgeFolder, "FixtureBridge", "Async.clef"))
+                        let expectedReport = System.IO.Path.GetFullPath(System.IO.Path.Combine(packageRoot, reportFolder, "FixtureBridge", "REPORT.md"))
+                        Assert.Equal(expectedAsync, asyncFile)
+                        let sourceEntry = System.IO.Path.GetRelativePath(packageRoot, expectedAsync)
+                        Assert.Contains($"\"{sourceEntry}\"", bridge)
+                        Assert.Contains(expectedReport, generated.OutputFiles)
+                    if expectedTypes.StartsWith("src/") then
+                        let stored = System.IO.Directory.GetFiles(System.IO.Path.Combine(packageRoot, "src"), "*", System.IO.SearchOption.AllDirectories)
+                        Assert.All(stored, fun path -> Assert.Equal(".clef", System.IO.Path.GetExtension(path: string)))
                     Assert.Contains("\"Fidelity.Completion\"", bridge)
                     Assert.Contains("Completion.fidproj", bridge)
                     Assert.Contains("Fidelity.Completion.Ring.awaitCompletion token", asyncSource)

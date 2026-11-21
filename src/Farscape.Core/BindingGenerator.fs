@@ -913,6 +913,8 @@ module BindingGenerator =
         if divergent.IsEmpty then Ok ()
         else Error (Diagnostics.refusalsOf divergent " No bindings were written.")
 
+    let defaultSourceDirectory = "src"
+
     type GenerationOptions = {
         HeaderFile: FileInfo
         LibraryName: string
@@ -1053,14 +1055,24 @@ module BindingGenerator =
         tryResolveProjectDependency directory fileName siblingPath environmentVariable overridePath
         |> Result.defaultWith Diagnostics.raiseRefusal
 
-    let private projectDirectoryForOutput outputDir =
+    let private projectOutputRoots (configuredDirectory: string) (outputDir: string) =
         let fullPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath outputDir)
         let parent = Directory.GetParent fullPath
-        // The manifest belongs above Bindings for both package-local and shared output.
-        if isNull parent then fullPath
-        elif parent.Name = "Bindings" then parent.Parent.FullName
-        elif Path.GetFileName fullPath = "Bindings" then parent.FullName
-        else fullPath
+        // Resolve only the configured segments against the drive root when recognizing src.
+        let selected = Path.TrimEndingDirectorySeparator(Path.GetFullPath(configuredDirectory, Path.GetPathRoot fullPath))
+        if isNull parent then fullPath, fullPath, fullPath
+        elif Path.GetFileName(Path.GetDirectoryName selected) = defaultSourceDirectory then
+            let packageRoot = parent.Parent.FullName
+            packageRoot, parent.FullName, Path.Combine(packageRoot, "Bindings")
+        elif Path.GetFileName selected = defaultSourceDirectory then
+            parent.FullName, fullPath, parent.FullName
+        else
+            let packageRoot =
+                if parent.Name = "Bindings" then parent.Parent.FullName
+                elif Path.GetFileName fullPath = "Bindings" then parent.FullName
+                else fullPath
+            let bridgeRoot = Path.GetDirectoryName outputDir
+            packageRoot, bridgeRoot, bridgeRoot
 
     let private tryResolveProjectDependencies (project: PilotProject) directory : Result<string option * string option * string, Diagnostics.Refusal> =
         let descriptorOnly = project.Options |> Option.exists (fun opts -> opts.DescriptorOnlyDependencies)
@@ -1106,13 +1118,12 @@ module BindingGenerator =
     let private generateFidproj
         (project: PilotProject)
         (nsPrefix: string)
-        (outputDir: string)
+        (fidprojDir: string)
         (dependencies: string option * string option * string)
         (allFiles: string list)
         (verbose: bool) : string =
         let packageName = nsPrefix
         let platformPath, platformDescription, metadataPath = dependencies
-        let fidprojDir = projectDirectoryForOutput outputDir
         let relativeSources =
             allFiles
             |> List.map (fun f ->
@@ -1242,7 +1253,8 @@ module BindingGenerator =
             let outputDir =
                 if Path.IsPathRooted(project.Output.Directory) then project.Output.Directory
                 else Path.GetFullPath(Path.Combine(projectDir, project.Output.Directory))
-            let dependencies = resolveProjectDependencies project (projectDirectoryForOutput outputDir)
+            let fidprojDir, bridgeRoot, reportRoot = projectOutputRoots project.Output.Directory outputDir
+            let dependencies = resolveProjectDependencies project fidprojDir
             let cHeaders = project.Options |> Option.exists (fun opts -> opts.NativePointerSurface || opts.CHeaderMode)
             let headerCppMode header = not cHeaders && CppParser.detectCppMode header
             // Parse C/C++ headers
@@ -1965,8 +1977,13 @@ module BindingGenerator =
                             CallbackWrapperGenerator.generateTypedWithAsyncModules (if generateWrappers then asyncSelections else Map.empty) spec declarations callbackNs ctx callbackOpens resolveModule
                         | _ -> None
 
+                let libLastSegment = nsPrefix.Split('.') |> Array.last
+                let bridgeFolder = $"{libLastSegment}Bridge"
+                let bridgeDir = Path.Combine(bridgeRoot, bridgeFolder)
+                let callbackPath = Path.Combine(bridgeDir, "Callbacks.clef")
+                let asyncPath = Path.Combine(bridgeDir, "Async.clef")
                 let emittedTexts =
-                    [ for code in Option.toList asyncCompositionContent do yield "Bridge/Async.clef", code
+                    [ for code in Option.toList asyncCompositionContent do yield Path.GetRelativePath(outputDir, asyncPath), code
                       yield "Types.clef", sharedCode
                       for (fileName, _, errorOutput) in errorModulePlan do
                           yield fileName, errorOutput
@@ -1982,8 +1999,7 @@ module BindingGenerator =
                       for code in Option.toList signalCode do
                           yield Path.Combine("Bridge", "Signals.clef"), code
                       for code in Option.toList callbackWrapperContent do
-                          let libLastSegment = nsPrefix.Split('.') |> Array.last
-                          yield Path.Combine("..", $"{libLastSegment}Bridge", "Callbacks.clef"), code ]
+                          yield Path.GetRelativePath(outputDir, callbackPath), code ]
                 verifyEmittedClefPurity emittedTexts |> Result.defaultWith Diagnostics.raiseRefusal
 
                 // ── Static archive artifact (#204) ──────────────────────────
@@ -2095,7 +2111,7 @@ module BindingGenerator =
                 let allFiles = [sharedTypesPath] @ errorModuleFiles @ nsFiles @ typedProtocolFiles @ signalFiles
 
                 // Generate canonical fidproj for the binding library
-                let fidprojFile = generateFidproj project (if typedProtocol then nsPrefix + ".Native" else nsPrefix) outputDir dependencies allFiles verbose
+                let fidprojFile = generateFidproj project (if typedProtocol then nsPrefix + ".Native" else nsPrefix) fidprojDir dependencies allFiles verbose
 
                 // The link provenance record of a declared static archive (#204):
                 // <Package>.link-provenance.toml beside <Package>.fidproj.
@@ -2114,17 +2130,12 @@ module BindingGenerator =
                     | None -> []
                     | Some req ->
                         let bridgeName = $"{nsPrefix}.Bridge"
-                        let libLastSegment = nsPrefix.Split('.') |> Array.last
-                        let bridgeDir = Path.Combine(Path.GetDirectoryName(outputDir), $"{libLastSegment}Bridge")
                         Directory.CreateDirectory(bridgeDir) |> ignore
-
-                        let fidprojDir = Path.GetDirectoryName fidprojFile
 
                         // Callback wrappers file
                         let callbackFiles =
                             match callbackWrapperContent with
                             | Some output ->
-                                let callbackPath = Path.Combine(bridgeDir, "Callbacks.clef")
                                 File.WriteAllText(callbackPath, output)
                                 logVerbose $"  L2 marshaling: Callbacks.clef" verbose
                                 [callbackPath]
@@ -2134,9 +2145,8 @@ module BindingGenerator =
                             match asyncCompositionContent with
                             | None -> []
                             | Some output ->
-                                let path = Path.Combine(bridgeDir, "Async.clef")
-                                File.WriteAllText(path, output)
-                                [path]
+                                File.WriteAllText(asyncPath, output)
+                                [asyncPath]
                         let bridgeFiles = callbackFiles @ asyncFiles
 
                         // Generate Bridge fidproj
@@ -2222,7 +2232,10 @@ module BindingGenerator =
                             report.AppendLine("- Callback wrappers preserve declared entry records and explicit environment arguments.") |> ignore
 
                             let reportPath =
-                                if ctx.NativePointerSurface || cHeaderMode then Path.Combine(bridgeDir, "REPORT.md")
+                                if ctx.NativePointerSurface || cHeaderMode then
+                                    let reportDir = Path.Combine(reportRoot, bridgeFolder)
+                                    Directory.CreateDirectory(reportDir) |> ignore
+                                    Path.Combine(reportDir, "REPORT.md")
                                 else Path.Combine(fidprojDir, "LAYER3-REPORT.md")
                             File.WriteAllText(reportPath, report.ToString())
                             logVerbose $"L2 marshaling report: {reportPath}" verbose

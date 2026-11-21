@@ -106,7 +106,7 @@ let showError (message: string) =
 let generateCommand =
     let header =     Input.option<FileInfo> "--header"        |> desc "Path to C++ header file" |> required |> validateFileExists
     let library =    Input.option<string> "--library"         |> alias "-l" |> desc "Name of native library to bind to" |> required
-    let output =     Input.option<string> "--output"          |> alias "-o" |> desc "Output directory for generated code" |> def "./output"
+    let output =     Input.option<string> "--output"          |> alias "-o" |> desc "Output directory for generated code" |> def defaultSourceDirectory
     let ns =         Input.option<string> "--namespace"       |> alias "-n" |> desc "Namespace for generated code" |> def "NativeBindings"
     let includes =   Input.option<string[]> "--include-paths" |> alias "-i" |> desc "Additional include paths" |> def [||]
     let defines =    Input.option<string[]> "--defines"       |> alias "-d" |> desc "Preprocessor definitions (e.g., STM32L552xx)" |> def [||]
@@ -272,7 +272,7 @@ let pilotAnalyzeCommand =
 
         let headerFiles = headers |> Array.toList
         let project =
-            PilotAnalyzer.toPilotProject library headerFiles includePaths systemIncludePaths definesList (pkgConfig |> Array.toList) "fidelity" outputDir result
+            PilotAnalyzer.toPilotProject library headerFiles includePaths systemIncludePaths definesList (pkgConfig |> Array.toList) "fidelity" defaultSourceDirectory result
 
         let tomlPath = Path.Combine(outputDir, $"{library}.pilot.toml")
 
@@ -318,7 +318,7 @@ let pilotInitCommand =
                 PkgConfig = []
                 Artifact = None
             }
-            Output = { Mode = "fidelity"; Directory = outputDir }
+            Output = { Mode = "fidelity"; Directory = defaultSourceDirectory }
             Namespaces = [
                 { Name = $"Fidelity.{library}.Core"
                   Description = "Core functions"
@@ -456,7 +456,7 @@ let pilotDiscoverCommand =
                 else output
             Directory.CreateDirectory(outputDir) |> ignore
 
-            let project = PilotDiscovery.toPilotProject libName "fidelity" outputDir result
+            let project = PilotDiscovery.toPilotProject libName "fidelity" defaultSourceDirectory result
             let tomlPath = Path.Combine(outputDir, $"{libName}.pilot.toml")
 
             match PilotSerializer.saveToFile tomlPath project with

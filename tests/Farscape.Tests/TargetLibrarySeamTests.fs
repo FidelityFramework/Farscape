@@ -522,6 +522,8 @@ module TargetLibrarySeamScaffoldingTests =
             Directory.Delete(work, true)
 
     [<Theory>]
+    [<InlineData("src/", "Fidelity.Sqlite.Boundary.fidproj", "src/Types.clef")>]
+    [<InlineData("src/Native/", "Fidelity.Sqlite.Boundary.fidproj", "src/Native/Types.clef")>]
     [<InlineData("Bindings/", "Fidelity.Sqlite.Boundary.fidproj", "Bindings/Types.clef")>]
     [<InlineData("Bindings/Native/", "Fidelity.Sqlite.Boundary.fidproj", "Bindings/Native/Types.clef")>]
     [<InlineData("generated/", "generated/Fidelity.Sqlite.Boundary.fidproj", "Types.clef")>]
