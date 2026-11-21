@@ -32,6 +32,7 @@ module Substantiation =
           Dotnet: FileDigest
           Harness: FileDigest
           HarnessProject: FileDigest
+          SourceInputsSha256: string
           CompilerLog: FileDigest
           Psg0: FileDigest
           WitnessUnits: FileDigest
@@ -117,7 +118,8 @@ module Substantiation =
           /// None when the witness manifest carries no proof obligation list.
           Obligations: WitnessedObligation[] option
           /// The (Invocation, QuerySha256) of the source proof receipt the witness embeds.
-          SourceProof: (string * string) option }
+          SourceProof: (string * string) option
+          CheckedLibrarySources: Map<string, (string * int) option> option }
 
     let private refuse code path message =
         Diagnostics.diagnostic code message (Diagnostics.inFile path "substantiation input or retained evidence")
@@ -252,12 +254,11 @@ module Substantiation =
         else
             Error $"Unadmitted schema type {schema.FullName}."
 
-    let internal deserializeJson<'T> (text: string) : Result<'T, string> =
-        match Json.parse text with
-        | Error reason -> Error reason
-        | Ok root ->
-            deserializeJsonValue typeof<'T> root
-            |> Result.map (fun v -> v :?> 'T)
+    let private decodeJsonValue<'T> root =
+        deserializeJsonValue typeof<'T> root |> Result.map (fun value -> value :?> 'T)
+
+    let internal deserializeJson<'T> text =
+        Json.parse text |> Result.bind decodeJsonValue<'T>
 
     let private escapeJsonString (s: string) : string =
         let sb = StringBuilder(s.Length + 2)
@@ -319,13 +320,20 @@ module Substantiation =
     let internal serializeJsonPretty<'T> (value: 'T) : string =
         formatJsonPretty 0 (toJsonValue typeof<'T> (box value))
 
-    let private canonical (manifest: Manifest) = serializeJsonCompact { manifest with IntegritySha256 = "" }
+    let private manifestValue (manifest: Manifest) =
+        match toJsonValue typeof<Manifest> (box manifest) with
+        | JsonValue.Object fields when manifest.SchemaVersion = 1 ->
+            JsonValue.Object (fields |> List.filter (fun (name, _) -> name <> "SourceInputsSha256"))
+        | value -> value
+
+    let private canonical (manifest: Manifest) =
+        { manifest with IntegritySha256 = "" } |> manifestValue |> formatJsonCompact
 
     /// Bind the manifest's metadata as well as the external file digests. This is integrity
     /// evidence, not a signature or an assertion that the hypotheses have been proved.
     let seal (manifest: Manifest) = { manifest with IntegritySha256 = shaText (canonical manifest) }
 
-    let toJson (manifest: Manifest) = serializeJsonPretty manifest
+    let toJson (manifest: Manifest) = manifestValue manifest |> formatJsonPretty 0
 
     let rec private tomlOfJson (value: JsonValue) =
         match value with
@@ -342,7 +350,7 @@ module Substantiation =
         | _ -> Diagnostics.raiseRefusal (Diagnostics.uncoded "The substantiation schema admits no null or unsupported JSON value.")
 
     let toToml (manifest: Manifest) =
-        match tomlOfJson (toJsonValue typeof<Manifest> (box manifest)) with
+        match tomlOfJson (manifestValue manifest) with
         | TomlValue.InlineTable table -> Toml.serialize table
         | _ -> Diagnostics.raiseRefusal (Diagnostics.uncoded "A substantiation manifest must be a table.")
 
@@ -379,7 +387,11 @@ module Substantiation =
 
     let private requireIntegrity (manifest: Manifest) =
         let fail message = refuse Diagnostics.SubstantiationManifestMalformed manifest.FidprojPath message
-        if manifest.SchemaVersion <> 1 then fail "Unsupported substantiation schema version."
+        match manifest.SchemaVersion with
+        | 1 when manifest.SourceInputsSha256 = "" -> ()
+        | 2 when Regex.IsMatch(manifest.SourceInputsSha256, "^[a-f0-9]{64}$") -> ()
+        | 1 | 2 -> fail "The source input digest is invalid for this substantiation schema version."
+        | _ -> fail "Unsupported substantiation schema version."
         if isNull manifest.ElevatedWarningCodes
            || (manifest.ElevatedWarningCodes |> Array.exists (validWarningCode >> not))
            || manifest.ElevatedWarningCodes <> (manifest.ElevatedWarningCodes |> Array.distinct |> Array.sort)
@@ -450,7 +462,16 @@ module Substantiation =
 
     let parseJson (text: string) =
         protect Diagnostics.SubstantiationManifestMalformed "<substantiation.json>" (fun () ->
-            match deserializeJson<Manifest> text with
+            let decode = function
+                | JsonValue.Object fields as root when
+                    (Json.prop "SchemaVersion" root |> Option.bind Json.tryAsInt64) = Some 1L ->
+                    if Json.prop "SourceInputsSha256" root |> Option.isSome then
+                        Error "Substantiation schema 1 does not admit a source-input digest."
+                    else
+                        JsonValue.Object (("SourceInputsSha256", JsonValue.String "") :: fields)
+                        |> decodeJsonValue<Manifest>
+                | root -> decodeJsonValue<Manifest> root
+            match Json.parse text |> Result.bind decode with
             | Error reason -> refuse Diagnostics.SubstantiationManifestMalformed "<substantiation.json>" reason
             | Ok manifest ->
                 requireIntegrity manifest
@@ -478,6 +499,38 @@ module Substantiation =
             match Toml.parse(File.ReadAllText path) with
             | Ok doc -> doc
             | Error reason -> refuse Diagnostics.SubstantiationProjectInvalid path reason)
+
+    let private evidencePath path = ScratchDirectory.canonicalEvidencePath path
+
+    let private readCheckedSourceInputs artifacts (harnessProject: FileDigest) project expectedDigest =
+        let path = evidencePath (Path.Combine(artifacts, "source-inputs.json"))
+        let invalid message = refuse Diagnostics.SubstantiationProofInvalid path message
+        if not (File.Exists path) then invalid "The compiler did not retain the checked source-input receipt."
+        let bytes = File.ReadAllBytes path
+        let observedDigest = SHA256.HashData bytes |> Convert.ToHexStringLower
+        if expectedDigest |> Option.exists ((<>) observedDigest) then
+            refuse Diagnostics.SubstantiationDigestMismatch path "The checked source-input receipt SHA-256 has changed."
+        let inputs =
+            match Encoding.UTF8.GetString bytes |> SubstantiationProof.decodeCheckedSourceInputs with
+            | Ok inputs -> inputs
+            | Error reason -> invalid reason
+        let files = Map.ofList inputs.Files
+        if files.Count <> inputs.Files.Length then invalid "Checked file receipts must be unique."
+        let harnessMatches =
+            files.TryFind harnessProject.Path
+            |> Option.exists (fun recorded -> String.Equals(recorded, harnessProject.Sha256, StringComparison.OrdinalIgnoreCase))
+        if inputs.Project <> harnessProject.Path || not harnessMatches then
+            invalid "The source-input receipt does not bind the generated harness project."
+        if inputs.Sources |> List.exists (files.ContainsKey >> not) then
+            invalid "A checked source has no retained file digest."
+        match inputs.Platform, Toml.getValue "platform.description" project with
+        | None, _ -> ()
+        | Some (export, _, _), Some (TomlValue.String expected) when export = expected -> ()
+        | _ -> invalid "The selected platform export does not match the harness project."
+        for filePath, hash in List.distinct (inputs.Files @ inputs.Archives) do
+            if evidencePath filePath <> filePath then invalid "A checked file path is outside its canonical evidence path."
+            checkDigest filePath hash
+        observedDigest, inputs
 
     let private strings code path key document requiredField =
         match Toml.getValue key document with
@@ -1323,7 +1376,7 @@ module Substantiation =
                         refuse Diagnostics.SubstantiationActivationUnavailable source.Digest.Path
                             $"Exported callback-entry adapter '{adapter}' was not reached by any activated zero-argument library export during substantiation."
             { Declarations = psg.Declarations; Definitions = definitions.ToArray(); Imports = imports.ToArray()
-              Obligations = obligations; SourceProof = sourceProof })
+              Obligations = obligations; SourceProof = sourceProof; CheckedLibrarySources = None })
 
     let private table path key document =
         match Toml.getValue key document with
@@ -1333,8 +1386,6 @@ module Substantiation =
 
     let private absolute (directory: string) (path: string) =
         ScratchDirectory.canonicalEvidencePath (Path.Combine(directory, path))
-
-    let private evidencePath path = ScratchDirectory.canonicalEvidencePath path
 
     let private selectedMetadata path document =
         match Toml.getValue "platform.loading" document with
@@ -1434,7 +1485,14 @@ module Substantiation =
                   "06b_premises_sat.smt2", manifest.Proof.PremisesQuerySha256 ] do
                 checkDigest (Path.Combine(manifest.ArtifactsDirectory, name)) hash
             checkDigest manifest.Proof.Solver.Executable manifest.Proof.Solver.Sha256
-            SubstantiationProof.validateStoredEvidence listed manifest.Harness.Path manifest.Proof manifest.ArtifactsDirectory |> required
+            let checkedInputs =
+                if manifest.SchemaVersion = 2 then
+                    readCheckedSourceInputs manifest.ArtifactsDirectory manifest.HarnessProject project (Some manifest.SourceInputsSha256)
+                    |> snd |> Some
+                else None
+            let checkedLibrarySources =
+                SubstantiationProof.validateStoredEvidenceWithInputs checkedInputs listed manifest.Harness.Path manifest.Proof manifest.ArtifactsDirectory
+                |> required
             let directory = Path.GetDirectoryName manifest.FidprojPath
             let recordedFile kind =
                 match manifest.Boundary.Files |> Array.filter (fun file -> file.Kind = kind) with
@@ -1469,7 +1527,7 @@ module Substantiation =
                 Directory.Delete(validationWork, true)
                 if Directory.Exists validationRoot && Directory.GetFileSystemEntries(validationRoot).Length = 0 then
                     Directory.Delete validationRoot
-            correspondence
+            { correspondence with CheckedLibrarySources = checkedLibrarySources }
 
     /// Recheck the complete project membership and every retained digest without silently
     /// recompiling or replacing evidence. A parser checks shape; this checks the live inputs.
@@ -1513,6 +1571,7 @@ module Substantiation =
             [ yield composer; yield "compile"
               if warningsAsErrors then yield "--warn-as-error"
               yield "--no-color"
+              yield "--retain-source-inputs"
               yield project; yield "-k"; yield "-o"; yield Path.Combine(work, "substantiation-root") ]
         let info = ProcessLaunch.startInfo dotnet arguments
         info.WorkingDirectory <- work
@@ -1622,6 +1681,7 @@ module Substantiation =
                     |> Map.add "libraries" (TomlValue.Array(boundary.Libraries |> Array.map TomlValue.String |> List.ofArray))))
             let harnessProject = Path.Combine(work, "SubstantiationRoot.fidproj")
             File.WriteAllText(harnessProject, Toml.serialize rootDocument)
+            let boundHarnessProject = digest harnessProject
             let composer = resolveComposer ()
             let compilerDigest = digest composer
             let dotnet = resolveDotnet ()
@@ -1643,11 +1703,13 @@ module Substantiation =
             let witnessUnits = digest witnessPath
             let psg = verifyPsg0 psg0Path sources boundary |> required
             verifyWitnessUnits witnessPath psg sources boundary |> required |> ignore
-            let proof = SubstantiationProof.evaluate sourcePaths entryPath artifacts |> required
+            let sourceInputsSha256, checkedInputs = readCheckedSourceInputs artifacts boundHarnessProject rootDocument None
+            let proof = SubstantiationProof.evaluateWithInputs (Some checkedInputs) sourcePaths entryPath artifacts |> required
             let manifest =
                 seal
-                    { SchemaVersion = 1; Package = package; FidprojPath = projectPath; FidprojSha256 = projectHash
-                      Sources = sourceDigests; Compiler = compilerDigest; Dotnet = dotnetDigest; Harness = digest entryPath; HarnessProject = digest harnessProject
+                    { SchemaVersion = 2; Package = package; FidprojPath = projectPath; FidprojSha256 = projectHash
+                      Sources = sourceDigests; Compiler = compilerDigest; Dotnet = dotnetDigest; Harness = digest entryPath; HarnessProject = boundHarnessProject
+                      SourceInputsSha256 = sourceInputsSha256
                       AllowWarnings = request.AllowWarnings; WarningsAsErrors = warningsAsErrors; ElevatedWarningCodes = elevatedCodes
                       CompilerLog = digest log; Psg0 = psg0; WitnessUnits = witnessUnits; ArtifactsDirectory = artifacts; Proof = proof; Boundary = boundary; IntegritySha256 = "" }
             validateManifest manifest |> required

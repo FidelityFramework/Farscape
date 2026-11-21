@@ -91,6 +91,7 @@ module private TargetLibraryCensusFixtures =
           Dotnet = dotnet
           Harness = harness
           HarnessProject = harnessProj
+          SourceInputsSha256 = ""
           CompilerLog = compilerLog
           Psg0 = psg0
           WitnessUnits = witness

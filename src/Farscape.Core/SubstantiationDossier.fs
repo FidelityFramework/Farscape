@@ -655,6 +655,7 @@ module SubstantiationDossier =
         (libSourcePaths: string[])
         (harnessFullPath: string)
         (fidprojPath: string)
+        (checkedLibrarySources: Map<string, (string * int) option> option)
         (inventory: (string * string * string)[])
         : DossierObligation[] =
         let invalid (path: string) (message: string) = fail Diagnostics.DossierCorrespondenceInvalid path message
@@ -710,14 +711,21 @@ module SubstantiationDossier =
         inventory
         |> Array.choose (fun (anchor, source, _) ->
             let location = sourceLocation.Match source
-            if location.Success then
+            match checkedLibrarySources, checkedLibrarySources |> Option.bind (Map.tryFind anchor) with
+            | Some _, None -> None
+            | _, Some (Some (path, line)) ->
+                match Map.tryFind path sourceModules with
+                | Some moduleName -> Some (buildDossierObligation anchor source path moduleName line)
+                | None -> invalid obligationsPath ("Checked library obligation '" + anchor + "' has no selected library module.")
+            | _ when location.Success ->
                 let path = Path.GetFullPath location.Groups["path"].Value
                 match Map.tryFind path sourceModules with
                 | None -> None
                 | Some moduleName ->
                     let line = Int32.Parse location.Groups["line"].Value
                     Some (buildDossierObligation anchor source path moduleName line)
-            else
+            | Some _, _ -> invalid obligationsPath ("Checked library obligation '" + anchor + "' has no file:line:column source.")
+            | _ ->
                 match SubstantiationProof.matchSharedBufferObligation anchor source with
                 | None ->
                     invalid obligationsPath ("Obligation '" + anchor + "' has no file:line:column source.")
@@ -786,6 +794,7 @@ module SubstantiationDossier =
                         canonicalLibs
                         canonicalHarness
                         canonicalHarness
+                        None
                         inventory)
         with
         | :? Diagnostics.RefusalException as ex -> Error ex.Refusal
@@ -869,6 +878,7 @@ module SubstantiationDossier =
                 libSourcePaths
                 harnessFullPath
                 manifest.FidprojPath
+                correspondence.CheckedLibrarySources
                 inventory
         if obligations.Length <> manifest.Proof.LibraryObligations then
             invalid obligationsPath ("The obligation inventory attributes " + string obligations.Length + " obligations to the library sources and the manifest records " + string manifest.Proof.LibraryObligations + ".")

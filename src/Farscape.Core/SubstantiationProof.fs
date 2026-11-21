@@ -229,14 +229,96 @@ module SubstantiationProof =
         | JsonValue.Array values -> Array.ofList values
         | _ -> fail Diagnostics.SubstantiationProofInvalid location $"'{name}' must be an array."
 
-    let rec private uniqueProperties location (element: JsonValue) =
+    let rec private hasUniqueProperties (element: JsonValue) =
         match element with
         | JsonValue.Object properties ->
-            if (properties |> List.map fst |> Set.ofList |> Set.count) <> properties.Length then
-                fail Diagnostics.SubstantiationProofInvalid location "Duplicate JSON property names are not permitted."
-            properties |> List.iter (fun (_, value) -> uniqueProperties location value)
-        | JsonValue.Array values -> values |> List.iter (uniqueProperties location)
-        | _ -> ()
+            (properties |> List.map fst |> Set.ofList |> Set.count) = properties.Length &&
+            (properties |> List.forall (snd >> hasUniqueProperties))
+        | JsonValue.Array values -> List.forall hasUniqueProperties values
+        | _ -> true
+
+    let private uniqueProperties location element =
+        if not (hasUniqueProperties element) then
+            fail Diagnostics.SubstantiationProofInvalid location "Duplicate JSON property names are not permitted."
+
+    type internal PublishedSourceOrigin =
+        { Anchor: string
+          Source: string
+          Owners: (string * int) list }
+
+    type internal CheckedSourceInputs =
+        { Project: string
+          Sources: string list
+          Direct: string list
+          Dependencies: string list
+          Files: (string * string) list
+          Archives: (string * string) list
+          Platform: (string * string * string) option
+          Origins: PublishedSourceOrigin list
+          Invocation: string
+          QuerySha256: string
+          DischargeSha256: string }
+
+    let internal decodeCheckedSourceInputs receipt =
+        let text = function
+            | JsonValue.String value when value <> "" -> Some value
+            | _ -> None
+        let memberText key value = Json.prop key value |> Option.bind text
+        let decodeRows decode = function
+            | JsonValue.Array values ->
+                List.fold (fun state value ->
+                    match state, decode value with
+                    | Some rows, Some row -> Some (row :: rows)
+                    | _ -> None) (Some []) values
+                |> Option.map List.rev
+            | _ -> None
+        let rows key decode value = Json.prop key value |> Option.bind (decodeRows decode)
+        let declarationPath value = Json.prop "declaration" value |> Option.bind (memberText "path")
+        let placementSource value =
+            match Json.prop "declaration" value with
+            | Some declaration ->
+                match memberText "path" declaration, Json.prop "start" declaration with
+                | Some path, Some (JsonValue.Array [line; _]) ->
+                    match Json.tryAsInt64 line with
+                    | Some number when number > 0L && number <= 2147483647L -> Some (path, int number)
+                    | _ -> None
+                | _ -> None
+            | None -> None
+        let file value =
+            match memberText "Path" value, memberText "Sha256" value with
+            | Some path, Some sha256 -> Some (path, sha256)
+            | _ -> None
+        let origin value =
+            match memberText "anchor" value, memberText "source" value,
+                  rows "placements" placementSource value with
+            | Some anchor, Some source, Some (_ :: _ as owners) ->
+                Some { Anchor = anchor; Source = source; Owners = owners }
+            | _ -> None
+        let platform = function
+            | JsonValue.Null -> Some None
+            | value ->
+                match memberText "export" value, memberText "declaredId" value, declarationPath value with
+                | Some export, Some declaredId, Some path -> Some (Some (export, declaredId, path))
+                | _ -> None
+        Json.parse receipt |> Result.bind (fun value ->
+            if not (hasUniqueProperties value) then
+                Error "Checked source inputs contain duplicate JSON properties."
+            elif (Json.prop "schema" value |> Option.bind Json.tryAsInt64) <> Some 2L then
+                Error "Checked source attribution requires a retained schema-2 source-input receipt."
+            else
+                match memberText "project" value, rows "sourcesInCheckOrder" text value,
+                      rows "directSources" text value, rows "dependencySources" text value,
+                      rows "files" file value, rows "archives" file value,
+                      Json.prop "selectedPlatform" value |> Option.bind platform,
+                      rows "sharedBufferOrigins" origin value,
+                      memberText "sourceProofInvocation" value, memberText "sourceQuerySha256" value,
+                      memberText "sourceDischargeSha256" value with
+                | Some project, Some sources, Some direct, Some dependencies, Some files, Some archives,
+                  Some platform, Some origins, Some invocation, Some querySha256, Some dischargeSha256 ->
+                    Ok { Project = project; Sources = sources; Direct = direct; Dependencies = dependencies
+                         Files = files; Archives = archives; Platform = platform; Origins = origins
+                         Invocation = invocation; QuerySha256 = querySha256; DischargeSha256 = dischargeSha256 }
+                | _ -> Error "Checked source inputs have missing or malformed membership or proof fields.")
 
     let private obligationRows (json: string) =
         let root = parseJson "06a_obligations.json" json
@@ -505,6 +587,10 @@ module SubstantiationProof =
             |> Array.distinct
         sharedBufferPlacementDeclarations platformFiles
 
+    let private obligationFile source =
+        let location = Regex.Match(source, @"^(?<path>.+):[0-9]+:[0-9]+$")
+        if location.Success then Some location.Groups["path"].Value else None
+
     let private origins (sourcePaths: string array) (harnessPath: string) (obligations: (string * string) array) =
         let canonical location (path: string) =
             if String.IsNullOrWhiteSpace path || not (Path.IsPathFullyQualified path) then
@@ -550,11 +636,13 @@ module SubstantiationProof =
             | None -> ()
         obligations
         |> Array.map (fun (anchor, source) ->
-            let location = Regex.Match(source, @"^(?<path>.+):[0-9]+:[0-9]+$")
-            if location.Success then
-                let path = canonical source location.Groups["path"].Value
-                anchor, if libraryPaths.Contains path then Library elif path = harness then Harness else Dependency
-            else
+            match obligationFile source with
+            | Some path ->
+                let path = canonical source path
+                if libraryPaths.Contains path then anchor, Library
+                elif path = harness then anchor, Harness
+                else fail Diagnostics.SubstantiationProofInvalid source "The file origin is outside the bound library and harness and has no authenticated dependency receipt."
+            | None ->
                 match matchSharedBufferObligation anchor source with
                 | None ->
                     fail Diagnostics.SubstantiationProofInvalid source "An obligation source must retain its file:line:column location."
@@ -592,6 +680,52 @@ module SubstantiationProof =
                         anchor, origin)
         |> Map.ofArray
 
+    let private checkedOrigins library harness (inputs: CheckedSourceInputs) obligations =
+        let direct = Set.ofList inputs.Direct
+        let dependencies = Set.ofList inputs.Dependencies
+        let published = inputs.Origins |> List.map (fun origin -> origin.Anchor, origin) |> Map.ofList
+        let isFile source = obligationFile source |> Option.isSome
+        let withoutFile = obligations |> Array.filter (snd >> isFile >> not) |> Array.map fst |> Set.ofArray
+        if inputs.Direct <> (Array.toList library @ [harness]) ||
+           direct.Count <> inputs.Direct.Length then
+            Error "Checked direct source order differs from the bound library and harness."
+        elif not (Set.isEmpty (Set.intersect direct dependencies)) then
+            Error "A checked source is supplied by both the direct project and a dependency."
+        elif inputs.Dependencies.Length <> dependencies.Count ||
+             List.distinct (inputs.Dependencies @ inputs.Direct) <> inputs.Sources then
+            Error "The authenticated suppliers do not match the ordered checked sources."
+        elif published.Count <> inputs.Origins.Length ||
+             (published |> Map.keys |> Set.ofSeq) <> withoutFile then
+            Error "Published synthetic origins do not correspond one-to-one with retained source obligations."
+        else
+            let role path =
+                if path = harness then Some Harness
+                elif direct.Contains path then Some Library
+                elif dependencies.Contains path then Some Dependency
+                else None
+            let sourceOwner anchor source =
+                match obligationFile source, inputs.Platform with
+                | Some path, _ ->
+                    match role path with
+                    | Some owner -> Ok owner
+                    | None -> Error $"Obligation '{anchor}' names a file outside the checked source inputs."
+                | None, Some (_, declaredId, path) when Option.isSome (role path) ->
+                    let prefix = declaredId + ":"
+                    match published.TryFind anchor with
+                    | Some origin when origin.Source = source && source.Length >= prefix.Length &&
+                                       source[..prefix.Length - 1] = prefix ->
+                        match origin.Owners |> List.map (fst >> role) |> List.distinct with
+                        | [Some owner] -> Ok owner
+                        | _ -> Error $"Obligation '{anchor}' does not bind one checked source owner role."
+                    | _ -> Error $"Obligation '{anchor}' does not match its selected platform source."
+                | None, _ ->
+                    Error $"Obligation '{anchor}' lacks a selected checked platform declaration."
+            (Ok [], obligations)
+            ||> Array.fold (fun state (anchor, source) ->
+                state |> Result.bind (fun previous ->
+                    sourceOwner anchor source |> Result.map (fun owner -> (anchor, owner) :: previous)))
+            |> Result.map Map.ofList
+
     let private invocation location root =
         match Guid.TryParse(text location "Invocation" root) with
         | true, value when value <> Guid.Empty -> value
@@ -623,18 +757,19 @@ module SubstantiationProof =
 
     /// Inspect the compiler receipt without running a solver. PremisesSatCount is
     /// zero until evaluate supplies the independent SAT(H) evidence.
-    let inspectReceipt (sourcePaths: string array) (harnessPath: string) (obligationsJson: string) (query: string) (receiptJson: string) : Result<ProofSummary, Diagnostics.Refusal> =
+    let private inspectProof
+        (inputs: CheckedSourceInputs option) (sourcePaths: string array) (harnessPath: string)
+        (obligationsJson: string) (query: string) (receiptJson: string) =
         protect Diagnostics.SubstantiationProofInvalid "06c_psg_discharge.json" (fun () ->
             let location = "06c_psg_discharge.json"
             let invalid message = fail Diagnostics.SubstantiationProofInvalid location message
             let obligations = obligationRows obligationsJson
-            let attribution = origins sourcePaths harnessPath obligations
             let ids = Array.map fst obligations
             let premises = extractPremises (List.ofArray ids) query |> unwrap
             let root = parseJson location receiptJson
             uniqueProperties location root
             if text location "Stage" root <> "psg" then invalid "The receipt is not the source PSG discharge stage."
-            invocation location root |> ignore
+            let proofInvocation = invocation location root
             let queryHash = hashText query
             // Composer's source protocol binds both input and query to 06b;
             // 06a has its own manifest digest and exact anchor correspondence.
@@ -650,6 +785,17 @@ module SubstantiationProof =
                 let anchor = text location "Anchor" outcome
                 if text location "Source" outcome <> sources[anchor] then
                     invalid $"Outcome '{anchor}' does not retain its obligation's source identity."
+            let attribution =
+                match inputs with
+                | None -> origins sourcePaths harnessPath obligations
+                | Some checkedInputs ->
+                    if checkedInputs.Invocation <> proofInvocation.ToString("D") ||
+                       not (sameDigest checkedInputs.QuerySha256 queryHash) ||
+                       not (sameDigest checkedInputs.DischargeSha256 (hashText receiptJson)) then
+                        invalid "Checked source inputs do not bind the exact proof invocation, query and discharge."
+                    match checkedOrigins sourcePaths harnessPath checkedInputs obligations with
+                    | Ok rows -> rows
+                    | Error reason -> invalid reason
             let results = outcomes |> Array.map (text location "Verdict")
             let pending = results |> Array.filter (fun verdict -> verdict <> "unsat" && verdict <> "sat") |> Array.length
             let refuted = results |> Array.filter ((=) "sat") |> Array.length
@@ -667,7 +813,11 @@ module SubstantiationProof =
               TotalObligations = ids.Length; DischargedUnsatCount = discharged; PendingOpenCount = pending; RefutedCount = refuted
               PremisesSatCount = 0; ObligationsSha256 = hashText obligationsJson; QuerySha256 = queryHash; ReceiptSha256 = hashText receiptJson
               PremisesQuerySha256 = hashText premises; PremisesOutputSha256 = hashText ""
-              CompilerPremiseReceiptsCount = 0; CompilerNonVacuityReceiptsCount = 0; StageReceipts = [||]; Solver = solver })
+              CompilerPremiseReceiptsCount = 0; CompilerNonVacuityReceiptsCount = 0; StageReceipts = [||]; Solver = solver }, attribution)
+
+    let inspectReceipt sourcePaths harnessPath obligationsJson query receiptJson =
+        inspectProof None sourcePaths harnessPath obligationsJson query receiptJson
+        |> Result.map fst
 
     /// Bind every compiler-owned conditional query and its retained receipt/output
     /// to the same source proof invocation and cvc5 identity as the discharge.
@@ -768,11 +918,11 @@ module SubstantiationProof =
 
     /// Evaluate precisely the retained source evidence and independently check SAT(H).
     /// The explicit artifacts directory owns every newly written proof file.
-    let evaluate (sourcePaths: string array) (harnessPath: string) (artifactsDirectory: string) : Result<ProofSummary, Diagnostics.Refusal> =
+    let internal evaluateWithInputs inputs (sourcePaths: string array) (harnessPath: string) (artifactsDirectory: string) : Result<ProofSummary, Diagnostics.Refusal> =
         protect Diagnostics.SubstantiationProofInvalid artifactsDirectory (fun () ->
             let read name = File.ReadAllText(Path.Combine(artifactsDirectory, name))
             let obligations, query, receipt = read "06a_obligations.json", read "06b_obligations.smt2", read "06c_psg_discharge.json"
-            let summary = inspectReceipt sourcePaths harnessPath obligations query receipt |> unwrap
+            let summary, _ = inspectProof inputs sourcePaths harnessPath obligations query receipt |> unwrap
             if not (hasCurrentSolverArguments summary.Solver) then
                 fail Diagnostics.SubstantiationProofInvalid "06c_psg_discharge.json" "New source proof evidence requires the compiler's 25000 ms per-query cvc5 limit."
             let premiseCount, nonVacuityCount, stages = inspectStages artifactsDirectory obligations receipt summary.Solver
@@ -796,8 +946,11 @@ module SubstantiationProof =
                 PremisesOutputSha256 = hashText output
                 CompilerPremiseReceiptsCount = premiseCount; CompilerNonVacuityReceiptsCount = nonVacuityCount; StageReceipts = stages })
 
+    let evaluate sourcePaths harnessPath artifactsDirectory =
+        evaluateWithInputs None sourcePaths harnessPath artifactsDirectory
+
     /// Revalidate stored evidence without substituting a new proof run for it.
-    let validateStoredEvidence (sourcePaths: string array) (harnessPath: string) (summary: ProofSummary) (artifactsDirectory: string) : Result<unit, Diagnostics.Refusal> =
+    let internal validateStoredEvidenceWithInputs inputs (sourcePaths: string array) (harnessPath: string) (summary: ProofSummary) (artifactsDirectory: string) =
         protect Diagnostics.SubstantiationProofInvalid artifactsDirectory (fun () ->
             let read name = File.ReadAllText(Path.Combine(artifactsDirectory, name))
             let invalid name = fail Diagnostics.SubstantiationProofInvalid (Path.Combine(artifactsDirectory, name)) "The retained proof artifact or its manifest digest has changed."
@@ -809,7 +962,7 @@ module SubstantiationProof =
                 let path = Path.Combine(artifactsDirectory, name)
                 if not (File.Exists path) || not (sameDigest (hashFile path) digest) then invalid name
             let obligations, receipt = read "06a_obligations.json", read "06c_psg_discharge.json"
-            let parsed = inspectReceipt sourcePaths harnessPath obligations (read "06b_obligations.smt2") receipt |> unwrap
+            let parsed, attribution = inspectProof inputs sourcePaths harnessPath obligations (read "06b_obligations.smt2") receipt |> unwrap
             let normalized =
                 { summary with PremisesSatCount = 0; LibraryPremisesSatCount = 0; PremisesOutputSha256 = hashText ""
                                CompilerPremiseReceiptsCount = 0; CompilerNonVacuityReceiptsCount = 0; StageReceipts = [||] }
@@ -820,4 +973,13 @@ module SubstantiationProof =
                 invalid "06c_psg_premises_*/06c_psg_nonvacuity_*"
             checkPremisesOutput summary.TotalObligations (read "06b_premises_sat.stdout")
             if not (String.IsNullOrWhiteSpace(read "06b_premises_sat.stderr")) then invalid "06b_premises_sat.stderr"
-            checkSolver summary.Solver)
+            checkSolver summary.Solver
+            inputs |> Option.map (fun checkedInputs ->
+                let placementSources =
+                    checkedInputs.Origins |> List.map (fun row -> row.Anchor, List.tryHead row.Owners) |> Map.ofList
+                attribution |> Map.filter (fun _ owner -> owner = Library)
+                |> Map.map (fun anchor _ -> placementSources.TryFind anchor |> Option.flatten)))
+
+    let validateStoredEvidence sourcePaths harnessPath summary artifactsDirectory =
+        validateStoredEvidenceWithInputs None sourcePaths harnessPath summary artifactsDirectory
+        |> Result.map ignore

@@ -1681,6 +1681,31 @@ let ``indeterminate premise solver responses are refused with FS9240`` verdict =
     SubstantiationProof.evaluate proofSources proofHarnessPath work |> refused "FS9240"
     Assert.Equal(verdict, File.ReadAllText(Path.Combine(work, "06b_premises_sat.stdout")).Trim())
 
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``coherent unselected file cannot acquire dependency proof ownership`` exists =
+    let work = scratch "unselected-proof-source"
+    let path = Path.Combine(work, "Unselected.clef")
+    if exists then File.WriteAllText(path, "module Unselected\n")
+    let query = queryBlock "first" "true"
+    let original = obligations [ "first" ]
+    let discharge = receipt query [ "first", "unsat" ]
+    let inspect = SubstantiationProof.inspectReceipt proofSources proofHarnessPath
+    let changed = path + ":2:1"
+    let changedObligations = original.Replace(proofSource, changed)
+    let changedDischarge = discharge.Replace(proofSource, changed)
+    let summary = inspect original query discharge |> accepted
+    Assert.Equal(1, summary.LibraryObligations)
+    match inspect changedObligations query changedDischarge with
+    | Error refusal ->
+        Assert.Contains("FS9237: The file origin is outside the bound library and harness", refusal.Text)
+    | Ok _ -> failwith "An unselected file acquired proof ownership."
+    match inspect changedObligations query discharge with
+    | Error refusal ->
+        Assert.Contains("does not retain its obligation's source identity", refusal.Text)
+    | Ok _ -> failwith "Different obligation and outcome source identities were accepted."
+
 let private compilerStageFixture () =
     let work = scratch "compiler-stage-receipts"
     let solver = cvc5OnPath ()
