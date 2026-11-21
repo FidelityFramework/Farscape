@@ -67,21 +67,22 @@ let printUnemittedMacros (result: GenerationResult) =
             printColorLine $"  {macro.Name}: {FidelityCodeGenerator.describeUnemittedMacroKind macro.Kind}" ConsoleColor.Yellow
         printLine ""
 
-let runGeneration (options: GenerationOptions) : Result<GenerationResult, Diagnostics.Refusal> =
+let runGeneration retainDelta (options: GenerationOptions) : Result<GenerationResult, Diagnostics.Refusal> =
     // Show generating message
     printHeader "Generating Clef bindings..."
     printLine ""
 
-    match BindingGenerator.generateBindingsDiagnosed options with
+    match BindingGenerator.generateBindingsWithDeltaDiagnosed options retainDelta with
     | Error refusal ->
         Error refusal
-    | Ok result ->
+    | Ok (result, delta) ->
         printLine ""
         printColorLine "Generation Complete" ConsoleColor.Green
         printLine ""
         printColorLine $"Parsed {result.DeclarationCount} declarations from header" ConsoleColor.White
         for file in result.OutputFiles do
             printColorLine $"  {file}" ConsoleColor.Cyan
+        delta |> Option.iter (fun path -> printColorLine $"Previous generated sources: {path}" ConsoleColor.Cyan)
         printLine ""
         printUnemittedMacros result
         Ok result
@@ -112,6 +113,7 @@ let generateCommand =
     let defines =    Input.option<string[]> "--defines"       |> alias "-d" |> desc "Preprocessor definitions (e.g., STM32L552xx)" |> def [||]
     let verbose =    Input.option<bool> "--verbose"           |> alias "-v" |> desc "Verbose output" |> def false
     let outputMode = Input.option<string> "--output-mode"     |> alias "-m" |> desc "Output mode: fidelity, fidelity-wrappers" |> def "fidelity"
+    let delta =      Input.option<bool> "--delta"            |> desc "Retain the previous generated sources for review" |> def false
 
     let parseOutputMode (modeStr: string) =
         let lower = modeStr.ToLowerInvariant()
@@ -119,8 +121,9 @@ let generateCommand =
         | "fidelity-wrappers" -> true, Farscape.Core.Types.LP64
         | _ -> false, Farscape.Core.Types.LP64
 
-    let action (header, library, output, ns, includes, defines, verbose, outputMode) =
+    let action (header, library, output, ns, includes, defines, outputMode, (context: ActionContext)) =
         let wrappers, dataModel = parseOutputMode outputMode
+        let retainDelta = delta.GetValue context.ParseResult
         let options = {
             HeaderFile = header
             LibraryName = library
@@ -128,14 +131,14 @@ let generateCommand =
             Namespace = ns
             IncludePaths = includes |> Array.toList
             Defines = defines |> Array.toList
-            Verbose = verbose
+            Verbose = verbose.GetValue context.ParseResult
             GenerateWrappers = wrappers
             DataModel = dataModel
         }
         showHeader()
         showConfiguration options
 
-        match runGeneration options with
+        match runGeneration retainDelta options with
         | Error refusal ->
             showError refusal.Text
             // Each FS91xx refusal's clang location (#186), as project generation prints it.
@@ -150,7 +153,9 @@ let generateCommand =
 
     command "generate" {
         description "Generate Clef bindings for a native library"
-        inputs (header, library, output, ns, includes, defines, verbose, outputMode)
+        inputs (header, library, output, ns, includes, defines, outputMode, Input.context)
+        addInput verbose
+        addInput delta
         setAction action
     }
 
@@ -490,13 +495,14 @@ let projectGenerateCommand =
     let project =   Input.option<FileInfo> "--project"     |> desc "Path to .pilot.toml project file" |> required |> validateFileExists
     let verbose =   Input.option<bool> "--verbose"         |> alias "-v" |> desc "Verbose output" |> def false
     let wrappers =  Input.option<bool> "--wrappers"        |> alias "-w" |> desc "Also generate idiomatic Clef wrappers (Layer 2)" |> def false
+    let delta = Input.option<bool> "--delta" |> desc "Retain the previous generated Clef sources for review" |> def false
 
-    let action (project: FileInfo, verbose, wrappers) =
+    let action (project: FileInfo, verbose, wrappers, delta) =
         showHeader ()
         printHeader "Generating Fidelity bindings from project..."
         printLine ""
 
-        match BindingGenerator.generateFromProjectDiagnosed project.FullName verbose wrappers Farscape.Core.Types.LP64 with
+        match BindingGenerator.generateFromProjectWithDeltaDiagnosed project.FullName verbose wrappers delta Farscape.Core.Types.LP64 with
         | Error refusal ->
             showError refusal.Text
             // Each FS91xx refusal's clang location and pilot key (#195).
@@ -505,12 +511,13 @@ let projectGenerateCommand =
                     printColorLine $"  {line}" ConsoleColor.Red
             if not refusal.Diagnostics.IsEmpty then printLine ""
             1
-        | Ok result ->
+        | Ok (result, review) ->
             printColorLine "Generation Complete" ConsoleColor.Green
             printLine ""
             printColorLine $"Parsed {result.DeclarationCount} declarations" ConsoleColor.White
             for file in result.OutputFiles do
                 printColorLine $"  {file}" ConsoleColor.Cyan
+            review |> Option.iter (fun path -> printColorLine $"Previous generated sources: {path}" ConsoleColor.Cyan)
             printLine ""
             for advisory in result.Advisories do
                 printColorLine $"Advisory: {advisory}" ConsoleColor.Yellow
@@ -520,7 +527,7 @@ let projectGenerateCommand =
 
     command "project" {
         description "Generate bindings from a .pilot.toml project file"
-        inputs (project, verbose, wrappers)
+        inputs (project, verbose, wrappers, delta)
         setAction action
     }
 

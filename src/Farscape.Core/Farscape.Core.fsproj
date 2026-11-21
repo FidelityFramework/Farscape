@@ -46,6 +46,7 @@
     <Compile Include="ErrnoModuleGenerator.fs" />
     <Compile Include="EnumErrorModuleGenerator.fs" />
     <Compile Include="CallbackWrapperGenerator.fs" />
+    <Compile Include="GeneratedSourcePublication.fs" />
     <Compile Include="BindingGenerator.fs" />
     <Compile Include="SubstantiationProof.fs" />
     <Compile Include="SubstantiationBoundary.fs" />

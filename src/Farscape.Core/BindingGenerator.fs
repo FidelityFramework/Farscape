@@ -951,7 +951,7 @@ module BindingGenerator =
 
     /// Generate Clef bindings from a C/C++ header file.
     /// Returns Result to enforce proper error handling - fails fast on parse errors.
-    let private generateBindingsCore (options: GenerationOptions) : Result<GenerationResult, Diagnostics.Refusal> =
+    let private generateBindingsCore (options: GenerationOptions) retainDelta : Result<GenerationResult * string option, Diagnostics.Refusal> =
         logVerbose $"Starting binding generation for {options.HeaderFile}" options.Verbose
         logVerbose $"Target library: {options.LibraryName}" options.Verbose
         logVerbose $"Output directory: {options.OutputDirectory}" options.Verbose
@@ -991,31 +991,37 @@ module BindingGenerator =
                 else []
 
             // Settle every source projection before replacing any generated file.
-            (outputPath, generatedCode) :: wrapperOutputs
+            let sources = (outputPath, generatedCode) :: wrapperOutputs
+            sources
             |> List.map (fun (path, code) -> Path.GetRelativePath(options.OutputDirectory, path), code)
             |> verifyEmittedClefPurity
             |> Result.defaultWith Diagnostics.raiseRefusal
-            Directory.CreateDirectory(options.OutputDirectory) |> ignore
-            for path, code in (outputPath, generatedCode) :: wrapperOutputs do
-                File.WriteAllText(path, code)
+            let owner = GeneratedSourcePublication.Standalone(options.LibraryName, options.Namespace)
+            let packageDir = Path.GetFullPath(Path.Combine(options.OutputDirectory, ".."))
+            let delta =
+                GeneratedSourcePublication.publish owner packageDir options.OutputDirectory options.OutputDirectory retainDelta sources [] []
+                |> Result.defaultWith (Diagnostics.uncoded >> Diagnostics.raiseRefusal)
+            for path, _ in sources do
                 logVerbose $"Binding module written to: {path}" options.Verbose
 
-            Ok {
-                OutputFiles = outputPath :: (wrapperOutputs |> List.map fst)
+            Ok ({
+                OutputFiles = List.map fst sources
                 DeclarationCount = declarations.Length
                 Advisories = []
                 UnemittedMacros = FidelityCodeGenerator.unemittedMacros declarations
-            }
+            }, delta)
 
     /// Generate bindings from one header (`farscape generate`). A failure carries the structured
     /// diagnostics of its FS91xx refusals (#186), whether the parse refuses (a malformed define,
     /// FS9124) or generation raises it (an unmeasured enum, FS9103; a by-value type resolving
     /// nowhere, FS9115), with the exact text `generateBindings` reports as its `Text`.
-    let generateBindingsDiagnosed (options: GenerationOptions) : Result<GenerationResult, Diagnostics.Refusal> =
-        try generateBindingsCore options
+    let generateBindingsWithDeltaDiagnosed (options: GenerationOptions) retainDelta : Result<GenerationResult * string option, Diagnostics.Refusal> =
+        try generateBindingsCore options retainDelta
         with
         | :? Diagnostics.RefusalException as refused -> Error (Diagnostics.prefixed "Binding generation failed: " refused.Refusal)
         | ex -> Error (Diagnostics.uncoded $"Binding generation failed: {ex.Message}")
+
+    let generateBindingsDiagnosed options = generateBindingsWithDeltaDiagnosed options false |> Result.map fst
 
     /// `generateBindingsDiagnosed`, reporting a failure as its text.
     let generateBindings options : Result<GenerationResult, string> =
@@ -1115,13 +1121,12 @@ module BindingGenerator =
 
     /// Generate a canonical .fidproj file for the binding library.
     /// Fully automatic — derives everything from what Farscape already knows.
-    let private generateFidproj
+    let private renderFidproj
         (project: PilotProject)
         (nsPrefix: string)
         (fidprojDir: string)
         (dependencies: string option * string option * string)
-        (allFiles: string list)
-        (verbose: bool) : string =
+        (allFiles: string list) =
         let packageName = nsPrefix
         let platformPath, platformDescription, metadataPath = dependencies
         let relativeSources =
@@ -1184,9 +1189,7 @@ module BindingGenerator =
         let content = sb.ToString()
         let fidprojName = $"{packageName}.fidproj"
         let fidprojPath = Path.Combine(fidprojDir, fidprojName)
-        File.WriteAllText(fidprojPath, content)
-        logVerbose $"Generated fidproj: {fidprojPath}" verbose
-        fidprojPath
+        fidprojPath, content
 
     /// Derive the common namespace prefix from project namespace names.
     /// e.g., ["Fidelity.ROCm.Device"; "Fidelity.ROCm.Memory"] → "Fidelity.ROCm"
@@ -1225,7 +1228,7 @@ module BindingGenerator =
     /// Shared types (referenced by 2+ namespaces) go into a root Types.clef.
     /// Supports multi-header projects: parses each header independently, merges with dedup.
     /// When generateWrappers is true, also generates Layer 2 idiomatic wrappers.
-    let private generateFromProjectCore (aliasRows: string -> TypeMapper.AbiRepr option) (projectPath: string) (verbose: bool) (generateWrappers: bool) (dataModel: PlatformABI) : Result<GenerationResult, Diagnostics.Refusal> =
+    let private generateFromProjectCore (aliasRows: string -> TypeMapper.AbiRepr option) (projectPath: string) (verbose: bool) (generateWrappers: bool) retainDelta (dataModel: PlatformABI) : Result<GenerationResult * string option, Diagnostics.Refusal> =
         let uncoded = Diagnostics.uncoded
         let wrappersRequested (project: PilotTypes.PilotProject) = generateWrappers || project.Output.Mode = "fidelity-wrappers"
         match PilotSerializer.loadFromFileDiagnosed projectPath with
@@ -1982,9 +1985,8 @@ module BindingGenerator =
                 let bridgeDir = Path.Combine(bridgeRoot, bridgeFolder)
                 let callbackPath = Path.Combine(bridgeDir, "Callbacks.clef")
                 let asyncPath = Path.Combine(bridgeDir, "Async.clef")
-                let emittedTexts =
-                    [ for code in Option.toList asyncCompositionContent do yield Path.GetRelativePath(outputDir, asyncPath), code
-                      yield "Types.clef", sharedCode
+                let nativeTexts =
+                    [ yield "Types.clef", sharedCode
                       for (fileName, _, errorOutput) in errorModulePlan do
                           yield fileName, errorOutput
                       for (ns, _, localCode, _, funcCode, wrapperCode) in namespaceCode do
@@ -1997,9 +1999,11 @@ module BindingGenerator =
                       for (path, protoCode) in typedProtocolContents do
                           yield Path.GetRelativePath(outputDir, path), protoCode
                       for code in Option.toList signalCode do
-                          yield Path.Combine("Bridge", "Signals.clef"), code
-                      for code in Option.toList callbackWrapperContent do
-                          yield Path.GetRelativePath(outputDir, callbackPath), code ]
+                          yield Path.Combine("Bridge", "Signals.clef"), code ]
+                let emittedTexts =
+                    [ for code in Option.toList asyncCompositionContent do yield Path.GetRelativePath(outputDir, asyncPath), code
+                      yield! nativeTexts
+                      for code in Option.toList callbackWrapperContent do yield Path.GetRelativePath(outputDir, callbackPath), code ]
                 verifyEmittedClefPurity emittedTexts |> Result.defaultWith Diagnostics.raiseRefusal
 
                 // ── Static archive artifact (#204) ──────────────────────────
@@ -2045,110 +2049,22 @@ module BindingGenerator =
                             |> Result.defaultWith Diagnostics.raiseRefusal
                         ArchiveInspection.renderLinkProvenanceToml project.Library.Name provenance resolvedBindings [])
 
-                // ── Shared Types.clef (root level) ──────────────────────────
-                let sharedTypesPath = Path.Combine(outputDir, "Types.clef")
-                Directory.CreateDirectory(outputDir) |> ignore
-                File.WriteAllText(sharedTypesPath, sharedCode)
-                logVerbose $"Shared types module: {sharedTypesPath} ({classification.SharedTypes.Count} types)" verbose
-
-                // ── Error module ────────────────────────────────────────────
-                let errorModuleFiles =
-                    errorModulePlan
-                    |> List.map (fun (fileName, label, output) ->
-                        let errorPath = Path.Combine(outputDir, fileName)
-                        File.WriteAllText(errorPath, output)
-                        logVerbose $"{label}: {errorPath}" verbose
-                        errorPath)
-
-                // ── BAREWire descriptors ─────────────────────────────────────
-                // Every struct's StructDescriptor is emitted inside its layout module in the
-                // Types module (wiki 14_Binding_Generation_Gaps §2); there is no separate Descriptors file to write.
-
-                // ── Namespace subfolders ─────────────────────────────────────
-                let nsFiles =
-                    namespaceCode |> List.collect (fun (ns, localTypeCount, localCode, funcCount, funcCode, wrapperCode) ->
-                        let lastSegment = ns.Name.Split('.') |> Array.last
-                        let nsDir = Path.Combine(outputDir, lastSegment)
-                        Directory.CreateDirectory(nsDir) |> ignore
-
-                        // ── Local Types.clef (if namespace has local types) ──
-                        let localTypeFiles =
-                            match localCode with
-                            | None -> []
-                            | Some localCode ->
-                                let localTypesPath = Path.Combine(nsDir, "Types.clef")
-                                File.WriteAllText(localTypesPath, localCode)
-                                logVerbose $"  {lastSegment}/Types.clef ({localTypeCount} types)" verbose
-                                [localTypesPath]
-
-                        // ── Functions .clef ──────────────────────────────────
-                        let funcPath = Path.Combine(nsDir, $"{lastSegment}.clef")
-                        File.WriteAllText(funcPath, funcCode)
-                        logVerbose $"  {lastSegment}/{lastSegment}.clef ({funcCount} functions)" verbose
-
-                        // ── Wrappers (optional) ─────────────────────────────
-                        let wrapperFiles =
-                            match wrapperCode with
-                            | Some wrapperCode ->
-                                let wrapperPath = Path.Combine(nsDir, $"{lastSegment}Api.clef")
-                                File.WriteAllText(wrapperPath, wrapperCode)
-                                logVerbose $"  {lastSegment}/{lastSegment}Api.clef" verbose
-                                [wrapperPath]
-                            | None -> []
-
-                        localTypeFiles @ [funcPath] @ wrapperFiles)
-
-                let typedProtocolFiles = TypedProtocolGenerator.emit typedProtocolContents
-                let signalFiles =
-                    match signalCode with
-                    | None -> []
-                    | Some contents ->
-                        let dir = Path.Combine(outputDir, "Bridge")
-                        Directory.CreateDirectory(dir) |> ignore
-                        let path = Path.Combine(dir, "Signals.clef")
-                        File.WriteAllText(path, contents)
-                        [path]
-                let allFiles = [sharedTypesPath] @ errorModuleFiles @ nsFiles @ typedProtocolFiles @ signalFiles
-
-                // Generate canonical fidproj for the binding library
-                let fidprojFile = generateFidproj project (if typedProtocol then nsPrefix + ".Native" else nsPrefix) fidprojDir dependencies allFiles verbose
-
-                // The link provenance record of a declared static archive (#204):
-                // <Package>.link-provenance.toml beside <Package>.fidproj.
+                let nativeSources = nativeTexts |> List.map (fun (path, text) -> Path.Combine(outputDir, path), text)
+                let allFiles = List.map fst nativeSources
+                let fidprojFile, fidprojText = renderFidproj project (if typedProtocol then nsPrefix + ".Native" else nsPrefix) fidprojDir dependencies allFiles
                 let linkProvenanceFiles =
-                    match linkProvenance with
-                    | Some contents ->
-                        let provenancePath = Path.ChangeExtension(fidprojFile, ".link-provenance.toml")
-                        File.WriteAllText(provenancePath, contents)
-                        logVerbose $"Link provenance: {provenancePath}" verbose
-                        [provenancePath]
-                    | None -> []
+                    linkProvenance |> Option.toList |> List.map (fun contents -> Path.ChangeExtension(fidprojFile, ".link-provenance.toml"), contents)
+                let bridgeSources =
+                    [ for contents in Option.toList callbackWrapperContent do yield callbackPath, contents
+                      for contents in Option.toList asyncCompositionContent do yield asyncPath, contents ]
+                let bridgeFiles = List.map fst bridgeSources
 
                 // ── Layer 2 Marshaling Bridge package ─────────────────────
-                let layer3Files =
+                let bridgeMetadata =
                     match layer3Req with
                     | None -> []
                     | Some req ->
                         let bridgeName = $"{nsPrefix}.Bridge"
-                        Directory.CreateDirectory(bridgeDir) |> ignore
-
-                        // Callback wrappers file
-                        let callbackFiles =
-                            match callbackWrapperContent with
-                            | Some output ->
-                                File.WriteAllText(callbackPath, output)
-                                logVerbose $"  L2 marshaling: Callbacks.clef" verbose
-                                [callbackPath]
-                            | None -> []
-
-                        let asyncFiles =
-                            match asyncCompositionContent with
-                            | None -> []
-                            | Some output ->
-                                File.WriteAllText(asyncPath, output)
-                                [asyncPath]
-                        let bridgeFiles = callbackFiles @ asyncFiles
-
                         // Generate Bridge fidproj
                         if not bridgeFiles.IsEmpty then
                             let relativeSources =
@@ -2202,8 +2118,6 @@ module BindingGenerator =
                                     let quote value = Fidelity.Data.TOML.Toml.serializeValue (Fidelity.Data.TOML.TomlValue.String value)
                                     sb.AppendLine($"{quote library} = {{ path = {quote relative} }}") |> ignore
                             let bridgeFidprojPath = Path.Combine(fidprojDir, $"{bridgeName}.fidproj")
-                            File.WriteAllText(bridgeFidprojPath, sb.ToString())
-                            logVerbose $"Generated L2 marshaling fidproj: {bridgeFidprojPath}" verbose
 
                             // Generate LAYER3-REPORT.md
                             let report = System.Text.StringBuilder()
@@ -2234,13 +2148,9 @@ module BindingGenerator =
                             let reportPath =
                                 if ctx.NativePointerSurface || cHeaderMode then
                                     let reportDir = Path.Combine(reportRoot, bridgeFolder)
-                                    Directory.CreateDirectory(reportDir) |> ignore
                                     Path.Combine(reportDir, "REPORT.md")
                                 else Path.Combine(fidprojDir, "LAYER3-REPORT.md")
-                            File.WriteAllText(reportPath, report.ToString())
-                            logVerbose $"L2 marshaling report: {reportPath}" verbose
-
-                            bridgeFiles @ [bridgeFidprojPath; reportPath]
+                            [bridgeFidprojPath, sb.ToString(); reportPath, report.ToString()]
                         else []
 
                 let advisories =
@@ -2251,15 +2161,19 @@ module BindingGenerator =
                         [$"Using null_with_reason convention for '{project.Library.Name}'. Functions returning nullable handles call {reasonFn}() on absence; the reason result retains its declared boundary type."]
                     | _ -> []
 
-                let allOutputFiles =
-                    allFiles @ [fidprojFile] @ layer3Files @ linkProvenanceFiles
+                let metadata = [fidprojFile, fidprojText] @ bridgeMetadata @ linkProvenanceFiles
+                let delta =
+                    GeneratedSourcePublication.publish (GeneratedSourcePublication.PilotFile projectPath) fidprojDir outputDir bridgeDir retainDelta nativeSources bridgeSources metadata
+                    |> Result.defaultWith (Diagnostics.uncoded >> Diagnostics.raiseRefusal)
+                let allOutputFiles = allFiles @ [fidprojFile] @ bridgeFiles @ List.map fst bridgeMetadata @ List.map fst linkProvenanceFiles
+                for path in allOutputFiles do logVerbose $"Generated: {path}" verbose
 
-                Ok {
+                Ok ({
                     OutputFiles = allOutputFiles
                     DeclarationCount = declarations.Length
                     Advisories = advisories
                     UnemittedMacros = FidelityCodeGenerator.unemittedMacros declarations
-                }
+                }, delta)
 
     /// The pilot key whose input causes each refusal code that pilot input causes (#184): a
     /// malformed define is a `[library] defines` entry, a record without a value type is
@@ -2281,7 +2195,7 @@ module BindingGenerator =
     /// a failure the pilot checks report directly keeps its text as it is. Each diagnostic a
     /// pilot key causes carries the pilot file and that key; a diagnostic generation keyed
     /// (#195) gets the pilot file bound here.
-    let private projectFailure (projectPath: string) (run: unit -> Result<GenerationResult, Diagnostics.Refusal>) =
+    let private projectFailure (projectPath: string) (run: unit -> Result<'a, Diagnostics.Refusal>) =
         let failure =
             try run ()
             with
@@ -2297,8 +2211,11 @@ module BindingGenerator =
     /// Generate bindings from a `.pilot.toml` project. A failure carries the structured
     /// diagnostics of its FS91xx refusals (#184), with the exact text `generateFromProject`
     /// reports as its `Text`: the public surface an editor reads refusals from.
-    let generateFromProjectDiagnosed projectPath verbose generateWrappers dataModel : Result<GenerationResult, Diagnostics.Refusal> =
-        projectFailure projectPath (fun () -> generateFromProjectCore (TypeMapper.tryScalar dataModel) projectPath verbose generateWrappers dataModel)
+    let generateFromProjectWithDeltaDiagnosed projectPath verbose generateWrappers retainDelta dataModel : Result<GenerationResult * string option, Diagnostics.Refusal> =
+        projectFailure projectPath (fun () -> generateFromProjectCore (TypeMapper.tryScalar dataModel) projectPath verbose generateWrappers retainDelta dataModel)
+
+    let generateFromProjectDiagnosed projectPath verbose generateWrappers dataModel =
+        generateFromProjectWithDeltaDiagnosed projectPath verbose generateWrappers false dataModel |> Result.map fst
 
     /// Surface-contract failures are generation diagnostics, not uncaught tooling exceptions.
     let generateFromProject projectPath verbose generateWrappers dataModel =
@@ -2307,7 +2224,8 @@ module BindingGenerator =
     /// `generateFromProjectDiagnosed` with the profile rows clang's alias measurements are
     /// checked against (FS9118) supplied, everything else unchanged.
     let generateFromProjectCheckingAliasesAgainstDiagnosed (aliasRows: string -> TypeMapper.AbiRepr option) projectPath verbose generateWrappers dataModel =
-        projectFailure projectPath (fun () -> generateFromProjectCore aliasRows projectPath verbose generateWrappers dataModel)
+        projectFailure projectPath (fun () -> generateFromProjectCore aliasRows projectPath verbose generateWrappers false dataModel)
+        |> Result.map fst
 
     /// `generateFromProject` with the profile rows clang's alias measurements are checked
     /// against (FS9118) supplied, everything else unchanged. On an LP64 host every integer row
