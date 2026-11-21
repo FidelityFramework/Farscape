@@ -171,6 +171,24 @@ module FidelityCodeGenerator =
         /// A named type the generator cannot represent (a struct by value, a union): no ABI claim.
         | Unresolved of string
 
+    type private ByValueName =
+        | ExplicitRecordTag of string
+        | OrdinaryTypeName of string
+
+    let private byValueNameOf (typedefs: Map<string, string>) cType =
+        let rec follow visited (spelling: string) =
+            if spelling.Contains '*' || spelling.Contains '(' || spelling.Contains '&' || spelling.Contains '[' then None
+            else
+                let name = TypeMapper.cleanTypeName spelling
+                let bare = spelling.Replace("const ", "").Replace("volatile ", "").Trim()
+                if bare.StartsWith "struct " || bare.StartsWith "union " || bare.StartsWith "class " then
+                    Some (ExplicitRecordTag name)
+                else
+                    match typedefs.TryFind name with
+                    | Some underlying when not (Set.contains name visited) -> follow (Set.add name visited) underlying
+                    | _ -> Some (OrdinaryTypeName name)
+        follow Set.empty cType
+
     let private nullabilityQualifiers = Set.ofList ["_Nonnull"; "_Nullable"; "_Null_unspecified"]
 
     let private cTypeFragments (cType: string) =
@@ -452,8 +470,10 @@ module FidelityCodeGenerator =
                         | CEnum (_, r) -> CEnum (name, r)
                         | resolved -> resolved
                     | _ -> Unresolved name
-        if not (cType.Contains("*") || cType.Contains("&")) && opaqueHandles.Contains cleaned then OpaqueHandle cleaned
-        else
+        match byValueNameOf Map.empty cType with
+        | Some (ExplicitRecordTag tag) -> Unresolved tag
+        | _ when not (cType.Contains("*") || cType.Contains("&")) && opaqueHandles.Contains cleaned -> OpaqueHandle cleaned
+        | _ ->
         match Map.tryFind cleaned delegates with
         | Some d -> functionPointer d.ReturnType (d.Parameters |> List.map snd)
         | None ->
@@ -621,22 +641,13 @@ module FidelityCodeGenerator =
     /// typedef when the unit declares one, else a record name. None when the type reaches
     /// neither: a record only forward-declared, or defined outside the pilot's declarations.
     let byValueRecordOf (ctx: GenerationContext) (cType: string) : (string * string) option =
-        let rec follow (visited: Set<string>) (spelling: string) =
-            if spelling.Contains '*' || spelling.Contains '(' || spelling.Contains '&' || spelling.Contains '[' then None
-            else
-            let name = TypeMapper.cleanTypeName spelling
-            let bare = spelling.Replace("const ", "").Replace("volatile ", "").Trim()
-            let record () =
-                match ctx.Structs.TryFind name with
-                | Some s when CppParser.isDefinedRecord s -> Some (name, if s.IsUnion then "union" else "struct")
-                | _ when ctx.KnownClasses.ContainsKey name -> Some (name, "C++ class")
-                | _ -> None
-            if bare.StartsWith "struct " || bare.StartsWith "union " || bare.StartsWith "class " then record ()
-            else
-                match ctx.TypedefMap.TryFind name with
-                | Some underlying when not (visited.Contains name) -> follow (visited.Add name) underlying
-                | _ -> record ()
-        follow Set.empty cType
+        match byValueNameOf ctx.TypedefMap cType with
+        | Some (ExplicitRecordTag name | OrdinaryTypeName name) ->
+            match ctx.Structs.TryFind name with
+            | Some record when CppParser.isDefinedRecord record -> Some (name, if record.IsUnion then "union" else "struct")
+            | _ when ctx.KnownClasses.ContainsKey name -> Some (name, "C++ class")
+            | _ -> None
+        | None -> None
 
     /// A C type under the context. A by-value spelling that names a typedef of a defined C
     /// struct or union (`typedef struct __pthread_internal_list {…} __pthread_list_t`, #172)

@@ -141,6 +141,28 @@ let ``buildTypedefMap resolves typedef chains`` () =
     let map = FidelityCodeGenerator.buildTypedefMap decls
     Assert.Equal("long int", map.["__off_t"])
 
+[<Theory>]
+[<InlineData("struct sample", "sample")>]
+[<InlineData("exact_tag_alias", "exact_tag_alias")>]
+[<InlineData("one_more_alias", "one_more_alias")>]
+[<InlineData("const struct sample", "sample")>]
+[<InlineData("struct size_t", "size_t")>]
+[<InlineData("union sample", "sample")>]
+[<InlineData("anonymous_record", "anonymous_record")>]
+[<InlineData("unsized_alias", "unsized_alias")>]
+let ``by-value tags resolve independently of ordinary scalar typedefs`` spelling expected =
+    let typedefs =
+        Map.ofList [ "sample", "long long"; "exact_tag_alias", "struct sample"; "one_more_alias", "exact_tag_alias"
+                     "anonymous_record", "struct anonymous_record"; "unsized_alias", "unknown_name" ]
+    let resolve = FidelityCodeGenerator.resolveCType typedefs Types.LP64 Set.empty Map.empty Map.empty
+    Assert.Equal<FidelityCodeGenerator.ResolvedCType>(FidelityCodeGenerator.Unresolved expected, resolve spelling)
+    match resolve "sample" with
+    | FidelityCodeGenerator.Scalar scalar ->
+        Assert.Equal(TypeMapper.Signed, scalar.Family)
+        Assert.Equal(64, scalar.Bits)
+        Assert.Equal(TypeMapper.Declared, scalar.Stratum)
+    | value -> failwithf "expected a declared scalar for the ordinary typedef, got %A" value
+
 [<Fact>]
 let ``generate produces valid Fidelity binding for simple function`` () =
     let decls = [
