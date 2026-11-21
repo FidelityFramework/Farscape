@@ -2976,8 +2976,29 @@ module FidelityCodeGenerator =
         (openModules: string list)
         : string =
 
-        if ctx.NativePointerSurface then
-            Diagnostics.refuse (nativePointerSurfaceRefusal (Diagnostics.Located.Unknown "experimental_native_pointer_surface is pilot input, not a header declaration"))
+        let groups =
+            if ctx.NativePointerSurface then
+                Error (nativePointerSurfaceRefusal (Diagnostics.Located.Unknown "experimental_native_pointer_surface is pilot input, not a header declaration"))
+            else
+                let emitted = DeclarationAlgebra.cataDeclarations (generationAlgebra ctx namespace' libraryName) declarations
+                let index (scalars, records) origin group =
+                    match group with
+                    | GStruct forms ->
+                        ((scalars, records), forms) ||> List.fold (fun (scalars, records) form ->
+                            match form, origin with
+                            | SubModule (name, _), CppParser.Typedef scalar -> Map.add name scalar.Name scalars, records
+                            | SubModule (name, _), CppParser.Struct record -> scalars, (name, record) :: records
+                            | _ -> scalars, records)
+                    | _ -> scalars, records
+                let scalars, records = List.fold2 index (Map.empty, []) declarations emitted
+                match records |> List.tryPick (fun (name, record) -> Map.tryFind name scalars |> Option.map (fun scalar -> name, record, scalar)) with
+                | Some (name, record, scalar) ->
+                    let kind = if record.IsUnion then "union" else "struct"
+                    Error (Diagnostics.diagnostic Diagnostics.PublicStorageModuleCollision
+                               $"Generated module '{namespace'}.{name}' would be declared by both scalar typedef '{scalar}' and {kind} '{record.Name}'."
+                               record.Location.Location)
+                | None -> Ok emitted
+            |> Result.defaultWith Diagnostics.refuse
         let opaqueHandleDecls = generateOpaqueHandleDecls handlesToDeclare
         let markerDecls =
             let declared =
@@ -2989,9 +3010,6 @@ module FidelityCodeGenerator =
             |> List.distinct
             |> List.filter (fun name -> not (ctx.ValueStructs.Contains name) && not (handlesToDeclare.Contains name))
             |> List.map OpaqueMarker
-
-        let groups =
-            DeclarationAlgebra.cataDeclarations (generationAlgebra ctx namespace' libraryName) declarations
 
         let enums = groups |> List.collect (function GEnum d -> d | _ -> [])
         let structs =

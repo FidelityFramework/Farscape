@@ -112,6 +112,30 @@ let ``bare selectors prefer a defined tag and require typedef agreement in both 
         System.IO.Directory.Delete(dir, true)
 
 [<Fact>]
+let ``two physical storage modules cannot share a public name even when their layouts match`` () =
+    let dir = TestScratch.create "public-storage-name"
+    let header = System.IO.Path.Combine(dir, "storage.h")
+    let options = [ "c_header_mode = true"; "abi_critical_structs = [\"struct sample\"]"
+                    "[[options.bindings]]"; "name = \"selector_probe\"" ]
+    let run declaration check =
+        System.IO.File.WriteAllText(header, declaration + "\nstruct sample { long long word; };\nint selector_probe(void);\n")
+        clangConfirms header [ "sizeof(sample) == sizeof(struct sample)"; "_Alignof(sample) == _Alignof(struct sample)" ]
+        withPilot [header] options ["selector_probe"] check
+    try
+        run "typedef struct sample sample;" (fun result output ->
+            result |> Result.defaultWith failwith |> ignore
+            let path = System.IO.Directory.GetFiles(output, "Types.clef", System.IO.SearchOption.AllDirectories) |> Array.exactlyOne
+            let lines = System.IO.File.ReadAllLines path
+            Assert.Single(lines |> Array.filter ((=) "module sample =")) |> ignore
+            Assert.Contains(lines, fun line -> line.Contains("let Descriptor : Expr<StructDescriptor>")))
+        run "typedef long long sample;" (fun result output ->
+            let expected = "Binding generation failed: FS9258: Generated module 'Test.Fixture.Types.sample' would be declared by both scalar typedef 'sample' and struct 'sample'."
+            Assert.Equal(Error expected, result |> Result.map ignore)
+            Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+    finally
+        System.IO.Directory.Delete(dir, true)
+
+[<Fact>]
 let ``an unnamed field record becomes a record named from its parent and field`` () =
     let found = records "anonymous-records/wide-counter.h"
     let counter = found.["fx_wide_counter"]

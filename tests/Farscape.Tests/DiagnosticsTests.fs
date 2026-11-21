@@ -479,7 +479,7 @@ let ``each refusal reason has its own code, allocated sequentially from FS9101 w
     // full at FS9199, and allocation continues as FS92xx).
     let numbers = codes |> List.map (snd >> fun code -> int (code.Substring 2)) |> List.sort
     Assert.Equal<int list>([ 9101 .. 9101 + numbers.Length - 1 ], numbers)
-    Assert.Equal(9257, List.last numbers)
+    Assert.Equal(9258, List.last numbers)
 
 [<Fact>]
 let ``Farscape #221 and #222 enforce zero System.Text.Json and zero raw CLR throws across all Farscape.Core and Farscape.Cli modules`` () =

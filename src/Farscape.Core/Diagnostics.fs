@@ -163,6 +163,7 @@ namespace Farscape.Core
 /// | FS9255 | a read-only buffer count parameter duplicates the buffer parameter, is fixed, or is no scalar integer Value parameter |
 /// | FS9256 | a read-only buffer retention contract has an invalid owner, redefinition key, or release target |
 /// | FS9257 | a buffer absence contract lacks a matching read-only buffer contract on the same parameter |
+/// | FS9258 | a record and a scalar typedef both emit a storage module with the same name in one generated namespace |
 ///
 /// Allocation continues past FS9199 as FS92xx: the codes are sequential, four digits after FS.
 /// Each refusal reason has exactly one code and each code one reason.
@@ -620,6 +621,8 @@ module Diagnostics =
     let ReadOnlyBufferRetentionInvalid = "FS9256" // read-only buffer retention owner, redefinition key, or release mismatch (#57, #206)
     [<Literal>]
     let BufferAbsenceInvalid = "FS9257" // buffer absence contract without matching read_only_buffers entry (#57)
+    [<Literal>]
+    let PublicStorageModuleCollision = "FS9258" // two C declarations emit one public storage module name (#225)
 
     // =========================================================================
     // Structured diagnostics (#184)
