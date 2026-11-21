@@ -860,52 +860,44 @@ module SubstantiationBoundary =
         match TomlTable.tryFind "arch" platform, TomlTable.tryFind "os" platform with
         | Some (TomlValue.String "x86_64"), Some (TomlValue.String "linux") when System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture = System.Runtime.InteropServices.Architecture.X64 -> ()
         | _ -> layoutFailure request.FidprojPath "This Clang measurement route requires the declared Linux x86_64 LP64 target on an x86_64 host."
-        let bareRecordName (name: string) =
-            if name.StartsWith("typedef ", StringComparison.Ordinal) then name.Substring(8).Trim()
-            elif name.StartsWith("struct ", StringComparison.Ordinal) then name.Substring(7).Trim()
-            elif name.StartsWith("union ", StringComparison.Ordinal) then name.Substring(6).Trim()
-            else name
         let selected = pilot.Options |> Option.map (fun options -> options.AbiCriticalStructs @ options.ValueStructs) |> Option.toList |> List.concat |> Set.ofList
         let found = Collections.Generic.HashSet<string>()
         let layouts = ResizeArray<LayoutSummary>()
         let enums = ResizeArray<EnumSummary>()
-        let units = ResizeArray<string * CppParser.Declaration list>()
-        let included = ResizeArray<string * CppParser.Declaration list>()
-        let measurements = ResizeArray<string * Map<string, CppParser.StructLayoutInfo>>()
-        for header in headerPaths do
+        let parseHeader header =
             let cppMode = not (pilot.Options |> Option.exists (fun o -> o.CHeaderMode)) && CppParser.detectCppMode header
             let options : CppParser.HeaderParserOptions =
                 { HeaderFile = header; IncludePaths = includes; SystemIncludePaths = systemIncludes
                   Defines = pilot.Library.Defines; Verbose = false; IncludeMacros = false; MacroPrefixes = []
                   IncludeRoot = None; CppMode = cppMode }
             let parsed = match CppParser.parseHeaderFullDiagnosed options with Ok value -> value | Error e -> layoutFailure header e.Text
-            units.Add(header, parsed.Declarations)
-            included.Add(header, parsed.Included)
-            let typedefs =
-                (Map.empty, parsed.Declarations) ||> List.fold (fun acc decl ->
-                    match decl with
-                    | CppParser.Typedef t when not (acc.ContainsKey t.Name) -> acc.Add(t.Name, t.UnderlyingType)
-                    | _ -> acc)
-            let matchesSelected (s: CppParser.StructDecl) (entry: string) =
-                let bare = bareRecordName entry
-                if entry.StartsWith("struct ", StringComparison.Ordinal) then not s.IsUnion && s.Name = bare
-                elif entry.StartsWith("union ", StringComparison.Ordinal) then s.IsUnion && s.Name = bare
-                elif entry.StartsWith("typedef ", StringComparison.Ordinal) then
-                    (s.Name = bare && typedefs.ContainsKey bare)
-                    || (match typedefs.TryFind bare with Some underlying -> bareRecordName underlying = s.Name | None -> false)
-                else
-                    s.Name = bare
-                    || (match typedefs.TryFind bare with Some underlying -> bareRecordName underlying = s.Name | None -> false)
+            header, cppMode, parsed
+        let parsedUnits = headerPaths |> List.map parseHeader
+        let units = parsedUnits |> List.map (fun (header, _, parsed) -> header, parsed.Declarations)
+        let included = parsedUnits |> List.map (fun (header, _, parsed) -> header, parsed.Included) |> Map.ofList
+        let requireAgreement = function Ok () -> () | Error (failure: Diagnostics.Refusal) -> layoutFailure pilotPath failure.Text
+        BindingGenerator.agreeRecords units |> requireAgreement
+        BindingGenerator.agreeEnums included units |> requireAgreement
+        BindingGenerator.requireMeasuredEnumUses included units |> requireAgreement
+        BindingGenerator.requireMeasuredAnonymousRecords units |> requireAgreement
+        let selections =
+            if selected.IsEmpty then Map.empty
+            else
+                let merged = units |> List.map snd |> DeclarationAlgebra.mergeDeclarations
+                let ctx = FidelityCodeGenerator.buildGenerationContext merged Types.LP64 Map.empty
+                match BindingGenerator.measurementAssignments ctx included merged units (Set.toList selected) with
+                | Error reason -> layoutFailure pilotPath reason
+                | Ok records -> records |> List.map (fun (header, entries) -> header, Map.ofList entries) |> Map.ofList
+        let measurements = ResizeArray<string * Map<string, CppParser.StructLayoutInfo>>()
+        for header, cppMode, parsed in parsedUnits do
+            let recordBySelector = selections |> Map.tryFind header |> Option.defaultValue Map.empty
+            let matchesSelected (s: CppParser.StructDecl) entry = recordBySelector.TryFind entry = Some s.Name
             let records = parsed.Declarations |> List.choose (function CppParser.Struct s when CppParser.isDefinedRecord s -> Some s | _ -> None)
             let required = records |> List.filter (fun s -> s.Measured.IsSome || (selected |> Set.exists (matchesSelected s)))
             let named = required |> List.filter (fun s -> s.Anonymous.IsNone)
-            let spellings = named |> List.map (fun s ->
-                if typedefs.ContainsKey s.Name then "typedef " + s.Name
-                elif s.IsUnion then "union " + s.Name
-                elif not cppMode then "struct " + s.Name
-                else s.Name)
             let measured =
-                match CppParser.extractStructLayoutsForModeDiagnosed header includes systemIncludes pilot.Library.Defines spellings cppMode false with
+                let names = named |> List.map (fun (record: CppParser.StructDecl) -> record.Name)
+                match CppParser.measureSelectedRecords header includes systemIncludes pilot.Library.Defines cppMode false parsed names with
                 | Ok value -> value
                 | Error e -> layoutFailure header e.Text
             measurements.Add(header, measured)
@@ -926,11 +918,6 @@ module SubstantiationBoundary =
                         enums.Add { Header = header; Name = e.Name; WidthBits = value.Bits; Signed = value.IsSigned }
                     | _ -> layoutFailure header $"Enum '{e.Name}' has no measured width and signedness."
                 | _ -> ()
-        let requireAgreement = function Ok () -> () | Error (failure: Diagnostics.Refusal) -> layoutFailure pilotPath failure.Text
-        BindingGenerator.agreeRecords (List.ofSeq units) |> requireAgreement
-        BindingGenerator.agreeEnums (Map.ofSeq included) (List.ofSeq units) |> requireAgreement
-        BindingGenerator.requireMeasuredEnumUses (Map.ofSeq included) (List.ofSeq units) |> requireAgreement
-        BindingGenerator.requireMeasuredAnonymousRecords (List.ofSeq units) |> requireAgreement
         match BindingGenerator.agreeMeasurements (List.ofSeq measurements) with
         | Ok _ -> ()
         | Error reason -> layoutFailure pilotPath reason

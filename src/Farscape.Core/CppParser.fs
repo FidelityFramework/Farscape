@@ -1118,13 +1118,14 @@ module CppParser =
         (includeRoot: string option)
         (verbose: bool)
         (enrichFunction: (string * string) list option -> JsonValue -> FunctionDecl -> Result<FunctionDecl, Diagnostics.Refusal>)
-        : Result<Declaration list * Set<string> * Declaration list, Diagnostics.Refusal> =
+        : Result<Declaration list * (Set<string> * Set<string>) * Declaration list, Diagnostics.Refusal> =
 
         let results = ResizeArray<Declaration>()
         let mutable astError : Diagnostics.Refusal option = None
         // Enums and records named only by a typedef (`typedef enum { ... } T;`,
         // `typedef union { ... } T;`): spelled `T`, not `enum T` or `union T`.
-        let typedefNamedTags = System.Collections.Generic.HashSet<string>()
+        let mutable typedefNamedRecords = Set.empty
+        let mutable typedefNamedEnums = Set.empty
         // Typedefs and enums this unit's own parse sees through its includes but whose files
         // lie outside the library boundary: facts of this same translation unit, kept for
         // resolving its own declarations, never emitted as its declarations.
@@ -1289,7 +1290,7 @@ module CppParser =
                             if structDecl.Name <> "" then structDecl.Name
                             else
                                 let named = getString node "id" |> Option.bind (fun id -> Map.tryFind id anonymousRecordNames) |> Option.defaultValue ""
-                                if named <> "" then typedefNamedTags.Add named |> ignore
+                                if named <> "" then typedefNamedRecords <- Set.add named typedefNamedRecords
                                 named
                         if name = "" then results.Add(Struct structDecl)
                         else
@@ -1309,7 +1310,7 @@ module CppParser =
                             if enumDecl.Name <> "" then enumDecl.Name
                             else
                                 let named = getString node "id" |> Option.bind (fun id -> Map.tryFind id anonymousRecordNames) |> Option.defaultValue ""
-                                if named <> "" then typedefNamedTags.Add named |> ignore
+                                if named <> "" then typedefNamedEnums <- Set.add named typedefNamedEnums
                                 named
                         results.Add(Enum { enumDecl with Name = name })
                     | None -> ()
@@ -1326,7 +1327,7 @@ module CppParser =
                         | _ ->
                             let named = getString node "id" |> Option.bind (fun id -> Map.tryFind id anonymousRecordNames) |> Option.defaultValue ""
                             if named <> "" then
-                                typedefNamedTags.Add named |> ignore
+                                typedefNamedRecords <- Set.add named typedefNamedRecords
                                 Some named
                             else None
                     match resolvedName with
@@ -1497,7 +1498,7 @@ module CppParser =
                                 if enumDecl.Name <> "" then enumDecl.Name
                                 else
                                     let named = getString node "id" |> Option.bind (fun id -> Map.tryFind id anonymousRecordNames) |> Option.defaultValue ""
-                                    if named <> "" then typedefNamedTags.Add named |> ignore
+                                    if named <> "" then typedefNamedEnums <- Set.add named typedefNamedEnums
                                     named
                             if name <> "" then included.Add(Enum { enumDecl with Name = name })
                         | None -> ()
@@ -1529,7 +1530,7 @@ module CppParser =
             |> List.ofSeq
         match astError with
         | Some refusal -> Error refusal
-        | None -> Ok (results, Set.ofSeq typedefNamedTags, included)
+        | None -> Ok (results, (typedefNamedRecords, typedefNamedEnums), included)
 
     // =========================================================================
     // Macro Parsing
@@ -2098,6 +2099,16 @@ module CppParser =
         let args = buildClangArgs options
         runClang args ["-E"; "-dM"; options.HeaderFile] options.Verbose
 
+    let private layoutOperand (selector: string) =
+        if selector.StartsWith("typedef ") then selector.Substring(8)
+        elif selector.StartsWith("union ") || selector.StartsWith("struct ") then selector
+        else "struct " + selector
+
+    let private recordLayoutSelector (typedefNamedRecords: Set<string>) (record: StructDecl) =
+        if typedefNamedRecords.Contains record.Name then "typedef " + record.Name
+        elif record.IsUnion then "union " + record.Name
+        else "struct " + record.Name
+
     /// Run clang with -fdump-record-layouts-simple to extract struct layout info.
     /// Generates a temporary translation unit that forces layout computation for the named structs
     /// by referencing sizeof() for each. Layout data appears on stderr.
@@ -2126,11 +2137,7 @@ module CppParser =
                 let sizeofRefs =
                     structNames
                     |> List.mapi (fun i name ->
-                        let cType =
-                            if name.StartsWith("typedef ") then name.Substring(8)
-                            elif name.StartsWith("union ") || name.StartsWith("struct ") then name
-                            else $"struct {name}"
-                        $"void *_fs_layout_{i} = (void*)sizeof({cType});")
+                        $"void *_fs_layout_{i} = (void*)sizeof({layoutOperand name});")
                     |> String.concat "\n"
                 File.WriteAllText(tempFile, $"{includeDirective}\n{sizeofRefs}\n")
 
@@ -2714,10 +2721,7 @@ module CppParser =
                 byName.TryFind origin.Parent |> Option.bind (outermost (visited.Add s.Name))
             | Some _ -> None
         let roots = (anonymous @ attributed @ reaching @ padded) |> List.choose (outermost Set.empty) |> List.distinctBy _.Name
-        let spelling (s: StructDecl) =
-            if typedefNamed.Contains s.Name then s.Name
-            elif s.IsUnion then "union " + s.Name
-            else "struct " + s.Name
+        let spelling record = recordLayoutSelector typedefNamed record |> layoutOperand
         // The copy of each attributed record without its attributes (#174), or why none is faithful.
         let copyName (ordinal: int) = $"__farscape_unattributed_{ordinal}"
         let copies : (StructDecl * Result<int * string * string list, string>) list =
@@ -3111,9 +3115,27 @@ module CppParser =
         /// through includes outside the library boundary; facts for resolving this unit's
         /// declarations, never declarations of the unit.
         Included: Declaration list
+        /// Names Clang assigned from the declaring typedef of an otherwise unnamed record.
+        TypedefNamedRecords: Set<string>
         /// Clang built-in type aliases this unit's function results spell, read through clang.
         Aliases: ClangTypeAlias list
     }
+
+    let measureSelectedRecords header includes systemIncludes defines cppMode verbose (unit: ParseResult) names =
+        let wanted = Set.ofList names
+        let records =
+            unit.Declarations |> List.choose (function
+                | Struct record when wanted.Contains record.Name && isDefinedRecord record -> Some record
+                | _ -> None)
+            |> List.groupBy _.Name |> Map.ofList
+        let select name =
+            match records.TryFind name with
+            | Some [record] -> Ok (recordLayoutSelector unit.TypedefNamedRecords record)
+            | Some _ -> Error (Diagnostics.uncoded $"Pilot header '{header}' has multiple physical record definitions named '{name}'; a bare layout key cannot distinguish them.")
+            | None -> Error (Diagnostics.uncoded $"No defined record '{name}' in pilot header '{header}' for layout measurement.")
+        let selectors = List.fold (fun acc name -> acc |> Result.bind (fun rest -> select name |> Result.map (fun selector -> selector :: rest))) (Ok []) (List.distinct names)
+        selectors |> Result.bind (fun spellings ->
+            extractStructLayoutsForModeDiagnosed header includes systemIncludes defines (List.rev spellings) cppMode verbose)
 
     /// Parse a C/C++ header file and extract all declarations including macros. A failure
     /// carries the diagnostics of each FS91xx refusal with the exact text `parseHeaderFull`
@@ -3141,16 +3163,16 @@ module CppParser =
 
                     match walkAst root options.HeaderFile targetFile options.IncludeRoot options.Verbose (enrichNonNullAttributes options) with
                     | Error refusal -> Error refusal
-                    | Ok (declarations, typedefNamedTags, included) ->
+                    | Ok (declarations, (typedefNamedRecords, typedefNamedEnums), included) ->
                         // Included enums are measured in this same unit, with its own enums.
-                        let measured = measureEnums options typedefNamedTags (declarations @ included)
+                        let measured = measureEnums options typedefNamedEnums (declarations @ included)
                         let declarations, included = List.splitAt declarations.Length measured
                         match anonymousNameCollisions options.HeaderFile (declarations @ included) with
                         | collisions when not collisions.IsEmpty ->
                             Error (Diagnostics.refusalsOf collisions "")
                         | _ ->
                             // Each record's typedef attributes, from this unit's typedefs (#175).
-                            let declarations = annotateTypedefAttributes typedefNamedTags (declarations @ included) declarations
+                            let declarations = annotateTypedefAttributes typedefNamedRecords (declarations @ included) declarations
                             // By-value parameters and results reaching an attributed typedef (#181),
                             // measured in this same unit.
                             let declarations = measureByValueTypedefs options (declarations @ included) declarations
@@ -3158,7 +3180,7 @@ module CppParser =
                             // layout-neutral attribute, records whose field types reach an attributed
                             // typedef and records carrying an unnamed bit-field are measured in this
                             // same unit.
-                            let declarations = measureRecordLayouts options typedefNamedTags declarations
+                            let declarations = measureRecordLayouts options typedefNamedRecords declarations
 
                             if options.Verbose then
                                 printfn "[CppParser] Extracted %d AST declarations" (List.length declarations)
@@ -3200,6 +3222,7 @@ module CppParser =
                                 Templates = templateDeclarations options.HeaderFile root
                                 Macros = macros
                                 Included = included
+                                TypedefNamedRecords = typedefNamedRecords
                                 Aliases = measureResultAliases options declarations included
                             }
                 with
@@ -3221,14 +3244,14 @@ module CppParser =
         let root = JsonValue.Parse astJson
         match walkAst root header (Path.GetFileName header) None false (fun _ _ f -> Ok f) with
         | Error refusal -> Error refusal.Text
-        | Ok (declarations, typedefNamed, included) ->
+        | Ok (declarations, (typedefNamedRecords, _), included) ->
             match anonymousNameCollisions header (declarations @ included) with
-            | [] -> Ok (annotateTypedefAttributes typedefNamed (declarations @ included) declarations)
+            | [] -> Ok (annotateTypedefAttributes typedefNamedRecords (declarations @ included) declarations)
             | collisions -> Error (Diagnostics.refusalsOf collisions "").Text
 
     /// Parse a C/C++ header as one translation unit: its declarations (with macros), and the
     /// typedefs and enums its parse reaches through includes outside the library boundary.
-    let parseHeaderUnitDiagnosed (options: HeaderParserOptions) : Result<Declaration list * Declaration list * ClangTypeAlias list, Diagnostics.Refusal> =
+    let parseBindingUnitDiagnosed (options: HeaderParserOptions) : Result<ParseResult, Diagnostics.Refusal> =
         match parseHeaderFullDiagnosed options with
         | Error err -> Error err
         | Ok result ->
@@ -3236,7 +3259,10 @@ module CppParser =
             if allDecls.IsEmpty then
                 Error (Diagnostics.uncoded $"Parse succeeded but no declarations found in {Path.GetFileName(options.HeaderFile)}.")
             else
-                Ok (allDecls, result.Included, result.Aliases)
+                Ok { result with Declarations = allDecls }
+
+    let parseHeaderUnitDiagnosed (options: HeaderParserOptions) =
+        parseBindingUnitDiagnosed options |> Result.map (fun unit -> unit.Declarations, unit.Included, unit.Aliases)
 
     /// `parseHeaderUnitDiagnosed`, reporting a failure as its text.
     let parseHeaderUnit (options: HeaderParserOptions) : Result<Declaration list * Declaration list * ClangTypeAlias list, string> =

@@ -26,6 +26,92 @@ let private layoutOf (s: CppParser.StructDecl) =
     | None -> failwithf "Record %s carries no clang measurement" s.Name
 
 [<Fact>]
+let ``selected record operands retain named tags and genuine typedef origins`` () =
+    let dir = TestScratch.create "selected-record-origins"
+    let header = System.IO.Path.Combine(dir, "types.h")
+    try
+        System.IO.File.WriteAllText(header, String.concat "\n" [
+            "typedef long long sample;"
+            "struct sample { char bytes[17]; };"
+            "typedef struct sample exact_tag_alias;"
+            "typedef struct { char lead; long long payload; } anonymous_record;"
+            "typedef enum { one } enum_name;"
+            "struct enum_name { char bytes[3]; };"
+            "typedef struct { int first; } twin;"
+            "struct twin { char other[3]; };"])
+        let options : CppParser.HeaderParserOptions =
+            { HeaderFile = header; IncludePaths = []; SystemIncludePaths = []; Defines = []; IncludeRoot = None
+              MacroPrefixes = []; IncludeMacros = false; Verbose = false; CppMode = false }
+        let parsed = CppParser.parseHeaderFullDiagnosed options |> Result.defaultWith (fun e -> failwith e.Text)
+        let ctx = FidelityCodeGenerator.buildGenerationContext parsed.Declarations Types.LP64 Map.empty
+        let select = BindingGenerator.selectedPhysicalRecord ctx ctx.TypedefMap.ContainsKey
+        Assert.Equal<string option>(None, select "typedef sample")
+        Assert.Equal<string option>(None, select "typedef enum_name")
+        Assert.Equal(Some "sample", select "struct sample")
+        Assert.Equal(Some "sample", select "typedef exact_tag_alias")
+        Assert.Equal(Some "anonymous_record", select "typedef anonymous_record")
+        let rows =
+            CppParser.measureSelectedRecords header [] [] [] false false parsed ["sample"; "anonymous_record"; "enum_name"]
+            |> Result.defaultWith (fun e -> failwith e.Text)
+        let row name =
+            let layout = rows |> Map.find name
+            layout.SizeBits, layout.AlignmentBits, layout.FieldOffsetsBits
+        Assert.Equal((136, 8, [0]), row "sample")
+        Assert.Equal((128, 64, [0; 64]), row "anonymous_record")
+        Assert.Equal((24, 8, [0]), row "enum_name")
+        match CppParser.measureSelectedRecords header [] [] [] false false parsed ["twin"] with
+        | Ok _ -> failwith "two inequivalent physical records shared a layout key"
+        | Error e -> Assert.Equal($"Pilot header '{header}' has multiple physical record definitions named 'twin'; a bare layout key cannot distinguish them.", e.Text)
+
+        clangConfirms header ["sizeof(sample) == 8"; "sizeof(struct sample) == 17"; "sizeof(exact_tag_alias) == 17"
+                              "offsetof(anonymous_record, payload) == 8"; "sizeof(struct enum_name) == 3"]
+    finally
+        System.IO.Directory.Delete(dir, true)
+
+[<Fact>]
+let ``bare selectors prefer a defined tag and require typedef agreement in both header orders`` () =
+    let dir = TestScratch.create "bare-record-selection"
+    let parseUnit side target =
+        let folder = System.IO.Path.Combine(dir, side)
+        System.IO.Directory.CreateDirectory folder |> ignore
+        let header = System.IO.Path.Combine(folder, "owner.h")
+        System.IO.File.WriteAllText(System.IO.Path.Combine(folder, "leaf.h"), $"typedef {target} leaf;")
+        System.IO.File.WriteAllText(header, String.concat "\n" [
+            "#include \"leaf.h\""
+            "typedef long long sample;"
+            "struct sample { unsigned char bytes[17]; };"
+            $"typedef {target} direct_choice;"
+            "typedef leaf included_choice;"
+            "typedef struct sample stable_choice;"])
+        let options : CppParser.HeaderParserOptions =
+            { HeaderFile = header; IncludePaths = []; SystemIncludePaths = []; Defines = []; IncludeRoot = None
+              MacroPrefixes = []; IncludeMacros = false; Verbose = false; CppMode = false }
+        let parsed = CppParser.parseHeaderFullDiagnosed options |> Result.defaultWith (fun e -> failwith e.Text)
+        header, parsed
+    try
+        let a = parseUnit "a" "struct sample"
+        let b = parseUnit "b" "long long"
+        for ordered in [[a; b]; [b; a]] do
+            let units = ordered |> List.map (fun (path, unit: CppParser.ParseResult) -> path, unit.Declarations)
+            let included = ordered |> List.map (fun (path, unit) -> path, unit.Included) |> Map.ofList
+            let merged = units |> List.map snd |> DeclarationAlgebra.mergeDeclarations
+            let ctx = FidelityCodeGenerator.buildGenerationContext merged Types.LP64 Map.empty
+            let verify requested expected =
+                let actual = BindingGenerator.measurementAssignments ctx included merged units requested
+                Assert.Equal<Result<(string * (string * string) list) list, string>>(expected, actual)
+            let first = fst ordered.Head
+            let second = fst ordered.Tail.Head
+            verify ["sample"; "stable_choice"] (Ok (ordered |> List.map (fun (path, _) ->
+                path, ["sample", "sample"; "stable_choice", "sample"])))
+            verify ["direct_choice"] (Error $"ABI-critical typedef 'direct_choice' is declared differently by '{first}' and '{second}'; one declaration per pilot is required.")
+            let roles = ordered |> List.map (fun (path, _) ->
+                let role = if path = fst a then "sample" else "no record"
+                $"'{path}' ({role})") |> String.concat ", "
+            verify ["included_choice"] (Error $"ABI-critical typedef 'included_choice' has different record targets across declaring pilot headers: {roles}.")
+    finally
+        System.IO.Directory.Delete(dir, true)
+
+[<Fact>]
 let ``an unnamed field record becomes a record named from its parent and field`` () =
     let found = records "anonymous-records/wide-counter.h"
     let counter = found.["fx_wide_counter"]

@@ -157,6 +157,27 @@ module BindingGenerator =
             | CppParser.UnsupportedArrayType _ -> None)
         |> List.distinct
 
+    let selectedPhysicalRecord (ctx: FidelityCodeGenerator.GenerationContext) declaresTypedef (requested: string) =
+        let byValue name =
+            FidelityCodeGenerator.byValueRecordOf ctx name
+            |> Option.bind (function physical, ("struct" | "union") -> Some physical | _ -> None)
+        if requested.StartsWith("typedef ") then
+            let name = requested.Substring(8).Trim()
+            if not (declaresTypedef name) then None
+            else
+                match FidelityCodeGenerator.resolveCType ctx.TypedefMap ctx.DataModel ctx.OpaqueHandles ctx.Delegates ctx.Enums name with
+                | FidelityCodeGenerator.Unresolved _ -> byValue name
+                | _ -> None
+        elif requested.StartsWith("struct ") || requested.StartsWith("union ") then
+            let tag, name = if requested.StartsWith("struct ") then "struct", requested.Substring(7).Trim() else "union", requested.Substring(6).Trim()
+            match FidelityCodeGenerator.byValueRecordOf ctx requested with
+            | Some (physical, actualKind) when physical = name && actualKind = tag -> Some physical
+            | _ -> None
+        else
+            match ctx.Structs.TryFind requested with
+            | Some record when CppParser.isDefinedRecord record -> Some record.Name
+            | _ -> byValue requested
+
     /// A measured layout is a fact about one translation unit. Each ABI-critical entry names
     /// a record (its tag, or what its typedef stands for); the record is measured in the unit
     /// of every pilot header whose own declaration list defines it and, for a `typedef` entry,
@@ -169,9 +190,9 @@ module BindingGenerator =
     /// requires one effective layout. An entry no pilot header declares is not measured, so
     /// the existing declaration refusals report it instead of a layout some unrelated unit
     /// reaches under the same name.
-    let measurementUnits (ctx: FidelityCodeGenerator.GenerationContext) (merged: CppParser.Declaration list)
+    let measurementAssignments (ctx: FidelityCodeGenerator.GenerationContext) (included: Map<string, CppParser.Declaration list>) (merged: CppParser.Declaration list)
                          (headers: (string * CppParser.Declaration list) list) (requested: string list)
-        : Result<(string * string list) list, string> =
+        : Result<(string * (string * string) list) list, string> =
         let bareName (name: string) = name.Replace("typedef ", "").Replace("struct ", "").Replace("union ", "")
         let definitions (decls: CppParser.Declaration list) =
             decls |> List.choose (function CppParser.Declaration.Struct s when s.Name <> "" && CppParser.isDefinedRecord s -> Some (s.Name, s) | _ -> None) |> Map.ofList
@@ -184,22 +205,32 @@ module BindingGenerator =
         let mergedDefinitions = definitions merged
         let mergedTypedefs = typedefs merged
         let units = headers |> List.map (fun (header, decls) -> header, definitions decls, typedefs decls)
-        // The record an entry names: its tag, the record carrying the typedef's own name, or
-        // what the typedef stands for.
+        let recordContext = { ctx with Structs = mergedDefinitions }
+        let declaringUnits =
+            List.map2 (fun (_, declarations) (header, _, ownTypedefs) ->
+                let reached = included |> Map.tryFind header |> Option.defaultValue []
+                let facts = lazy (FidelityCodeGenerator.buildGenerationContext (declarations @ reached) ctx.DataModel Map.empty)
+                header, ownTypedefs, facts) headers units
         let recordOf (name: string) =
-            let bare = bareName name
-            if name.StartsWith "typedef " then
-                let resolved =
-                    if not (mergedTypedefs.ContainsKey bare) then None
-                    else
-                        match FidelityCodeGenerator.resolveCType ctx.TypedefMap ctx.DataModel ctx.OpaqueHandles ctx.Delegates ctx.Enums bare with
-                        | FidelityCodeGenerator.Unresolved record when mergedDefinitions.ContainsKey record -> Some record
-                        | _ -> None
-                match resolved with
-                | Some record -> Some record
-                | None -> if mergedDefinitions.ContainsKey bare then Some bare else None
-            elif mergedDefinitions.ContainsKey bare then Some bare
-            else None
+            if mergedDefinitions.ContainsKey name || name.StartsWith("struct ") || name.StartsWith("union ") then
+                Ok (selectedPhysicalRecord recordContext mergedTypedefs.ContainsKey name)
+            elif not (name.StartsWith "typedef ") then Ok None
+            else
+                let bare = bareName name
+                let targets =
+                    declaringUnits |> List.choose (fun (header, own, facts) ->
+                        if not (own.ContainsKey bare) then None
+                        else
+                            let unit = { facts.Value with Structs = mergedDefinitions }
+                            Some (header, selectedPhysicalRecord unit own.ContainsKey name))
+                match targets |> List.map snd |> List.distinct with
+                | [] -> Ok None
+                | [one] -> Ok one
+                | _ ->
+                    let details = targets |> List.map (fun (header, target) ->
+                        let label = target |> Option.defaultValue "no record"
+                        $"'{header}' ({label})") |> String.concat ", "
+                    Error $"ABI-critical typedef '{bare}' has different record targets across declaring pilot headers: {details}."
         // Every record the descriptor of `record` emits: itself and its by-value nesting.
         let rec closure (visited: Set<string>) (record: string) =
             if visited.Contains record then visited
@@ -281,17 +312,20 @@ module BindingGenerator =
         let assignments =
             requested |> List.map (fun name ->
                 let bare = bareName name
-                let isTypedef = name.StartsWith "typedef "
+                let selector =
+                    if name = bare && not (mergedDefinitions.ContainsKey bare) && mergedTypedefs.ContainsKey bare then "typedef " + bare
+                    else name
+                let isTypedef = selector.StartsWith "typedef "
                 let entryChain = if isTypedef && mergedTypedefs.ContainsKey bare then typedefClosure Set.empty bare |> Set.toList else []
                 let entryDisagreement =
                     units |> List.tryPick (fun (header, defs, tds) ->
                         ignore defs
                         if not (isTypedef && tds.ContainsKey bare) then None
                         else entryChain |> List.tryPick (fun hop -> match entryTypedefAgreement bare header tds hop with Error error -> Some error | Ok () -> None))
-                match entryDisagreement, recordOf name with
-                | Some error, _ -> Error error
-                | None, None -> Ok []
-                | None, Some record ->
+                match entryDisagreement, recordOf selector with
+                | Some error, _ | None, Error error -> Error error
+                | None, Ok None -> Ok []
+                | None, Ok (Some record) ->
                     let declaresTypedef (tds: Map<string, string>) = tds.ContainsKey bare
                     let candidates = units |> List.filter (fun (_, defs, tds) -> defs.ContainsKey record && (not isTypedef || declaresTypedef tds))
                     match candidates with
@@ -307,7 +341,7 @@ module BindingGenerator =
                         candidates |> List.map (fun (header, defs, tds) ->
                             (Ok (), records) ||> List.fold (fun state nested -> state |> Result.bind (fun () -> agreement record header defs nested))
                             |> fun state -> (state, dependencies) ||> List.fold (fun state typedefName -> state |> Result.bind (fun () -> fieldTypedefAgreement record header tds typedefName))
-                            |> Result.map (fun () -> header, name))
+                            |> Result.map (fun () -> header, (name, record)))
                         |> List.fold (fun state item -> state |> Result.bind (fun acc -> item |> Result.map (fun pair -> pair :: acc))) (Ok [])
                         |> Result.map List.rev)
         match assignments |> List.tryPick (function Error error -> Some error | _ -> None) with
@@ -320,6 +354,10 @@ module BindingGenerator =
                 | [] -> None
                 | names -> Some (header, names))
             |> Ok
+
+    let measurementUnits ctx merged headers requested =
+        measurementAssignments ctx Map.empty merged headers requested
+        |> Result.map (List.map (fun (header, assignments) -> header, List.map fst assignments))
 
     /// The known locations among `sources`, in order: a refusal's related declarations.
     let private knownLocations (sources: Diagnostics.Located<Diagnostics.SourceLocation> list) =
@@ -1220,14 +1258,14 @@ module BindingGenerator =
                     if cHeaders then
                         // Native carrier pilots bind the C ABI. pthread.h also contains guarded
                         // C++ cleanup classes, which must not turn its public unions into C++ PODs.
-                        CppParser.parseHeaderUnitDiagnosed {
+                        CppParser.parseBindingUnitDiagnosed {
                             HeaderFile = headerPath; IncludePaths = project.Library.IncludePaths
                             SystemIncludePaths = project.Library.SystemIncludePaths
                             Defines = project.Library.Defines; IncludeRoot = includeRoot
                             MacroPrefixes = project.Library.MacroPrefixes; IncludeMacros = true
                             Verbose = verbose; CppMode = false }
                     else
-                        CppParser.parseHeaderUnitDiagnosed {
+                        CppParser.parseBindingUnitDiagnosed {
                             HeaderFile = headerPath; IncludePaths = project.Library.IncludePaths
                             SystemIncludePaths = project.Library.SystemIncludePaths
                             Defines = project.Library.Defines; IncludeRoot = includeRoot
@@ -1250,16 +1288,17 @@ module BindingGenerator =
                 Error (Diagnostics.prefixed "Failed to parse XML protocols: " (Diagnostics.joined "; " xmlErrors))
             else
 
-                let headerDeclLists = headerResults |> List.choose (function Ok (d, _, _) -> Some d | _ -> None)
+                let parsedUnits = headerResults |> List.choose Result.toOption
+                let headerDeclLists = parsedUnits |> List.map _.Declarations
                 // Clang built-in aliases each unit's function results spell (#171), read by clang.
                 let resultAliases =
-                    List.zip project.Library.Headers (headerResults |> List.choose (function Ok (_, _, a) -> Some a | _ -> None))
+                    List.zip project.Library.Headers (parsedUnits |> List.map _.Aliases)
                     |> Map.ofList
                 // Typedefs and enums each header's own parse reaches through includes: facts of
                 // that unit for resolving its own declarations, never its declarations. An alias
                 // clang canonicalized stands for its canonical type in that unit.
                 let included =
-                    List.zip project.Library.Headers (headerResults |> List.choose (function Ok (_, i, _) -> Some i | _ -> None))
+                    List.zip project.Library.Headers (parsedUnits |> List.map _.Included)
                     |> List.map (fun (header, facts) -> header, facts @ aliasTypedefs (resultAliases |> Map.tryFind header |> Option.defaultValue []))
                     |> Map.ofList
                 // Before the merge discards provenance: one macro definition per pilot.
@@ -1386,41 +1425,27 @@ module BindingGenerator =
                         // the first header's unit may reach a different record under the same name.
                         let probeCtx = FidelityCodeGenerator.buildGenerationContext declarations dataModel Map.empty
                         let units =
-                            measurementUnits probeCtx declarations (List.zip project.Library.Headers headerDeclLists) abiStructNames
+                            measurementAssignments probeCtx included declarations (List.zip project.Library.Headers headerDeclLists) abiStructNames
                             |> Result.defaultWith (fun message ->
                                 Diagnostics.diagnostic Diagnostics.AbiStorageUnitDisagrees message
                                     (Diagnostics.Located.Unknown "the measuring unit and the pilot's declaring header are named in the message")
                                 |> Diagnostics.withPilotKey "options.abi_critical_structs" None
                                 |> Diagnostics.refuse)
                         preflightAbiCritical probeCtx
-                        let headerDeclsByPath = List.zip project.Library.Headers headerDeclLists |> Map.ofList
+                        let parsedByHeader = List.zip project.Library.Headers parsedUnits |> Map.ofList
                         units
-                        |> List.map (fun (headerFile, names) ->
-                            let ownDecls =
-                                match headerDeclsByPath.TryFind headerFile with
-                                | Some declarations -> declarations
+                        |> List.map (fun (headerFile, assignments) ->
+                            let parsed =
+                                match parsedByHeader.TryFind headerFile with
+                                | Some unit -> unit
                                 | None ->
                                     Diagnostics.diagnostic Diagnostics.AbiStorageUnitDisagrees
                                         $"ABI layout measuring unit '{headerFile}' has no parsed declaration list."
                                         (Diagnostics.Located.Unknown "the measuring header is absent from the pilot's parsed declaring units")
                                     |> Diagnostics.withPilotKey "options.abi_critical_structs" None
                                     |> Diagnostics.refuse
-                            let unitTypedefs = (unitFactsWith included headerFile ownDecls).Typedefs
-                            let spelledNames =
-                                names |> List.map (fun req ->
-                                    if req.StartsWith("typedef ") || req.StartsWith("struct ") || req.StartsWith("union ") then req
-                                    elif unitTypedefs.ContainsKey req then "typedef " + req
-                                    else
-                                        let record =
-                                            ownDecls
-                                            |> List.tryPick (function CppParser.Declaration.Struct s when s.Name = req -> Some s | _ -> None)
-                                            |> Option.orElseWith (fun () -> probeCtx.Structs.TryFind req)
-                                        match record with
-                                        | Some record when record.IsUnion -> "union " + req
-                                        | Some _ -> "struct " + req
-                                        | None -> req)
                             let measured =
-                                CppParser.extractStructLayoutsForModeDiagnosed headerFile project.Library.IncludePaths project.Library.SystemIncludePaths project.Library.Defines spelledNames (headerCppMode headerFile) verbose
+                                CppParser.measureSelectedRecords headerFile project.Library.IncludePaths project.Library.SystemIncludePaths project.Library.Defines (headerCppMode headerFile) verbose parsed (List.map snd assignments)
                                 |> Result.mapError (fun refusal ->
                                     if not refusal.Diagnostics.IsEmpty then refusal
                                     else
