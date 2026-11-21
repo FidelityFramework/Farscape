@@ -434,7 +434,7 @@ let private receiptWithTool executable digest version query outcomes =
             [ "Executable", JsonValue.String executable
               "Sha256", JsonValue.String digest
               "Version", JsonValue.String version
-              "Arguments", JsonValue.Array [ JsonValue.String "--lang=smt2"; JsonValue.String "--tlimit=25000" ] ]
+              "Arguments", JsonValue.Array [ JsonValue.String "--lang=smt2"; JsonValue.String "--tlimit-per=25000" ] ]
     let outcomeItems =
         outcomes
         |> List.map (fun (anchor, verdict) ->
@@ -1602,11 +1602,28 @@ let ``receipt digests and solver identities are validated`` () =
     let query = queryBlock "first" "true"
     let document = obligations [ "first" ]
     let original = receipt query [ "first", "unsat" ]
+    let inspect evidence = SubstantiationProof.inspectReceipt proofSources proofHarnessPath document query evidence
+    let withArguments values =
+        Json.parseOrFail original
+        |> jUpdate "Tools" (jUpdateAt 0 (jSet "Arguments" (JsonValue.Array(List.map JsonValue.String values))))
+        |> Json.serialize
+    for limit in [ "--tlimit-per=25000"; "--tlimit=25000" ] do
+        let actual = withArguments [ "--lang=smt2"; limit ] |> inspect |> accepted
+        Assert.Equal<string[]>([| "--lang=smt2"; limit |], actual.Solver.Arguments)
     for broken in
         [ original.Replace(sha query, String.replicate 64 "0")
           original.Replace(String.replicate 64 "a", "not-a-digest")
-          original.Replace("--tlimit=25000", "--tlimit=1") ] do
-        SubstantiationProof.inspectReceipt proofSources proofHarnessPath document query broken |> refused "FS9237"
+          withArguments []
+          withArguments [ "--lang=smt2" ]
+          withArguments [ "--lang=smt2"; "--tlimit-per=1" ]
+          withArguments [ "--lang=smt2"; "--tlimit=1" ]
+          withArguments [ "--tlimit-per=25000"; "--lang=smt2" ]
+          withArguments [ "--tlimit=25000"; "--lang=smt2" ]
+          withArguments [ "--lang=smt2"; "--tlimit-per=25000"; "--incremental" ]
+          withArguments [ "--lang=smt2"; "--tlimit=25000"; "--incremental" ]
+          withArguments [ "--lang=smt2"; "--tlimit-per=25000"; "--tlimit=25000" ]
+          withArguments [ "--lang=smt2"; "--tlimit=25000"; "--tlimit-per=25000" ] ] do
+        broken |> inspect |> refused "FS9237"
 
 let private cvc5OnPath () =
     let path = Environment.GetEnvironmentVariable "PATH"
@@ -1626,6 +1643,9 @@ let ``missing receipt bound solver is refused without substituting a tool`` () =
     let unavailableReceipt = receiptWithTool unavailable (String.replicate 64 "a") "cvc5 missing fixture" query [ "first", "unsat" ]
     File.WriteAllText(Path.Combine(work, "06c_psg_discharge.json"), unavailableReceipt)
     SubstantiationProof.evaluate proofSources proofHarnessPath work |> refused "FS9241"
+    let legacy = unavailableReceipt.Replace("--tlimit-per=25000", "--tlimit=25000")
+    File.WriteAllText(Path.Combine(work, "06c_psg_discharge.json"), legacy)
+    SubstantiationProof.evaluate proofSources proofHarnessPath work |> refused "FS9237"
 
 [<Fact>]
 let ``solver rejects vacuous H even when H and not C is unsat`` () =
@@ -1635,7 +1655,7 @@ let ``solver rejects vacuous H even when H and not C is unsat`` () =
     let query = queryBlock "first" "false"
     let queryPath = Path.Combine(work, "06b_obligations.smt2")
     File.WriteAllText(queryPath, query)
-    let unsat = run work "vacuous-discharge" (ProcessLaunch.startInfo solver [ "--lang=smt2"; "--tlimit=25000"; queryPath ])
+    let unsat = run work "vacuous-discharge" (ProcessLaunch.startInfo solver [ "--lang=smt2"; "--tlimit-per=25000"; queryPath ])
     Assert.Equal("unsat", unsat.Trim())
     File.WriteAllText(Path.Combine(work, "06a_obligations.json"), obligations [ "first" ])
     let compilerReceipt = receiptWithTool solver (ClangToolchain.sha256 solver) version query [ "first", "unsat" ]
@@ -1692,6 +1712,16 @@ let ``compiler premise and nonvacuity receipts bind every retained sidecar`` () 
     Assert.Equal(8, summary.StageReceipts.Length)
     Assert.Equal<string[]>(summary.StageReceipts |> Array.map _.Path |> Array.sort, summary.StageReceipts |> Array.map _.Path)
     SubstantiationProof.validateStoredEvidence proofSources proofHarnessPath summary work |> accepted
+    let legacyArgs = [| "--lang=smt2"; "--tlimit=25000" |]
+    let changedSummary = { summary with Solver = { summary.Solver with Arguments = legacyArgs } }
+    SubstantiationProof.validateStoredEvidence proofSources proofHarnessPath changedSummary work |> refused "FS9237"
+    let receiptPath = Path.Combine(work, "06c_psg_discharge.json")
+    let originalReceipt = File.ReadAllText receiptPath
+    try
+        File.WriteAllText(receiptPath, originalReceipt.Replace("--tlimit-per=25000", "--tlimit=25000"))
+        SubstantiationProof.validateStoredEvidence proofSources proofHarnessPath summary work |> refused "FS9237"
+    finally
+        File.WriteAllText(receiptPath, originalReceipt)
     for digest in summary.StageReceipts do
         let bytes = File.ReadAllBytes digest.Path
         try
@@ -1702,12 +1732,25 @@ let ``compiler premise and nonvacuity receipts bind every retained sidecar`` () 
         finally
             File.WriteAllBytes(digest.Path, bytes)
     SubstantiationProof.validateStoredEvidence proofSources proofHarnessPath summary work |> accepted
+    for path in [ receiptPath
+                  Path.Combine(work, "06c_psg_premises_0.json")
+                  Path.Combine(work, "06c_psg_nonvacuity_0.json") ] do
+        File.WriteAllText(path, File.ReadAllText(path).Replace("--tlimit-per=25000", "--tlimit=25000"))
+    let archived =
+        { summary with
+            Solver = { summary.Solver with Arguments = legacyArgs }
+            ReceiptSha256 = (ClangToolchain.sha256 receiptPath).ToUpperInvariant()
+            StageReceipts =
+                summary.StageReceipts
+                |> Array.map (fun digest -> { digest with Sha256 = (ClangToolchain.sha256 digest.Path).ToUpperInvariant() }) }
+    SubstantiationProof.validateStoredEvidence proofSources proofHarnessPath archived work |> accepted
 
 [<Theory>]
 [<InlineData("Invocation")>]
 [<InlineData("InputSha256")>]
 [<InlineData("QuerySha256")>]
 [<InlineData("SolverIdentity")>]
+[<InlineData("SolverArguments")>]
 [<InlineData("StandardError")>]
 [<InlineData("Anchor")>]
 [<InlineData("Source")>]
@@ -1721,6 +1764,9 @@ let ``compiler conditional receipts refuse mismatched invocation tool query and 
         | "Invocation" -> jSet field (JsonValue.String(Guid.NewGuid().ToString())) doc
         | "InputSha256" | "QuerySha256" -> jSet field (JsonValue.String(String.replicate 64 "0")) doc
         | "SolverIdentity" -> jUpdate "Tools" (jUpdateAt 0 (jSet "Version" (JsonValue.String "cvc5 unrelated version"))) doc
+        | "SolverArguments" ->
+            let historical = JsonValue.Array [ JsonValue.String "--lang=smt2"; JsonValue.String "--tlimit=25000" ]
+            jUpdate "Tools" (jUpdateAt 0 (jSet "Arguments" historical)) doc
         | "StandardError" -> jSet field (JsonValue.String "unexpected solver diagnostic") doc
         | "Anchor" -> jUpdate "Outcomes" (jUpdateAt 0 (jSet field (JsonValue.String "absent-obligation"))) doc
         | "Source" -> jUpdate "Outcomes" (jUpdateAt 0 (jSet field (JsonValue.String(proofHarnessPath + ":2:1")))) doc

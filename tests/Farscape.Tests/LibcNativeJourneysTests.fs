@@ -164,7 +164,8 @@ let private substantiate fx =
     Assert.True(proof.TotalObligations > 0)
     Assert.True(proof.LibraryObligations > 0)
     Assert.True(proof.HarnessObligations > 0)
-    Assert.Equal(proof.TotalObligations, proof.LibraryObligations + proof.HarnessObligations)
+    // The complete census also includes obligations owned by selected dependencies.
+    Assert.True(proof.LibraryObligations + proof.HarnessObligations <= proof.TotalObligations)
     Assert.Equal(proof.TotalObligations, proof.PremisesSatCount)
     Assert.Equal(proof.TotalObligations, proof.DischargedUnsatCount)
     Assert.Equal(proof.LibraryObligations, proof.LibraryPremisesSatCount)

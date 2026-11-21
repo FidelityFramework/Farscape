@@ -597,6 +597,8 @@ module SubstantiationProof =
         | true, value when value <> Guid.Empty -> value
         | _ -> fail Diagnostics.SubstantiationProofInvalid location "The receipt lacks a nonempty compiler invocation identity."
 
+    let private hasCurrentSolverArguments (solver: SolverIdentity) = solver.Arguments = [| "--lang=smt2"; "--tlimit-per=25000" |]
+
     let private solverIdentity location root =
         let invalid message = fail Diagnostics.SubstantiationProofInvalid location message
         let tools = array location "Tools" root
@@ -615,7 +617,7 @@ module SubstantiationProof =
         if not (Path.IsPathFullyQualified solver.Executable) || not (Path.GetFileName(solver.Executable).StartsWith("cvc5", StringComparison.Ordinal))
            || not (isDigest solver.Sha256) || String.IsNullOrWhiteSpace solver.Version
            || not (solver.Version.Contains("cvc5", StringComparison.OrdinalIgnoreCase))
-           || solver.Arguments <> [| "--lang=smt2"; "--tlimit=25000" |] then
+           || (not (hasCurrentSolverArguments solver) && solver.Arguments <> [| "--lang=smt2"; "--tlimit=25000" |]) then
             invalid "The receipt does not bind the required cvc5 executable, SHA-256, version and arguments."
         solver
 
@@ -771,6 +773,8 @@ module SubstantiationProof =
             let read name = File.ReadAllText(Path.Combine(artifactsDirectory, name))
             let obligations, query, receipt = read "06a_obligations.json", read "06b_obligations.smt2", read "06c_psg_discharge.json"
             let summary = inspectReceipt sourcePaths harnessPath obligations query receipt |> unwrap
+            if not (hasCurrentSolverArguments summary.Solver) then
+                fail Diagnostics.SubstantiationProofInvalid "06c_psg_discharge.json" "New source proof evidence requires the compiler's 25000 ms per-query cvc5 limit."
             let premiseCount, nonVacuityCount, stages = inspectStages artifactsDirectory obligations receipt summary.Solver
             for name, digest in [ "06a_obligations.json", summary.ObligationsSha256; "06b_obligations.smt2", summary.QuerySha256; "06c_psg_discharge.json", summary.ReceiptSha256 ] do
                 if not (sameDigest (hashFile (Path.Combine(artifactsDirectory, name))) digest) then
