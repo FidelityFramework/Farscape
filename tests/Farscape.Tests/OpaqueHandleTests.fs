@@ -263,6 +263,18 @@ module IntegrationTests =
         let source = FidelityCodeGenerator.generateModule ctx ctx.OpaqueHandles declarations "Test" "test" "test" []
         Assert.Equal(2, source.Split("type hipStream_t =").Length)
 
+    [<Theory>]
+    [<InlineData("unit", false)>]
+    [<InlineData("user_context", true)>]
+    let ``explicit return handle preserves its pointer ABI and declares only a nominal marker`` (marker: string) (declared: bool) =
+        let binding = pilotBinding "sqlite3_user_data" [ $"return_handle = \"{marker}\"" ]
+        let text = generatedClefWith [ "/usr/include/sqlite3.h" ] binding [ "sqlite3_user_data" ] []
+        let declaration = declarationText text "sqlite3_user_data"
+        Assert.Contains($" : option<CHandle<{marker}>> =", declaration)
+        Assert.Contains("ReturnType = Pointer 64", declarationText text "sqlite3_user_dataDescriptor")
+        let markerDeclaration = $"type {marker} = private | Opaque_{marker}"
+        Assert.Equal((if declared then 1 else 0), text.Split(markerDeclaration).Length - 1)
+
     [<Fact>]
     let ``native header nullability survives macros typedefs and clang attribute indexing`` () =
         let path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "farscape-boundary-" + System.Guid.NewGuid().ToString("N") + ".h")

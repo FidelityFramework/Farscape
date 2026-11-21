@@ -1486,7 +1486,7 @@ module BindingGenerator =
                         |> List.collect (fun ns -> PilotAnalyzer.filterDeclarationsForNamespace ns declarations)
                         |> List.choose (function CppParser.Declaration.Function f -> Some f | _ -> None)
                     let rec markers = function
-                        | CodeAST.Generic("CHandle", CodeAST.Named n) when not (Set.contains n (Set.ofList ["unit"; "int"; "float"; "bool"; "string"])) -> [n]
+                        | CodeAST.Generic("CHandle", CodeAST.Named n) -> [n]
                         | CodeAST.Generic(_, t) -> markers t
                         | CodeAST.FunctionType(args, ret) -> List.collect markers (ret :: args)
                         | _ -> []
@@ -1509,7 +1509,8 @@ module BindingGenerator =
                             let unit = FidelityCodeGenerator.inUnitOf "struct" s.Name { baseCtx with DeclarationUnits = unitTypedefMaps }
                             s.Fields |> List.collect (fun field -> markerFromType unit field.Type)
                         | _ -> [])
-                    let phantomMarkers = Set.ofList (functionMarkers @ structFieldMarkers)
+                    let phantomMarkers =
+                        Set.difference (Set.ofList (functionMarkers @ structFieldMarkers)) (Set.ofList ["unit"; "int"; "float"; "bool"; "string"])
                     { baseCtx with
                         CppClasses =
                             project.CppConfig |> Option.map _.Classes |> Option.defaultValue []
