@@ -1016,11 +1016,12 @@ module BindingGenerator =
         |> Result.defaultWith Diagnostics.raiseRefusal
 
     let private projectDirectoryForOutput outputDir =
-        let fullPath = Path.GetFullPath outputDir
+        let fullPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath outputDir)
         let parent = Directory.GetParent fullPath
-        // Platform packages share the manifest directory above Bindings/<package>.
-        // Standalone generation must keep its manifest with its own output.
-        if not (isNull parent) && parent.Name = "Bindings" then parent.Parent.FullName
+        // The manifest belongs above Bindings for both package-local and shared output.
+        if isNull parent then fullPath
+        elif parent.Name = "Bindings" then parent.Parent.FullName
+        elif Path.GetFileName fullPath = "Bindings" then parent.FullName
         else fullPath
 
     let private tryResolveProjectDependencies (project: PilotProject) directory : Result<string option * string option * string, Diagnostics.Refusal> =

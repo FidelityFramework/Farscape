@@ -521,8 +521,12 @@ module TargetLibrarySeamScaffoldingTests =
         finally
             Directory.Delete(work, true)
 
-    [<Fact>]
-    let ``Static Binding Elision Test preserves byte-identical SQLite Clef and fidproj outputs between dynamic and static archive modes`` () =
+    [<Theory>]
+    [<InlineData("Bindings/", "Fidelity.Sqlite.Boundary.fidproj", "Bindings/Types.clef")>]
+    [<InlineData("Bindings/Native/", "Fidelity.Sqlite.Boundary.fidproj", "Bindings/Native/Types.clef")>]
+    [<InlineData("generated/", "generated/Fidelity.Sqlite.Boundary.fidproj", "Types.clef")>]
+    let ``Static Binding Elision Test preserves byte-identical SQLite Clef and fidproj outputs between dynamic and static archive modes``
+        (output: string, expectedManifest: string, expectedTypes: string) =
         let work = TestHelpers.TestScratch.create "sqlite-static-elision"
         try
             Assert.True(File.Exists "/usr/include/sqlite3.h", "Required system header missing: /usr/include/sqlite3.h")
@@ -548,14 +552,14 @@ module TargetLibrarySeamScaffoldingTests =
 
             let dynDir = Path.Combine(work, "dynamic")
             let dynPilot = Path.Combine(work, "DynamicSqlite.pilot.toml")
-            writeLines dynPilot (sqlitePilotLines dynDir [])
+            writeLines dynPilot (sqlitePilotLines (Path.Combine(dynDir, output)) [])
             ScratchDirectory.within work (fun () -> BindingGenerator.generateFromProjectDiagnosed dynPilot false false Types.LP64)
             |> accepted |> ignore
 
             let staticDir = Path.Combine(work, "static")
             let staticPilot = Path.Combine(work, "StaticSqlite.pilot.toml")
             writeLines staticPilot
-                (sqlitePilotLines staticDir
+                (sqlitePilotLines (Path.Combine(staticDir, output))
                     [ "[library.artifact]"
                       "kind = \"static-archive\""
                       "path = " + quote archivePath
@@ -572,6 +576,12 @@ module TargetLibrarySeamScaffoldingTests =
 
             let dynSurface = readSurface dynDir
             let staticSurface = readSurface staticDir
+            let manifest, manifestBytes =
+                dynSurface
+                |> List.filter (fun (path, _) -> Path.GetExtension path = ".fidproj")
+                |> Assert.Single
+            Assert.Equal(expectedManifest, manifest)
+            Assert.Contains($"    \"{expectedTypes}\"", Encoding.UTF8.GetString manifestBytes)
             Assert.True(dynSurface.Length >= 3)
             Assert.Equal<string list>(dynSurface |> List.map fst, staticSurface |> List.map fst)
             for (relPath, dynBytes), (_, staticBytes) in List.zip dynSurface staticSurface do
