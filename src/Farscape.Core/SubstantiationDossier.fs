@@ -879,7 +879,9 @@ module SubstantiationDossier =
                 libSourcePaths
                 harnessFullPath
                 manifest.FidprojPath
-                correspondence.CheckedLibrarySources
+                (match correspondence.CheckedLibrarySources with
+                 | Some _ as checkedSources -> checkedSources
+                 | None -> invalid obligationsPath "Compiler correspondence requires checked source inputs.")
                 inventory
         if obligations.Length <> manifest.Proof.LibraryObligations then
             invalid obligationsPath ("The obligation inventory attributes " + string obligations.Length + " obligations to the library sources and the manifest records " + string manifest.Proof.LibraryObligations + ".")

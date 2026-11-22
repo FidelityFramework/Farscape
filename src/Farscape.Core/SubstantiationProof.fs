@@ -815,7 +815,7 @@ module SubstantiationProof =
               PremisesQuerySha256 = hashText premises; PremisesOutputSha256 = hashText ""
               CompilerPremiseReceiptsCount = 0; CompilerNonVacuityReceiptsCount = 0; StageReceipts = [||]; Solver = solver }, attribution)
 
-    let inspectReceipt sourcePaths harnessPath obligationsJson query receiptJson =
+    let internal inspectReceipt sourcePaths harnessPath obligationsJson query receiptJson =
         inspectProof None sourcePaths harnessPath obligationsJson query receiptJson
         |> Result.map fst
 
@@ -946,7 +946,7 @@ module SubstantiationProof =
                 PremisesOutputSha256 = hashText output
                 CompilerPremiseReceiptsCount = premiseCount; CompilerNonVacuityReceiptsCount = nonVacuityCount; StageReceipts = stages })
 
-    let evaluate sourcePaths harnessPath artifactsDirectory =
+    let internal evaluate sourcePaths harnessPath artifactsDirectory =
         evaluateWithInputs None sourcePaths harnessPath artifactsDirectory
 
     /// Revalidate stored evidence without substituting a new proof run for it.
@@ -980,6 +980,6 @@ module SubstantiationProof =
                 attribution |> Map.filter (fun _ owner -> owner = Library)
                 |> Map.map (fun anchor _ -> placementSources.TryFind anchor |> Option.flatten)))
 
-    let validateStoredEvidence sourcePaths harnessPath summary artifactsDirectory =
+    let internal validateStoredEvidence sourcePaths harnessPath summary artifactsDirectory =
         validateStoredEvidenceWithInputs None sourcePaths harnessPath summary artifactsDirectory
         |> Result.map ignore
