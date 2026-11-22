@@ -1558,9 +1558,10 @@ let ``source receipt outcomes bind one to one to the complete obligation invento
 let ``source receipt attributes library harness and dependency obligations separately`` () =
     let ids = [ "library"; "harness"; "dependency" ]
     let query = ids |> List.map (fun id -> queryBlock id "true") |> String.concat ""
+    let dependency = Path.Combine(scratchRoot, "dependency", "Imported.clef")
     let origins =
         [| proofSource; proofHarnessPath + ":7:3"
-           Path.Combine(scratchRoot, "dependency", "Imported.clef") + ":4:2" |]
+           dependency + ":4:2" |]
     let inventory =
         Json.parseOrFail(obligations ids)
         |> jUpdate "obligations" (fun arr ->
@@ -1579,9 +1580,37 @@ let ``source receipt attributes library harness and dependency obligations separ
                 |> List.mapi (fun index outcome -> jSet "Source" (JsonValue.String origins[index]) outcome)
                 |> JsonValue.Array
             | other -> other)
-    let summary =
-        SubstantiationProof.inspectReceipt proofSources proofHarnessPath (Json.serialize inventory) query (Json.serialize discharge)
-        |> accepted
+    let inspect inputs =
+        SubstantiationProof.inspectProof inputs proofSources proofHarnessPath
+            (Json.serialize inventory) query (Json.serialize discharge)
+        |> Result.map fst
+    let requireRefusal (message: string) = function
+        | Error (reason: Diagnostics.Refusal) -> Assert.Contains(message, reason.Text)
+        | Ok _ -> failwith "Expected refusal of an unbound source role."
+    let hash (text: string) = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes text))
+    let invocation =
+        match Json.prop "Invocation" discharge with
+        | Some (JsonValue.String value) -> value
+        | _ -> failwith "Expected the proof fixture invocation."
+    let direct = Array.toList proofSources @ [proofHarnessPath]
+    let inputs: SubstantiationProof.CheckedSourceInputs =
+        { Project = Path.ChangeExtension(proofHarnessPath, ".fidproj")
+          Sources = dependency :: direct
+          Direct = direct
+          Dependencies = [dependency]
+          Files = []
+          Archives = []
+          Platform = None
+          Origins = []
+          Invocation = invocation
+          QuerySha256 = hash query
+          DischargeSha256 = hash (Json.serialize discharge) }
+    inspect None |> requireRefusal "outside the bound library and harness"
+    inspect (Some { inputs with Sources = direct; Dependencies = [] })
+    |> requireRefusal "names a file outside the checked source inputs"
+    inspect (Some { inputs with Direct = List.rev direct })
+    |> requireRefusal "Checked direct source order differs"
+    let summary = inspect (Some inputs) |> accepted
     Assert.Equal(3, summary.TotalObligations)
     Assert.Equal(1, summary.LibraryObligations)
     Assert.Equal(1, summary.LibraryDischargedUnsatCount)
@@ -1868,11 +1897,17 @@ let ``native static probe substantiates both solver clauses and both manifest fo
     let manifest =
         File.ReadAllText(Path.Combine(output, "SubstantiationProbe.substantiation.json"))
         |> Substantiation.parseJson |> accepted
+    Assert.Equal(2, manifest.SchemaVersion)
+    let legacy = { manifest with SchemaVersion = 1; SourceInputsSha256 = "" } |> Substantiation.seal
+    let historical = legacy |> Substantiation.toJson |> Substantiation.parseJson |> accepted
+    match Substantiation.validateManifest historical with
+    | Error refusal -> Assert.Contains("Current proof verification requires a sealed checked source-input receipt.", refusal.Text)
+    | Ok _ -> failwith "An archive-only manifest was admitted as current proof evidence."
     Assert.False(manifest.AllowWarnings)
     Assert.True(manifest.WarningsAsErrors)
     Assert.Equal<string[]>([| "CCS8500" |], manifest.ElevatedWarningCodes)
     let arguments = File.ReadAllLines argumentsPath
-    Assert.Equal<string[]>([| manifest.Compiler.Path; "compile"; "--warn-as-error"; "--no-color"; manifest.HarnessProject.Path; "-k"; "-o"; Path.Combine(Path.GetDirectoryName manifest.HarnessProject.Path, "substantiation-root") |], arguments)
+    Assert.Equal<string[]>([| manifest.Compiler.Path; "compile"; "--warn-as-error"; "--no-color"; "--retain-source-inputs"; manifest.HarnessProject.Path; "-k"; "-o"; Path.Combine(Path.GetDirectoryName manifest.HarnessProject.Path, "substantiation-root") |], arguments)
     Assert.Contains($"Library obligations: {manifest.Proof.LibraryObligations};", summary)
     Assert.Contains($"Total obligations: {manifest.Proof.TotalObligations};", summary)
     Assert.True(manifest.Proof.TotalObligations > 0, "the native compiler journey must emit obligations")

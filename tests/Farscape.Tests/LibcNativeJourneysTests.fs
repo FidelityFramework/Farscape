@@ -6,6 +6,7 @@ open System.IO
 open System.IO.Pipes
 open System.Text
 open Fidelity.Data.JSON
+open Fidelity.Data.TOML
 open System.Text.RegularExpressions
 open Xunit
 open Farscape.Core
@@ -276,7 +277,12 @@ let private verifyCompiledProbeProofs (sources: string list) (harness: string) (
         | [| single |] -> single
         | found -> failwithf "Expected exactly one %s*/artifact-receipt.json alongside %s, found [%s]" prefix binary (String.concat "; " found)
     let intermediates = Path.Combine(probeDir, "targets", "intermediates")
-    let summary = SubstantiationProof.evaluate (Array.ofList sources) harness intermediates |> accepted
+    let projectPath = binary + ".fidproj"
+    let project = File.ReadAllText projectPath |> Toml.parse |> Result.defaultWith failwith
+    let projectDigest: Substantiation.FileDigest =
+        { Path = projectPath; Sha256 = ClangToolchain.sha256 projectPath }
+    let _, inputs = Substantiation.readCheckedSourceInputs intermediates projectDigest project None
+    let summary = SubstantiationProof.evaluateWithInputs (Some inputs) (Array.ofList sources) harness intermediates |> accepted
     Assert.Equal(summary.TotalObligations, summary.DischargedUnsatCount)
     Assert.Equal(0, summary.PendingOpenCount)
     Assert.Equal(0, summary.RefutedCount)
@@ -287,7 +293,9 @@ let private compile work name sources =
     let path = project work name "console" sources
     let binary = Path.Combine(work, name)
     let composer = sibling "COMPOSER_DLL" "Composer/src/bin/Debug/net10.0/Composer.dll"
-    let launch = ProcessLaunch.startInfo "dotnet" [ composer; "compile"; "--warn-as-error"; "--no-color"; path; "-k"; "-o"; binary ]
+    let launch =
+        ProcessLaunch.startInfo "dotnet"
+            [ composer; "compile"; "--warn-as-error"; "--no-color"; "--retain-source-inputs"; path; "-k"; "-o"; binary ]
     // Observe the backend's actual opt and LLD invocations, forwarding to fixed real tools.
     let toolDirectory = Path.Combine(work, name + "-tools")
     Directory.CreateDirectory toolDirectory |> ignore

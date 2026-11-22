@@ -389,7 +389,7 @@ module Substantiation =
         let fail message = refuse Diagnostics.SubstantiationManifestMalformed manifest.FidprojPath message
         match manifest.SchemaVersion with
         | 1 when manifest.SourceInputsSha256 = "" -> ()
-        | 2 when Regex.IsMatch(manifest.SourceInputsSha256, "^[a-f0-9]{64}$") -> ()
+        | 2 when Regex.IsMatch(manifest.SourceInputsSha256, @"\A[a-f0-9]{64}\z") -> ()
         | 1 | 2 -> fail "The source input digest is invalid for this substantiation schema version."
         | _ -> fail "Unsupported substantiation schema version."
         if isNull manifest.ElevatedWarningCodes
@@ -502,7 +502,7 @@ module Substantiation =
 
     let private evidencePath path = ScratchDirectory.canonicalEvidencePath path
 
-    let private readCheckedSourceInputs artifacts (harnessProject: FileDigest) project expectedDigest =
+    let internal readCheckedSourceInputs artifacts (harnessProject: FileDigest) project expectedDigest =
         let path = evidencePath (Path.Combine(artifacts, "source-inputs.json"))
         let invalid message = refuse Diagnostics.SubstantiationProofInvalid path message
         if not (File.Exists path) then invalid "The compiler did not retain the checked source-input receipt."
@@ -1441,6 +1441,8 @@ module Substantiation =
     /// that `verifyPsg0` and `verifyWitnessUnits` established during the same pass.
     let private validateManifestEvidence (manifest: Manifest) : Correspondence =
             requireIntegrity manifest
+            if manifest.SchemaVersion <> 2 then
+                refuse Diagnostics.SubstantiationProofInvalid manifest.FidprojPath "Current proof verification requires a sealed checked source-input receipt."
             ScratchDirectory.canonicalEvidencePath manifest.FidprojPath |> ignore
             ScratchDirectory.canonicalEvidencePath (Path.GetDirectoryName manifest.FidprojPath) |> ignore
             for path in [ manifest.ArtifactsDirectory; manifest.Harness.Path; manifest.HarnessProject.Path; manifest.CompilerLog.Path; manifest.Psg0.Path; manifest.WitnessUnits.Path ] do
@@ -1485,13 +1487,10 @@ module Substantiation =
                   "06b_premises_sat.smt2", manifest.Proof.PremisesQuerySha256 ] do
                 checkDigest (Path.Combine(manifest.ArtifactsDirectory, name)) hash
             checkDigest manifest.Proof.Solver.Executable manifest.Proof.Solver.Sha256
-            let checkedInputs =
-                if manifest.SchemaVersion = 2 then
-                    readCheckedSourceInputs manifest.ArtifactsDirectory manifest.HarnessProject project (Some manifest.SourceInputsSha256)
-                    |> snd |> Some
-                else None
+            let _, checkedInputs =
+                readCheckedSourceInputs manifest.ArtifactsDirectory manifest.HarnessProject project (Some manifest.SourceInputsSha256)
             let checkedLibrarySources =
-                SubstantiationProof.validateStoredEvidenceWithInputs checkedInputs listed manifest.Harness.Path manifest.Proof manifest.ArtifactsDirectory
+                SubstantiationProof.validateStoredEvidenceWithInputs (Some checkedInputs) listed manifest.Harness.Path manifest.Proof manifest.ArtifactsDirectory
                 |> required
             let directory = Path.GetDirectoryName manifest.FidprojPath
             let recordedFile kind =

@@ -532,7 +532,8 @@ module SubstantiationDossier =
           "06b_obligations.smt2", manifest.Proof.QuerySha256
           "06c_psg_discharge.json", manifest.Proof.ReceiptSha256
           "06b_premises_sat.smt2", manifest.Proof.PremisesQuerySha256
-          "06b_premises_sat.stdout", manifest.Proof.PremisesOutputSha256 ]
+          "06b_premises_sat.stdout", manifest.Proof.PremisesOutputSha256
+          if manifest.SchemaVersion = 2 then "source-inputs.json", manifest.SourceInputsSha256 ]
         |> List.map (fun (name, digest) -> Path.Combine(manifest.ArtifactsDirectory, name), digest)
 
     /// Every file the manifest records, checked before any deeper validation: an invalid or

@@ -352,7 +352,7 @@ module SubstantiationProof =
     let private verdicts (output: string) =
         output.Split([| '\r'; '\n' |], StringSplitOptions.RemoveEmptyEntries) |> Array.map _.Trim()
 
-    type private ObligationOrigin = Library | Harness | Dependency
+    type internal ObligationOrigin = Library | Harness | Dependency
 
     let internal sharedBufferAnchor =
         Regex(@"^(?:fs9220_(?<form>layout)|fs9221_(?<form>extent|space)|fs9222_(?<form>lifetime)|fs9223_(?<form>exclusivity))_(?<slug>[A-Za-z0-9_]+)$", RegexOptions.Compiled)
@@ -588,7 +588,7 @@ module SubstantiationProof =
         sharedBufferPlacementDeclarations platformFiles
 
     let private obligationFile source =
-        let location = Regex.Match(source, @"^(?<path>.+):[0-9]+:[0-9]+$")
+        let location = Regex.Match(source, @"\A(?<path>.+):[0-9]+:[0-9]+\z")
         if location.Success then Some location.Groups["path"].Value else None
 
     let private origins (sourcePaths: string array) (harnessPath: string) (obligations: (string * string) array) =
@@ -757,7 +757,7 @@ module SubstantiationProof =
 
     /// Inspect the compiler receipt without running a solver. PremisesSatCount is
     /// zero until evaluate supplies the independent SAT(H) evidence.
-    let private inspectProof
+    let internal inspectProof
         (inputs: CheckedSourceInputs option) (sourcePaths: string array) (harnessPath: string)
         (obligationsJson: string) (query: string) (receiptJson: string) =
         protect Diagnostics.SubstantiationProofInvalid "06c_psg_discharge.json" (fun () ->
