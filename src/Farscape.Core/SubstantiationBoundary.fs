@@ -875,6 +875,7 @@ module SubstantiationBoundary =
         let parsedUnits = headerPaths |> List.map parseHeader
         let units = parsedUnits |> List.map (fun (header, _, parsed) -> header, parsed.Declarations)
         let included = parsedUnits |> List.map (fun (header, _, parsed) -> header, parsed.Included) |> Map.ofList
+        let typedefNamedByUnit = parsedUnits |> List.map (fun (header, _, parsed) -> header, parsed.TypedefNamedRecords) |> Map.ofList
         let requireAgreement = function Ok () -> () | Error (failure: Diagnostics.Refusal) -> layoutFailure pilotPath failure.Text
         BindingGenerator.agreeRecords units |> requireAgreement
         BindingGenerator.agreeEnums included units |> requireAgreement
@@ -885,7 +886,7 @@ module SubstantiationBoundary =
             else
                 let merged = units |> List.map snd |> DeclarationAlgebra.mergeDeclarations
                 let ctx = FidelityCodeGenerator.buildGenerationContext merged Types.LP64 Map.empty
-                match BindingGenerator.measurementAssignments ctx included merged units (Set.toList selected) with
+                match BindingGenerator.measurementAssignments ctx included merged units typedefNamedByUnit (Set.toList selected) with
                 | Error reason -> layoutFailure pilotPath reason
                 | Ok records -> records |> List.map (fun (header, entries) -> header, Map.ofList entries) |> Map.ofList
         let measurements = ResizeArray<string * Map<string, CppParser.StructLayoutInfo>>()

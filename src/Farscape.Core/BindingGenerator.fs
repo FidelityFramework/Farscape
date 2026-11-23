@@ -157,26 +157,42 @@ module BindingGenerator =
             | CppParser.UnsupportedArrayType _ -> None)
         |> List.distinct
 
-    let selectedPhysicalRecord (ctx: FidelityCodeGenerator.GenerationContext) declaresTypedef (requested: string) =
+    type private RecordSelection =
+        | PhysicalRecord of string
+        | ForwardDeclaredTag of string
+        | TagKindMismatch of string
+        | NoPhysicalRecord
+
+    let private selectedRecordName = function
+        | PhysicalRecord name -> Some name
+        | ForwardDeclaredTag _ | TagKindMismatch _ | NoPhysicalRecord -> None
+
+    let private selectPhysicalRecord (ctx: FidelityCodeGenerator.GenerationContext) declaresTypedef (requested: string) =
         let byValue name =
-            FidelityCodeGenerator.byValueRecordOf ctx name
-            |> Option.bind (function physical, ("struct" | "union") -> Some physical | _ -> None)
+            match FidelityCodeGenerator.byValueRecordOf ctx name with
+            | Some (physical, ("struct" | "union")) -> PhysicalRecord physical
+            | _ -> NoPhysicalRecord
         if requested.StartsWith("typedef ") then
             let name = requested.Substring(8).Trim()
-            if not (declaresTypedef name) then None
+            if not (declaresTypedef name) then NoPhysicalRecord
             else
                 match FidelityCodeGenerator.resolveCType ctx.TypedefMap ctx.DataModel ctx.OpaqueHandles ctx.Delegates ctx.Enums name with
                 | FidelityCodeGenerator.Unresolved _ -> byValue name
-                | _ -> None
+                | _ -> NoPhysicalRecord
         elif requested.StartsWith("struct ") || requested.StartsWith("union ") then
             let tag, name = if requested.StartsWith("struct ") then "struct", requested.Substring(7).Trim() else "union", requested.Substring(6).Trim()
-            match FidelityCodeGenerator.byValueRecordOf ctx requested with
-            | Some (physical, actualKind) when physical = name && actualKind = tag -> Some physical
-            | _ -> None
+            match ctx.Structs.TryFind name with
+            | Some record when record.IsUnion <> (tag = "union") -> TagKindMismatch record.Name
+            | Some record when CppParser.isDefinedRecord record -> PhysicalRecord record.Name
+            | Some record -> ForwardDeclaredTag record.Name
+            | _ -> NoPhysicalRecord
         else
             match ctx.Structs.TryFind requested with
-            | Some record when CppParser.isDefinedRecord record -> Some record.Name
+            | Some record when CppParser.isDefinedRecord record -> PhysicalRecord record.Name
             | _ -> byValue requested
+
+    let selectedPhysicalRecord ctx declaresTypedef requested =
+        selectPhysicalRecord ctx declaresTypedef requested |> selectedRecordName
 
     /// A measured layout is a fact about one translation unit. Each ABI-critical entry names
     /// a record (its tag, or what its typedef stands for); the record is measured in the unit
@@ -190,9 +206,8 @@ module BindingGenerator =
     /// requires one effective layout. An entry no pilot header declares is not measured, so
     /// the existing declaration refusals report it instead of a layout some unrelated unit
     /// reaches under the same name.
-    let measurementAssignments (ctx: FidelityCodeGenerator.GenerationContext) (included: Map<string, CppParser.Declaration list>) (merged: CppParser.Declaration list)
-                         (headers: (string * CppParser.Declaration list) list) (requested: string list)
-        : Result<(string * (string * string) list) list, string> =
+    let private recordMeasurements (ctx: FidelityCodeGenerator.GenerationContext) (included: Map<string, CppParser.Declaration list>) (merged: CppParser.Declaration list)
+                         (headers: (string * CppParser.Declaration list) list) (typedefNamedByUnit: Map<string, Set<string>>) (requested: string list) =
         let bareName (name: string) = name.Replace("typedef ", "").Replace("struct ", "").Replace("union ", "")
         let definitions (decls: CppParser.Declaration list) =
             decls |> List.choose (function CppParser.Declaration.Struct s when s.Name <> "" && CppParser.isDefinedRecord s -> Some (s.Name, s) | _ -> None) |> Map.ofList
@@ -212,9 +227,14 @@ module BindingGenerator =
                 let facts = lazy (FidelityCodeGenerator.buildGenerationContext (declarations @ reached) ctx.DataModel Map.empty)
                 header, ownTypedefs, facts) headers units
         let recordOf (name: string) =
-            if mergedDefinitions.ContainsKey name || name.StartsWith("struct ") || name.StartsWith("union ") then
-                Ok (selectedPhysicalRecord recordContext mergedTypedefs.ContainsKey name)
-            elif not (name.StartsWith "typedef ") then Ok None
+            if name.StartsWith("struct ") || name.StartsWith("union ") then
+                Ok (selectPhysicalRecord ctx mergedTypedefs.ContainsKey name)
+            elif mergedDefinitions.ContainsKey name then
+                Ok (selectPhysicalRecord recordContext mergedTypedefs.ContainsKey name)
+            elif not (name.StartsWith "typedef ") then
+                match ctx.Structs.TryFind name with
+                | Some record when not (CppParser.isDefinedRecord record) -> Ok (ForwardDeclaredTag record.Name)
+                | _ -> Ok NoPhysicalRecord
             else
                 let bare = bareName name
                 let targets =
@@ -222,15 +242,44 @@ module BindingGenerator =
                         if not (own.ContainsKey bare) then None
                         else
                             let unit = { facts.Value with Structs = mergedDefinitions }
-                            Some (header, selectedPhysicalRecord unit own.ContainsKey name))
+                            Some (header, selectPhysicalRecord unit own.ContainsKey name))
                 match targets |> List.map snd |> List.distinct with
-                | [] -> Ok None
+                | [] -> Ok NoPhysicalRecord
                 | [one] -> Ok one
                 | _ ->
                     let details = targets |> List.map (fun (header, target) ->
-                        let label = target |> Option.defaultValue "no record"
+                        let label = target |> selectedRecordName |> Option.defaultValue "no record"
                         $"'{header}' ({label})") |> String.concat ", "
                     Error $"ABI-critical typedef '{bare}' has different record targets across declaring pilot headers: {details}."
+        let bindRecordOrigin explicitTag name selection =
+            if not (typedefNamedByUnit |> Map.exists (fun _ names -> names.Contains name)) then Ok selection
+            else
+                let occurrences =
+                    headers |> List.choose (fun (header, declarations) ->
+                        let count =
+                            declarations |> List.sumBy (function
+                                | CppParser.Struct record when record.Name = name -> 1
+                                | _ -> 0)
+                        if count = 0 then None
+                        else
+                            let namedByTypedef = typedefNamedByUnit.TryFind header |> Option.exists (Set.contains name)
+                            Some (header, count, namedByTypedef))
+                match occurrences |> List.tryFind (fun (_, count, namedByTypedef) -> namedByTypedef && count > 1) with
+                | Some (header, _, _) ->
+                    Error $"ABI-critical storage '{name}' has multiple record occurrences for a typedef-named spelling in '{header}'; one physical declaration per pilot is required."
+                | None ->
+                    match occurrences |> List.map (fun (_, _, namedByTypedef) -> namedByTypedef) |> List.distinct with
+                    | [true] when explicitTag -> Ok NoPhysicalRecord
+                    | [true; false] | [false; true] ->
+                        let details =
+                            occurrences
+                            |> List.sortBy (fun (header, _, _) -> header)
+                            |> List.map (fun (header, _, namedByTypedef) ->
+                                let role = if namedByTypedef then "typedef-named anonymous record" else "C tag"
+                                $"'{header}' ({role})")
+                            |> String.concat ", "
+                        Error $"ABI-critical storage '{name}' names distinct record origins across declaring pilot headers: {details}."
+                    | _ -> Ok selection
         // Every record the descriptor of `record` emits: itself and its by-value nesting.
         let rec closure (visited: Set<string>) (record: string) =
             if visited.Contains record then visited
@@ -316,16 +365,22 @@ module BindingGenerator =
                     if name = bare && not (mergedDefinitions.ContainsKey bare) && mergedTypedefs.ContainsKey bare then "typedef " + bare
                     else name
                 let isTypedef = selector.StartsWith "typedef "
+                let isTag = selector.StartsWith("struct ") || selector.StartsWith("union ")
                 let entryChain = if isTypedef && mergedTypedefs.ContainsKey bare then typedefClosure Set.empty bare |> Set.toList else []
                 let entryDisagreement =
                     units |> List.tryPick (fun (header, defs, tds) ->
                         ignore defs
                         if not (isTypedef && tds.ContainsKey bare) then None
                         else entryChain |> List.tryPick (fun hop -> match entryTypedefAgreement bare header tds hop with Error error -> Some error | Ok () -> None))
-                match entryDisagreement, recordOf selector with
+                let selection =
+                    recordOf selector
+                    |> Result.bind (function
+                        | (PhysicalRecord record | ForwardDeclaredTag record | TagKindMismatch record) as choice ->
+                            bindRecordOrigin isTag record choice
+                        | NoPhysicalRecord -> Ok NoPhysicalRecord)
+                match entryDisagreement, selection with
                 | Some error, _ | None, Error error -> Error error
-                | None, Ok None -> Ok []
-                | None, Ok (Some record) ->
+                | None, Ok (PhysicalRecord record as selection) ->
                     let declaresTypedef (tds: Map<string, string>) = tds.ContainsKey bare
                     let candidates = units |> List.filter (fun (_, defs, tds) -> defs.ContainsKey record && (not isTypedef || declaresTypedef tds))
                     match candidates with
@@ -343,20 +398,27 @@ module BindingGenerator =
                             |> fun state -> (state, dependencies) ||> List.fold (fun state typedefName -> state |> Result.bind (fun () -> fieldTypedefAgreement record header tds typedefName))
                             |> Result.map (fun () -> header, (name, record)))
                         |> List.fold (fun state item -> state |> Result.bind (fun acc -> item |> Result.map (fun pair -> pair :: acc))) (Ok [])
-                        |> Result.map List.rev)
+                        |> Result.map List.rev
+                    |> Result.map (fun rows -> (name, selection), rows)
+                | None, Ok selection -> Ok ((name, selection), []))
         match assignments |> List.tryPick (function Error error -> Some error | _ -> None) with
         | Some error -> Error error
         | None ->
-            let assigned = assignments |> List.collect (function Ok pairs -> pairs | _ -> [])
-            units
-            |> List.choose (fun (header, _, _) ->
-                match assigned |> List.filter (fun (declaring, _) -> declaring = header) |> List.map snd with
-                | [] -> None
-                | names -> Some (header, names))
-            |> Ok
+            let selections, rows = assignments |> List.choose Result.toOption |> List.unzip
+            let assigned = List.concat rows
+            let byUnit =
+                units
+                |> List.choose (fun (header, _, _) ->
+                    match assigned |> List.filter (fun (declaring, _) -> declaring = header) |> List.map snd with
+                    | [] -> None
+                    | names -> Some (header, names))
+            Ok (Map.ofList selections, byUnit)
+
+    let measurementAssignments ctx included merged headers typedefNamedByUnit requested =
+        recordMeasurements ctx included merged headers typedefNamedByUnit requested |> Result.map snd
 
     let measurementUnits ctx merged headers requested =
-        measurementAssignments ctx Map.empty merged headers requested
+        measurementAssignments ctx Map.empty merged headers Map.empty requested
         |> Result.map (List.map (fun (header, assignments) -> header, List.map fst assignments))
 
     /// The known locations among `sources`, in order: a refusal's related declarations.
@@ -1398,56 +1460,69 @@ module BindingGenerator =
                         logVerbose $"  class: {c.Name} (fields={c.Fields.Length}, methods={c.Methods.Length}) -> {classification}" verbose
 
                 // Build generation context once from the full declaration list
-                let preflightAbiCritical (checkCtx: FidelityCodeGenerator.GenerationContext) =
+                let preflightAbiCritical (selections: Map<string, RecordSelection>) (checkCtx: FidelityCodeGenerator.GenerationContext) =
                     match project.Options with
                     | Some opts ->
                         let nativeCarrier = opts.NativePointerSurface || opts.CHeaderMode
                         for requested in opts.AbiCriticalStructs do
                             let name = requested.Replace("typedef ", "").Replace("struct ", "").Replace("union ", "")
-                            let expectedUnion =
-                                if requested.StartsWith("struct ") then Some false
-                                elif requested.StartsWith("union ") then Some true
-                                else None
-                            let declared = checkCtx.Structs.TryFind name
+                            let tagRequested = requested.StartsWith("struct ") || requested.StartsWith("union ")
+                            let missingTypedef = requested.StartsWith("typedef ") && not (checkCtx.TypedefMap.ContainsKey name)
+                            let selected = selections.TryFind requested
+                            let declared =
+                                match selected with
+                                | Some (PhysicalRecord record | ForwardDeclaredTag record | TagKindMismatch record) -> checkCtx.Structs.TryFind record
+                                | _ -> None
                             let refuse code message =
+                                let missing =
+                                    if missingTypedef then $"no parsed header declares a typedef named '{name}'"
+                                    else $"no parsed header declares a record named '{name}'"
                                 let source =
                                     declared |> Option.map _.Location.Location
-                                    |> Option.defaultValue (Diagnostics.Located.Unknown $"no parsed header declares a record named '{name}'")
+                                    |> Option.defaultValue (Diagnostics.Located.Unknown missing)
                                 Diagnostics.diagnostic code message source
                                 |> Diagnostics.withPilotKey "options.abi_critical_structs" None
                                 |> Diagnostics.refuse
-                            if requested.StartsWith("typedef ") && not (checkCtx.TypedefMap.ContainsKey name) then
+                            if missingTypedef then
                                 refuse Diagnostics.AbiStorageUndeclared $"ABI-critical typedef '{name}' is not declared."
-                            if expectedUnion |> Option.exists (fun expected -> declared |> Option.exists (fun record -> record.IsUnion <> expected)) then
+                            match selected with
+                            | Some (TagKindMismatch _) ->
                                 refuse Diagnostics.AbiStorageKindMismatch $"ABI-critical storage '{name}' does not match the requested record kind."
-                            if declared.IsNone then
-                                let unit = FidelityCodeGenerator.inUnitOf "typedef" name { checkCtx with DeclarationUnits = unitTypedefMaps }
-                                match FidelityCodeGenerator.resolveCType unit.TypedefMap dataModel Set.empty unit.Delegates unit.Enums name with
-                                | FidelityCodeGenerator.Scalar r when expectedUnion.IsNone && r.Bits > 0 -> ()
-                                | _ ->
+                            | Some (PhysicalRecord _ | ForwardDeclaredTag _) when declared.IsSome -> ()
+                            | _ ->
+                                let scalar =
+                                    match selected with
+                                    | Some NoPhysicalRecord when not tagRequested ->
+                                        let unit = FidelityCodeGenerator.inUnitOf "typedef" name { checkCtx with DeclarationUnits = unitTypedefMaps }
+                                        match FidelityCodeGenerator.resolveCType unit.TypedefMap dataModel Set.empty unit.Delegates unit.Enums name with
+                                        | FidelityCodeGenerator.Scalar r -> r.Bits > 0
+                                        | _ -> false
+                                    | _ -> false
+                                if not scalar then
                                     let what = if nativeCarrier then "Native carrier" else "ABI-critical"
                                     refuse Diagnostics.AbiStorageUndeclared $"{what} storage '{name}' has no known scalar or measured record representation."
                     | None -> ()
 
-                let structLayouts =
+                let structLayouts, selections =
                     let abiStructNames =
                         match project.Options with
                         | Some opts when not opts.AbiCriticalStructs.IsEmpty -> opts.AbiCriticalStructs
                         | _ -> []
-                    if abiStructNames.IsEmpty then Map.empty
+                    if abiStructNames.IsEmpty then Map.empty, Map.empty
                     else
                         // Measure each storage in its declaring headers' units (measurementUnits):
                         // the first header's unit may reach a different record under the same name.
                         let probeCtx = FidelityCodeGenerator.buildGenerationContext declarations dataModel Map.empty
-                        let units =
-                            measurementAssignments probeCtx included declarations (List.zip project.Library.Headers headerDeclLists) abiStructNames
+                        let parsedByHeader = List.zip project.Library.Headers parsedUnits |> Map.ofList
+                        let typedefNamedByUnit = parsedByHeader |> Map.map (fun _ parsed -> parsed.TypedefNamedRecords)
+                        let selections, units =
+                            recordMeasurements probeCtx included declarations (List.zip project.Library.Headers headerDeclLists) typedefNamedByUnit abiStructNames
                             |> Result.defaultWith (fun message ->
                                 Diagnostics.diagnostic Diagnostics.AbiStorageUnitDisagrees message
                                     (Diagnostics.Located.Unknown "the measuring unit and the pilot's declaring header are named in the message")
                                 |> Diagnostics.withPilotKey "options.abi_critical_structs" None
                                 |> Diagnostics.refuse)
-                        preflightAbiCritical probeCtx
-                        let parsedByHeader = List.zip project.Library.Headers parsedUnits |> Map.ofList
+                        preflightAbiCritical selections probeCtx
                         units
                         |> List.map (fun (headerFile, assignments) ->
                             let parsed =
@@ -1477,22 +1552,27 @@ module BindingGenerator =
                                 (Diagnostics.Located.Unknown "the two measuring units are named in the message")
                             |> Diagnostics.withPilotKey "options.abi_critical_structs" None
                             |> Diagnostics.refuse)
+                        |> fun layouts -> layouts, selections
 
                 let ctx =
                     let baseCtx = FidelityCodeGenerator.buildGenerationContext declarations dataModel structLayouts
-                    preflightAbiCritical baseCtx
+                    preflightAbiCritical selections baseCtx
                     match project.Options with
                     | Some opts ->
                         let nativeCarrier = opts.NativePointerSurface || opts.CHeaderMode
                         for requested in opts.AbiCriticalStructs do
-                            let name = requested.Replace("typedef ", "").Replace("struct ", "").Replace("union ", "")
-                            let declared = baseCtx.Structs.TryFind name
-                            if declared.IsSome && not (structLayouts.ContainsKey name) then
-                                let source = declared |> Option.map _.Location.Location |> Option.defaultValue (Diagnostics.Located.Unknown $"no parsed header declares a record named '{name}'")
+                            match selections.TryFind requested with
+                            | Some (PhysicalRecord record | ForwardDeclaredTag record) when not (structLayouts.ContainsKey record) ->
+                                let name = requested.Replace("typedef ", "").Replace("struct ", "").Replace("union ", "")
+                                let source =
+                                    baseCtx.Structs.TryFind record
+                                    |> Option.map _.Location.Location
+                                    |> Option.defaultValue (Diagnostics.Located.Unknown $"no parsed header declares a record named '{record}'")
                                 let what = if nativeCarrier then "Native carrier" else "ABI-critical"
                                 Diagnostics.diagnostic Diagnostics.AbiStorageUnmeasured $"{what} storage '{name}' requires a measured layout; header probe did not provide it." source
                                 |> Diagnostics.withPilotKey "options.abi_critical_structs" None
                                 |> Diagnostics.refuse
+                            | _ -> ()
                     | _ -> ()
                     // An external contract must survive neither duplicate-map collapse
                     // nor namespace filtering. Refuse before any generation effects.

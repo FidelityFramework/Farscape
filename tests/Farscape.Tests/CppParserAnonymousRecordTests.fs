@@ -94,10 +94,11 @@ let ``bare selectors prefer a defined tag and require typedef agreement in both 
         for ordered in [[a; b]; [b; a]] do
             let units = ordered |> List.map (fun (path, unit: CppParser.ParseResult) -> path, unit.Declarations)
             let included = ordered |> List.map (fun (path, unit) -> path, unit.Included) |> Map.ofList
+            let typedefNamedByUnit = ordered |> List.map (fun (path, unit) -> path, unit.TypedefNamedRecords) |> Map.ofList
             let merged = units |> List.map snd |> DeclarationAlgebra.mergeDeclarations
             let ctx = FidelityCodeGenerator.buildGenerationContext merged Types.LP64 Map.empty
             let verify requested expected =
-                let actual = BindingGenerator.measurementAssignments ctx included merged units requested
+                let actual = BindingGenerator.measurementAssignments ctx included merged units typedefNamedByUnit requested
                 Assert.Equal<Result<(string * (string * string) list) list, string>>(expected, actual)
             let first = fst ordered.Head
             let second = fst ordered.Tail.Head
@@ -132,6 +133,166 @@ let ``two physical storage modules cannot share a public name even when their la
             let expected = "Binding generation failed: FS9258: Generated module 'Test.Fixture.Types.sample' would be declared by both scalar typedef 'sample' and struct 'sample'."
             Assert.Equal(Error expected, result |> Result.map ignore)
             Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+    finally
+        System.IO.Directory.Delete(dir, true)
+
+[<Fact>]
+let ``ordinary scalar selection cannot acquire its same-spelled tag's measurement`` () =
+    let dir = TestScratch.create "ordinary-selector"
+    let header = System.IO.Path.Combine(dir, "storage.h")
+    let generate tag check =
+        System.IO.File.WriteAllText(header, String.concat "\n" [
+            "typedef long long sample;"
+            $"struct {tag} {{ char bytes[17]; }};"
+            "int selector_probe(void);" ])
+        clangConfirms header [
+            "sizeof(sample) == 8"; "_Alignof(sample) == 8"
+            $"sizeof(struct {tag}) == 17"; $"_Alignof(struct {tag}) == 1"
+            $"offsetof(struct {tag}, bytes) == 0" ]
+        withPilot [header]
+            [ "c_header_mode = true"; "abi_critical_structs = [\"typedef sample\"]"
+              "[[options.bindings]]"; "name = \"selector_probe\"" ]
+            ["selector_probe"] check
+    try
+        generate "another_tag" (fun result output ->
+            result |> Result.defaultWith failwith |> ignore
+            let path = System.IO.Directory.GetFiles(output, "Types.clef", System.IO.SearchOption.AllDirectories) |> Array.exactlyOne
+            let text = System.IO.File.ReadAllText path
+            Assert.Contains("module sample =", text)
+            Assert.Contains("let Size : int = 8", text)
+            Assert.Contains("let Alignment : int = 8", text)
+            Assert.DoesNotContain("let Descriptor : Expr<StructDescriptor>", text))
+        generate "sample" (fun result output ->
+            let expected = "Binding generation failed: FS9258: Generated module 'Test.Fixture.Types.sample' would be declared by both scalar typedef 'sample' and struct 'sample'."
+            Assert.Equal(Error expected, result |> Result.map ignore)
+            Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+    finally
+        System.IO.Directory.Delete(dir, true)
+
+[<Theory>]
+[<InlineData(false)>]
+[<InlineData(true)>]
+let ``public generation measures the record assigned to a tagged typedef`` competingTag =
+    let dir = TestScratch.create "tagged-typedef"
+    let header = System.IO.Path.Combine(dir, "storage.h")
+    try
+        let declarations = [
+            "struct measured_tag { char bytes[17]; };"
+            "typedef struct measured_tag declared_alias;"
+            if competingTag then "struct declared_alias { long long independent; };"
+            "int selector_probe(void);" ]
+        System.IO.File.WriteAllText(header, String.concat "\n" declarations)
+        clangConfirms header [
+            "sizeof(declared_alias) == 17"; "_Alignof(declared_alias) == 1"
+            "offsetof(declared_alias, bytes) == 0"
+            if competingTag then "sizeof(struct declared_alias) == 8" ]
+        withPilot [header]
+            [ "c_header_mode = true"; "abi_critical_structs = [\"typedef declared_alias\"]"
+              "[[options.bindings]]"; "name = \"selector_probe\"" ]
+            ["selector_probe"] (fun result output ->
+                result |> Result.defaultWith failwith |> ignore
+                let path = System.IO.Directory.GetFiles(output, "Types.clef", System.IO.SearchOption.AllDirectories) |> Array.exactlyOne
+                let lines = System.IO.File.ReadAllLines path
+                Assert.Single(lines |> Array.filter ((=) "module measured_tag =")) |> ignore
+                if competingTag then
+                    Assert.Single(lines |> Array.filter ((=) "module declared_alias =")) |> ignore
+                    Assert.Contains("/// C struct `declared_alias`: layout declared (natural alignment under LP64 from the declared field types).", lines)
+                else
+                    Assert.DoesNotContain("module declared_alias =", lines)
+                let record =
+                    lines
+                    |> Array.skipWhile ((<>) "module measured_tag =")
+                    |> Array.skip 1
+                    |> Array.takeWhile (fun line -> not (line.StartsWith "module "))
+                    |> Array.map _.Trim()
+                Assert.Contains("let Size : int = 17", record)
+                Assert.Contains("let Alignment : int = 1", record)
+                Assert.Contains("let bytesOffset : int = 0", record)
+                Assert.Contains(record, fun line -> line.Contains "let Descriptor : Expr<StructDescriptor>"))
+    finally
+        System.IO.Directory.Delete(dir, true)
+
+[<Theory>]
+[<InlineData("forward_tag", "FS9187", "Native carrier storage 'forward_tag' requires a measured layout; header probe did not provide it.", true)>]
+[<InlineData("struct forward_tag", "FS9187", "Native carrier storage 'forward_tag' requires a measured layout; header probe did not provide it.", true)>]
+[<InlineData("union forward_tag", "FS9186", "ABI-critical storage 'forward_tag' does not match the requested record kind.", true)>]
+[<InlineData("struct absent_tag", "FS9185", "Native carrier storage 'absent_tag' has no known scalar or measured record representation.", false)>]
+let ``tag refusals distinguish forward declarations from absent tags`` selector code message declared =
+    let dir = TestScratch.create "forward-tag-selection"
+    let header = System.IO.Path.Combine(dir, "storage.h")
+    try
+        System.IO.File.WriteAllText(header, "struct forward_tag;\nint selector_probe(void);\n")
+        let generate project =
+            match BindingGenerator.generateFromProjectDiagnosed project false false Types.LP64 with
+            | Ok result -> Ok result
+            | Error refusal ->
+                let diagnostic = Assert.Single refusal.Diagnostics
+                let source : Diagnostics.Located<Diagnostics.SourceLocation> =
+                    if declared then
+                        Diagnostics.Located.Known { Path = header; Position = Diagnostics.Located.Known { Line = 1; Column = 8 } }
+                    else Diagnostics.Located.Unknown "no parsed header declares a record named 'absent_tag'"
+                Assert.Equal(code, diagnostic.Code)
+                Assert.Equal(message, diagnostic.Message)
+                Assert.Equal(source, diagnostic.Source)
+                let pilot : Diagnostics.PilotLocation = { PilotFile = project; Key = "options.abi_critical_structs"; Parameter = None }
+                Assert.Equal(Some pilot, diagnostic.Pilot)
+                Error refusal.Text
+        withPilotGenerating generate [header] []
+            [ "c_header_mode = true"; $"abi_critical_structs = [\"{selector}\"]"
+              "[[options.bindings]]"; "name = \"selector_probe\"" ]
+            ["selector_probe"] [] [] (fun result output ->
+                Assert.Equal(Error $"Binding generation failed: {code}: {message}", result |> Result.map ignore)
+                Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+    finally
+        System.IO.Directory.Delete(dir, true)
+
+[<Fact>]
+let ``an anonymous typedef cannot supply an explicit C tag`` () =
+    let dir = TestScratch.create "typedef-is-not-tag"
+    let header = System.IO.Path.Combine(dir, "storage.h")
+    let generate selector check =
+        withPilot [header]
+            [ "c_header_mode = true"; $"abi_critical_structs = [\"{selector}\"]"
+              "[[options.bindings]]"; "name = \"selector_probe\"" ]
+            ["selector_probe"] check
+    try
+        System.IO.File.WriteAllText(header, "typedef struct { char lead; long long payload; } anonymous_record;\nint selector_probe(void);\n")
+        clangConfirms header ["sizeof(anonymous_record) == 16"; "_Alignof(anonymous_record) == 8"; "offsetof(anonymous_record, payload) == 8"]
+        generate "typedef anonymous_record" (fun result output ->
+            result |> Result.defaultWith failwith |> ignore
+            let path = System.IO.Directory.GetFiles(output, "Types.clef", System.IO.SearchOption.AllDirectories) |> Array.exactlyOne
+            let text = System.IO.File.ReadAllText path
+            Assert.Contains("C struct `anonymous_record`: layout measured", text)
+            Assert.Contains("let Size : int = 16", text)
+            Assert.Contains("let Alignment : int = 8", text)
+            Assert.Contains("let payloadOffset : int = 8", text))
+        for selector in ["struct anonymous_record"; "union anonymous_record"] do
+            generate selector (fun result output ->
+                let expected = "Binding generation failed: FS9185: Native carrier storage 'anonymous_record' has no known scalar or measured record representation."
+                Assert.Equal(Error expected, result |> Result.map ignore)
+                Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
+    finally
+        System.IO.Directory.Delete(dir, true)
+
+[<Fact>]
+let ``equal layouts cannot merge a C tag and a typedef named record across units`` () =
+    let dir = TestScratch.create "record-origin-unit"
+    let named = System.IO.Path.Combine(dir, "named.h")
+    let anonymous = System.IO.Path.Combine(dir, "anonymous.h")
+    try
+        System.IO.File.WriteAllText(named, "struct shared_name { char bytes[17]; };\nint selector_probe(void);\n")
+        System.IO.File.WriteAllText(anonymous, "typedef struct { char bytes[17]; } shared_name;\n")
+        clangConfirms named ["sizeof(struct shared_name) == 17"; "_Alignof(struct shared_name) == 1"]
+        clangConfirms anonymous ["sizeof(shared_name) == 17"; "_Alignof(shared_name) == 1"]
+        for units in [[named; anonymous]; [anonymous; named]] do
+            for selector in ["struct shared_name"; "typedef shared_name"] do
+                withPilot units
+                    [ "c_header_mode = true"; $"abi_critical_structs = [\"{selector}\"]"
+                      "[[options.bindings]]"; "name = \"selector_probe\"" ]
+                    ["selector_probe"] (fun result output ->
+                        let expected = $"Binding generation failed: FS9188: ABI-critical storage 'shared_name' names distinct record origins across declaring pilot headers: '{anonymous}' (typedef-named anonymous record), '{named}' (C tag)."
+                        Assert.Equal(Error expected, result |> Result.map ignore)
+                        Assert.Empty(System.IO.Directory.GetFiles(output, "*", System.IO.SearchOption.AllDirectories)))
     finally
         System.IO.Directory.Delete(dir, true)
 

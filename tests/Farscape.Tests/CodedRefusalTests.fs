@@ -769,7 +769,7 @@ let ``an abi_critical_structs typedef no header declares is refused at its pilot
     Assert.Equal(Diagnostics.AbiStorageUndeclared, d.Code)
     Assert.Equal("ABI-critical typedef 'fx_absent_t' is not declared.", d.Message)
     Assert.Equal(pilotKey project "options.abi_critical_structs", d.Pilot)
-    Assert.Equal(Diagnostics.Located.Unknown "no parsed header declares a record named 'fx_absent_t'", d.Source)
+    Assert.Equal(Diagnostics.Located.Unknown "no parsed header declares a typedef named 'fx_absent_t'", d.Source)
 
 [<Fact>]
 let ``an abi_critical_structs entry naming another record kind is refused at the record`` () =
