@@ -118,6 +118,225 @@ module SubstantiationSeams =
           RefusalControlsPath: string
           RefusalControlsSha256: string }
 
+    // Explicit, type-directed Fidelity.Data codecs for the seam receipts (#228). They replace the
+    // reflective writer/reader; field order and published bytes are unchanged.
+    let private seamCheckKeys = [ "Id"; "Category"; "Summary"; "BinarySha256"; "Passed"; "Command" ]
+    let private seamChecksKeys = [ "SchemaVersion"; "Package"; "ManifestIntegritySha256"; "TargetTriple"; "Checks" ]
+    let private refusalControlKeys = [ "Id"; "ExpectedCode"; "ObservedCode"; "MisuseSummary"; "ProtectionSummary"; "Passed" ]
+    let private refusalControlsKeys = [ "SchemaVersion"; "Package"; "ManifestIntegritySha256"; "Controls" ]
+    let private dischargeKeys =
+        [ "ReceiptPath"; "ReceiptSha256"; "PremisesOutputPath"; "PremisesOutputSha256"; "TotalObligations"
+          "DischargedUnsatCount"; "PremisesSatCount"; "LibraryObligations"; "LibraryDischargedUnsatCount"
+          "LibraryPremisesSatCount"; "PendingOpenCount"; "RefutedCount" ]
+    let private sharedLibraryKeys = [ "CheckId"; "SharedLibraryPath"; "SharedLibrarySha256"; "DynamicProbeBinaryPath"; "DynamicProbeBinarySha256" ]
+    let private probeKeys = [ "CheckId"; "BinaryPath"; "BinarySha256" ]
+    let private ledgerKeys =
+        [ "Schema"; "SchemaVersion"; "SeamChecksSchema"; "RefusalControlsSchema"; "Package"; "ManifestIntegritySha256"
+          "TargetTriple"; "RequiredSeamCategories"; "VerifiedPhysicalCategories"; "Discharge"; "RetainedBinaries"
+          "SharedLibraries"; "SeamChecksPath"; "SeamChecksSha256"; "RefusalControlsPath"; "RefusalControlsSha256" ]
+
+    let private jsonString = Substantiation.jsonString
+    let private jsonInt = Substantiation.jsonInt
+    let private jsonArray = Substantiation.jsonArray
+    let private jsonObject = Substantiation.jsonObject
+
+    let internal encodeSeamCheckEntry (entry: SeamCheckEntry) : JsonValue =
+        jsonObject [
+            "Id", jsonString entry.Id
+            "Category", jsonString entry.Category
+            "Summary", jsonString entry.Summary
+            "BinarySha256", jsonString entry.BinarySha256
+            "Passed", JsonValue.Bool entry.Passed
+            "Command", jsonString entry.Command ]
+
+    let internal decodeSeamCheckEntry (value: JsonValue) : Result<SeamCheckEntry, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "seam check entry" seamCheckKeys value
+            let! id = Substantiation.field "seam check entry" map "Id" Substantiation.decodeString
+            let! category = Substantiation.field "seam check entry" map "Category" Substantiation.decodeString
+            let! summary = Substantiation.field "seam check entry" map "Summary" Substantiation.decodeString
+            let! binarySha256 = Substantiation.field "seam check entry" map "BinarySha256" Substantiation.decodeString
+            let! passed = Substantiation.field "seam check entry" map "Passed" Substantiation.decodeBool
+            let! command = Substantiation.field "seam check entry" map "Command" Substantiation.decodeString
+            return { Id = id; Category = category; Summary = summary; BinarySha256 = binarySha256; Passed = passed; Command = command }
+        }
+
+    let internal encodeSeamChecksReceipt (receipt: SeamChecksReceipt) : JsonValue =
+        jsonObject [
+            "SchemaVersion", jsonInt receipt.SchemaVersion
+            "Package", jsonString receipt.Package
+            "ManifestIntegritySha256", jsonString receipt.ManifestIntegritySha256
+            "TargetTriple", jsonString receipt.TargetTriple
+            "Checks", jsonArray encodeSeamCheckEntry receipt.Checks ]
+
+    let internal decodeSeamChecksReceipt (value: JsonValue) : Result<SeamChecksReceipt, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "seam checks receipt" seamChecksKeys value
+            let! schemaVersion = Substantiation.field "seam checks receipt" map "SchemaVersion" Substantiation.decodeInt
+            let! package = Substantiation.field "seam checks receipt" map "Package" Substantiation.decodeString
+            let! integrity = Substantiation.field "seam checks receipt" map "ManifestIntegritySha256" Substantiation.decodeString
+            let! targetTriple = Substantiation.field "seam checks receipt" map "TargetTriple" Substantiation.decodeString
+            let! checks = Substantiation.field "seam checks receipt" map "Checks" (Substantiation.decodeArray "Checks" decodeSeamCheckEntry)
+            return { SchemaVersion = schemaVersion; Package = package; ManifestIntegritySha256 = integrity;
+                    TargetTriple = targetTriple; Checks = checks }
+        }
+
+    let internal encodeRefusalControlEntry (entry: RefusalControlEntry) : JsonValue =
+        jsonObject [
+            "Id", jsonString entry.Id
+            "ExpectedCode", jsonString entry.ExpectedCode
+            "ObservedCode", jsonString entry.ObservedCode
+            "MisuseSummary", jsonString entry.MisuseSummary
+            "ProtectionSummary", jsonString entry.ProtectionSummary
+            "Passed", JsonValue.Bool entry.Passed ]
+
+    let internal decodeRefusalControlEntry (value: JsonValue) : Result<RefusalControlEntry, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "refusal control entry" refusalControlKeys value
+            let! id = Substantiation.field "refusal control entry" map "Id" Substantiation.decodeString
+            let! expectedCode = Substantiation.field "refusal control entry" map "ExpectedCode" Substantiation.decodeString
+            let! observedCode = Substantiation.field "refusal control entry" map "ObservedCode" Substantiation.decodeString
+            let! misuseSummary = Substantiation.field "refusal control entry" map "MisuseSummary" Substantiation.decodeString
+            let! protectionSummary = Substantiation.field "refusal control entry" map "ProtectionSummary" Substantiation.decodeString
+            let! passed = Substantiation.field "refusal control entry" map "Passed" Substantiation.decodeBool
+            return { Id = id; ExpectedCode = expectedCode; ObservedCode = observedCode;
+                    MisuseSummary = misuseSummary; ProtectionSummary = protectionSummary; Passed = passed }
+        }
+
+    let internal encodeRefusalControlsReceipt (receipt: RefusalControlsReceipt) : JsonValue =
+        jsonObject [
+            "SchemaVersion", jsonInt receipt.SchemaVersion
+            "Package", jsonString receipt.Package
+            "ManifestIntegritySha256", jsonString receipt.ManifestIntegritySha256
+            "Controls", jsonArray encodeRefusalControlEntry receipt.Controls ]
+
+    let internal decodeRefusalControlsReceipt (value: JsonValue) : Result<RefusalControlsReceipt, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "refusal controls receipt" refusalControlsKeys value
+            let! schemaVersion = Substantiation.field "refusal controls receipt" map "SchemaVersion" Substantiation.decodeInt
+            let! package = Substantiation.field "refusal controls receipt" map "Package" Substantiation.decodeString
+            let! integrity = Substantiation.field "refusal controls receipt" map "ManifestIntegritySha256" Substantiation.decodeString
+            let! controls = Substantiation.field "refusal controls receipt" map "Controls" (Substantiation.decodeArray "Controls" decodeRefusalControlEntry)
+            return { SchemaVersion = schemaVersion; Package = package; ManifestIntegritySha256 = integrity; Controls = controls }
+        }
+
+    let internal encodeDischargeSummary (discharge: DischargeSummary) : JsonValue =
+        jsonObject [
+            "ReceiptPath", jsonString discharge.ReceiptPath
+            "ReceiptSha256", jsonString discharge.ReceiptSha256
+            "PremisesOutputPath", jsonString discharge.PremisesOutputPath
+            "PremisesOutputSha256", jsonString discharge.PremisesOutputSha256
+            "TotalObligations", jsonInt discharge.TotalObligations
+            "DischargedUnsatCount", jsonInt discharge.DischargedUnsatCount
+            "PremisesSatCount", jsonInt discharge.PremisesSatCount
+            "LibraryObligations", jsonInt discharge.LibraryObligations
+            "LibraryDischargedUnsatCount", jsonInt discharge.LibraryDischargedUnsatCount
+            "LibraryPremisesSatCount", jsonInt discharge.LibraryPremisesSatCount
+            "PendingOpenCount", jsonInt discharge.PendingOpenCount
+            "RefutedCount", jsonInt discharge.RefutedCount ]
+
+    let internal decodeDischargeSummary (value: JsonValue) : Result<DischargeSummary, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "discharge summary" dischargeKeys value
+            let! receiptPath = Substantiation.field "discharge summary" map "ReceiptPath" Substantiation.decodeString
+            let! receiptSha256 = Substantiation.field "discharge summary" map "ReceiptSha256" Substantiation.decodeString
+            let! premisesOutputPath = Substantiation.field "discharge summary" map "PremisesOutputPath" Substantiation.decodeString
+            let! premisesOutputSha256 = Substantiation.field "discharge summary" map "PremisesOutputSha256" Substantiation.decodeString
+            let! totalObligations = Substantiation.field "discharge summary" map "TotalObligations" Substantiation.decodeInt
+            let! dischargedUnsat = Substantiation.field "discharge summary" map "DischargedUnsatCount" Substantiation.decodeInt
+            let! premisesSat = Substantiation.field "discharge summary" map "PremisesSatCount" Substantiation.decodeInt
+            let! libraryObligations = Substantiation.field "discharge summary" map "LibraryObligations" Substantiation.decodeInt
+            let! libraryUnsat = Substantiation.field "discharge summary" map "LibraryDischargedUnsatCount" Substantiation.decodeInt
+            let! librarySat = Substantiation.field "discharge summary" map "LibraryPremisesSatCount" Substantiation.decodeInt
+            let! pendingOpen = Substantiation.field "discharge summary" map "PendingOpenCount" Substantiation.decodeInt
+            let! refuted = Substantiation.field "discharge summary" map "RefutedCount" Substantiation.decodeInt
+            return { ReceiptPath = receiptPath; ReceiptSha256 = receiptSha256; PremisesOutputPath = premisesOutputPath;
+                    PremisesOutputSha256 = premisesOutputSha256; TotalObligations = totalObligations;
+                    DischargedUnsatCount = dischargedUnsat; PremisesSatCount = premisesSat;
+                    LibraryObligations = libraryObligations; LibraryDischargedUnsatCount = libraryUnsat;
+                    LibraryPremisesSatCount = librarySat; PendingOpenCount = pendingOpen; RefutedCount = refuted }
+        }
+
+    let internal encodeSharedLibraryComparison (comparison: SharedLibraryComparison) : JsonValue =
+        jsonObject [
+            "CheckId", jsonString comparison.CheckId
+            "SharedLibraryPath", jsonString comparison.SharedLibraryPath
+            "SharedLibrarySha256", jsonString comparison.SharedLibrarySha256
+            "DynamicProbeBinaryPath", jsonString comparison.DynamicProbeBinaryPath
+            "DynamicProbeBinarySha256", jsonString comparison.DynamicProbeBinarySha256 ]
+
+    let internal decodeSharedLibraryComparison (value: JsonValue) : Result<SharedLibraryComparison, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "shared library comparison" sharedLibraryKeys value
+            let! checkId = Substantiation.field "shared library comparison" map "CheckId" Substantiation.decodeString
+            let! sharedLibraryPath = Substantiation.field "shared library comparison" map "SharedLibraryPath" Substantiation.decodeString
+            let! sharedLibrarySha256 = Substantiation.field "shared library comparison" map "SharedLibrarySha256" Substantiation.decodeString
+            let! probePath = Substantiation.field "shared library comparison" map "DynamicProbeBinaryPath" Substantiation.decodeString
+            let! probeSha256 = Substantiation.field "shared library comparison" map "DynamicProbeBinarySha256" Substantiation.decodeString
+            return { CheckId = checkId; SharedLibraryPath = sharedLibraryPath; SharedLibrarySha256 = sharedLibrarySha256;
+                    DynamicProbeBinaryPath = probePath; DynamicProbeBinarySha256 = probeSha256 }
+        }
+
+    let internal encodeRetainedProbeBinary (probe: RetainedProbeBinary) : JsonValue =
+        jsonObject [
+            "CheckId", jsonString probe.CheckId
+            "BinaryPath", jsonString probe.BinaryPath
+            "BinarySha256", jsonString probe.BinarySha256 ]
+
+    let internal decodeRetainedProbeBinary (value: JsonValue) : Result<RetainedProbeBinary, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "retained probe binary" probeKeys value
+            let! checkId = Substantiation.field "retained probe binary" map "CheckId" Substantiation.decodeString
+            let! binaryPath = Substantiation.field "retained probe binary" map "BinaryPath" Substantiation.decodeString
+            let! binarySha256 = Substantiation.field "retained probe binary" map "BinarySha256" Substantiation.decodeString
+            return { CheckId = checkId; BinaryPath = binaryPath; BinarySha256 = binarySha256 }
+        }
+
+    let internal encodeSeamsLedgerReceipt (ledger: SeamsLedgerReceipt) : JsonValue =
+        jsonObject [
+            "Schema", jsonString ledger.Schema
+            "SchemaVersion", jsonInt ledger.SchemaVersion
+            "SeamChecksSchema", jsonString ledger.SeamChecksSchema
+            "RefusalControlsSchema", jsonString ledger.RefusalControlsSchema
+            "Package", jsonString ledger.Package
+            "ManifestIntegritySha256", jsonString ledger.ManifestIntegritySha256
+            "TargetTriple", jsonString ledger.TargetTriple
+            "RequiredSeamCategories", jsonArray jsonString ledger.RequiredSeamCategories
+            "VerifiedPhysicalCategories", jsonArray jsonString ledger.VerifiedPhysicalCategories
+            "Discharge", encodeDischargeSummary ledger.Discharge
+            "RetainedBinaries", jsonArray encodeRetainedProbeBinary ledger.RetainedBinaries
+            "SharedLibraries", jsonArray encodeSharedLibraryComparison ledger.SharedLibraries
+            "SeamChecksPath", jsonString ledger.SeamChecksPath
+            "SeamChecksSha256", jsonString ledger.SeamChecksSha256
+            "RefusalControlsPath", jsonString ledger.RefusalControlsPath
+            "RefusalControlsSha256", jsonString ledger.RefusalControlsSha256 ]
+
+    let internal decodeSeamsLedgerReceipt (value: JsonValue) : Result<SeamsLedgerReceipt, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "seams ledger receipt" ledgerKeys value
+            let! schema = Substantiation.field "seams ledger receipt" map "Schema" Substantiation.decodeString
+            let! schemaVersion = Substantiation.field "seams ledger receipt" map "SchemaVersion" Substantiation.decodeInt
+            let! seamChecksSchema = Substantiation.field "seams ledger receipt" map "SeamChecksSchema" Substantiation.decodeString
+            let! refusalControlsSchema = Substantiation.field "seams ledger receipt" map "RefusalControlsSchema" Substantiation.decodeString
+            let! package = Substantiation.field "seams ledger receipt" map "Package" Substantiation.decodeString
+            let! integrity = Substantiation.field "seams ledger receipt" map "ManifestIntegritySha256" Substantiation.decodeString
+            let! targetTriple = Substantiation.field "seams ledger receipt" map "TargetTriple" Substantiation.decodeString
+            let! requiredCategories = Substantiation.field "seams ledger receipt" map "RequiredSeamCategories" (Substantiation.decodeArray "RequiredSeamCategories" Substantiation.decodeString)
+            let! verifiedCategories = Substantiation.field "seams ledger receipt" map "VerifiedPhysicalCategories" (Substantiation.decodeArray "VerifiedPhysicalCategories" Substantiation.decodeString)
+            let! discharge = Substantiation.field "seams ledger receipt" map "Discharge" decodeDischargeSummary
+            let! retained = Substantiation.field "seams ledger receipt" map "RetainedBinaries" (Substantiation.decodeArray "RetainedBinaries" decodeRetainedProbeBinary)
+            let! shared = Substantiation.field "seams ledger receipt" map "SharedLibraries" (Substantiation.decodeArray "SharedLibraries" decodeSharedLibraryComparison)
+            let! seamChecksPath = Substantiation.field "seams ledger receipt" map "SeamChecksPath" Substantiation.decodeString
+            let! seamChecksSha256 = Substantiation.field "seams ledger receipt" map "SeamChecksSha256" Substantiation.decodeString
+            let! refusalControlsPath = Substantiation.field "seams ledger receipt" map "RefusalControlsPath" Substantiation.decodeString
+            let! refusalControlsSha256 = Substantiation.field "seams ledger receipt" map "RefusalControlsSha256" Substantiation.decodeString
+            return { Schema = schema; SchemaVersion = schemaVersion; SeamChecksSchema = seamChecksSchema;
+                    RefusalControlsSchema = refusalControlsSchema; Package = package; ManifestIntegritySha256 = integrity;
+                    TargetTriple = targetTriple; RequiredSeamCategories = requiredCategories;
+                    VerifiedPhysicalCategories = verifiedCategories; Discharge = discharge; RetainedBinaries = retained;
+                    SharedLibraries = shared; SeamChecksPath = seamChecksPath; SeamChecksSha256 = seamChecksSha256;
+                    RefusalControlsPath = refusalControlsPath; RefusalControlsSha256 = refusalControlsSha256 }
+        }
     type ElfExecutableInspection =
         { Path: string
           Sha256: string
@@ -194,7 +413,7 @@ module SubstantiationSeams =
             receiptFail Diagnostics.DossierOutputFailure path
                 (refused.Refusal.Diagnostics |> List.map (fun diagnostic -> diagnostic.Message) |> String.concat " ")
 
-    let private parseStrict<'T> label path : 'T =
+    let private parseStrict<'T> label path (decode: JsonValue -> Result<'T, string>) : 'T =
         if not (File.Exists path) then receiptFail Diagnostics.DossierInputMalformed path (label + " does not exist.")
         let text =
             try Ok(File.ReadAllText(path, UTF8Encoding(false, true)))
@@ -202,7 +421,7 @@ module SubstantiationSeams =
         match text with
         | Error reason -> receiptFail Diagnostics.DossierInputMalformed path (label + " violates its required JSON schema: " + reason)
         | Ok raw ->
-            match Substantiation.deserializeJson<'T> raw with
+            match Substantiation.decodeJsonText raw decode with
             | Ok value -> value
             | Error reason -> receiptFail Diagnostics.DossierInputMalformed path (label + " violates its required JSON schema: " + reason)
 
@@ -253,7 +472,7 @@ module SubstantiationSeams =
     let readSeamReceipt (manifest: Substantiation.Manifest) (path: string) : Result<SeamChecksReceipt, Diagnostics.Refusal> =
         try
             let resolved = receiptEvidencePath path
-            let receipt = parseStrict<SeamChecksReceipt> "The seam checks receipt" resolved
+            let receipt = parseStrict "The seam checks receipt" resolved decodeSeamChecksReceipt
             requireSeamChecks manifest resolved receipt
             Ok receipt
         with
@@ -267,7 +486,7 @@ module SubstantiationSeams =
     let readRefusalReceipt (manifest: Substantiation.Manifest) (path: string) : Result<RefusalControlsReceipt, Diagnostics.Refusal> =
         try
             let resolved = receiptEvidencePath path
-            let receipt = parseStrict<RefusalControlsReceipt> "The refusal controls receipt" resolved
+            let receipt = parseStrict "The refusal controls receipt" resolved decodeRefusalControlsReceipt
             requireRefusalControls manifest resolved receipt
             Ok receipt
         with
@@ -286,9 +505,9 @@ module SubstantiationSeams =
         with error ->
             fail path (label + " cannot be read as UTF-8: " + error.Message)
 
-    let private serializeVerified<'T> (path: string) (value: 'T) : string =
-        let json = Substantiation.serializeJsonPretty value
-        match Substantiation.deserializeJson<'T> json with
+    let private serializeVerified (path: string) (encode: 'T -> JsonValue) (decode: JsonValue -> Result<'T, string>) (value: 'T) : string =
+        let json = Substantiation.prettyJson (encode value)
+        match Substantiation.decodeJsonText json decode with
         | Error reason -> fail path ("Serialized JSON receipt violates its schema: " + reason)
         | Ok _ ->
             if String.IsNullOrWhiteSpace json then fail path "Serialized JSON receipt is empty."
@@ -1534,7 +1753,7 @@ module SubstantiationSeams =
             let resolved = evidencePath path
             let text = readUtf8 "The seams ledger receipt" resolved
             let ledger =
-                match Substantiation.deserializeJson<SeamsLedgerReceipt> text with
+                match Substantiation.decodeJsonText text decodeSeamsLedgerReceipt with
                 | Ok value -> value
                 | Error reason -> fail resolved ("The seams ledger receipt violates its required JSON schema: " + reason)
             if ledger.Schema <> LedgerSchema || ledger.SchemaVersion <> 1 then
@@ -1642,8 +1861,6 @@ module SubstantiationSeams =
             if Set.ofSeq seenSharedCheckIds <> expectedElisionCheckIds then
                 fail resolved "Seams ledger SharedLibraries does not cover every 'static-dynamic-link-elision' check 1-to-1."
 
-            if isNull (box ledger.Discharge) then
-                fail resolved "Seams ledger Discharge summary is null."
             let liveDischarge = verifyDischargeCore manifest
             let ledgerReceiptPath = evidencePath ledger.Discharge.ReceiptPath
             let ledgerPremisesPath = evidencePath ledger.Discharge.PremisesOutputPath
@@ -1724,8 +1941,8 @@ module SubstantiationSeams =
                   ManifestIntegritySha256 = manifest.IntegritySha256
                   Controls = controlEntries }
 
-            let seamJson = serializeVerified seamChecksPath seamReceipt
-            let refusalJson = serializeVerified refusalControlsPath refusalReceipt
+            let seamJson = serializeVerified seamChecksPath encodeSeamChecksReceipt decodeSeamChecksReceipt seamReceipt
+            let refusalJson = serializeVerified refusalControlsPath encodeRefusalControlsReceipt decodeRefusalControlsReceipt refusalReceipt
             let seamSha = shaText seamJson
             let refusalSha = shaText refusalJson
 
@@ -1752,7 +1969,7 @@ module SubstantiationSeams =
                   RefusalControlsPath = refusalControlsPath
                   RefusalControlsSha256 = refusalSha }
 
-            let ledgerJson = serializeVerified ledgerPath ledger
+            let ledgerJson = serializeVerified ledgerPath encodeSeamsLedgerReceipt decodeSeamsLedgerReceipt ledger
 
             writeAtomic seamChecksPath seamJson
             writeAtomic refusalControlsPath refusalJson

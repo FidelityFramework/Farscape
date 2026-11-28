@@ -2650,3 +2650,470 @@ let ``explicit warning relaxation retains custom elevations through the native C
     { manifest with WarningsAsErrors = true }
     |> Substantiation.seal |> Substantiation.validateManifest |> refused "FS9236"
     Substantiation.validateManifest manifest |> accepted
+
+// =====================================================================
+// #228 controls for the explicit type-directed Fidelity.Data codecs.
+// =====================================================================
+
+let private codecStrata : SubstantiationBoundary.BoundaryStrata =
+    { ForeignCalls = false; MeasuredRecords = false; StaticArchive = false; ErrorConventions = false;
+      Ownership = false; ZeroCopy = false; Callbacks = false; Nullability = false }
+
+let private codecProof : SubstantiationProof.ProofSummary =
+    { LibraryObligations = 1; LibraryDischargedUnsatCount = 1; LibraryPremisesSatCount = 1;
+      HarnessObligations = 0; TotalObligations = 1; DischargedUnsatCount = 1; PendingOpenCount = 0;
+      RefutedCount = 0; PremisesSatCount = 1; ObligationsSha256 = "aa"; QuerySha256 = "bb";
+      ReceiptSha256 = "cc"; PremisesQuerySha256 = "dd"; PremisesOutputSha256 = "ee";
+      CompilerPremiseReceiptsCount = 1; CompilerNonVacuityReceiptsCount = 1;
+      StageReceipts = [| { Path = "stage.json"; Sha256 = "ff" } |];
+      Solver = { Executable = "cvc5"; Sha256 = "gg"; Version = "2.11.0"; Arguments = [| "--mode=strict" |] } }
+
+let private codecBoundary : SubstantiationBoundary.BoundaryEvidence =
+    let hypotheses, seamChecks = SubstantiationBoundary.deriveContract "<codec-fixture>" codecStrata
+    { Strata = codecStrata; Files = [||]; LinkMode = "none"; Libraries = [||]; ExternSymbols = [||];
+      ClangIdentity = "not-applicable"; ClangTarget = "not-measured"; TargetDataModel = "not-measured";
+      Layouts = [||]; Enums = [||]; RestsOn = hypotheses; RequiredSeamChecks = seamChecks }
+
+let private codecManifestBase : Substantiation.Manifest =
+    { SchemaVersion = 2;
+      Package = "CodecProbe";
+      FidprojPath = "<codec-fixture>/CodecProbe.fidproj";
+      FidprojSha256 = "11";
+      Sources = [| { Path = "CodecProbe.clef"; Sha256 = "22"; ModuleName = "CodecProbe";
+                     RuntimeDeclarations = [| "CodecProbe.run" |]; CompileTimeDeclarations = [| |]; ForeignDeclarations = [| |] } |];
+      Compiler = { Path = "<codec-fixture>/compiler"; Sha256 = "33" };
+      Dotnet = { Path = "<codec-fixture>/dotnet"; Sha256 = "44" };
+      Harness = { Path = "<codec-fixture>/harness.clef"; Sha256 = "55" };
+      HarnessProject = { Path = "<codec-fixture>/harness.fidproj"; Sha256 = "66" };
+      SourceInputsSha256 = String('a', 64);
+      CompilerLog = { Path = "<codec-fixture>/compiler.log"; Sha256 = "77" };
+      Psg0 = { Path = "<codec-fixture>/artifacts/01_psg0.json"; Sha256 = "88" };
+      WitnessUnits = { Path = "<codec-fixture>/artifacts/10_witness_units.json"; Sha256 = "99" };
+      AllowWarnings = false;
+      WarningsAsErrors = true;
+      ElevatedWarningCodes = [| "CCS8500" |];
+      ArtifactsDirectory = "<codec-fixture>/artifacts";
+      Proof = codecProof;
+      Boundary = codecBoundary;
+      IntegritySha256 = "" }
+
+let private codecManifest = Substantiation.seal codecManifestBase
+
+let private codecKeys =
+    [ "SchemaVersion"; "Package"; "FidprojPath"; "FidprojSha256"; "Sources"; "Compiler"; "Dotnet"; "Harness";
+      "HarnessProject"; "SourceInputsSha256"; "CompilerLog"; "Psg0"; "WitnessUnits"; "AllowWarnings";
+      "WarningsAsErrors"; "ElevatedWarningCodes"; "ArtifactsDirectory"; "Proof"; "Boundary"; "IntegritySha256" ]
+
+let private refusalText (refusal: Diagnostics.Refusal) =
+    refusal.Diagnostics |> List.map (fun diagnostic -> diagnostic.Message) |> String.concat " "
+
+[<Fact>]
+let ``explicit codec roundtrip preserves the sealed manifest and its checked source identity`` () =
+    let manifest = codecManifest
+    let json = Substantiation.toJson manifest
+    let decoded = Substantiation.parseJson json |> accepted
+    Assert.Equal(manifest, decoded)
+    Assert.Equal(manifest.SourceInputsSha256, decoded.SourceInputsSha256)
+    Assert.Equal(manifest.IntegritySha256, decoded.IntegritySha256)
+    Assert.Equal(json, Substantiation.toJson decoded)
+    let positions = codecKeys |> List.map (fun key -> json.IndexOf("\"" + key + "\":"))
+    Assert.True(positions |> List.forall ((<) 0), "a published manifest key is missing")
+    Assert.Equal(codecKeys.Length, (positions |> List.distinct |> List.length))
+    Assert.True(positions |> List.pairwise |> List.forall (fun (a, b) -> a < b), "published manifest keys are out of order")
+
+[<Fact>]
+let ``sealed manifests are byte identical across repeated seals`` () =
+    let manifest = codecManifest
+    Assert.Equal(Substantiation.toJson manifest, Substantiation.toJson (Substantiation.seal manifest))
+
+[<Fact>]
+let ``null string fields are refused at encoding instead of publishing null JSON`` () =
+    let nullManifest = { codecManifest with Package = Unchecked.defaultof<string> }
+    let ex = Assert.Throws<Diagnostics.RefusalException>(fun () -> Substantiation.toJson nullManifest |> ignore)
+    Assert.Contains("admits no null", ex.Message)
+
+[<Fact>]
+let ``malformed manifest JSON refuses with FS9236`` () =
+    [ ""; "{"; "{\"SchemaVersion\": 2"; "[1,2"; "null" ]
+    |> List.iter (fun text -> Substantiation.parseJson text |> refused "FS9236")
+
+[<Fact>]
+let ``a duplicate key in the top level manifest object refuses with FS9236`` () =
+    let json = Substantiation.toJson codecManifest
+    let duplicated = json.Replace("\"Package\":", "\"Package\": \"CodecProbe\", \"Package\":")
+    match Substantiation.parseJson duplicated with
+    | Error refusal ->
+        Assert.Equal<string list>([ "FS9236" ], refusal.Diagnostics |> List.map _.Code |> List.distinct)
+        Assert.Contains("repeats field 'Package'", refusalText refusal)
+    | Ok _ -> failwith "a manifest with a duplicate top-level key was accepted"
+
+[<Fact>]
+let ``a duplicate key inside a nested source digest refuses with FS9236`` () =
+    let json = Substantiation.toJson codecManifest
+    let duplicated = json.Replace("\"ModuleName\":", "\"Sha256\": \"22\", \"ModuleName\":")
+    match Substantiation.parseJson duplicated with
+    | Error refusal ->
+        Assert.Equal<string list>([ "FS9236" ], refusal.Diagnostics |> List.map _.Code |> List.distinct)
+        Assert.Contains("repeats field 'Sha256'", refusalText refusal)
+    | Ok _ -> failwith "a nested digest with a duplicate key was accepted"
+
+[<Fact>]
+let ``an unknown manifest key refuses with FS9236`` () =
+    let json = (Substantiation.toJson codecManifest).Replace("\"Package\":", "\"UnknownField\": 1, \"Package\":")
+    match Substantiation.parseJson json with
+    | Error refusal ->
+        Assert.Equal<string list>([ "FS9236" ], refusal.Diagnostics |> List.map _.Code |> List.distinct)
+        Assert.Contains("field 'UnknownField' outside its schema", refusalText refusal)
+    | Ok _ -> failwith "a manifest with an unknown key was accepted"
+
+[<Fact>]
+let ``a missing required manifest field refuses with FS9236`` () =
+    let json = System.Text.RegularExpressions.Regex.Replace(Substantiation.toJson codecManifest, "\"FidprojSha256\": \"11\",\n", "")
+    match Substantiation.parseJson json with
+    | Error refusal ->
+        Assert.Equal<string list>([ "FS9236" ], refusal.Diagnostics |> List.map _.Code |> List.distinct)
+        Assert.Contains("missing required field 'FidprojSha256'", refusalText refusal)
+    | Ok _ -> failwith "a manifest missing FidprojSha256 was accepted"
+
+[<Fact>]
+let ``a manifest field of the wrong JSON type refuses with FS9236 and names the field`` () =
+    let json = (Substantiation.toJson codecManifest).Replace("\"AllowWarnings\": false", "\"AllowWarnings\": \"false\"")
+    match Substantiation.parseJson json with
+    | Error refusal ->
+        Assert.Equal<string list>([ "FS9236" ], refusal.Diagnostics |> List.map _.Code |> List.distinct)
+        Assert.Contains("Field 'AllowWarnings'", refusalText refusal)
+        Assert.Contains("Expected a boolean", refusalText refusal)
+    | Ok _ -> failwith "a manifest whose AllowWarnings is a string was accepted"
+
+[<Fact>]
+let ``one substituted manifest field fails at the integrity validation`` () =
+    let json = (Substantiation.toJson codecManifest).Replace("\"TotalObligations\": 1", "\"TotalObligations\": 2")
+    match Substantiation.parseJson json with
+    | Error refusal ->
+        Assert.Equal<string list>([ "FS9236" ], refusal.Diagnostics |> List.map _.Code |> List.distinct)
+        Assert.Contains("integrity digest does not match", refusalText refusal)
+    | Ok _ -> failwith "a one-field substitution of a sealed manifest was accepted"
+
+[<Fact>]
+let ``an omitted checked source-input receipt is admitted only as an archive and refused by validation`` () =
+    let legacy = { codecManifest with SchemaVersion = 1; SourceInputsSha256 = "" } |> Substantiation.seal
+    let archived = Substantiation.toJson legacy |> Substantiation.parseJson |> accepted
+    Assert.Equal("", archived.SourceInputsSha256)
+    match Substantiation.validateManifest archived with
+    | Error refusal ->
+        Assert.Equal<string list>([ "FS9237" ], refusal.Diagnostics |> List.map _.Code |> List.distinct)
+        Assert.Contains("requires a sealed checked source-input receipt", refusalText refusal)
+    | Ok _ -> failwith "an archive-only manifest was admitted as current proof evidence"
+
+[<Fact>]
+let ``a schema 1 document rebound with a checked source digest refuses with FS9236`` () =
+    let json = (Substantiation.toJson codecManifest).Replace("\"SchemaVersion\": 2", "\"SchemaVersion\": 1")
+    match Substantiation.parseJson json with
+    | Error refusal ->
+        Assert.Equal<string list>([ "FS9236" ], refusal.Diagnostics |> List.map _.Code |> List.distinct)
+        Assert.Contains("schema 1 does not admit a source-input digest", refusalText refusal)
+    | Ok _ -> failwith "a schema 1 document carrying a checked source-input digest was accepted"
+
+[<Fact>]
+let ``a real library manifest refuses omitted and rebound schema 2 checked source-input receipts`` () =
+    let probe = nativeProbe ()
+    let manifest = request probe.Project (Some probe.Pilot) (Some probe.Provenance) probe.Work |> Substantiation.evaluate |> accepted
+    // Positive: exact JSON round-trip preserves bytes and checked-source identity.
+    let published = Substantiation.toJson manifest
+    let reparsed = Substantiation.parseJson published |> accepted
+    Assert.Equal(manifest, reparsed)
+    Assert.Equal(published, Substantiation.toJson reparsed)
+    Substantiation.validateManifest reparsed |> accepted
+    // Exact-reason negative 1: schema-2 manifest with omitted (empty) SourceInputsSha256 refuses at validation.
+    let omitted = { manifest with SourceInputsSha256 = "" } |> Substantiation.seal
+    match Substantiation.validateManifest omitted with
+    | Error refusal ->
+        Assert.Equal<string list>([ "FS9236" ], refusal.Diagnostics |> List.map _.Code |> List.distinct)
+        Assert.Contains("The source input digest is invalid", refusalText refusal)
+    | Ok _ -> failwith "a schema 2 manifest with empty SourceInputsSha256 was accepted"
+    // Exact-reason negative 2: resealed schema-2 manifest rebound to a different SourceInputsSha256 refuses at checked-source validation.
+    let reboundDigest =
+        if manifest.SourceInputsSha256.StartsWith("0", StringComparison.Ordinal) then String('1', 64) else String('0', 64)
+    let rebound = { manifest with SourceInputsSha256 = reboundDigest } |> Substantiation.seal
+    let reboundParsed = Substantiation.toJson rebound |> Substantiation.parseJson |> accepted
+    match Substantiation.validateManifest reboundParsed with
+    | Error refusal ->
+        Assert.Equal<string list>([ "FS9234" ], refusal.Diagnostics |> List.map _.Code |> List.distinct)
+        Assert.Contains("checked source-input receipt SHA-256 has changed", refusalText refusal)
+    | Ok _ -> failwith "a schema 2 manifest rebound to a wrong checked source-input digest was accepted"
+
+[<Fact>]
+let ``a duplicate key inside a boundary layout object refuses with FS9236`` () =
+    let layoutBoundary =
+        { codecBoundary with Layouts = [| { Header = "probe.h"; Name = "Pair"; Kind = "struct"; SizeBits = 64; AlignmentBits = 32; FieldOffsetsBits = [| 0; 32 |] } |] }
+    let withLayout = { codecManifest with Boundary = layoutBoundary } |> Substantiation.seal |> Substantiation.toJson
+    let duplicated = withLayout.Replace("\"Kind\": \"struct\",", "\"Kind\": \"struct\", \"Kind\": \"struct\",")
+    match Substantiation.parseJson duplicated with
+    | Error refusal ->
+        Assert.Equal<string list>([ "FS9236" ], refusal.Diagnostics |> List.map _.Code |> List.distinct)
+        Assert.Contains("repeats field 'Kind'", refusalText refusal)
+    | Ok _ -> failwith "a nested layout object with a duplicate key was accepted"
+
+let private codecRocqEntry : SubstantiationDossier.DossierRocqEntry =
+    { Symbol = "add_comm"; Source = "CodecProbe.v"; Keyword = "Theorem"; Group = "Falsified";
+      Summary = "addition commutes"; Proposition = "forall x y, add x y = add y x";
+      BinderNotes = [| { Name = "x"; Note = "first operand" } |]; Assumptions = "closed";
+      Axioms = [||]; TrustScope = "library"; CorrespondsTo = [| "add_comm" |] }
+
+let private codecDossier : SubstantiationDossier.Dossier =
+    { SchemaVersion = 1;
+      Package = "CodecProbe";
+      Title = "CodecProbe substantiation dossier";
+      OverallStatus = "SUBSTANTIATED";
+      ManifestPath = "<codec-fixture>/substantiation.json";
+      ManifestIntegritySha256 = codecManifest.IntegritySha256;
+      Counts = { Open = 0; Falsified = 1; Checks = 1; Guarantees = 1; PendingSeamCategories = 0 };
+      Legend = [| { Section = "Open"; Health = "none"; Meaning = "no obligation is open" } |];
+      Open = { CompilerOpenObligations = 0; CompilerRefutedObligations = 0; RocqOpen = [||] };
+      Falsified =
+        { CompilerNonVacuityReceipts = 1; RefusalControlsAttached = true;
+          RefusalControls = [| { Id = "errno-1"; ExpectedCode = "FS9241"; ObservedCode = "FS9241"; Passed = true;
+                                MisuseSummary = "unclassified foreign call"; ProtectionSummary = "refused before output" } |];
+          RocqFalsified = [| codecRocqEntry |] };
+      Checks =
+        { PremisesSat = 1; TotalObligations = 1; LibraryPremisesSat = 1; LibraryObligations = 1;
+          CompilerPremiseReceipts = 1; SeamChecksAttached = true; SeamTargetTriple = "x86_64-linux-gnu";
+          SeamChecks = [| { Id = "callback-1"; Category = "callbacks"; Summary = "entry arity";
+                           BinarySha256 = "cc"; Passed = true; Command = "seam-callbacks" } |];
+          SeamCategories = [| { Category = "callbacks"; Description = "callback ABI"; Status = "SUBSTANTIATED"; Evidence = [| "witness.json" |] } |];
+          RocqChecks = [| codecRocqEntry |] };
+      Guarantees =
+        { TrustScope = "library"; HarnessObligations = 0; RocqGuarantees = [| codecRocqEntry |];
+          LibraryObligations = [| { Declaration = "add"; ModuleLevel = false; Anchor = "add";
+                                   Source = "CodecProbe.clef"; Kind = "runtime"; Guarantee = "add_comm";
+                                   TrustScope = "library" } |] };
+      Assumptions = { Hypotheses = [| { Id = "H-ABI-1"; Family = "H-ABI"; Category = "callbacks";
+                                       Origin = "boundary"; Statement = "callbacks are ABI conformant";
+                                       TestedBy = [| "callback-1" |] } |]; RocqAxioms = [||] };
+      Traceability =
+        { Declarations = [| { Declaration = "add"; Kind = "runtime"; Source = "CodecProbe.clef"; PsgNode = 1;
+                             Obligations = [| "add_comm" |]; MlirSymbols = [| "@add" |]; ForeignLinks = [||];
+                             MeasuredTypes = [||]; RocqTheorems = [| "add_comm" |] } |];
+          Layouts = [| { Header = "probe.h"; Name = "Pair"; Kind = "struct"; SizeBits = 64;
+                        AlignmentBits = 32; FieldOffsetsBits = [| 0; 32 |] } |];
+          Enums = [| { Header = "probe.h"; Name = "Mode"; WidthBits = 32; Signed = true } |];
+          Digests = [| { Item = "psg0"; Path = "<codec-fixture>/artifacts/01_psg0.json"; Value = "88" } |];
+          RocqAttached = true; RocqVersion = "8.6";
+          RocqUnits = [| { Module = "CodecProbe"; Path = "<codec-fixture>/CodecProbe.v"; SourceMd5 = "aa"; GlobMd5 = "bb" } |] } }
+
+[<Fact>]
+let ``dossier documents round trip through the explicit codec with unchanged bytes`` () =
+    let text = SubstantiationDossier.toJson codecDossier
+    let decoded = SubstantiationDossier.parseDossierJson text |> accepted
+    Assert.Equal(codecDossier, decoded)
+    Assert.Equal(text, SubstantiationDossier.toJson decoded)
+    let nullDossier = { codecDossier with Title = Unchecked.defaultof<string> }
+    let ex = Assert.Throws<Diagnostics.RefusalException>(fun () -> SubstantiationDossier.toJson nullDossier |> ignore)
+    Assert.Contains("admits no null", ex.Message)
+
+[<Fact>]
+let ``a duplicate key inside a dossier seam category refuses with FS9247`` () =
+    let duplicated = (SubstantiationDossier.toJson codecDossier).Replace("\"Status\": \"SUBSTANTIATED\",", "\"Status\": \"SUBSTANTIATED\", \"Status\": \"SUBSTANTIATED\",")
+    match SubstantiationDossier.parseDossierJson duplicated with
+    | Error refusal ->
+        Assert.Equal<string list>([ "FS9247" ], refusal.Diagnostics |> List.map _.Code |> List.distinct)
+        Assert.Contains("repeats field 'Status'", refusalText refusal)
+    | Ok _ -> failwith "duplicate dossier seam category key was accepted"
+
+[<Fact>]
+let ``an unknown dossier key refuses with FS9247`` () =
+    let json = (SubstantiationDossier.toJson codecDossier).Replace("\"Title\":", "\"UnknownField\": 1, \"Title\":")
+    match SubstantiationDossier.parseDossierJson json with
+    | Error refusal ->
+        Assert.Equal<string list>([ "FS9247" ], refusal.Diagnostics |> List.map _.Code |> List.distinct)
+        Assert.Contains("field 'UnknownField' outside its schema", refusalText refusal)
+    | Ok _ -> failwith "unknown dossier key was accepted"
+
+[<Fact>]
+let ``a missing dossier field refuses with FS9247`` () =
+    let json = System.Text.RegularExpressions.Regex.Replace(SubstantiationDossier.toJson codecDossier, "\"RocqVersion\": \"8.6\",\n", "")
+    match SubstantiationDossier.parseDossierJson json with
+    | Error refusal ->
+        Assert.Equal<string list>([ "FS9247" ], refusal.Diagnostics |> List.map _.Code |> List.distinct)
+        Assert.Contains("missing required field 'RocqVersion'", refusalText refusal)
+    | Ok _ -> failwith "missing dossier field was accepted"
+
+[<Fact>]
+let ``a dossier field of the wrong JSON type refuses with FS9247 and names the field`` () =
+    let json = (SubstantiationDossier.toJson codecDossier).Replace("\"RocqAttached\": true", "\"RocqAttached\": \"yes\"")
+    match SubstantiationDossier.parseDossierJson json with
+    | Error refusal ->
+        Assert.Equal<string list>([ "FS9247" ], refusal.Diagnostics |> List.map _.Code |> List.distinct)
+        Assert.Contains("Field 'RocqAttached'", refusalText refusal)
+        Assert.Contains("Expected a boolean", refusalText refusal)
+    | Ok _ -> failwith "wrong-type dossier field was accepted"
+
+// =====================================================================
+// #228 controls for the explicit SubstantiationSeams receipt codecs.
+// =====================================================================
+
+let private codecSeamChecksReceipt : SubstantiationSeams.SeamChecksReceipt =
+    { SchemaVersion = 1
+      Package = "CodecProbe"
+      ManifestIntegritySha256 = codecManifest.IntegritySha256
+      TargetTriple = "x86_64-linux-gnu"
+      Checks =
+        [| { Id = "seam-scalar-1"
+             Category = "scalar-handle-link-and-call"
+             Summary = "Scalar probe linked statically"
+             BinarySha256 = String('b', 64)
+             Passed = true
+             Command = "<codec-fixture>/probe-scalar" } |] }
+
+let private codecRefusalControlsReceipt : SubstantiationSeams.RefusalControlsReceipt =
+    { SchemaVersion = 1
+      Package = "CodecProbe"
+      ManifestIntegritySha256 = codecManifest.IntegritySha256
+      Controls =
+        [| { Id = "unlinked-extern"
+             ExpectedCode = "FS9228"
+             ObservedCode = "FS9228"
+             MisuseSummary = "Unlinked extern symbol"
+             ProtectionSummary = "Refused before output"
+             Passed = true } |] }
+
+let private codecSeamsLedgerReceipt (seamJson: string) (refusalJson: string) : SubstantiationSeams.SeamsLedgerReceipt =
+    let sha text = SHA256.HashData(Encoding.UTF8.GetBytes(text: string)) |> Convert.ToHexStringLower
+    { Schema = SubstantiationSeams.LedgerSchema
+      SchemaVersion = 1
+      SeamChecksSchema = SubstantiationSeams.SeamChecksSchema
+      RefusalControlsSchema = SubstantiationSeams.RefusalControlsSchema
+      Package = "CodecProbe"
+      ManifestIntegritySha256 = codecManifest.IntegritySha256
+      TargetTriple = "x86_64-linux-gnu"
+      RequiredSeamCategories = [| "scalar-handle-link-and-call" |]
+      VerifiedPhysicalCategories = [| "scalar-handle-link-and-call" |]
+      Discharge =
+        { ReceiptPath = "<codec-fixture>/receipt.txt"
+          ReceiptSha256 = String('c', 64)
+          PremisesOutputPath = "<codec-fixture>/premises.txt"
+          PremisesOutputSha256 = String('d', 64)
+          TotalObligations = 1
+          DischargedUnsatCount = 1
+          PremisesSatCount = 1
+          LibraryObligations = 1
+          LibraryDischargedUnsatCount = 1
+          LibraryPremisesSatCount = 1
+          PendingOpenCount = 0
+          RefutedCount = 0 }
+      RetainedBinaries =
+        [| { CheckId = "seam-scalar-1"
+             BinaryPath = "<codec-fixture>/probe-scalar"
+             BinarySha256 = String('b', 64) } |]
+      SharedLibraries =
+        [| { CheckId = "seam-link-1"
+             SharedLibraryPath = "<codec-fixture>/libprobe.so"
+             SharedLibrarySha256 = String('e', 64)
+             DynamicProbeBinaryPath = "<codec-fixture>/dyn-probe"
+             DynamicProbeBinarySha256 = String('f', 64) } |]
+      SeamChecksPath = "<codec-fixture>/seams.json"
+      SeamChecksSha256 = sha seamJson
+      RefusalControlsPath = "<codec-fixture>/refusals.json"
+      RefusalControlsSha256 = sha refusalJson }
+
+[<Fact>]
+let ``seam check, refusal control, and ledger receipts round trip through explicit codecs with exact key order and null refusal`` () =
+    let assertOrdered (json: string) (keys: string list) =
+        let positions = keys |> List.map (fun key -> json.IndexOf("\"" + key + "\":"))
+        Assert.True(positions |> List.forall ((<) 0), "a published seam receipt key is missing")
+        Assert.True(positions |> List.pairwise |> List.forall (fun (a, b) -> a < b), "published seam receipt keys are out of order")
+
+    let seamJson = SubstantiationSeams.encodeSeamChecksReceipt codecSeamChecksReceipt |> Substantiation.prettyJson
+    assertOrdered seamJson [ "SchemaVersion"; "Package"; "ManifestIntegritySha256"; "TargetTriple"; "Checks" ]
+    match Substantiation.decodeJsonText seamJson SubstantiationSeams.decodeSeamChecksReceipt with
+    | Ok decoded ->
+        Assert.Equal(codecSeamChecksReceipt, decoded)
+        Assert.Equal(seamJson, SubstantiationSeams.encodeSeamChecksReceipt decoded |> Substantiation.prettyJson)
+    | Error reason -> failwith reason
+
+    let refusalJson = SubstantiationSeams.encodeRefusalControlsReceipt codecRefusalControlsReceipt |> Substantiation.prettyJson
+    assertOrdered refusalJson [ "SchemaVersion"; "Package"; "ManifestIntegritySha256"; "Controls" ]
+    match Substantiation.decodeJsonText refusalJson SubstantiationSeams.decodeRefusalControlsReceipt with
+    | Ok decoded ->
+        Assert.Equal(codecRefusalControlsReceipt, decoded)
+        Assert.Equal(refusalJson, SubstantiationSeams.encodeRefusalControlsReceipt decoded |> Substantiation.prettyJson)
+    | Error reason -> failwith reason
+
+    let ledger = codecSeamsLedgerReceipt seamJson refusalJson
+    let ledgerJson = SubstantiationSeams.encodeSeamsLedgerReceipt ledger |> Substantiation.prettyJson
+    assertOrdered ledgerJson
+        [ "Schema"; "SchemaVersion"; "SeamChecksSchema"; "RefusalControlsSchema"; "Package"; "ManifestIntegritySha256"
+          "TargetTriple"; "RequiredSeamCategories"; "VerifiedPhysicalCategories"; "Discharge"; "RetainedBinaries"
+          "SharedLibraries"; "SeamChecksPath"; "SeamChecksSha256"; "RefusalControlsPath"; "RefusalControlsSha256" ]
+    match Substantiation.decodeJsonText ledgerJson SubstantiationSeams.decodeSeamsLedgerReceipt with
+    | Ok decoded ->
+        Assert.Equal(ledger, decoded)
+        Assert.Equal(ledgerJson, SubstantiationSeams.encodeSeamsLedgerReceipt decoded |> Substantiation.prettyJson)
+    | Error reason -> failwith reason
+
+    // Fail-closed null refusal across seam encoders.
+    let nullSeam = { codecSeamChecksReceipt with Package = Unchecked.defaultof<string> }
+    let ex1 = Assert.Throws<Diagnostics.RefusalException>(fun () -> SubstantiationSeams.encodeSeamChecksReceipt nullSeam |> ignore)
+    Assert.Contains("admits no null", ex1.Message)
+    let nullRefusal = { codecRefusalControlsReceipt with Package = Unchecked.defaultof<string> }
+    let ex2 = Assert.Throws<Diagnostics.RefusalException>(fun () -> SubstantiationSeams.encodeRefusalControlsReceipt nullRefusal |> ignore)
+    Assert.Contains("admits no null", ex2.Message)
+    let nullLedger = { ledger with Schema = Unchecked.defaultof<string> }
+    let ex3 = Assert.Throws<Diagnostics.RefusalException>(fun () -> SubstantiationSeams.encodeSeamsLedgerReceipt nullLedger |> ignore)
+    Assert.Contains("admits no null", ex3.Message)
+
+[<Fact>]
+let ``seam receipt explicit codecs refuse duplicate, unknown, missing, and wrong-type JSON fields`` () =
+    let seamJson = SubstantiationSeams.encodeSeamChecksReceipt codecSeamChecksReceipt |> Substantiation.prettyJson
+    let refusalJson = SubstantiationSeams.encodeRefusalControlsReceipt codecRefusalControlsReceipt |> Substantiation.prettyJson
+    let ledger = codecSeamsLedgerReceipt seamJson refusalJson
+    let ledgerJson = SubstantiationSeams.encodeSeamsLedgerReceipt ledger |> Substantiation.prettyJson
+
+    // Duplicate key in seam check entry
+    match Substantiation.decodeJsonText (seamJson.Replace("\"Passed\": true,", "\"Passed\": true, \"Passed\": true,")) SubstantiationSeams.decodeSeamChecksReceipt with
+    | Error reason -> Assert.Contains("repeats field 'Passed'", reason)
+    | Ok _ -> failwith "duplicate seam check key was accepted"
+
+    // Unknown key in refusal controls receipt
+    match Substantiation.decodeJsonText (refusalJson.Replace("\"Package\":", "\"ExtraField\": 1, \"Package\":")) SubstantiationSeams.decodeRefusalControlsReceipt with
+    | Error reason -> Assert.Contains("field 'ExtraField' outside its schema", reason)
+    | Ok _ -> failwith "unknown refusal controls key was accepted"
+
+    // Missing required field in ledger Discharge summary
+    let missingField = System.Text.RegularExpressions.Regex.Replace(ledgerJson, "\"PendingOpenCount\": 0,\n", "")
+    match Substantiation.decodeJsonText missingField SubstantiationSeams.decodeSeamsLedgerReceipt with
+    | Error reason -> Assert.Contains("missing required field 'PendingOpenCount'", reason)
+    | Ok _ -> failwith "ledger missing PendingOpenCount was accepted"
+
+    // Wrong JSON type names the failing field
+    match Substantiation.decodeJsonText (ledgerJson.Replace("\"TotalObligations\": 1", "\"TotalObligations\": \"one\"")) SubstantiationSeams.decodeSeamsLedgerReceipt with
+    | Error reason ->
+        Assert.Contains("Field 'TotalObligations'", reason)
+        Assert.Contains("Expected a 32-bit integer.", reason)
+    | Ok _ -> failwith "ledger with string TotalObligations was accepted"
+
+    // File-level strict readers refuse duplicate keys with exact diagnostic codes (FS9247 / FS9253)
+    let work = scratch "seam-receipt-codecs"
+    let badSeamPath = Path.Combine(work, "bad-seams.json")
+    File.WriteAllText(badSeamPath, seamJson.Replace("\"TargetTriple\":", "\"TargetTriple\": \"x86_64-linux-gnu\", \"TargetTriple\":"))
+    match SubstantiationSeams.readSeamReceipt codecManifest badSeamPath with
+    | Error refusal ->
+        Assert.Equal<string list>([ "FS9247" ], refusal.Diagnostics |> List.map _.Code |> List.distinct)
+        Assert.Contains("repeats field 'TargetTriple'", refusalText refusal)
+    | Ok _ -> failwith "readSeamReceipt accepted duplicate key"
+
+    let badRefusalPath = Path.Combine(work, "bad-refusals.json")
+    File.WriteAllText(badRefusalPath, refusalJson.Replace("\"Package\":", "\"UnknownKey\": 1, \"Package\":"))
+    match SubstantiationSeams.readRefusalReceipt codecManifest badRefusalPath with
+    | Error refusal ->
+        Assert.Equal<string list>([ "FS9247" ], refusal.Diagnostics |> List.map _.Code |> List.distinct)
+        Assert.Contains("field 'UnknownKey' outside its schema", refusalText refusal)
+    | Ok _ -> failwith "readRefusalReceipt accepted unknown key"
+
+    let badLedgerPath = Path.Combine(work, "bad-ledger.json")
+    File.WriteAllText(badLedgerPath, ledgerJson.Replace("\"SchemaVersion\": 1", "\"SchemaVersion\": \"1\""))
+    match SubstantiationSeams.readLedgerReceipt codecManifest badLedgerPath with
+    | Error refusal ->
+        Assert.Equal<string list>([ "FS9253" ], refusal.Diagnostics |> List.map _.Code |> List.distinct)
+        Assert.Contains("Field 'SchemaVersion'", refusalText refusal)
+    | Ok _ -> failwith "readLedgerReceipt accepted string SchemaVersion"

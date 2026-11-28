@@ -199,6 +199,415 @@ module SubstantiationDossier =
           Assumptions: DossierAssumptions
           Traceability: DossierTraceability }
 
+    // Explicit, type-directed Fidelity.Data codecs for the dossier document (#228). They replace
+    // the reflective writer/reader; field order, array formatting and published bytes are unchanged.
+    let private jsonString = Substantiation.jsonString
+    let private jsonInt = Substantiation.jsonInt
+    let private jsonArray = Substantiation.jsonArray
+    let private jsonObject = Substantiation.jsonObject
+
+    let internal encodeRocqCorrespondenceEntry (entry: RocqCorrespondenceEntry) : JsonValue =
+        jsonObject [ "RocqSymbol", jsonString entry.RocqSymbol; "Targets", jsonArray jsonString entry.Targets ]
+
+    let internal decodeRocqCorrespondenceEntry (value: JsonValue) : Result<RocqCorrespondenceEntry, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "Rocq correspondence entry" [ "RocqSymbol"; "Targets" ] value
+            let! rocqSymbol = Substantiation.field "Rocq correspondence entry" map "RocqSymbol" Substantiation.decodeString
+            let! targets = Substantiation.field "Rocq correspondence entry" map "Targets" (Substantiation.decodeArray "Targets" Substantiation.decodeString)
+            return { RocqSymbol = rocqSymbol; Targets = targets }
+        }
+
+    let internal encodeRocqDossierConfig (config: RocqDossierConfig) : JsonValue =
+        jsonObject [
+            "SchemaVersion", jsonInt config.SchemaVersion
+            "FalsifiedSuffix", jsonString config.FalsifiedSuffix
+            "CheckMarker", jsonString config.CheckMarker
+            "Correspondence", jsonArray encodeRocqCorrespondenceEntry config.Correspondence ]
+
+    let internal decodeRocqDossierConfig (value: JsonValue) : Result<RocqDossierConfig, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "Rocq dossier config" [ "SchemaVersion"; "FalsifiedSuffix"; "CheckMarker"; "Correspondence" ] value
+            let! schemaVersion = Substantiation.field "Rocq dossier config" map "SchemaVersion" Substantiation.decodeInt
+            let! falsifiedSuffix = Substantiation.field "Rocq dossier config" map "FalsifiedSuffix" Substantiation.decodeString
+            let! checkMarker = Substantiation.field "Rocq dossier config" map "CheckMarker" Substantiation.decodeString
+            let! correspondence = Substantiation.field "Rocq dossier config" map "Correspondence" (Substantiation.decodeArray "Correspondence" decodeRocqCorrespondenceEntry)
+            return { SchemaVersion = schemaVersion; FalsifiedSuffix = falsifiedSuffix;
+                    CheckMarker = checkMarker; Correspondence = correspondence }
+        }
+
+    let internal encodeBinderNote (note: DossierBinderNote) : JsonValue =
+        jsonObject [ "Name", jsonString note.Name; "Note", jsonString note.Note ]
+
+    let internal decodeBinderNote (value: JsonValue) : Result<DossierBinderNote, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "binder note" [ "Name"; "Note" ] value
+            let! name = Substantiation.field "binder note" map "Name" Substantiation.decodeString
+            let! note = Substantiation.field "binder note" map "Note" Substantiation.decodeString
+            return { Name = name; Note = note }
+        }
+
+    let internal encodeRocqEntry (entry: DossierRocqEntry) : JsonValue =
+        jsonObject [
+            "Symbol", jsonString entry.Symbol
+            "Source", jsonString entry.Source
+            "Keyword", jsonString entry.Keyword
+            "Group", jsonString entry.Group
+            "Summary", jsonString entry.Summary
+            "Proposition", jsonString entry.Proposition
+            "BinderNotes", jsonArray encodeBinderNote entry.BinderNotes
+            "Assumptions", jsonString entry.Assumptions
+            "Axioms", jsonArray jsonString entry.Axioms
+            "TrustScope", jsonString entry.TrustScope
+            "CorrespondsTo", jsonArray jsonString entry.CorrespondsTo ]
+
+    let internal decodeRocqEntry (value: JsonValue) : Result<DossierRocqEntry, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "Rocq entry" [ "Symbol"; "Source"; "Keyword"; "Group"; "Summary"; "Proposition"; "BinderNotes"; "Assumptions"; "Axioms"; "TrustScope"; "CorrespondsTo" ]                 value
+            let! symbol = Substantiation.field "Rocq entry" map "Symbol" Substantiation.decodeString
+            let! source = Substantiation.field "Rocq entry" map "Source" Substantiation.decodeString
+            let! keyword = Substantiation.field "Rocq entry" map "Keyword" Substantiation.decodeString
+            let! group = Substantiation.field "Rocq entry" map "Group" Substantiation.decodeString
+            let! summary = Substantiation.field "Rocq entry" map "Summary" Substantiation.decodeString
+            let! proposition = Substantiation.field "Rocq entry" map "Proposition" Substantiation.decodeString
+            let! binderNotes = Substantiation.field "Rocq entry" map "BinderNotes" (Substantiation.decodeArray "BinderNotes" decodeBinderNote)
+            let! assumptions = Substantiation.field "Rocq entry" map "Assumptions" Substantiation.decodeString
+            let! axioms = Substantiation.field "Rocq entry" map "Axioms" (Substantiation.decodeArray "Axioms" Substantiation.decodeString)
+            let! trustScope = Substantiation.field "Rocq entry" map "TrustScope" Substantiation.decodeString
+            let! correspondsTo = Substantiation.field "Rocq entry" map "CorrespondsTo" (Substantiation.decodeArray "CorrespondsTo" Substantiation.decodeString)
+            return { Symbol = symbol; Source = source; Keyword = keyword; Group = group; Summary = summary;
+                    Proposition = proposition; BinderNotes = binderNotes; Assumptions = assumptions;
+                    Axioms = axioms; TrustScope = trustScope; CorrespondsTo = correspondsTo }
+        }
+
+    let internal encodeSeamCategory (category: DossierSeamCategory) : JsonValue =
+        jsonObject [
+            "Category", jsonString category.Category
+            "Description", jsonString category.Description
+            "Status", jsonString category.Status
+            "Evidence", jsonArray jsonString category.Evidence ]
+
+    let internal decodeSeamCategory (value: JsonValue) : Result<DossierSeamCategory, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "seam category" [ "Category"; "Description"; "Status"; "Evidence" ] value
+            let! category = Substantiation.field "seam category" map "Category" Substantiation.decodeString
+            let! description = Substantiation.field "seam category" map "Description" Substantiation.decodeString
+            let! status = Substantiation.field "seam category" map "Status" Substantiation.decodeString
+            let! evidence = Substantiation.field "seam category" map "Evidence" (Substantiation.decodeArray "Evidence" Substantiation.decodeString)
+            return { Category = category; Description = description; Status = status; Evidence = evidence }
+        }
+
+    let internal encodeObligation (obligation: DossierObligation) : JsonValue =
+        jsonObject [
+            "Declaration", jsonString obligation.Declaration
+            "ModuleLevel", JsonValue.Bool obligation.ModuleLevel
+            "Anchor", jsonString obligation.Anchor
+            "Source", jsonString obligation.Source
+            "Kind", jsonString obligation.Kind
+            "Guarantee", jsonString obligation.Guarantee
+            "TrustScope", jsonString obligation.TrustScope ]
+
+    let internal decodeObligation (value: JsonValue) : Result<DossierObligation, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "dossier obligation" [ "Declaration"; "ModuleLevel"; "Anchor"; "Source"; "Kind"; "Guarantee"; "TrustScope" ] value
+            let! declaration = Substantiation.field "dossier obligation" map "Declaration" Substantiation.decodeString
+            let! moduleLevel = Substantiation.field "dossier obligation" map "ModuleLevel" Substantiation.decodeBool
+            let! anchor = Substantiation.field "dossier obligation" map "Anchor" Substantiation.decodeString
+            let! source = Substantiation.field "dossier obligation" map "Source" Substantiation.decodeString
+            let! kind = Substantiation.field "dossier obligation" map "Kind" Substantiation.decodeString
+            let! guarantee = Substantiation.field "dossier obligation" map "Guarantee" Substantiation.decodeString
+            let! trustScope = Substantiation.field "dossier obligation" map "TrustScope" Substantiation.decodeString
+            return { Declaration = declaration; ModuleLevel = moduleLevel; Anchor = anchor; Source = source;
+                    Kind = kind; Guarantee = guarantee; TrustScope = trustScope }
+        }
+
+    let internal encodeHypothesis (hypothesis: DossierHypothesis) : JsonValue =
+        jsonObject [
+            "Id", jsonString hypothesis.Id
+            "Family", jsonString hypothesis.Family
+            "Category", jsonString hypothesis.Category
+            "Origin", jsonString hypothesis.Origin
+            "Statement", jsonString hypothesis.Statement
+            "TestedBy", jsonArray jsonString hypothesis.TestedBy ]
+
+    let internal decodeHypothesis (value: JsonValue) : Result<DossierHypothesis, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "dossier hypothesis" [ "Id"; "Family"; "Category"; "Origin"; "Statement"; "TestedBy" ] value
+            let! id = Substantiation.field "dossier hypothesis" map "Id" Substantiation.decodeString
+            let! family = Substantiation.field "dossier hypothesis" map "Family" Substantiation.decodeString
+            let! category = Substantiation.field "dossier hypothesis" map "Category" Substantiation.decodeString
+            let! origin = Substantiation.field "dossier hypothesis" map "Origin" Substantiation.decodeString
+            let! statement = Substantiation.field "dossier hypothesis" map "Statement" Substantiation.decodeString
+            let! testedBy = Substantiation.field "dossier hypothesis" map "TestedBy" (Substantiation.decodeArray "TestedBy" Substantiation.decodeString)
+            return { Id = id; Family = family; Category = category; Origin = origin; Statement = statement; TestedBy = testedBy }
+        }
+
+    let internal encodeForeignLink (link: DossierForeignLink) : JsonValue =
+        jsonObject [
+            "Library", jsonString link.Library
+            "Symbol", jsonString link.Symbol
+            "Member", jsonString link.Member
+            "MemberSha256", jsonString link.MemberSha256
+            "Binding", jsonString link.Binding ]
+
+    let internal decodeForeignLink (value: JsonValue) : Result<DossierForeignLink, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "foreign link" [ "Library"; "Symbol"; "Member"; "MemberSha256"; "Binding" ] value
+            let! library = Substantiation.field "foreign link" map "Library" Substantiation.decodeString
+            let! symbol = Substantiation.field "foreign link" map "Symbol" Substantiation.decodeString
+            let! memberName = Substantiation.field "foreign link" map "Member" Substantiation.decodeString
+            let! memberSha256 = Substantiation.field "foreign link" map "MemberSha256" Substantiation.decodeString
+            let! binding = Substantiation.field "foreign link" map "Binding" Substantiation.decodeString
+            return { Library = library; Symbol = symbol; Member = memberName; MemberSha256 = memberSha256; Binding = binding }
+        }
+
+    let internal encodeDeclaration (declaration: DossierDeclaration) : JsonValue =
+        jsonObject [
+            "Declaration", jsonString declaration.Declaration
+            "Kind", jsonString declaration.Kind
+            "Source", jsonString declaration.Source
+            "PsgNode", jsonInt declaration.PsgNode
+            "Obligations", jsonArray jsonString declaration.Obligations
+            "MlirSymbols", jsonArray jsonString declaration.MlirSymbols
+            "ForeignLinks", jsonArray encodeForeignLink declaration.ForeignLinks
+            "MeasuredTypes", jsonArray jsonString declaration.MeasuredTypes
+            "RocqTheorems", jsonArray jsonString declaration.RocqTheorems ]
+
+    let internal decodeDeclaration (value: JsonValue) : Result<DossierDeclaration, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "dossier declaration" [ "Declaration"; "Kind"; "Source"; "PsgNode"; "Obligations"; "MlirSymbols"; "ForeignLinks"; "MeasuredTypes"; "RocqTheorems" ]                 value
+            let! declaration = Substantiation.field "dossier declaration" map "Declaration" Substantiation.decodeString
+            let! kind = Substantiation.field "dossier declaration" map "Kind" Substantiation.decodeString
+            let! source = Substantiation.field "dossier declaration" map "Source" Substantiation.decodeString
+            let! psgNode = Substantiation.field "dossier declaration" map "PsgNode" Substantiation.decodeInt
+            let! obligations = Substantiation.field "dossier declaration" map "Obligations" (Substantiation.decodeArray "Obligations" Substantiation.decodeString)
+            let! mlirSymbols = Substantiation.field "dossier declaration" map "MlirSymbols" (Substantiation.decodeArray "MlirSymbols" Substantiation.decodeString)
+            let! foreignLinks = Substantiation.field "dossier declaration" map "ForeignLinks" (Substantiation.decodeArray "ForeignLinks" decodeForeignLink)
+            let! measuredTypes = Substantiation.field "dossier declaration" map "MeasuredTypes" (Substantiation.decodeArray "MeasuredTypes" Substantiation.decodeString)
+            let! rocqTheorems = Substantiation.field "dossier declaration" map "RocqTheorems" (Substantiation.decodeArray "RocqTheorems" Substantiation.decodeString)
+            return { Declaration = declaration; Kind = kind; Source = source; PsgNode = psgNode;
+                    Obligations = obligations; MlirSymbols = mlirSymbols; ForeignLinks = foreignLinks;
+                    MeasuredTypes = measuredTypes; RocqTheorems = rocqTheorems }
+        }
+
+    let internal encodeDigest (digest: DossierDigest) : JsonValue =
+        jsonObject [ "Item", jsonString digest.Item; "Path", jsonString digest.Path; "Value", jsonString digest.Value ]
+
+    let internal decodeDigest (value: JsonValue) : Result<DossierDigest, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "dossier digest" [ "Item"; "Path"; "Value" ] value
+            let! item = Substantiation.field "dossier digest" map "Item" Substantiation.decodeString
+            let! path = Substantiation.field "dossier digest" map "Path" Substantiation.decodeString
+            let! digestValue = Substantiation.field "dossier digest" map "Value" Substantiation.decodeString
+            return { Item = item; Path = path; Value = digestValue }
+        }
+
+    let internal encodeRocqUnit (unit: DossierRocqUnit) : JsonValue =
+        jsonObject [
+            "Module", jsonString unit.Module
+            "Path", jsonString unit.Path
+            "SourceMd5", jsonString unit.SourceMd5
+            "GlobMd5", jsonString unit.GlobMd5 ]
+
+    let internal decodeRocqUnit (value: JsonValue) : Result<DossierRocqUnit, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "Rocq unit" [ "Module"; "Path"; "SourceMd5"; "GlobMd5" ] value
+            let! moduleName = Substantiation.field "Rocq unit" map "Module" Substantiation.decodeString
+            let! path = Substantiation.field "Rocq unit" map "Path" Substantiation.decodeString
+            let! sourceMd5 = Substantiation.field "Rocq unit" map "SourceMd5" Substantiation.decodeString
+            let! globMd5 = Substantiation.field "Rocq unit" map "GlobMd5" Substantiation.decodeString
+            return { Module = moduleName; Path = path; SourceMd5 = sourceMd5; GlobMd5 = globMd5 }
+        }
+
+    let internal encodeLegendRow (row: DossierLegendRow) : JsonValue =
+        jsonObject [ "Section", jsonString row.Section; "Health", jsonString row.Health; "Meaning", jsonString row.Meaning ]
+
+    let internal decodeLegendRow (value: JsonValue) : Result<DossierLegendRow, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "legend row" [ "Section"; "Health"; "Meaning" ] value
+            let! section = Substantiation.field "legend row" map "Section" Substantiation.decodeString
+            let! health = Substantiation.field "legend row" map "Health" Substantiation.decodeString
+            let! meaning = Substantiation.field "legend row" map "Meaning" Substantiation.decodeString
+            return { Section = section; Health = health; Meaning = meaning }
+        }
+
+    let internal encodeCounts (counts: DossierCounts) : JsonValue =
+        jsonObject [
+            "Open", jsonInt counts.Open
+            "Falsified", jsonInt counts.Falsified
+            "Checks", jsonInt counts.Checks
+            "Guarantees", jsonInt counts.Guarantees
+            "PendingSeamCategories", jsonInt counts.PendingSeamCategories ]
+
+    let internal decodeCounts (value: JsonValue) : Result<DossierCounts, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "dossier counts" [ "Open"; "Falsified"; "Checks"; "Guarantees"; "PendingSeamCategories" ] value
+            let! openCount = Substantiation.field "dossier counts" map "Open" Substantiation.decodeInt
+            let! falsified = Substantiation.field "dossier counts" map "Falsified" Substantiation.decodeInt
+            let! checks = Substantiation.field "dossier counts" map "Checks" Substantiation.decodeInt
+            let! guarantees = Substantiation.field "dossier counts" map "Guarantees" Substantiation.decodeInt
+            let! pending = Substantiation.field "dossier counts" map "PendingSeamCategories" Substantiation.decodeInt
+            return { Open = openCount; Falsified = falsified; Checks = checks; Guarantees = guarantees; PendingSeamCategories = pending }
+        }
+
+    let internal encodeOpenSection (section: DossierOpen) : JsonValue =
+        jsonObject [
+            "CompilerOpenObligations", jsonInt section.CompilerOpenObligations
+            "CompilerRefutedObligations", jsonInt section.CompilerRefutedObligations
+            "RocqOpen", jsonArray encodeRocqEntry section.RocqOpen ]
+
+    let internal decodeOpenSection (value: JsonValue) : Result<DossierOpen, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "dossier open section" [ "CompilerOpenObligations"; "CompilerRefutedObligations"; "RocqOpen" ] value
+            let! compilerOpen = Substantiation.field "dossier open section" map "CompilerOpenObligations" Substantiation.decodeInt
+            let! refuted = Substantiation.field "dossier open section" map "CompilerRefutedObligations" Substantiation.decodeInt
+            let! rocqOpen = Substantiation.field "dossier open section" map "RocqOpen" (Substantiation.decodeArray "RocqOpen" decodeRocqEntry)
+            return { CompilerOpenObligations = compilerOpen; CompilerRefutedObligations = refuted; RocqOpen = rocqOpen }
+        }
+
+    let internal encodeFalsified (falsified: DossierFalsified) : JsonValue =
+        jsonObject [
+            "CompilerNonVacuityReceipts", jsonInt falsified.CompilerNonVacuityReceipts
+            "RefusalControlsAttached", JsonValue.Bool falsified.RefusalControlsAttached
+            "RefusalControls", jsonArray SubstantiationSeams.encodeRefusalControlEntry falsified.RefusalControls
+            "RocqFalsified", jsonArray encodeRocqEntry falsified.RocqFalsified ]
+
+    let internal decodeFalsified (value: JsonValue) : Result<DossierFalsified, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "dossier falsified section" [ "CompilerNonVacuityReceipts"; "RefusalControlsAttached"; "RefusalControls"; "RocqFalsified" ] value
+            let! receipts = Substantiation.field "dossier falsified section" map "CompilerNonVacuityReceipts" Substantiation.decodeInt
+            let! attached = Substantiation.field "dossier falsified section" map "RefusalControlsAttached" Substantiation.decodeBool
+            let! controls = Substantiation.field "dossier falsified section" map "RefusalControls" (Substantiation.decodeArray "RefusalControls" SubstantiationSeams.decodeRefusalControlEntry)
+            let! rocqFalsified = Substantiation.field "dossier falsified section" map "RocqFalsified" (Substantiation.decodeArray "RocqFalsified" decodeRocqEntry)
+            return { CompilerNonVacuityReceipts = receipts; RefusalControlsAttached = attached;
+                    RefusalControls = controls; RocqFalsified = rocqFalsified }
+        }
+
+    let internal encodeChecks (checks: DossierChecks) : JsonValue =
+        jsonObject [
+            "PremisesSat", jsonInt checks.PremisesSat
+            "TotalObligations", jsonInt checks.TotalObligations
+            "LibraryPremisesSat", jsonInt checks.LibraryPremisesSat
+            "LibraryObligations", jsonInt checks.LibraryObligations
+            "CompilerPremiseReceipts", jsonInt checks.CompilerPremiseReceipts
+            "SeamChecksAttached", JsonValue.Bool checks.SeamChecksAttached
+            "SeamTargetTriple", jsonString checks.SeamTargetTriple
+            "SeamChecks", jsonArray SubstantiationSeams.encodeSeamCheckEntry checks.SeamChecks
+            "SeamCategories", jsonArray encodeSeamCategory checks.SeamCategories
+            "RocqChecks", jsonArray encodeRocqEntry checks.RocqChecks ]
+
+    let internal decodeChecks (value: JsonValue) : Result<DossierChecks, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "dossier checks section" [ "PremisesSat"; "TotalObligations"; "LibraryPremisesSat"; "LibraryObligations"; "CompilerPremiseReceipts"; "SeamChecksAttached"; "SeamTargetTriple"; "SeamChecks"; "SeamCategories"; "RocqChecks" ]                 value
+            let! premisesSat = Substantiation.field "dossier checks section" map "PremisesSat" Substantiation.decodeInt
+            let! total = Substantiation.field "dossier checks section" map "TotalObligations" Substantiation.decodeInt
+            let! librarySat = Substantiation.field "dossier checks section" map "LibraryPremisesSat" Substantiation.decodeInt
+            let! libraryObligations = Substantiation.field "dossier checks section" map "LibraryObligations" Substantiation.decodeInt
+            let! premiseReceipts = Substantiation.field "dossier checks section" map "CompilerPremiseReceipts" Substantiation.decodeInt
+            let! attached = Substantiation.field "dossier checks section" map "SeamChecksAttached" Substantiation.decodeBool
+            let! targetTriple = Substantiation.field "dossier checks section" map "SeamTargetTriple" Substantiation.decodeString
+            let! seamChecks = Substantiation.field "dossier checks section" map "SeamChecks" (Substantiation.decodeArray "SeamChecks" SubstantiationSeams.decodeSeamCheckEntry)
+            let! categories = Substantiation.field "dossier checks section" map "SeamCategories" (Substantiation.decodeArray "SeamCategories" decodeSeamCategory)
+            let! rocqChecks = Substantiation.field "dossier checks section" map "RocqChecks" (Substantiation.decodeArray "RocqChecks" decodeRocqEntry)
+            return { PremisesSat = premisesSat; TotalObligations = total; LibraryPremisesSat = librarySat;
+                    LibraryObligations = libraryObligations; CompilerPremiseReceipts = premiseReceipts;
+                    SeamChecksAttached = attached; SeamTargetTriple = targetTriple; SeamChecks = seamChecks;
+                    SeamCategories = categories; RocqChecks = rocqChecks }
+        }
+
+    let internal encodeGuarantees (guarantees: DossierGuarantees) : JsonValue =
+        jsonObject [
+            "TrustScope", jsonString guarantees.TrustScope
+            "LibraryObligations", jsonArray encodeObligation guarantees.LibraryObligations
+            "HarnessObligations", jsonInt guarantees.HarnessObligations
+            "RocqGuarantees", jsonArray encodeRocqEntry guarantees.RocqGuarantees ]
+
+    let internal decodeGuarantees (value: JsonValue) : Result<DossierGuarantees, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "dossier guarantees section" [ "TrustScope"; "LibraryObligations"; "HarnessObligations"; "RocqGuarantees" ] value
+            let! trustScope = Substantiation.field "dossier guarantees section" map "TrustScope" Substantiation.decodeString
+            let! obligations = Substantiation.field "dossier guarantees section" map "LibraryObligations" (Substantiation.decodeArray "LibraryObligations" decodeObligation)
+            let! harness = Substantiation.field "dossier guarantees section" map "HarnessObligations" Substantiation.decodeInt
+            let! rocqGuarantees = Substantiation.field "dossier guarantees section" map "RocqGuarantees" (Substantiation.decodeArray "RocqGuarantees" decodeRocqEntry)
+            return { TrustScope = trustScope; LibraryObligations = obligations; HarnessObligations = harness;
+                    RocqGuarantees = rocqGuarantees }
+        }
+
+    let internal encodeAssumptions (assumptions: DossierAssumptions) : JsonValue =
+        jsonObject [
+            "Hypotheses", jsonArray encodeHypothesis assumptions.Hypotheses
+            "RocqAxioms", jsonArray jsonString assumptions.RocqAxioms ]
+
+    let internal decodeAssumptions (value: JsonValue) : Result<DossierAssumptions, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "dossier assumptions section" [ "Hypotheses"; "RocqAxioms" ] value
+            let! hypotheses = Substantiation.field "dossier assumptions section" map "Hypotheses" (Substantiation.decodeArray "Hypotheses" decodeHypothesis)
+            let! axioms = Substantiation.field "dossier assumptions section" map "RocqAxioms" (Substantiation.decodeArray "RocqAxioms" Substantiation.decodeString)
+            return { Hypotheses = hypotheses; RocqAxioms = axioms }
+        }
+
+    let internal encodeTraceability (traceability: DossierTraceability) : JsonValue =
+        jsonObject [
+            "Declarations", jsonArray encodeDeclaration traceability.Declarations
+            "Layouts", jsonArray Substantiation.encodeLayoutSummary traceability.Layouts
+            "Enums", jsonArray Substantiation.encodeEnumSummary traceability.Enums
+            "Digests", jsonArray encodeDigest traceability.Digests
+            "RocqAttached", JsonValue.Bool traceability.RocqAttached
+            "RocqVersion", jsonString traceability.RocqVersion
+            "RocqUnits", jsonArray encodeRocqUnit traceability.RocqUnits ]
+
+    let internal decodeTraceability (value: JsonValue) : Result<DossierTraceability, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "dossier traceability section" [ "Declarations"; "Layouts"; "Enums"; "Digests"; "RocqAttached"; "RocqVersion"; "RocqUnits" ] value
+            let! declarations = Substantiation.field "dossier traceability section" map "Declarations" (Substantiation.decodeArray "Declarations" decodeDeclaration)
+            let! layouts = Substantiation.field "dossier traceability section" map "Layouts" (Substantiation.decodeArray "Layouts" Substantiation.decodeLayoutSummary)
+            let! enums = Substantiation.field "dossier traceability section" map "Enums" (Substantiation.decodeArray "Enums" Substantiation.decodeEnumSummary)
+            let! digests = Substantiation.field "dossier traceability section" map "Digests" (Substantiation.decodeArray "Digests" decodeDigest)
+            let! rocqAttached = Substantiation.field "dossier traceability section" map "RocqAttached" Substantiation.decodeBool
+            let! rocqVersion = Substantiation.field "dossier traceability section" map "RocqVersion" Substantiation.decodeString
+            let! rocqUnits = Substantiation.field "dossier traceability section" map "RocqUnits" (Substantiation.decodeArray "RocqUnits" decodeRocqUnit)
+            return { Declarations = declarations; Layouts = layouts; Enums = enums; Digests = digests;
+                    RocqAttached = rocqAttached; RocqVersion = rocqVersion; RocqUnits = rocqUnits }
+        }
+
+    let internal encodeDossier (dossier: Dossier) : JsonValue =
+        jsonObject [
+            "SchemaVersion", jsonInt dossier.SchemaVersion
+            "Package", jsonString dossier.Package
+            "Title", jsonString dossier.Title
+            "OverallStatus", jsonString dossier.OverallStatus
+            "ManifestPath", jsonString dossier.ManifestPath
+            "ManifestIntegritySha256", jsonString dossier.ManifestIntegritySha256
+            "Counts", encodeCounts dossier.Counts
+            "Legend", jsonArray encodeLegendRow dossier.Legend
+            "Open", encodeOpenSection dossier.Open
+            "Falsified", encodeFalsified dossier.Falsified
+            "Checks", encodeChecks dossier.Checks
+            "Guarantees", encodeGuarantees dossier.Guarantees
+            "Assumptions", encodeAssumptions dossier.Assumptions
+            "Traceability", encodeTraceability dossier.Traceability ]
+
+    let internal decodeDossier (value: JsonValue) : Result<Dossier, string> =
+        Substantiation.codec {
+            let! map = Substantiation.exactFields "dossier" [ "SchemaVersion"; "Package"; "Title"; "OverallStatus"; "ManifestPath"; "ManifestIntegritySha256"; "Counts"; "Legend"; "Open"; "Falsified"; "Checks"; "Guarantees"; "Assumptions"; "Traceability" ]                 value
+            let! schemaVersion = Substantiation.field "dossier" map "SchemaVersion" Substantiation.decodeInt
+            let! package = Substantiation.field "dossier" map "Package" Substantiation.decodeString
+            let! title = Substantiation.field "dossier" map "Title" Substantiation.decodeString
+            let! overallStatus = Substantiation.field "dossier" map "OverallStatus" Substantiation.decodeString
+            let! manifestPath = Substantiation.field "dossier" map "ManifestPath" Substantiation.decodeString
+            let! integrity = Substantiation.field "dossier" map "ManifestIntegritySha256" Substantiation.decodeString
+            let! counts = Substantiation.field "dossier" map "Counts" decodeCounts
+            let! legend = Substantiation.field "dossier" map "Legend" (Substantiation.decodeArray "Legend" decodeLegendRow)
+            let! openSection = Substantiation.field "dossier" map "Open" decodeOpenSection
+            let! falsified = Substantiation.field "dossier" map "Falsified" decodeFalsified
+            let! checks = Substantiation.field "dossier" map "Checks" decodeChecks
+            let! guarantees = Substantiation.field "dossier" map "Guarantees" decodeGuarantees
+            let! assumptions = Substantiation.field "dossier" map "Assumptions" decodeAssumptions
+            let! traceability = Substantiation.field "dossier" map "Traceability" decodeTraceability
+            return { SchemaVersion = schemaVersion; Package = package; Title = title; OverallStatus = overallStatus;
+                    ManifestPath = manifestPath; ManifestIntegritySha256 = integrity; Counts = counts; Legend = legend;
+                    Open = openSection; Falsified = falsified; Checks = checks; Guarantees = guarantees;
+                    Assumptions = assumptions; Traceability = traceability }
+        }
     type Generated =
         { Dossier: Dossier
           JsonPath: string
@@ -392,9 +801,9 @@ module SubstantiationDossier =
         with error -> fail Diagnostics.DossierInputMalformed path (label + " is unreadable: " + error.Message)
 
     /// A record input with every field present exactly once, no unknown field and no null.
-    let private parseStrict<'T> (label: string) (path: string) : 'T =
+    let private parseStrict (label: string) (path: string) (decode: JsonValue -> Result<'T, string>) : 'T =
         let text = readText label path
-        match Substantiation.deserializeJson<'T> text with
+        match Substantiation.decodeJsonText text decode with
         | Ok value -> value
         | Error reason -> fail Diagnostics.DossierInputMalformed path (label + " violates its required JSON schema: " + reason)
 
@@ -420,7 +829,7 @@ module SubstantiationDossier =
           Correspondence = [||] }
 
     let private loadConfig (path: string) : RocqDossierConfig =
-        let config = parseStrict<RocqDossierConfig> "The Rocq dossier config" path
+        let config = parseStrict "The Rocq dossier config" path decodeRocqDossierConfig
         let invalid message = fail Diagnostics.DossierInputMalformed path message
         if config.SchemaVersion <> 1 then invalid "Unsupported Rocq dossier config schema version."
         if String.IsNullOrEmpty config.FalsifiedSuffix then invalid "FalsifiedSuffix must be nonempty."
@@ -1278,12 +1687,12 @@ module SubstantiationDossier =
     // =====================================================================
 
     let toJson (dossier: Dossier) : string =
-        (Substantiation.serializeJsonPretty dossier).Replace("\r\n", "\n") + "\n"
+        (Substantiation.prettyJson (encodeDossier dossier)).Replace("\r\n", "\n") + "\n"
 
     /// Parse a dossier JSON document. Every field is required exactly once; an unknown field,
     /// a null or another schema version is refused with FS9247.
     let parseDossierJson (text: string) : Result<Dossier, Diagnostics.Refusal> =
-        match Substantiation.deserializeJson<Dossier> text with
+        match Substantiation.decodeJsonText text decodeDossier with
         | Error reason ->
             Diagnostics.diagnostic Diagnostics.DossierInputMalformed ("The dossier violates its required JSON schema: " + reason)
                 (Diagnostics.inFile "<dossier.json>" "dossier document")

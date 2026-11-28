@@ -6,7 +6,6 @@ open System.Diagnostics
 open System.Security.Cryptography
 open System.Text
 open System.Text.RegularExpressions
-open Microsoft.FSharp.Reflection
 open Fidelity.Data.JSON
 open Fidelity.Data.TOML
 
@@ -143,37 +142,427 @@ module Substantiation =
     let private digest path : FileDigest =
         { Path = Path.GetFullPath path; Sha256 = ClangToolchain.sha256 path }
 
-    let rec internal toJsonValue (schema: Type) (value: obj) : JsonValue =
+    // Explicit, type-directed Fidelity.Data codecs (#228). Every substantiation record is
+    // written and read field by field, so no CLR reflection reaches the pure core. Field
+    // order, array formatting and the published bytes are unchanged.
+    type internal CodecBuilder() =
+        member _.Return(value) : Result<'T, string> = Ok value
+        member _.ReturnFrom(value: Result<'T, string>) : Result<'T, string> = value
+        member _.Bind(value: Result<'T, string>, continuation: 'T -> Result<'U, string>) : Result<'U, string> =
+            match value with
+            | Ok unwrapped -> continuation unwrapped
+            | Error reason -> Error reason
+
+    let internal codec = CodecBuilder()
+
+    let private fileDigestKeys = [ "Path"; "Sha256" ]
+    let private sourceDigestKeys = [ "Path"; "Sha256"; "ModuleName"; "RuntimeDeclarations"; "CompileTimeDeclarations"; "ForeignDeclarations" ]
+    let private solverKeys = [ "Executable"; "Sha256"; "Version"; "Arguments" ]
+    let private stageReceiptKeys = [ "Path"; "Sha256" ]
+    let private proofKeys =
+        [ "LibraryObligations"; "LibraryDischargedUnsatCount"; "LibraryPremisesSatCount"; "HarnessObligations"
+          "TotalObligations"; "DischargedUnsatCount"; "PendingOpenCount"; "RefutedCount"; "PremisesSatCount"
+          "ObligationsSha256"; "QuerySha256"; "ReceiptSha256"; "PremisesQuerySha256"; "PremisesOutputSha256"
+          "CompilerPremiseReceiptsCount"; "CompilerNonVacuityReceiptsCount"; "StageReceipts"; "Solver" ]
+    let private boundaryFileKeys = [ "Path"; "Sha256"; "Kind" ]
+    let private strataKeys = [ "ForeignCalls"; "MeasuredRecords"; "StaticArchive"; "ErrorConventions"; "Ownership"; "ZeroCopy"; "Callbacks"; "Nullability" ]
+    let private layoutKeys = [ "Header"; "Name"; "Kind"; "SizeBits"; "AlignmentBits"; "FieldOffsetsBits" ]
+    let private enumKeys = [ "Header"; "Name"; "WidthBits"; "Signed" ]
+    let private hypothesisKeys = [ "Id"; "Family"; "Origin"; "Statement" ]
+    let private boundaryKeys =
+        [ "Strata"; "Files"; "LinkMode"; "Libraries"; "ExternSymbols"; "ClangIdentity"; "ClangTarget"
+          "TargetDataModel"; "Layouts"; "Enums"; "RestsOn"; "RequiredSeamChecks" ]
+    let private manifestKeys =
+        [ "SchemaVersion"; "Package"; "FidprojPath"; "FidprojSha256"; "Sources"; "Compiler"; "Dotnet"; "Harness"
+          "HarnessProject"; "SourceInputsSha256"; "CompilerLog"; "Psg0"; "WitnessUnits"; "AllowWarnings"
+          "WarningsAsErrors"; "ElevatedWarningCodes"; "ArtifactsDirectory"; "Proof"; "Boundary"; "IntegritySha256" ]
+
+    let internal jsonString (value: string) : JsonValue =
         if isNull value then
             Diagnostics.raiseRefusal (Diagnostics.uncoded "The substantiation schema admits no null or unsupported JSON value.")
-        elif FSharpType.IsRecord schema then
-            let fields = FSharpType.GetRecordFields schema
-            fields
-            |> Array.toList
-            |> List.map (fun field -> field.Name, toJsonValue field.PropertyType (FSharpValue.GetRecordField(value, field)))
-            |> JsonValue.Object
-        elif schema.IsArray then
-            let elemType = schema.GetElementType()
-            let arr = value :?> Array
-            [ for i in 0 .. arr.Length - 1 -> toJsonValue elemType (arr.GetValue i) ]
-            |> JsonValue.Array
-        elif schema = typeof<string> then
-            let s = value :?> string
-            if isNull s then
-                Diagnostics.raiseRefusal (Diagnostics.uncoded "The substantiation schema admits no null or unsupported JSON value.")
-            else
-                JsonValue.String s
-        elif schema = typeof<int> then
-            Json.ofInt64 (int64 (value :?> int))
-        elif schema = typeof<int64> then
-            Json.ofInt64 (value :?> int64)
-        elif schema = typeof<bool> then
-            JsonValue.Bool (value :?> bool)
         else
-            Diagnostics.raiseRefusal (Diagnostics.uncoded $"Unadmitted schema type {schema.FullName}.")
+            JsonValue.String value
 
-    /// Missing-field defaults are not an input contract. Require every
-    /// record field, including empty arrays, and reject unknown or duplicate fields first.
+    let internal jsonInt (value: int) : JsonValue = Json.ofInt64 (int64 value)
+
+    let internal jsonArray (encode: 'T -> JsonValue) (values: 'T array) : JsonValue =
+        if isNull values then
+            Diagnostics.raiseRefusal (Diagnostics.uncoded "The substantiation schema admits no null or unsupported JSON value.")
+        else
+            values |> Array.toList |> List.map encode |> JsonValue.Array
+
+    let internal jsonObject (fields: (string * JsonValue) list) : JsonValue = JsonValue.Object fields
+
+    let internal encodeFileDigest (digest: FileDigest) : JsonValue =
+        jsonObject [ "Path", jsonString digest.Path; "Sha256", jsonString digest.Sha256 ]
+
+    let internal encodeSourceDigest (source: SourceDigest) : JsonValue =
+        jsonObject [
+            "Path", jsonString source.Path
+            "Sha256", jsonString source.Sha256
+            "ModuleName", jsonString source.ModuleName
+            "RuntimeDeclarations", jsonArray jsonString source.RuntimeDeclarations
+            "CompileTimeDeclarations", jsonArray jsonString source.CompileTimeDeclarations
+            "ForeignDeclarations", jsonArray jsonString source.ForeignDeclarations ]
+
+    let internal encodeSolverIdentity (solver: SubstantiationProof.SolverIdentity) : JsonValue =
+        jsonObject [
+            "Executable", jsonString solver.Executable
+            "Sha256", jsonString solver.Sha256
+            "Version", jsonString solver.Version
+            "Arguments", jsonArray jsonString solver.Arguments ]
+
+    let internal encodeStageReceiptDigest (receipt: SubstantiationProof.StageReceiptDigest) : JsonValue =
+        jsonObject [ "Path", jsonString receipt.Path; "Sha256", jsonString receipt.Sha256 ]
+
+    let internal encodeProofSummary (proof: SubstantiationProof.ProofSummary) : JsonValue =
+        jsonObject [
+            "LibraryObligations", jsonInt proof.LibraryObligations
+            "LibraryDischargedUnsatCount", jsonInt proof.LibraryDischargedUnsatCount
+            "LibraryPremisesSatCount", jsonInt proof.LibraryPremisesSatCount
+            "HarnessObligations", jsonInt proof.HarnessObligations
+            "TotalObligations", jsonInt proof.TotalObligations
+            "DischargedUnsatCount", jsonInt proof.DischargedUnsatCount
+            "PendingOpenCount", jsonInt proof.PendingOpenCount
+            "RefutedCount", jsonInt proof.RefutedCount
+            "PremisesSatCount", jsonInt proof.PremisesSatCount
+            "ObligationsSha256", jsonString proof.ObligationsSha256
+            "QuerySha256", jsonString proof.QuerySha256
+            "ReceiptSha256", jsonString proof.ReceiptSha256
+            "PremisesQuerySha256", jsonString proof.PremisesQuerySha256
+            "PremisesOutputSha256", jsonString proof.PremisesOutputSha256
+            "CompilerPremiseReceiptsCount", jsonInt proof.CompilerPremiseReceiptsCount
+            "CompilerNonVacuityReceiptsCount", jsonInt proof.CompilerNonVacuityReceiptsCount
+            "StageReceipts", jsonArray encodeStageReceiptDigest proof.StageReceipts
+            "Solver", encodeSolverIdentity proof.Solver ]
+
+    let internal encodeBoundaryFileDigest (file: SubstantiationBoundary.FileDigest) : JsonValue =
+        jsonObject [ "Path", jsonString file.Path; "Sha256", jsonString file.Sha256; "Kind", jsonString file.Kind ]
+
+    let internal encodeBoundaryStrata (strata: SubstantiationBoundary.BoundaryStrata) : JsonValue =
+        jsonObject [
+            "ForeignCalls", JsonValue.Bool strata.ForeignCalls
+            "MeasuredRecords", JsonValue.Bool strata.MeasuredRecords
+            "StaticArchive", JsonValue.Bool strata.StaticArchive
+            "ErrorConventions", JsonValue.Bool strata.ErrorConventions
+            "Ownership", JsonValue.Bool strata.Ownership
+            "ZeroCopy", JsonValue.Bool strata.ZeroCopy
+            "Callbacks", JsonValue.Bool strata.Callbacks
+            "Nullability", JsonValue.Bool strata.Nullability ]
+
+    let internal encodeLayoutSummary (layout: SubstantiationBoundary.LayoutSummary) : JsonValue =
+        jsonObject [
+            "Header", jsonString layout.Header
+            "Name", jsonString layout.Name
+            "Kind", jsonString layout.Kind
+            "SizeBits", jsonInt layout.SizeBits
+            "AlignmentBits", jsonInt layout.AlignmentBits
+            "FieldOffsetsBits", jsonArray jsonInt layout.FieldOffsetsBits ]
+
+    let internal encodeEnumSummary (enumeration: SubstantiationBoundary.EnumSummary) : JsonValue =
+        jsonObject [
+            "Header", jsonString enumeration.Header
+            "Name", jsonString enumeration.Name
+            "WidthBits", jsonInt enumeration.WidthBits
+            "Signed", JsonValue.Bool enumeration.Signed ]
+
+    let internal encodeBoundaryHypothesis (hypothesis: SubstantiationBoundary.Hypothesis) : JsonValue =
+        jsonObject [
+            "Id", jsonString hypothesis.Id
+            "Family", jsonString hypothesis.Family
+            "Origin", jsonString hypothesis.Origin
+            "Statement", jsonString hypothesis.Statement ]
+
+    let internal encodeBoundaryEvidence (boundary: SubstantiationBoundary.BoundaryEvidence) : JsonValue =
+        jsonObject [
+            "Strata", encodeBoundaryStrata boundary.Strata
+            "Files", jsonArray encodeBoundaryFileDigest boundary.Files
+            "LinkMode", jsonString boundary.LinkMode
+            "Libraries", jsonArray jsonString boundary.Libraries
+            "ExternSymbols", jsonArray jsonString boundary.ExternSymbols
+            "ClangIdentity", jsonString boundary.ClangIdentity
+            "ClangTarget", jsonString boundary.ClangTarget
+            "TargetDataModel", jsonString boundary.TargetDataModel
+            "Layouts", jsonArray encodeLayoutSummary boundary.Layouts
+            "Enums", jsonArray encodeEnumSummary boundary.Enums
+            "RestsOn", jsonArray encodeBoundaryHypothesis boundary.RestsOn
+            "RequiredSeamChecks", jsonArray jsonString boundary.RequiredSeamChecks ]
+
+    let internal encodeManifest (manifest: Manifest) : JsonValue =
+        jsonObject [
+            "SchemaVersion", jsonInt manifest.SchemaVersion
+            "Package", jsonString manifest.Package
+            "FidprojPath", jsonString manifest.FidprojPath
+            "FidprojSha256", jsonString manifest.FidprojSha256
+            "Sources", jsonArray encodeSourceDigest manifest.Sources
+            "Compiler", encodeFileDigest manifest.Compiler
+            "Dotnet", encodeFileDigest manifest.Dotnet
+            "Harness", encodeFileDigest manifest.Harness
+            "HarnessProject", encodeFileDigest manifest.HarnessProject
+            "SourceInputsSha256", jsonString manifest.SourceInputsSha256
+            "CompilerLog", encodeFileDigest manifest.CompilerLog
+            "Psg0", encodeFileDigest manifest.Psg0
+            "WitnessUnits", encodeFileDigest manifest.WitnessUnits
+            "AllowWarnings", JsonValue.Bool manifest.AllowWarnings
+            "WarningsAsErrors", JsonValue.Bool manifest.WarningsAsErrors
+            "ElevatedWarningCodes", jsonArray jsonString manifest.ElevatedWarningCodes
+            "ArtifactsDirectory", jsonString manifest.ArtifactsDirectory
+            "Proof", encodeProofSummary manifest.Proof
+            "Boundary", encodeBoundaryEvidence manifest.Boundary
+            "IntegritySha256", jsonString manifest.IntegritySha256 ]
+
+    /// An object whose keys are exactly `expected`, each one present exactly once. A repeated
+    /// key, a key outside the schema, or a missing field is refused before any value is read.
+    let internal exactFields (label: string) (expected: string list) (value: JsonValue) : Result<Map<string, JsonValue>, string> =
+        match value with
+        | JsonValue.Object properties ->
+            let rec firstDuplicate seen = function
+                | [] -> None
+                | (name, _) :: rest ->
+                    if Set.contains name seen then Some name
+                    else firstDuplicate (Set.add name seen) rest
+            let names = properties |> List.map fst
+            match firstDuplicate Set.empty properties with
+            | Some duplicate ->
+                Error $"{label} repeats field '{duplicate}'."
+            | None ->
+                match names |> List.tryFind (fun name -> not (List.contains name expected)) with
+                | Some unknown ->
+                    Error $"{label} has field '{unknown}' outside its schema."
+                | None ->
+                    match expected |> List.tryFind (fun name -> not (List.contains name names)) with
+                    | Some missing ->
+                        Error $"{label} is missing required field '{missing}'."
+                    | None ->
+                        Ok (Map.ofList properties)
+        | _ -> Error $"{label} must be a JSON object."
+
+    let internal field (label: string) (map: Map<string, JsonValue>) (name: string) (decode: JsonValue -> Result<'T, string>) : Result<'T, string> =
+        match Map.tryFind name map with
+        | Some value ->
+            match decode value with
+            | Ok decoded -> Ok decoded
+            | Error reason -> Error $"Field '{name}' of {label}: {reason}"
+        | None -> Error $"Missing required field '{name}' of the {label}."
+
+    let internal decodeString (value: JsonValue) : Result<string, string> =
+        match value with
+        | JsonValue.String text when not (isNull text) -> Ok text
+        | _ -> Error "Expected a string."
+
+    let internal decodeInt (value: JsonValue) : Result<int, string> =
+        match Json.tryAsInt64 value with
+        | Some number when number >= int64 Int32.MinValue && number <= int64 Int32.MaxValue -> Ok (int number)
+        | _ -> Error "Expected a 32-bit integer."
+
+    let internal decodeBool (value: JsonValue) : Result<bool, string> =
+        match value with
+        | JsonValue.Bool flag -> Ok flag
+        | _ -> Error "Expected a boolean."
+
+    let internal decodeArray (label: string) (decode: JsonValue -> Result<'T, string>) (value: JsonValue) : Result<'T array, string> =
+        match value with
+        | JsonValue.Array items ->
+            let rec loop acc remaining =
+                match remaining with
+                | [] -> Ok (List.toArray acc |> Array.rev)
+                | head :: tail ->
+                    match decode head with
+                    | Ok element -> loop (element :: acc) tail
+                    | Error reason -> Error reason
+            loop [] items
+        | _ -> Error $"{label} must be a JSON array."
+
+    let internal decodeFileDigest (value: JsonValue) : Result<FileDigest, string> =
+        codec {
+            let! map = exactFields "file digest" fileDigestKeys value
+            let! path = field "file digest" map "Path" decodeString
+            let! sha256 = field "file digest" map "Sha256" decodeString
+            return { Path = path; Sha256 = sha256 }
+        }
+
+    let internal decodeSourceDigest (value: JsonValue) : Result<SourceDigest, string> =
+        codec {
+            let! map = exactFields "source digest" sourceDigestKeys value
+            let! path = field "source digest" map "Path" decodeString
+            let! sha256 = field "source digest" map "Sha256" decodeString
+            let! moduleName = field "source digest" map "ModuleName" decodeString
+            let! runtime = field "source digest" map "RuntimeDeclarations" (decodeArray "RuntimeDeclarations" decodeString)
+            let! compile = field "source digest" map "CompileTimeDeclarations" (decodeArray "CompileTimeDeclarations" decodeString)
+            let! foreign = field "source digest" map "ForeignDeclarations" (decodeArray "ForeignDeclarations" decodeString)
+            return { Path = path; Sha256 = sha256; ModuleName = moduleName; RuntimeDeclarations = runtime;
+                    CompileTimeDeclarations = compile; ForeignDeclarations = foreign }
+        }
+
+    let internal decodeSolverIdentity (value: JsonValue) : Result<SubstantiationProof.SolverIdentity, string> =
+        codec {
+            let! map = exactFields "solver identity" solverKeys value
+            let! executable = field "solver identity" map "Executable" decodeString
+            let! sha256 = field "solver identity" map "Sha256" decodeString
+            let! version = field "solver identity" map "Version" decodeString
+            let! arguments = field "solver identity" map "Arguments" (decodeArray "Arguments" decodeString)
+            return { Executable = executable; Sha256 = sha256; Version = version; Arguments = arguments }
+        }
+
+    let internal decodeStageReceiptDigest (value: JsonValue) : Result<SubstantiationProof.StageReceiptDigest, string> =
+        codec {
+            let! map = exactFields "stage receipt digest" stageReceiptKeys value
+            let! path = field "stage receipt digest" map "Path" decodeString
+            let! sha256 = field "stage receipt digest" map "Sha256" decodeString
+            return { Path = path; Sha256 = sha256 }
+        }
+
+    let internal decodeProofSummary (value: JsonValue) : Result<SubstantiationProof.ProofSummary, string> =
+        codec {
+            let! map = exactFields "proof summary" proofKeys value
+            let! libraryObligations = field "proof summary" map "LibraryObligations" decodeInt
+            let! libraryUnsat = field "proof summary" map "LibraryDischargedUnsatCount" decodeInt
+            let! librarySat = field "proof summary" map "LibraryPremisesSatCount" decodeInt
+            let! harnessObligations = field "proof summary" map "HarnessObligations" decodeInt
+            let! total = field "proof summary" map "TotalObligations" decodeInt
+            let! unsat = field "proof summary" map "DischargedUnsatCount" decodeInt
+            let! pendingOpen = field "proof summary" map "PendingOpenCount" decodeInt
+            let! refuted = field "proof summary" map "RefutedCount" decodeInt
+            let! sat = field "proof summary" map "PremisesSatCount" decodeInt
+            let! obligations = field "proof summary" map "ObligationsSha256" decodeString
+            let! query = field "proof summary" map "QuerySha256" decodeString
+            let! receipt = field "proof summary" map "ReceiptSha256" decodeString
+            let! premisesQuery = field "proof summary" map "PremisesQuerySha256" decodeString
+            let! premisesOutput = field "proof summary" map "PremisesOutputSha256" decodeString
+            let! premiseReceipts = field "proof summary" map "CompilerPremiseReceiptsCount" decodeInt
+            let! nonVacuityReceipts = field "proof summary" map "CompilerNonVacuityReceiptsCount" decodeInt
+            let! stageReceipts = field "proof summary" map "StageReceipts" (decodeArray "StageReceipts" decodeStageReceiptDigest)
+            let! solver = field "proof summary" map "Solver" decodeSolverIdentity
+            return { LibraryObligations = libraryObligations; LibraryDischargedUnsatCount = libraryUnsat;
+                    LibraryPremisesSatCount = librarySat; HarnessObligations = harnessObligations;
+                    TotalObligations = total; DischargedUnsatCount = unsat; PendingOpenCount = pendingOpen;
+                    RefutedCount = refuted; PremisesSatCount = sat; ObligationsSha256 = obligations;
+                    QuerySha256 = query; ReceiptSha256 = receipt; PremisesQuerySha256 = premisesQuery;
+                    PremisesOutputSha256 = premisesOutput; CompilerPremiseReceiptsCount = premiseReceipts;
+                    CompilerNonVacuityReceiptsCount = nonVacuityReceipts; StageReceipts = stageReceipts; Solver = solver }
+        }
+
+    let internal decodeBoundaryStrata (value: JsonValue) : Result<SubstantiationBoundary.BoundaryStrata, string> =
+        codec {
+            let! map = exactFields "boundary strata" strataKeys value
+            let! foreignCalls = field "boundary strata" map "ForeignCalls" decodeBool
+            let! measuredRecords = field "boundary strata" map "MeasuredRecords" decodeBool
+            let! staticArchive = field "boundary strata" map "StaticArchive" decodeBool
+            let! errorConventions = field "boundary strata" map "ErrorConventions" decodeBool
+            let! ownership = field "boundary strata" map "Ownership" decodeBool
+            let! zeroCopy = field "boundary strata" map "ZeroCopy" decodeBool
+            let! callbacks = field "boundary strata" map "Callbacks" decodeBool
+            let! nullability = field "boundary strata" map "Nullability" decodeBool
+            return { ForeignCalls = foreignCalls; MeasuredRecords = measuredRecords; StaticArchive = staticArchive;
+                    ErrorConventions = errorConventions; Ownership = ownership; ZeroCopy = zeroCopy;
+                    Callbacks = callbacks; Nullability = nullability }
+        }
+
+    let internal decodeBoundaryFileDigest (value: JsonValue) : Result<SubstantiationBoundary.FileDigest, string> =
+        codec {
+            let! map = exactFields "boundary evidence file" boundaryFileKeys value
+            let! path = field "boundary evidence file" map "Path" decodeString
+            let! sha256 = field "boundary evidence file" map "Sha256" decodeString
+            let! kind = field "boundary evidence file" map "Kind" decodeString
+            return { Path = path; Sha256 = sha256; Kind = kind }
+        }
+
+    let internal decodeLayoutSummary (value: JsonValue) : Result<SubstantiationBoundary.LayoutSummary, string> =
+        codec {
+            let! map = exactFields "layout summary" layoutKeys value
+            let! header = field "layout summary" map "Header" decodeString
+            let! name = field "layout summary" map "Name" decodeString
+            let! kind = field "layout summary" map "Kind" decodeString
+            let! sizeBits = field "layout summary" map "SizeBits" decodeInt
+            let! alignmentBits = field "layout summary" map "AlignmentBits" decodeInt
+            let! offsets = field "layout summary" map "FieldOffsetsBits" (decodeArray "FieldOffsetsBits" decodeInt)
+            return { Header = header; Name = name; Kind = kind; SizeBits = sizeBits;
+                    AlignmentBits = alignmentBits; FieldOffsetsBits = offsets }
+        }
+
+    let internal decodeEnumSummary (value: JsonValue) : Result<SubstantiationBoundary.EnumSummary, string> =
+        codec {
+            let! map = exactFields "enum summary" enumKeys value
+            let! header = field "enum summary" map "Header" decodeString
+            let! name = field "enum summary" map "Name" decodeString
+            let! widthBits = field "enum summary" map "WidthBits" decodeInt
+            let! signed = field "enum summary" map "Signed" decodeBool
+            return { Header = header; Name = name; WidthBits = widthBits; Signed = signed }
+        }
+
+    let internal decodeBoundaryHypothesis (value: JsonValue) : Result<SubstantiationBoundary.Hypothesis, string> =
+        codec {
+            let! map = exactFields "boundary hypothesis" hypothesisKeys value
+            let! id = field "boundary hypothesis" map "Id" decodeString
+            let! family = field "boundary hypothesis" map "Family" decodeString
+            let! origin = field "boundary hypothesis" map "Origin" decodeString
+            let! statement = field "boundary hypothesis" map "Statement" decodeString
+            return { Id = id; Family = family; Origin = origin; Statement = statement }
+        }
+
+    let internal decodeBoundaryEvidence (value: JsonValue) : Result<SubstantiationBoundary.BoundaryEvidence, string> =
+        codec {
+            let! map = exactFields "boundary evidence" boundaryKeys value
+            let! strata = field "boundary evidence" map "Strata" decodeBoundaryStrata
+            let! files = field "boundary evidence" map "Files" (decodeArray "Files" decodeBoundaryFileDigest)
+            let! linkMode = field "boundary evidence" map "LinkMode" decodeString
+            let! libraries = field "boundary evidence" map "Libraries" (decodeArray "Libraries" decodeString)
+            let! externSymbols = field "boundary evidence" map "ExternSymbols" (decodeArray "ExternSymbols" decodeString)
+            let! clangIdentity = field "boundary evidence" map "ClangIdentity" decodeString
+            let! clangTarget = field "boundary evidence" map "ClangTarget" decodeString
+            let! targetDataModel = field "boundary evidence" map "TargetDataModel" decodeString
+            let! layouts = field "boundary evidence" map "Layouts" (decodeArray "Layouts" decodeLayoutSummary)
+            let! enums = field "boundary evidence" map "Enums" (decodeArray "Enums" decodeEnumSummary)
+            let! restsOn = field "boundary evidence" map "RestsOn" (decodeArray "RestsOn" decodeBoundaryHypothesis)
+            let! requiredSeamChecks = field "boundary evidence" map "RequiredSeamChecks" (decodeArray "RequiredSeamChecks" decodeString)
+            return { Strata = strata; Files = files; LinkMode = linkMode; Libraries = libraries;
+                    ExternSymbols = externSymbols; ClangIdentity = clangIdentity; ClangTarget = clangTarget;
+                    TargetDataModel = targetDataModel; Layouts = layouts; Enums = enums;
+                    RestsOn = restsOn; RequiredSeamChecks = requiredSeamChecks }
+        }
+
+    let internal decodeManifest (value: JsonValue) : Result<Manifest, string> =
+        codec {
+            let! map = exactFields "substantiation manifest" manifestKeys value
+            let! schemaVersion = field "substantiation manifest" map "SchemaVersion" decodeInt
+            let! package = field "substantiation manifest" map "Package" decodeString
+            let! fidprojPath = field "substantiation manifest" map "FidprojPath" decodeString
+            let! fidprojSha256 = field "substantiation manifest" map "FidprojSha256" decodeString
+            let! sources = field "substantiation manifest" map "Sources" (decodeArray "Sources" decodeSourceDigest)
+            let! compiler = field "substantiation manifest" map "Compiler" decodeFileDigest
+            let! dotnet = field "substantiation manifest" map "Dotnet" decodeFileDigest
+            let! harness = field "substantiation manifest" map "Harness" decodeFileDigest
+            let! harnessProject = field "substantiation manifest" map "HarnessProject" decodeFileDigest
+            let! sourceInputsSha256 = field "substantiation manifest" map "SourceInputsSha256" decodeString
+            let! compilerLog = field "substantiation manifest" map "CompilerLog" decodeFileDigest
+            let! psg0 = field "substantiation manifest" map "Psg0" decodeFileDigest
+            let! witnessUnits = field "substantiation manifest" map "WitnessUnits" decodeFileDigest
+            let! allowWarnings = field "substantiation manifest" map "AllowWarnings" decodeBool
+            let! warningsAsErrors = field "substantiation manifest" map "WarningsAsErrors" decodeBool
+            let! elevatedWarningCodes = field "substantiation manifest" map "ElevatedWarningCodes" (decodeArray "ElevatedWarningCodes" decodeString)
+            let! artifactsDirectory = field "substantiation manifest" map "ArtifactsDirectory" decodeString
+            let! proof = field "substantiation manifest" map "Proof" decodeProofSummary
+            let! boundary = field "substantiation manifest" map "Boundary" decodeBoundaryEvidence
+            let! integritySha256 = field "substantiation manifest" map "IntegritySha256" decodeString
+            let! _ =
+                if schemaVersion = 1 && sourceInputsSha256 <> "" then
+                    Error "Substantiation schema 1 does not admit a source-input digest."
+                else
+                    Ok ()
+            return { SchemaVersion = schemaVersion; Package = package; FidprojPath = fidprojPath;
+                    FidprojSha256 = fidprojSha256; Sources = sources; Compiler = compiler; Dotnet = dotnet;
+                    Harness = harness; HarnessProject = harnessProject; SourceInputsSha256 = sourceInputsSha256;
+                    CompilerLog = compilerLog; Psg0 = psg0; WitnessUnits = witnessUnits;
+                    AllowWarnings = allowWarnings; WarningsAsErrors = warningsAsErrors;
+                    ElevatedWarningCodes = elevatedWarningCodes; ArtifactsDirectory = artifactsDirectory;
+                    Proof = proof; Boundary = boundary; IntegritySha256 = integritySha256 }
+        }
+
+    /// Read a document through one explicit codec. Malformed JSON is an Error, never an exception.
+    let internal decodeJsonText (text: string) (decode: JsonValue -> Result<'T, string>) : Result<'T, string> =
+        Json.parse text |> Result.bind decode
+
+    /// A document is admissible only when no object anywhere repeats a property name.
     let rec internal requireUniqueJsonProperties (onDuplicate: unit -> unit) (element: JsonValue) : unit =
         match element with
         | JsonValue.Object properties ->
@@ -183,82 +572,6 @@ module Substantiation =
         | JsonValue.Array values ->
             values |> List.iter (requireUniqueJsonProperties onDuplicate)
         | _ -> ()
-
-    let rec internal deserializeJsonValue (schema: Type) (value: JsonValue) : Result<obj, string> =
-        if FSharpType.IsRecord schema then
-            match value with
-            | JsonValue.Object properties ->
-                let fields = FSharpType.GetRecordFields schema
-                let names = properties |> List.map fst |> List.toArray
-                if (names |> Array.distinct).Length <> names.Length then
-                    Error $"{schema.Name} has missing, duplicate or unknown fields."
-                else
-                    let propMap = Map.ofList properties
-                    let values = Array.zeroCreate<obj> fields.Length
-                    let mutable idx = 0
-                    let mutable err = None
-                    while idx < fields.Length && err.IsNone do
-                        let field = fields[idx]
-                        match Map.tryFind field.Name propMap with
-                        | None -> err <- Some $"Missing {schema.Name}.{field.Name}."
-                        | Some child ->
-                            match deserializeJsonValue field.PropertyType child with
-                            | Ok v ->
-                                values[idx] <- v
-                                idx <- idx + 1
-                            | Error e -> err <- Some e
-                    match err with
-                    | Some e -> Error e
-                    | None ->
-                        if names.Length <> fields.Length then
-                            Error $"{schema.Name} has missing, duplicate or unknown fields."
-                        else
-                            Ok (FSharpValue.MakeRecord(schema, values))
-            | _ -> Error $"Expected a {schema.Name} object."
-        elif schema.IsArray then
-            match value with
-            | JsonValue.Array items ->
-                let elemType = schema.GetElementType()
-                let arr = Array.CreateInstance(elemType, items.Length)
-                let mutable idx = 0
-                let mutable remaining = items
-                let mutable err = None
-                while not remaining.IsEmpty && err.IsNone do
-                    let head = remaining.Head
-                    remaining <- remaining.Tail
-                    match deserializeJsonValue elemType head with
-                    | Ok v ->
-                        arr.SetValue(v, idx)
-                        idx <- idx + 1
-                    | Error e -> err <- Some e
-                match err with
-                | Some e -> Error e
-                | None -> Ok (box arr)
-            | _ -> Error $"Expected an array of {schema.GetElementType().Name}."
-        elif schema = typeof<string> then
-            match value with
-            | JsonValue.String s -> Ok (box s)
-            | _ -> Error "Expected a string."
-        elif schema = typeof<int> then
-            match Json.tryAsInt64 value with
-            | Some n when n >= int64 Int32.MinValue && n <= int64 Int32.MaxValue -> Ok (box (int n))
-            | _ -> Error $"Expected a 32-bit integer for {schema.Name}."
-        elif schema = typeof<int64> then
-            match Json.tryAsInt64 value with
-            | Some n -> Ok (box n)
-            | None -> Error $"Expected a 64-bit integer for {schema.Name}."
-        elif schema = typeof<bool> then
-            match value with
-            | JsonValue.Bool b -> Ok (box b)
-            | _ -> Error $"Expected a boolean for {schema.Name}."
-        else
-            Error $"Unadmitted schema type {schema.FullName}."
-
-    let private decodeJsonValue<'T> root =
-        deserializeJsonValue typeof<'T> root |> Result.map (fun value -> value :?> 'T)
-
-    let internal deserializeJson<'T> text =
-        Json.parse text |> Result.bind decodeJsonValue<'T>
 
     let private escapeJsonString (s: string) : string =
         let sb = StringBuilder(s.Length + 2)
@@ -314,14 +627,12 @@ module Substantiation =
                 |> String.concat ",\n"
             "{\n" + inner + "\n" + pad indent + "}"
 
-    let internal serializeJsonCompact<'T> (value: 'T) : string =
-        formatJsonCompact (toJsonValue typeof<'T> (box value))
+    /// Deterministic renderings of a record an explicit codec has already encoded.
+    let internal compactJson (value: JsonValue) : string = formatJsonCompact value
+    let internal prettyJson (value: JsonValue) : string = formatJsonPretty 0 value
 
-    let internal serializeJsonPretty<'T> (value: 'T) : string =
-        formatJsonPretty 0 (toJsonValue typeof<'T> (box value))
-
-    let private manifestValue (manifest: Manifest) =
-        match toJsonValue typeof<Manifest> (box manifest) with
+    let private manifestValue (manifest: Manifest) : JsonValue =
+        match encodeManifest manifest with
         | JsonValue.Object fields when manifest.SchemaVersion = 1 ->
             JsonValue.Object (fields |> List.filter (fun (name, _) -> name <> "SourceInputsSha256"))
         | value -> value
@@ -469,8 +780,8 @@ module Substantiation =
                         Error "Substantiation schema 1 does not admit a source-input digest."
                     else
                         JsonValue.Object (("SourceInputsSha256", JsonValue.String "") :: fields)
-                        |> decodeJsonValue<Manifest>
-                | root -> decodeJsonValue<Manifest> root
+                        |> decodeManifest
+                | root -> decodeManifest root
             match Json.parse text |> Result.bind decode with
             | Error reason -> refuse Diagnostics.SubstantiationManifestMalformed "<substantiation.json>" reason
             | Ok manifest ->
